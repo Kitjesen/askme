@@ -20,7 +20,7 @@ def test_voice_runtime_bridge_posts_turn(monkeypatch) -> None:
         captured["json"] = json
         captured["headers"] = headers
         captured["timeout"] = timeout
-        return _Response({"handled": True, "turn": {"spoken_reply": "已提交任务。"}})
+        return _Response({"handled": True, "turn": {"spoken_reply": "runtime handled"}})
 
     monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
 
@@ -39,7 +39,7 @@ def test_voice_runtime_bridge_posts_turn(monkeypatch) -> None:
         }
     )
 
-    result = bridge.handle_voice_text("开始巡逻A-01")
+    result = bridge.handle_voice_text("start patrol")
 
     assert result["handled"] is True
     assert captured["url"] == "http://127.0.0.1:5100/api/voice/turns"
@@ -54,7 +54,7 @@ def test_voice_runtime_bridge_posts_text_turn_with_text_channel(monkeypatch) -> 
     def fake_post(url, json, headers, timeout):
         captured["json"] = json
         captured["headers"] = headers
-        return _Response({"handled": True, "turn": {"spoken_reply": "当前没有进行中的任务。"}})
+        return _Response({"handled": True, "turn": {"spoken_reply": "status ok"}})
 
     monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
 
@@ -72,7 +72,7 @@ def test_voice_runtime_bridge_posts_text_turn_with_text_channel(monkeypatch) -> 
         }
     )
 
-    result = bridge.handle_text_input("当前状态")
+    result = bridge.handle_text_input("status")
 
     assert result["handled"] is True
     assert captured["json"]["operator_id"] == "askme.console"
@@ -85,7 +85,7 @@ def test_voice_runtime_bridge_handle_turn_can_override_payload(monkeypatch) -> N
 
     def fake_post(url, json, headers, timeout):
         captured["json"] = json
-        return _Response({"handled": True, "turn": {"spoken_reply": "好的。"}})
+        return _Response({"handled": True, "turn": {"spoken_reply": "ok"}})
 
     monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
 
@@ -100,7 +100,7 @@ def test_voice_runtime_bridge_handle_turn_can_override_payload(monkeypatch) -> N
     )
 
     bridge.handle_turn(
-        "测试",
+        "test",
         enabled=True,
         operator_id="override.operator",
         session_id="override-session",
@@ -118,3 +118,23 @@ def test_voice_runtime_bridge_handle_turn_can_override_payload(monkeypatch) -> N
     assert captured["json"]["site_id"] == "plant-b"
     assert captured["json"]["submit"] is False
     assert captured["json"]["metadata"] == {"source": "unit-test"}
+
+
+def test_voice_runtime_bridge_returns_none_on_invalid_json(monkeypatch) -> None:
+    class _BadJsonResponse(_Response):
+        def json(self):
+            raise ValueError("invalid json")
+
+    def fake_post(url, json, headers, timeout):
+        return _BadJsonResponse({})
+
+    monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
+
+    bridge = VoiceRuntimeBridge(
+        {
+            "enabled": True,
+            "base_url": "http://127.0.0.1:5100",
+        }
+    )
+
+    assert bridge.handle_voice_text("status") is None

@@ -72,9 +72,18 @@ class _Bridge:
             "handled": True,
             "turn": {
                 "action_type": "runtime_query",
-                "spoken_reply": "当前没有进行中的任务。",
+                "spoken_reply": "runtime handled",
             },
         }
+
+
+class _ExplodingBridge:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def handle_text_input(self, text: str):
+        self.calls.append(text)
+        raise RuntimeError("runtime bridge offline")
 
 
 @pytest.mark.asyncio
@@ -91,17 +100,17 @@ async def test_text_loop_prefers_runtime_bridge_before_llm() -> None:
         voice_runtime_bridge=bridge,
     )
 
-    with patch("builtins.input", side_effect=["当前状态", "/quit"]):
+    with patch("builtins.input", side_effect=["status?", "/quit"]):
         await loop.run()
 
-    assert bridge.calls == ["当前状态"]
+    assert bridge.calls == ["status?"]
     assert pipeline.process_calls == []
 
 
 @pytest.mark.asyncio
 async def test_text_loop_handles_pending_tool_confirmation_before_llm() -> None:
     pipeline = _Pipeline()
-    pipeline.pending_reply_map["确认执行"] = "已确认执行"
+    pipeline.pending_reply_map["approve"] = "approved"
     loop = TextLoop(
         router=_Router(),
         pipeline=pipeline,
@@ -112,8 +121,29 @@ async def test_text_loop_handles_pending_tool_confirmation_before_llm() -> None:
         voice_runtime_bridge=_Bridge(),
     )
 
-    with patch("builtins.input", side_effect=["确认执行", "/quit"]):
+    with patch("builtins.input", side_effect=["approve", "/quit"]):
         await loop.run()
 
-    assert pipeline.pending_calls == ["确认执行", "/quit"]
+    assert pipeline.pending_calls == ["approve", "/quit"]
     assert pipeline.process_calls == []
+
+
+@pytest.mark.asyncio
+async def test_text_loop_falls_back_to_local_pipeline_when_runtime_bridge_fails() -> None:
+    bridge = _ExplodingBridge()
+    pipeline = _Pipeline()
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+        voice_runtime_bridge=bridge,
+    )
+
+    with patch("builtins.input", side_effect=["status?", "/quit"]):
+        await loop.run()
+
+    assert bridge.calls == ["status?"]
+    assert pipeline.process_calls == ["status?"]

@@ -95,33 +95,11 @@ class VoiceLoop:
                     # Other commands (/clear, /help, etc.) fall through to LLM
                     # so the assistant can respond naturally by voice
 
-                if intent.type == IntentType.GENERAL and self._voice_runtime_bridge:
-                    bridge_result = await asyncio.to_thread(
-                        self._voice_runtime_bridge.handle_voice_text,
-                        user_text,
-                    )
-                    if bridge_result and bridge_result.get("handled"):
-                        turn = bridge_result.get("turn", {})
-                        action_type = turn.get("action_type")
-                        skill_name = turn.get("skill_name")
-
-                        if action_type == "skill" and isinstance(skill_name, str) and skill_name:
-                            await self._pipeline.execute_skill(skill_name, user_text)
-                            continue
-
-                        spoken_reply = turn.get("spoken_reply")
-                        if isinstance(spoken_reply, str) and spoken_reply.strip():
-                            record_external_turn(
-                                self._pipeline,
-                                user_text,
-                                spoken_reply.strip(),
-                                source="runtime",
-                            )
-                            self._audio.speak(spoken_reply.strip())
-                            self._audio.start_playback()
-                            await asyncio.to_thread(self._audio.wait_speaking_done)
-                            self._audio.stop_playback()
-                            continue
+                if intent.type == IntentType.GENERAL:
+                    bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
+                    if bridge_handled:
+                        idle_task = self._pipeline.start_idle_reflection()
+                        continue
 
                 # General → LLM (pass pre-fetched memory)
                 await self._pipeline.process(user_text, memory_task=memory_task)
@@ -145,3 +123,58 @@ class VoiceLoop:
                     memory_task.cancel()
 
         logger.info("Bye!")
+
+    async def _maybe_handle_runtime_bridge(self, user_text: str) -> bool:
+        """Try the runtime bridge first and fall back locally on bridge failures."""
+        if self._voice_runtime_bridge is None:
+            return False
+
+        try:
+            bridge_result = await asyncio.to_thread(
+                self._voice_runtime_bridge.handle_voice_text,
+                user_text,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Voice runtime bridge failed, falling back to local pipeline: %s",
+                exc,
+            )
+            return False
+
+        if not isinstance(bridge_result, dict) or not bridge_result.get("handled"):
+            return False
+
+        turn = bridge_result.get("turn")
+        if not isinstance(turn, dict):
+            logger.warning(
+                "Voice runtime bridge returned an invalid handled payload; "
+                "falling back to local pipeline.",
+            )
+            return False
+
+        action_type = turn.get("action_type")
+        skill_name = turn.get("skill_name")
+
+        if action_type == "skill" and isinstance(skill_name, str) and skill_name:
+            await self._pipeline.execute_skill(skill_name, user_text)
+            return True
+
+        spoken_reply = turn.get("spoken_reply")
+        if isinstance(spoken_reply, str) and spoken_reply.strip():
+            record_external_turn(
+                self._pipeline,
+                user_text,
+                spoken_reply.strip(),
+                source="runtime",
+            )
+            self._audio.speak(spoken_reply.strip())
+            self._audio.start_playback()
+            await asyncio.to_thread(self._audio.wait_speaking_done)
+            self._audio.stop_playback()
+            return True
+
+        logger.warning(
+            "Voice runtime bridge marked the turn handled but returned no usable "
+            "reply; falling back to local pipeline.",
+        )
+        return False

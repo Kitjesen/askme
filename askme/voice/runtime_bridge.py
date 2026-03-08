@@ -93,9 +93,22 @@ class VoiceRuntimeBridge:
                 timeout=self._timeout_s,
             )
             response.raise_for_status()
-            return response.json()
+            response_payload = response.json()
+            if not isinstance(response_payload, dict):
+                logger.warning(
+                    "Voice runtime bridge returned non-object payload: %r",
+                    response_payload,
+                )
+                return None
+            return response_payload
+        except ValueError as exc:
+            logger.warning("Voice runtime bridge returned invalid JSON: %s", exc)
+            return None
         except requests.RequestException as exc:
             logger.warning("Voice runtime bridge request failed: %s", exc)
+            return None
+        except Exception as exc:
+            logger.warning("Voice runtime bridge failed unexpectedly: %s", exc)
             return None
 
 

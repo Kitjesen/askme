@@ -47,7 +47,7 @@ class _Audio:
     def listen_loop(self):
         self._calls += 1
         if self._calls == 1:
-            return "开始巡逻A-01"
+            return "inspect zone"
         return "exit"
 
     def acknowledge(self) -> None:
@@ -72,9 +72,18 @@ class _Bridge:
             "handled": True,
             "turn": {
                 "action_type": "mission",
-                "spoken_reply": "已提交任务。",
+                "spoken_reply": "runtime handled",
             },
         }
+
+
+class _ExplodingBridge:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def handle_voice_text(self, text: str):
+        self.calls.append(text)
+        raise RuntimeError("runtime bridge offline")
 
 
 @pytest.mark.asyncio
@@ -91,13 +100,13 @@ async def test_voice_loop_prefers_runtime_bridge_before_llm() -> None:
     await loop.run()
 
     assert pipeline.process_calls == []
-    assert audio.spoken[-1] == "已提交任务。"
+    assert audio.spoken[-1] == "runtime handled"
 
 
 @pytest.mark.asyncio
 async def test_voice_loop_handles_pending_tool_confirmation_before_llm() -> None:
     pipeline = _Pipeline()
-    pipeline.pending_reply_map["开始巡逻A-01"] = "已确认执行"
+    pipeline.pending_reply_map["inspect zone"] = "approved"
     audio = _Audio()
     loop = VoiceLoop(
         router=_Router(),
@@ -108,5 +117,23 @@ async def test_voice_loop_handles_pending_tool_confirmation_before_llm() -> None
 
     await loop.run()
 
-    assert pipeline.pending_calls == ["开始巡逻A-01", "exit"]
+    assert pipeline.pending_calls == ["inspect zone", "exit"]
     assert pipeline.process_calls == []
+
+
+@pytest.mark.asyncio
+async def test_voice_loop_falls_back_to_local_pipeline_when_runtime_bridge_fails() -> None:
+    pipeline = _Pipeline()
+    audio = _Audio()
+    bridge = _ExplodingBridge()
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        audio=audio,
+        voice_runtime_bridge=bridge,
+    )
+
+    await loop.run()
+
+    assert bridge.calls == ["inspect zone"]
+    assert pipeline.process_calls == ["inspect zone"]
