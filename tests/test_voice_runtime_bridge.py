@@ -138,3 +138,73 @@ def test_voice_runtime_bridge_returns_none_on_invalid_json(monkeypatch) -> None:
     )
 
     assert bridge.handle_voice_text("status") is None
+
+
+def test_voice_runtime_bridge_opens_circuit_after_repeated_failures(monkeypatch) -> None:
+    import requests
+
+    captured = {"calls": 0}
+
+    def fake_post(url, json, headers, timeout):
+        captured["calls"] += 1
+        raise requests.Timeout("runtime unavailable")
+
+    monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
+
+    bridge = VoiceRuntimeBridge(
+        {
+            "enabled": True,
+            "base_url": "http://127.0.0.1:5100",
+            "failure_threshold": 2,
+            "failure_cooldown": 30.0,
+        }
+    )
+
+    assert bridge.handle_voice_text("first") is None
+    assert bridge.handle_voice_text("second") is None
+    assert bridge.handle_voice_text("third") is None
+    assert captured["calls"] == 2
+
+
+def test_voice_runtime_bridge_recovers_after_cooldown(monkeypatch) -> None:
+    import requests
+
+    current_time = {"value": 100.0}
+    monkeypatch.setattr(
+        "askme.voice.runtime_bridge.time.monotonic",
+        lambda: current_time["value"],
+    )
+
+    captured = {"calls": 0}
+
+    def fake_post(url, json, headers, timeout):
+        captured["calls"] += 1
+        if captured["calls"] == 1:
+            raise requests.Timeout("runtime unavailable")
+        return _Response({"handled": True, "turn": {"spoken_reply": "ok"}})
+
+    monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
+
+    bridge = VoiceRuntimeBridge(
+        {
+            "enabled": True,
+            "base_url": "http://127.0.0.1:5100",
+            "failure_threshold": 1,
+            "failure_cooldown": 5.0,
+        }
+    )
+
+    assert bridge.handle_voice_text("first") is None
+
+    current_time["value"] = 102.0
+    assert bridge.handle_voice_text("second") is None
+    assert captured["calls"] == 1
+
+    current_time["value"] = 106.0
+    result = bridge.handle_voice_text("third")
+    assert result == {"handled": True, "turn": {"spoken_reply": "ok"}}
+    assert captured["calls"] == 2
+
+    current_time["value"] = 106.5
+    assert bridge.handle_voice_text("fourth") == {"handled": True, "turn": {"spoken_reply": "ok"}}
+    assert captured["calls"] == 3

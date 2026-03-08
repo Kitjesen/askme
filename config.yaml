@@ -237,3 +237,5 @@ runtime:
     site_id: ""
     submit: true
     timeout: 2.0
+    failure_threshold: 2
+    failure_cooldown: 15.0

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any
 
 import requests
@@ -26,6 +28,11 @@ class VoiceRuntimeBridge:
         self._site_id: str | None = _clean_optional(cfg.get("site_id"))
         self._submit: bool = bool(cfg.get("submit", True))
         self._timeout_s: float = float(cfg.get("timeout", 2.0))
+        self._failure_threshold: int = max(1, int(cfg.get("failure_threshold", 2)))
+        self._failure_cooldown_s: float = max(0.0, float(cfg.get("failure_cooldown", 15.0)))
+        self._state_lock = threading.Lock()
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
 
         if (self.enabled or self.text_enabled) and not self._base_url:
             logger.warning("VoiceRuntimeBridge enabled but base_url is empty; disabling bridge")
@@ -64,6 +71,9 @@ class VoiceRuntimeBridge:
         active = self.enabled if enabled is None else bool(enabled)
         if not active or not self._base_url:
             return None
+        recovery_probe = self._begin_request()
+        if recovery_probe is None:
+            return None
 
         payload = {
             "text": text,
@@ -95,21 +105,69 @@ class VoiceRuntimeBridge:
             response.raise_for_status()
             response_payload = response.json()
             if not isinstance(response_payload, dict):
-                logger.warning(
-                    "Voice runtime bridge returned non-object payload: %r",
-                    response_payload,
+                raise ValueError(
+                    f"runtime bridge returned non-object payload: {response_payload!r}"
                 )
-                return None
+            self._record_success()
+            if recovery_probe:
+                logger.info("Voice runtime bridge recovered after cooldown")
             return response_payload
-        except ValueError as exc:
-            logger.warning("Voice runtime bridge returned invalid JSON: %s", exc)
-            return None
-        except requests.RequestException as exc:
-            logger.warning("Voice runtime bridge request failed: %s", exc)
+        except (requests.RequestException, ValueError) as exc:
+            self._record_failure(exc, recovery_probe=recovery_probe)
             return None
         except Exception as exc:
-            logger.warning("Voice runtime bridge failed unexpectedly: %s", exc)
+            self._record_failure(exc, recovery_probe=recovery_probe)
             return None
+
+    def _begin_request(self) -> bool | None:
+        """Return whether this request is a recovery probe, or None if bypassed."""
+        now = time.monotonic()
+        with self._state_lock:
+            if self._circuit_open_until > now:
+                logger.info(
+                    "Voice runtime bridge bypassed for %.1fs after repeated failures",
+                    self._circuit_open_until - now,
+                )
+                return None
+            if self._circuit_open_until > 0:
+                self._circuit_open_until = 0.0
+                self._consecutive_failures = max(0, self._failure_threshold - 1)
+                logger.info("Voice runtime bridge cooldown elapsed; probing upstream again")
+                return True
+        return False
+
+    def _record_success(self) -> None:
+        with self._state_lock:
+            self._consecutive_failures = 0
+            self._circuit_open_until = 0.0
+
+    def _record_failure(self, exc: Exception, *, recovery_probe: bool) -> None:
+        with self._state_lock:
+            self._consecutive_failures += 1
+            failure_count = self._consecutive_failures
+            should_open = failure_count >= self._failure_threshold
+            if should_open and self._failure_cooldown_s > 0:
+                self._circuit_open_until = time.monotonic() + self._failure_cooldown_s
+
+        if should_open:
+            logger.warning(
+                "Voice runtime bridge disabled for %.1fs after %d consecutive failures: %s",
+                self._failure_cooldown_s,
+                failure_count,
+                exc,
+            )
+            return
+
+        if recovery_probe:
+            logger.warning("Voice runtime bridge recovery probe failed: %s", exc)
+            return
+
+        logger.warning(
+            "Voice runtime bridge request failed (%d/%d): %s",
+            failure_count,
+            self._failure_threshold,
+            exc,
+        )
 
 
 def _clean_optional(value: Any) -> str | None:
