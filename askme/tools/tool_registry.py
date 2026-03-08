@@ -29,6 +29,7 @@ _SAFETY_ORDER = {
 _APPROVAL_REQUIRED_PREFIX = "[Approval Required]"
 _APPROVAL_CANCELLED_PREFIX = "[Approval Cancelled]"
 _APPROVAL_EXPIRED_PREFIX = "[Approval Expired]"
+_APPROVAL_PENDING_PREFIX = "[Approval Pending]"
 _DEFAULT_CONFIRMATION_PHRASES = {
     "确认执行",
     "继续执行",
@@ -235,6 +236,23 @@ class ToolRegistry:
             return False
         return self._normalize_phrase(text) in self._rejection_phrases
 
+    def handle_pending_input(self, text: str) -> str | None:
+        """Resolve or restate the pending high-risk action for arbitrary operator input."""
+        expired = self._expire_pending_approval()
+        if expired is not None:
+            return self._format_approval_expired(expired)
+
+        pending = self._pending_approval
+        if pending is None:
+            return None
+
+        normalized = self._normalize_phrase(text)
+        if normalized in self._confirmation_phrases:
+            return self.approve_pending()
+        if normalized in self._rejection_phrases:
+            return self.reject_pending()
+        return self._format_approval_pending(pending)
+
     def approve_pending(self) -> str:
         """Execute the currently pending dangerous tool invocation."""
         expired = self._expire_pending_approval()
@@ -306,6 +324,9 @@ class ToolRegistry:
             return "[Error] Tool arguments must decode to an object."
 
         if self._requires_confirmation(tool):
+            self._expire_pending_approval()
+            if self._pending_approval is not None:
+                return self._format_approval_pending(self._pending_approval)
             self._pending_approval = PendingToolApproval(
                 tool_name=name,
                 kwargs=kwargs,
@@ -415,6 +436,13 @@ class ToolRegistry:
             f"{_APPROVAL_EXPIRED_PREFIX} 待确认操作已过期: "
             f"{pending.tool_name}({self._format_kwargs(pending.kwargs)})。"
             " 如需继续，请重新发起操作。"
+        )
+
+    def _format_approval_pending(self, pending: PendingToolApproval) -> str:
+        return (
+            f"{_APPROVAL_PENDING_PREFIX} High-risk operation still waiting: "
+            f"{pending.tool_name}({self._format_kwargs(pending.kwargs)}). "
+            "Reply 'confirm' to continue or 'cancel' to reject before starting another command."
         )
 
     def _is_tool_exposed(

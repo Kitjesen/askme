@@ -40,6 +40,20 @@ class _CriticalTool(BaseTool):
         return "critical"
 
 
+class _SecondDangerousTool(BaseTool):
+    name = "second_dangerous_tool"
+    description = "another dangerous tool"
+    parameters: dict[str, Any] = {"type": "object", "properties": {}}
+    safety_level = "dangerous"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, **kwargs: Any) -> str:
+        self.calls += 1
+        return "second-dangerous"
+
+
 class _EmergencyStopTool(BaseTool):
     name = "robot_emergency_stop"
     description = "emergency stop"
@@ -170,6 +184,55 @@ def test_pending_approval_expires() -> None:
     time.sleep(0.02)
     result = registry.approve_pending()
 
+    assert result.startswith("[Approval Expired]")
+    assert registry.has_pending_approval() is False
+
+
+def test_pending_approval_blocks_new_high_risk_request() -> None:
+    registry = _make_registry()
+    first = _DangerousTool()
+    second = _SecondDangerousTool()
+    registry.register(first)
+    registry.register(second)
+
+    registry.execute("dangerous_tool", '{"target": "bin-a"}', max_safety_level="dangerous")
+    result = registry.execute(
+        "second_dangerous_tool",
+        '{"target": "bin-b"}',
+        max_safety_level="dangerous",
+    )
+
+    assert result.startswith("[Approval Pending]")
+    assert "dangerous_tool" in result
+
+    approved = registry.approve_pending()
+    assert approved == "dangerous"
+    assert first.calls == 1
+    assert second.calls == 0
+
+
+def test_handle_pending_input_requires_explicit_resolution() -> None:
+    registry = _make_registry()
+    registry.register(_DangerousTool())
+    registry.execute("dangerous_tool", '{"target": "bin-a"}', max_safety_level="dangerous")
+
+    result = registry.handle_pending_input("status update")
+
+    assert result is not None
+    assert result.startswith("[Approval Pending]")
+    assert "dangerous_tool" in result
+    assert registry.has_pending_approval() is True
+
+
+def test_handle_pending_input_reports_expired_request() -> None:
+    registry = _make_registry(approval_timeout_seconds=0.01)
+    registry.register(_DangerousTool())
+    registry.execute("dangerous_tool", "{}", max_safety_level="dangerous")
+
+    time.sleep(0.02)
+    result = registry.handle_pending_input("approve")
+
+    assert result is not None
     assert result.startswith("[Approval Expired]")
     assert registry.has_pending_approval() is False
 

@@ -232,14 +232,11 @@ class BrainPipeline:
         return self._tools.has_pending_approval()
 
     async def handle_pending_tool_response(self, user_text: str) -> str | None:
-        """Approve or reject the pending dangerous tool based on user input."""
-        if self._tools.matches_confirmation(user_text):
-            result = await asyncio.to_thread(self._tools.approve_pending)
-            return await self._respond_without_llm(user_text, result)
-        if self._tools.matches_rejection(user_text):
-            result = self._tools.reject_pending()
-            return await self._respond_without_llm(user_text, result)
-        return None
+        """Resolve or restate the pending dangerous tool based on user input."""
+        result = self._tools.handle_pending_input(user_text)
+        if result is None:
+            return None
+        return await self._respond_without_llm(user_text, result)
 
     async def _respond_without_llm(self, user_text: str, assistant_text: str) -> str:
         """Speak and record a direct response that doesn't need another LLM turn."""
