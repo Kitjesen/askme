@@ -50,6 +50,7 @@ class BrainPipeline:
         prompt_seed: list[dict[str, str]] | None = None,
         user_prefix: str = "",
         voice_model: str | None = None,
+        general_tool_max_safety_level: str = "normal",
     ) -> None:
         self._llm = llm
         self._conversation = conversation
@@ -67,6 +68,7 @@ class BrainPipeline:
         self._prompt_seed = prompt_seed or []
         self._user_prefix = user_prefix
         self._voice_model = voice_model  # fast model for real-time voice turns
+        self._general_tool_max_safety_level = general_tool_max_safety_level
 
     # ── Public API ───────────────────────────────────────────
 
@@ -225,6 +227,34 @@ class BrainPipeline:
             self._arm.emergency_stop()
         logger.warning("E-STOP: All motion halted.")
 
+    def has_pending_tool_approval(self) -> bool:
+        """Whether a dangerous tool invocation is waiting for operator approval."""
+        return self._tools.has_pending_approval()
+
+    async def handle_pending_tool_response(self, user_text: str) -> str | None:
+        """Approve or reject the pending dangerous tool based on user input."""
+        if self._tools.matches_confirmation(user_text):
+            result = await asyncio.to_thread(self._tools.approve_pending)
+            return await self._respond_without_llm(user_text, result)
+        if self._tools.matches_rejection(user_text):
+            result = self._tools.reject_pending()
+            return await self._respond_without_llm(user_text, result)
+        return None
+
+    async def _respond_without_llm(self, user_text: str, assistant_text: str) -> str:
+        """Speak and record a direct response that doesn't need another LLM turn."""
+        self._audio.drain_buffers()
+        self._audio.start_playback()
+        self._audio.speak(assistant_text)
+        self._conversation.add_user_message(user_text)
+        self._conversation.add_assistant_message(assistant_text)
+        if self._episodic:
+            self._episodic.log("command", f"鐢ㄦ埛璇? {user_text}")
+            self._episodic.log("outcome", f"鐩存帴鍥炲: {assistant_text[:100]}")
+        await asyncio.to_thread(self._audio.wait_speaking_done)
+        self._audio.stop_playback()
+        return assistant_text
+
     # ── Internal ─────────────────────────────────────────────
 
     def _prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -271,7 +301,9 @@ class BrainPipeline:
         model: str | None = None,
     ) -> str:
         """Stream LLM response, speak sentences immediately, handle tool calls."""
-        tool_definitions = self._tools.get_definitions()
+        tool_definitions = self._tools.get_definitions(
+            max_safety_level=self._general_tool_max_safety_level
+        )
         full_response = ""
         tool_calls_acc: dict[int, dict[str, str]] = {}
         spoke_any = False
@@ -335,12 +367,18 @@ class BrainPipeline:
         # Build all tool call objects first
         tool_call_objs = []
         tool_results = []
+        approval_response: str | None = None
         for idx in sorted(tool_calls_acc.keys()):
             tc = tool_calls_acc[idx]
             logger.info("  -> %s(%s)", tc["name"], tc["arguments"])
             if self._episodic:
                 self._episodic.log("action", f"调用工具: {tc['name']}")
-            result = await asyncio.to_thread(self._tools.execute, tc["name"], tc["arguments"])
+            result = await asyncio.to_thread(
+                self._tools.execute,
+                tc["name"],
+                tc["arguments"],
+                max_safety_level=self._general_tool_max_safety_level,
+            )
             logger.info("  <- %s", result)
             if self._episodic:
                 self._episodic.log("outcome", f"工具结果 {tc['name']}: {str(result)[:100]}")
@@ -351,6 +389,9 @@ class BrainPipeline:
                 "function": {"name": tc["name"], "arguments": tc["arguments"]},
             })
             tool_results.append({"tool_call_id": tc["id"], "content": str(result)})
+            if self._tools.has_pending_approval():
+                approval_response = str(result)
+                break
 
         # Append ONE assistant message with all tool calls
         self._conversation.history.append({
@@ -365,6 +406,9 @@ class BrainPipeline:
                 "tool_call_id": tr["tool_call_id"],
                 "content": tr["content"],
             })
+
+        if approval_response is not None:
+            return approval_response
 
         # Follow-up LLM call with tool results
         follow_msgs = self._prepare_messages(

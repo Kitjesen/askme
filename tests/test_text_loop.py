@@ -18,12 +18,18 @@ class _Pipeline:
     def __init__(self) -> None:
         self.process_calls: list[str] = []
         self.skill_calls: list[tuple[str, str]] = []
+        self.pending_calls: list[str] = []
+        self.pending_reply_map: dict[str, str] = {}
 
     def start_idle_reflection(self):
         return None
 
     def start_memory_prefetch(self, user_text: str):
         return asyncio.create_task(asyncio.sleep(0, result=""))
+
+    async def handle_pending_tool_response(self, user_text: str):
+        self.pending_calls.append(user_text)
+        return self.pending_reply_map.get(user_text)
 
     async def process(self, user_text: str, *, memory_task=None):
         self.process_calls.append(user_text)
@@ -89,4 +95,25 @@ async def test_text_loop_prefers_runtime_bridge_before_llm() -> None:
         await loop.run()
 
     assert bridge.calls == ["当前状态"]
+    assert pipeline.process_calls == []
+
+
+@pytest.mark.asyncio
+async def test_text_loop_handles_pending_tool_confirmation_before_llm() -> None:
+    pipeline = _Pipeline()
+    pipeline.pending_reply_map["确认执行"] = "已确认执行"
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+        voice_runtime_bridge=_Bridge(),
+    )
+
+    with patch("builtins.input", side_effect=["确认执行", "/quit"]):
+        await loop.run()
+
+    assert pipeline.pending_calls == ["确认执行", "/quit"]
     assert pipeline.process_calls == []

@@ -9,10 +9,62 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
+import threading
+import time
 from abc import ABC, abstractmethod
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Iterable
+
+from askme.config import get_config
 
 logger = logging.getLogger(__name__)
+
+_SAFETY_ORDER = {
+    "normal": 0,
+    "dangerous": 1,
+    "critical": 2,
+}
+_APPROVAL_REQUIRED_PREFIX = "[Approval Required]"
+_APPROVAL_CANCELLED_PREFIX = "[Approval Cancelled]"
+_APPROVAL_EXPIRED_PREFIX = "[Approval Expired]"
+_DEFAULT_CONFIRMATION_PHRASES = {
+    "确认执行",
+    "继续执行",
+    "批准执行",
+    "approve",
+    "confirm",
+}
+_DEFAULT_REJECTION_PHRASES = {
+    "取消",
+    "取消执行",
+    "放弃",
+    "cancel",
+    "deny",
+}
+_DEFAULT_CONFIRMATION_BYPASS_TOOLS = {"robot_emergency_stop"}
+
+
+def _normalize_safety_level(level: str | None) -> str:
+    if level in _SAFETY_ORDER:
+        return level
+    return "critical"
+
+
+class ToolExecutionTimeoutError(TimeoutError):
+    """Raised when a tool exceeds its configured execution timeout."""
+
+
+@dataclass
+class PendingToolApproval:
+    """A dangerous tool invocation waiting for explicit operator approval."""
+
+    tool_name: str
+    kwargs: dict[str, Any]
+    args_json: str | None
+    safety_level: str
+    requested_at: float
 
 
 class BaseTool(ABC):
@@ -54,10 +106,54 @@ class BaseTool(ABC):
 class ToolRegistry:
     """Registry that holds tools and dispatches execution requests."""
 
-    def __init__(self) -> None:
-        self._tools: dict[str, BaseTool] = {}
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        cfg = get_config().get("tools", {}) if config is None else config
+        default_timeout = float(cfg.get("default_timeout", 8.0))
 
-    # ── Registration ────────────────────────────────────────────
+        self._tools: dict[str, BaseTool] = {}
+        self._timeout_by_safety: dict[str, float] = {
+            "normal": default_timeout,
+            "dangerous": float(cfg.get("dangerous_timeout", default_timeout)),
+            "critical": float(cfg.get("critical_timeout", default_timeout)),
+        }
+        self._timeout_cooldown: float = max(0.0, float(cfg.get("timeout_cooldown", 30.0)))
+        self._cooldown_until: dict[str, float] = {}
+        self._approval_timeout_seconds: float = max(
+            0.0,
+            float(cfg.get("approval_timeout_seconds", 30.0)),
+        )
+        self._require_confirmation_levels = {
+            _normalize_safety_level(level)
+            for level in cfg.get(
+                "require_confirmation_levels",
+                ["dangerous", "critical"],
+            )
+        }
+        self._confirmation_phrases = {
+            self._normalize_phrase(phrase)
+            for phrase in cfg.get(
+                "confirmation_phrases",
+                sorted(_DEFAULT_CONFIRMATION_PHRASES),
+            )
+            if self._normalize_phrase(phrase)
+        }
+        self._rejection_phrases = {
+            self._normalize_phrase(phrase)
+            for phrase in cfg.get(
+                "rejection_phrases",
+                sorted(_DEFAULT_REJECTION_PHRASES),
+            )
+            if self._normalize_phrase(phrase)
+        }
+        self._confirmation_bypass_tools = {
+            str(name).strip()
+            for name in cfg.get(
+                "confirmation_bypass_tools",
+                sorted(_DEFAULT_CONFIRMATION_BYPASS_TOOLS),
+            )
+            if str(name).strip()
+        }
+        self._pending_approval: PendingToolApproval | None = None
 
     def register(self, tool: BaseTool) -> None:
         """Register a tool instance. Overwrites if name already exists."""
@@ -71,21 +167,50 @@ class ToolRegistry:
         removed = self._tools.pop(name, None)
         if removed:
             logger.debug("Unregistered tool: %s", name)
+        self._cooldown_until.pop(name, None)
+        if self._pending_approval and self._pending_approval.tool_name == name:
+            self._pending_approval = None
         return removed is not None
-
-    # ── Querying ────────────────────────────────────────────────
 
     def get(self, name: str) -> BaseTool | None:
         """Get a tool by name, or None."""
         return self._tools.get(name)
 
-    def get_definitions(self) -> list[dict[str, Any]]:
-        """Return all tool definitions in OpenAI function-calling format."""
-        return [tool.get_definition() for tool in self._tools.values()]
+    def get_definitions(
+        self,
+        *,
+        allowed_names: Iterable[str] | None = None,
+        max_safety_level: str = "critical",
+    ) -> list[dict[str, Any]]:
+        """Return visible tool definitions in OpenAI function-calling format."""
+        allowed = set(allowed_names) if allowed_names is not None else None
+        return [
+            tool.get_definition()
+            for tool in self._tools.values()
+            if self._is_tool_exposed(
+                tool,
+                allowed_names=allowed,
+                max_safety_level=max_safety_level,
+            )
+        ]
 
-    def list_names(self) -> list[str]:
-        """Return a sorted list of registered tool names."""
-        return sorted(self._tools.keys())
+    def list_names(
+        self,
+        *,
+        allowed_names: Iterable[str] | None = None,
+        max_safety_level: str = "critical",
+    ) -> list[str]:
+        """Return a sorted list of visible registered tool names."""
+        allowed = set(allowed_names) if allowed_names is not None else None
+        return sorted(
+            tool.name
+            for tool in self._tools.values()
+            if self._is_tool_exposed(
+                tool,
+                allowed_names=allowed,
+                max_safety_level=max_safety_level,
+            )
+        )
 
     def __len__(self) -> int:
         return len(self._tools)
@@ -93,31 +218,282 @@ class ToolRegistry:
     def __contains__(self, name: str) -> bool:
         return name in self._tools
 
-    # ── Execution ───────────────────────────────────────────────
+    def has_pending_approval(self) -> bool:
+        """Whether a dangerous tool invocation is waiting for approval."""
+        self._expire_pending_approval()
+        return self._pending_approval is not None
 
-    def execute(self, name: str, args_json: str | None = None) -> str:
-        """Execute a tool by name with JSON-encoded arguments.
+    def matches_confirmation(self, text: str) -> bool:
+        """Return True when *text* confirms the pending dangerous action."""
+        if not self.has_pending_approval():
+            return False
+        return self._normalize_phrase(text) in self._confirmation_phrases
 
-        Args:
-            name: The tool name to execute.
-            args_json: A JSON string of keyword arguments (may be None or empty).
+    def matches_rejection(self, text: str) -> bool:
+        """Return True when *text* rejects the pending dangerous action."""
+        if not self.has_pending_approval():
+            return False
+        return self._normalize_phrase(text) in self._rejection_phrases
 
-        Returns:
-            The tool's string result, or an error message.
-        """
+    def approve_pending(self) -> str:
+        """Execute the currently pending dangerous tool invocation."""
+        expired = self._expire_pending_approval()
+        if expired is not None:
+            return self._format_approval_expired(expired)
+
+        pending = self._pending_approval
+        if pending is None:
+            return "[Approval] No pending high-risk operation."
+
+        tool = self._tools.get(pending.tool_name)
+        self._pending_approval = None
+        if tool is None:
+            logger.warning("Approved tool disappeared before execution: %s", pending.tool_name)
+            return f"[Error] Tool not found: {pending.tool_name}"
+
+        logger.warning(
+            "Operator approved %s tool: %s(%s)",
+            pending.safety_level,
+            pending.tool_name,
+            pending.kwargs,
+        )
+        return self._execute_tool(tool, pending.kwargs, timeout=self._resolve_timeout(tool, None))
+
+    def reject_pending(self) -> str:
+        """Cancel the currently pending dangerous tool invocation."""
+        expired = self._expire_pending_approval()
+        if expired is not None:
+            return self._format_approval_expired(expired)
+
+        pending = self._pending_approval
+        if pending is None:
+            return "[Approval] No pending high-risk operation."
+
+        self._pending_approval = None
+        return (
+            f"{_APPROVAL_CANCELLED_PREFIX} 已取消高风险操作: "
+            f"{pending.tool_name}({self._format_kwargs(pending.kwargs)})"
+        )
+
+    def execute(
+        self,
+        name: str,
+        args_json: str | None = None,
+        *,
+        allowed_names: Iterable[str] | None = None,
+        max_safety_level: str = "critical",
+        timeout: float | None = None,
+    ) -> str:
+        """Execute a tool by name with JSON-encoded arguments."""
         tool = self._tools.get(name)
         if tool is None:
             return f"[Error] Tool not found: {name}"
+
+        allowed = set(allowed_names) if allowed_names is not None else None
+        access_error = self._get_access_error(
+            tool,
+            allowed_names=allowed,
+            max_safety_level=max_safety_level,
+        )
+        if access_error:
+            return access_error
 
         try:
             kwargs = json.loads(args_json) if args_json else {}
         except json.JSONDecodeError as exc:
             return f"[Error] Invalid JSON arguments: {exc}"
+        if not isinstance(kwargs, dict):
+            return "[Error] Tool arguments must decode to an object."
 
+        if self._requires_confirmation(tool):
+            self._pending_approval = PendingToolApproval(
+                tool_name=name,
+                kwargs=kwargs,
+                args_json=args_json,
+                safety_level=_normalize_safety_level(tool.safety_level),
+                requested_at=time.monotonic(),
+            )
+            logger.warning(
+                "Queued %s tool for operator approval: %s(%s)",
+                _normalize_safety_level(tool.safety_level),
+                name,
+                kwargs,
+            )
+            return self._format_approval_required(tool, kwargs)
+
+        return self._execute_tool(
+            tool,
+            kwargs,
+            timeout=self._resolve_timeout(tool, timeout),
+        )
+
+    def _execute_tool(
+        self,
+        tool: BaseTool,
+        kwargs: dict[str, Any],
+        *,
+        timeout: float,
+    ) -> str:
         try:
-            logger.info("Executing tool: %s(%s)", name, kwargs)
-            result = tool.execute(**kwargs)
-            return result
+            logger.info(
+                "Executing tool: %s(%s) [safety=%s timeout=%.1fs]",
+                tool.name,
+                kwargs,
+                _normalize_safety_level(tool.safety_level),
+                timeout,
+            )
+            result = self._run_with_timeout(tool, kwargs, timeout=timeout)
+            return str(result)
+        except ToolExecutionTimeoutError:
+            self._mark_timed_out(tool.name)
+            logger.error("Tool execution timed out: %s", tool.name)
+            if self._timeout_cooldown > 0:
+                return (
+                    f"[Timeout] Tool '{tool.name}' exceeded {timeout:.1f}s and "
+                    f"is unavailable for {self._timeout_cooldown:.0f}s."
+                )
+            return f"[Timeout] Tool '{tool.name}' exceeded {timeout:.1f}s."
         except Exception as exc:
-            logger.exception("Tool execution failed: %s", name)
-            return f"[Error] Tool '{name}' execution failed: {exc}"
+            logger.exception("Tool execution failed: %s", tool.name)
+            return f"[Error] Tool '{tool.name}' execution failed: {exc}"
+
+    def _get_access_error(
+        self,
+        tool: BaseTool,
+        *,
+        allowed_names: set[str] | None,
+        max_safety_level: str,
+    ) -> str | None:
+        if allowed_names is not None and tool.name not in allowed_names:
+            return f"[Error] Tool '{tool.name}' is not enabled for this request."
+
+        tool_level = _normalize_safety_level(tool.safety_level)
+        allowed_level = _normalize_safety_level(max_safety_level)
+        if _SAFETY_ORDER[tool_level] > _SAFETY_ORDER[allowed_level]:
+            return (
+                f"[Error] Tool '{tool.name}' requires safety level '{tool_level}', "
+                f"but this request only allows '{allowed_level}'."
+            )
+
+        cooldown_remaining = self._cooldown_remaining(tool.name)
+        if cooldown_remaining > 0:
+            return (
+                f"[Error] Tool '{tool.name}' is temporarily unavailable after a timeout. "
+                f"Retry in {math.ceil(cooldown_remaining)}s."
+            )
+
+        return None
+
+    def _requires_confirmation(self, tool: BaseTool) -> bool:
+        tool_level = _normalize_safety_level(tool.safety_level)
+        if tool.name in self._confirmation_bypass_tools:
+            return False
+        return tool_level in self._require_confirmation_levels
+
+    def _expire_pending_approval(self) -> PendingToolApproval | None:
+        pending = self._pending_approval
+        if pending is None:
+            return None
+        if self._approval_timeout_seconds <= 0:
+            return None
+        if time.monotonic() - pending.requested_at <= self._approval_timeout_seconds:
+            return None
+
+        self._pending_approval = None
+        logger.warning("Pending approval expired for tool: %s", pending.tool_name)
+        return pending
+
+    def _format_approval_required(self, tool: BaseTool, kwargs: dict[str, Any]) -> str:
+        return (
+            f"{_APPROVAL_REQUIRED_PREFIX} 高风险操作待确认: "
+            f"{tool.name}({self._format_kwargs(kwargs)})。"
+            " 回复“确认执行”继续，回复“取消”放弃。"
+        )
+
+    def _format_approval_expired(self, pending: PendingToolApproval) -> str:
+        return (
+            f"{_APPROVAL_EXPIRED_PREFIX} 待确认操作已过期: "
+            f"{pending.tool_name}({self._format_kwargs(pending.kwargs)})。"
+            " 如需继续，请重新发起操作。"
+        )
+
+    def _is_tool_exposed(
+        self,
+        tool: BaseTool,
+        *,
+        allowed_names: set[str] | None,
+        max_safety_level: str,
+    ) -> bool:
+        return (
+            self._get_access_error(
+                tool,
+                allowed_names=allowed_names,
+                max_safety_level=max_safety_level,
+            )
+            is None
+        )
+
+    def _cooldown_remaining(self, name: str) -> float:
+        until = self._cooldown_until.get(name)
+        if until is None:
+            return 0.0
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            self._cooldown_until.pop(name, None)
+            return 0.0
+        return remaining
+
+    def _mark_timed_out(self, name: str) -> None:
+        if self._timeout_cooldown <= 0:
+            return
+        self._cooldown_until[name] = time.monotonic() + self._timeout_cooldown
+
+    def _resolve_timeout(self, tool: BaseTool, timeout: float | None) -> float:
+        if timeout is not None:
+            return float(timeout)
+        return self._timeout_by_safety[_normalize_safety_level(tool.safety_level)]
+
+    def _run_with_timeout(
+        self,
+        tool: BaseTool,
+        kwargs: dict[str, Any],
+        *,
+        timeout: float,
+    ) -> str:
+        if timeout <= 0:
+            return str(tool.execute(**kwargs))
+
+        result_box: dict[str, str] = {}
+        error_box: dict[str, Exception] = {}
+        done = threading.Event()
+
+        def _runner() -> None:
+            try:
+                result_box["result"] = str(tool.execute(**kwargs))
+            except Exception as exc:
+                error_box["error"] = exc
+            finally:
+                done.set()
+
+        thread = threading.Thread(
+            target=_runner,
+            name=f"askme-tool-{tool.name}",
+            daemon=True,
+        )
+        thread.start()
+        if not done.wait(timeout):
+            raise ToolExecutionTimeoutError(tool.name)
+        if "error" in error_box:
+            raise error_box["error"]
+        return result_box.get("result", "")
+
+    @staticmethod
+    def _format_kwargs(kwargs: dict[str, Any]) -> str:
+        if not kwargs:
+            return ""
+        return json.dumps(kwargs, ensure_ascii=False, separators=(", ", ": "))
+
+    @staticmethod
+    def _normalize_phrase(text: str) -> str:
+        compact = re.sub(r"[\s\.\,\!\?\;\:，。！？；：\"'`]+", "", text or "")
+        return compact.lower()

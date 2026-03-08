@@ -59,9 +59,12 @@ class SkillExecutor:
         prompt = skill.build_prompt(context)
         model = skill.model or self._default_model
         timeout = skill.timeout
+        max_safety_level = skill.safety_level or "normal"
 
         # Determine which tools to expose
-        tool_definitions = self._tools.get_definitions()
+        tool_definitions = self._tools.get_definitions(
+            max_safety_level=max_safety_level,
+        )
 
         # If the skill specifies a tools section, filter to only those tools
         allowed_tools: list[str] | None = None
@@ -75,6 +78,11 @@ class SkillExecutor:
                     td for td in tool_definitions
                     if td.get("function", {}).get("name") in allowed_tools
                 ]
+        allowed_tool_names = {
+            td.get("function", {}).get("name")
+            for td in tool_definitions
+            if td.get("function", {}).get("name")
+        }
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": prompt},
@@ -86,7 +94,13 @@ class SkillExecutor:
 
         try:
             result = await asyncio.wait_for(
-                self._run_tool_loop(messages, model, tool_definitions),
+                self._run_tool_loop(
+                    messages,
+                    model,
+                    tool_definitions,
+                    allowed_tool_names=allowed_tool_names,
+                    max_safety_level=max_safety_level,
+                ),
                 timeout=timeout,
             )
             return result
@@ -99,6 +113,9 @@ class SkillExecutor:
         messages: list[dict[str, Any]],
         model: str,
         tool_definitions: list[dict[str, Any]],
+        *,
+        allowed_tool_names: set[str] | None = None,
+        max_safety_level: str = "critical",
         max_iterations: int = 5,
     ) -> str:
         """Run the LLM -> tool-call -> LLM loop until a text response is produced."""
@@ -142,12 +159,20 @@ class SkillExecutor:
                         "Skill tool call [%d/%d]: %s(%s)",
                         iteration + 1, max_iterations, tool_name, tool_args,
                     )
-                    result = await asyncio.to_thread(self._tools.execute, tool_name, tool_args)
+                    result = await asyncio.to_thread(
+                        self._tools.execute,
+                        tool_name,
+                        tool_args,
+                        allowed_names=allowed_tool_names,
+                        max_safety_level=max_safety_level,
+                    )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": str(result),
                     })
+                    if self._tools.has_pending_approval():
+                        return str(result)
                 continue
 
             # No tool calls -- return the text response

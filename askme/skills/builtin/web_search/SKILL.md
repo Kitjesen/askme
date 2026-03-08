@@ -8,7 +8,7 @@ timeout: 30
 tags: [search, web, information]
 depends: []
 conflicts: []
-safety_level: normal
+safety_level: dangerous
 voice_trigger: 帮我搜索
 ---
 

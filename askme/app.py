@@ -99,6 +99,7 @@ class AskmeApp:
 
         # ── Assemble pipeline ───────────────────────────────
         brain_cfg = get_section("brain")
+        tools_cfg = get_section("tools")
 
         # Load SOUL.md character definition (overrides config prompt_seed)
         soul_seed = self._load_soul()
@@ -124,6 +125,10 @@ class AskmeApp:
             prompt_seed=prompt_seed,
             user_prefix=brain_cfg.get("user_prefix", ""),
             voice_model=brain_cfg.get("voice_model") if voice_mode else None,
+            general_tool_max_safety_level=tools_cfg.get(
+                "general_chat_max_safety_level",
+                "normal",
+            ),
         )
 
         self._commands = CommandHandler(

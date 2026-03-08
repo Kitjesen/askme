@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
-def _set_test_env(monkeypatch, tmp_path):
+def _set_test_env(monkeypatch):
     """Set minimal environment variables so config.py doesn't fail."""
     monkeypatch.setenv("LLM_API_KEY", "sk-test-key")
     monkeypatch.setenv("LLM_BASE_URL", "https://api.example.com/v1")

@@ -67,6 +67,12 @@ class TextLoop:
                 if idle_task and not idle_task.done():
                     idle_task.cancel()
 
+                pending_reply = await self._pipeline.handle_pending_tool_response(user_text)
+                if pending_reply is not None:
+                    logger.info("[Assistant]: %s", pending_reply)
+                    idle_task = self._pipeline.start_idle_reflection()
+                    continue
+
                 # Start memory prefetch ASAP (overlaps with routing)
                 memory_task = self._pipeline.start_memory_prefetch(user_text)
 

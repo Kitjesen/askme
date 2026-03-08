@@ -146,6 +146,34 @@ robot:
   simulate: true
 
 # ----------------------------------------------------------
+# Tools: local execution safety and timeout policy
+# ----------------------------------------------------------
+tools:
+  general_chat_max_safety_level: normal
+  default_timeout: 8.0
+  dangerous_timeout: 8.0
+  critical_timeout: 4.0
+  timeout_cooldown: 30.0
+  approval_timeout_seconds: 30.0
+  require_confirmation_levels:
+    - dangerous
+    - critical
+  confirmation_bypass_tools:
+    - robot_emergency_stop
+  confirmation_phrases:
+    - "确认执行"
+    - "继续执行"
+    - "批准执行"
+    - "approve"
+    - "confirm"
+  rejection_phrases:
+    - "取消"
+    - "取消执行"
+    - "放弃"
+    - "cancel"
+    - "deny"
+
+# ----------------------------------------------------------
 # Proactive: Autonomous patrol and anomaly detection
 # ----------------------------------------------------------
 proactive:
