@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "askme": {
+      "command": "python",
+      "args": ["-m", "askme.mcp_server"],
+      "cwd": "D:\\inovxio\\askme"
+    }
+  }
+}

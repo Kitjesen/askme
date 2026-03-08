@@ -1,0 +1,21 @@
+# Askme MCP Server — Docker Compose
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f askme
+
+services:
+  askme:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
+      - MINIMAX_GROUP_ID=${MINIMAX_GROUP_ID:-}
+      - ASKME_FEATURE_ROBOT=0
+      - ASKME_FEATURE_VOICE=0
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped

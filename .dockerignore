@@ -1,0 +1,10 @@
+.env
+.git
+__pycache__
+*.pyc
+models/
+memU/
+.pytest_cache
+.vscode
+data/
+*.egg-info

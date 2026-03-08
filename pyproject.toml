@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "askme"
+version = "4.0.0"
+description = "Voice AI Assistant with Skills, Robot Control, and Memory"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "openai>=1.0.0",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.1",
+    "numpy>=1.26.0",
+    "sherpa-onnx>=1.10.0",
+    "requests>=2.31.0",
+    "miniaudio>=1.61",
+    "edge-tts>=6.1.0",
+    "colorama>=0.4.6",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "mcp[cli]>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+]
+robot = [
+    "pyserial>=3.5",
+    "onnxruntime>=1.16.0",
+]
+memory = [
+    "memu>=0.1.0",
+]
+vision = [
+    "qp-perception>=0.1.0",
+]
+embed = [
+    "sentence-transformers>=2.7.0",
+    "uvicorn>=0.23.0",
+    "fastapi>=0.103.0",
+]
+
+[project.scripts]
+askme = "askme.__main__:main"
+askme-mcp = "askme.mcp_server:main"
+
+[tool.setuptools.packages.find]
+include = ["askme*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

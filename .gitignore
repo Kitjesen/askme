@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Environment
+.env
+.venv/
+venv/
+
+# Models (large binary files)
+models/asr/
+models/kws/
+models/tts/
+models/vad/
+models/policy/
+
+# Data
+data/
+
+# IDE
+.vscode/
+.idea/
+*.vsix
+
+# Rust build
+memU/target/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,211 @@
+# ============================================================
+# Askme - Global Configuration
+# ============================================================
+# Use ${ENV_VAR} syntax for secrets (resolved from .env at runtime).
+# Defaults are provided for non-secret values.
+
+app:
+  name: askme
+  version: "2.0.0"
+  data_dir: data
+  log_level: INFO
+
+# ----------------------------------------------------------
+# Brain: LLM / Reasoning
+# ----------------------------------------------------------
+brain:
+  api_key: ${LLM_API_KEY}
+  base_url: ${LLM_BASE_URL}
+  model: claude-opus-4-6
+  # Lightweight model for real-time voice turns (lower TTFT)
+  voice_model: claude-haiku-4-5-20251001
+  # Max tokens for a single completion (0 = model default)
+  max_tokens: 0
+  temperature: 0.7
+  # Resilience: timeout, retry, model fallback
+  timeout: 30.0
+  max_retries: 2
+  fallback_models:
+    - claude-sonnet-4-5-20250929
+    - claude-haiku-4-5-20251001
+  # Character definition file (overrides prompt_seed when present)
+  soul_file: SOUL.md
+  # System prompt template (relay may override, SOUL.md compensates via seed)
+  system_prompt: "工业巡检机器人Thunder。中文口语，简洁汇报，80字以内。"
+  # Prompt seed: fallback when SOUL.md is absent
+  prompt_seed:
+    - role: user
+      content: "你是Thunder，穹沛科技的工业巡检机器人，用中文简洁回答"
+    - role: assistant
+      content: "收到。我是Thunder，穹沛的巡检机器人。等待指令。"
+  # Format tag prepended to each user message for TTS output control
+  user_prefix: "[工业巡检模式：中文口语，80字以内，简洁汇报式，不用markdown，不说英文]"
+
+# ----------------------------------------------------------
+# Memory: MemU / Embedding
+# ----------------------------------------------------------
+memory:
+  enabled: true
+  embed_url: ${LOCAL_EMBED_URL}
+  embed_model: Qwen/Qwen3-Embedding-0.6B
+  # Timeout (seconds) for embedding server reachability check
+  health_check_timeout: 1
+  # Timeout (seconds) for retrieval calls
+  retrieve_timeout: 3.0
+  retrieve_method: rag
+  user_id: user_1
+  episodic:
+    importance_threshold: 5.0
+    reflect_min_events: 5
+    reflect_cooldown_seconds: 300
+    flush_threshold: 100
+    episode_retention_hours: 24
+    knowledge_context_chars: 1000
+    digest_context_chars: 600
+    relevant_context_chars: 600
+    relevant_top_k: 5
+
+# ----------------------------------------------------------
+# Conversation History
+# ----------------------------------------------------------
+conversation:
+  history_file: data/conversation_history.json
+  max_history: 40
+
+# ----------------------------------------------------------
+# Voice: ASR / VAD / KWS / TTS
+# ----------------------------------------------------------
+voice:
+  asr:
+    model_dir: models/asr/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
+    sample_rate: 16000
+    feature_dim: 80
+    num_threads: 1
+    # Endpoint detection silence thresholds (seconds)
+    # rule1: long silence after short utterance, rule2: normal speech
+    rule1_min_trailing_silence: 1.6
+    rule2_min_trailing_silence: 0.8
+    # Timeout (seconds) for ASR after wake word detection
+    asr_timeout: 10.0
+
+  vad:
+    model_path: models/vad/silero_vad.onnx
+    threshold: 0.5
+    min_silence_duration: 0.5
+    min_speech_duration: 0.25
+    sample_rate: 16000
+    buffer_size_seconds: 30
+
+  kws:
+    model_dir: models/kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01
+    num_threads: 1
+    keywords:
+      - "你好"
+      - "小智"
+
+  tts:
+    # Backend: "local" (sherpa-onnx, fast) or "edge" (Edge TTS, network)
+    backend: edge
+    # Local backend settings
+    model_dir: models/tts/vits-zh-aishell3
+    num_threads: 4
+    speed: 1.0
+    sid: 0
+    # Edge backend settings (fallback)
+    voice: zh-CN-YunxiNeural
+    rate: "+0%"
+    # Common
+    sample_rate: 24000
+    output_device: 3
+
+# ----------------------------------------------------------
+# Vision: qp-perception (YOLO detection + tracking)
+# ----------------------------------------------------------
+vision:
+  enabled: false
+  model_path: models/perception/yolo11n-seg.pt
+  confidence_threshold: 0.40
+  device: ""
+  camera_index: 0
+  # VLM fallback (Claude Sonnet for scene understanding)
+  vlm_enabled: false
+  vlm_api_key: ${LLM_API_KEY}
+  vlm_model: claude-haiku-4-5-20251001
+
+# ----------------------------------------------------------
+# Robot: Mechanical arm control
+# ----------------------------------------------------------
+robot:
+  enabled: false
+  policy_model_path: models/policy/policy_pose0111.onnx
+  obs_dim: 285
+  action_dim: 16
+  serial_port: COM3
+  serial_baudrate: 115200
+  # simulate: true → no real hardware, for testing
+  simulate: true
+
+# ----------------------------------------------------------
+# Proactive: Autonomous patrol and anomaly detection
+# ----------------------------------------------------------
+proactive:
+  enabled: false
+  # Seconds between patrol scans
+  patrol_interval: 60
+  # Min seconds between TTS alerts (avoid spamming)
+  alert_cooldown: 30
+  # Model for anomaly judgment (fast, cheap)
+  judge_model: claude-haiku-4-5-20251001
+  # Sensitivity: low (danger only) / medium (notable changes) / high (all changes)
+  sensitivity: medium
+  # How many past scenes to keep for comparison
+  scene_history_size: 5
+  # Periodic auto-tasks (optional)
+  auto_tasks: []
+  #   - name: "环境播报"
+  #     interval: 300
+  #     prompt: "用一句话描述当前环境状况"
+
+# ----------------------------------------------------------
+# Platforms: Multi-platform support (future)
+# ----------------------------------------------------------
+platforms:
+  terminal:
+    enabled: true
+  wechat:
+    enabled: false
+  web:
+    enabled: false
+
+# ----------------------------------------------------------
+# Scheduler: Timed tasks (future)
+# ----------------------------------------------------------
+scheduler:
+  enabled: false
+  jobs: []
+
+# ----------------------------------------------------------
+# Swarm: Multi-agent collaboration (future)
+# ----------------------------------------------------------
+swarm:
+  enabled: false
+  agents: []
+
+# ----------------------------------------------------------
+# Runtime: NOVA Dog runtime bridge
+# ----------------------------------------------------------
+runtime:
+  voice_bridge:
+    enabled: true
+    text_enabled: true
+    base_url: ${ASKME_EDGE_SERVICE_URL}
+    api_key: ${NOVA_DOG_RUNTIME_API_KEY}
+    operator_id: askme.voice
+    session_id: askme-local-voice
+    channel: voice
+    text_session_id: askme-local-text
+    text_channel: text
+    robot_id: ""
+    site_id: ""
+    submit: true
+    timeout: 2.0

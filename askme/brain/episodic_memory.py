@@ -1,0 +1,798 @@
+"""
+Episodic memory — experience logging, decay, reflection, and knowledge consolidation.
+
+Inspired by:
+  - Park et al. 2023 (Generative Agents): importance scoring + retrieval + reflection
+  - OpenClaw: two-layer separation (daily log vs curated knowledge)
+  - ACT-R cognitive architecture: base-level activation with power-law decay
+  - Ebbinghaus forgetting curve: exponential decay with rehearsal strengthening
+  - Letta/MemGPT: sleep-time consolidation
+
+Architecture:
+  L1 Episode Buffer  →  L2 Episode Digest  →  L3 World Knowledge
+  (raw events with      (reflected summaries    (categorized facts:
+   importance + decay)    as .md files)           environment, entities,
+                                                  routines, etc.)
+
+Reflection triggers (Park 2023 hybrid):
+  - Cumulative importance exceeds threshold (primary)
+  - Buffer count exceeds minimum (fallback)
+  - Cooldown prevents excessive reflection
+
+Usage::
+
+    from askme.brain.episodic_memory import EpisodicMemory
+
+    mem = EpisodicMemory(llm=llm_client)
+    mem.log("perception", "检测到一个人站在门口",
+            context={"label": "person", "confidence": 0.92})
+    mem.log("action", "执行巡逻路径 A", context={"path": "A"})
+    mem.log("outcome", "巡逻完成，未发现异常")
+
+    # Triggered by importance accumulation or periodically
+    await mem.reflect()
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import time
+from collections import deque
+from datetime import datetime
+from pathlib import Path
+from typing import Any, TYPE_CHECKING
+
+from askme.config import get_config, project_root
+
+if TYPE_CHECKING:
+    from askme.brain.llm_client import LLMClient
+
+logger = logging.getLogger(__name__)
+
+# ── Constants ──────────────────────────────────────────────
+
+# L1: Episode buffer limits
+MAX_BUFFER_SIZE = 200       # Max events in memory buffer
+FLUSH_THRESHOLD = 100       # Flush to disk when buffer reaches this
+EPISODE_RETENTION_HOURS = 24  # Keep raw episodes for this long
+
+# L2: Reflection triggers
+REFLECT_MIN_EVENTS = 10     # Minimum events before reflection makes sense
+REFLECT_COOLDOWN_S = 300    # At least 5 min between reflections
+IMPORTANCE_THRESHOLD = 15.0  # Park 2023: cumulative importance to trigger reflection
+
+# Activation / Decay (Ebbinghaus + ACT-R inspired)
+DEFAULT_STABILITY_S = 3600.0   # Initial stability = 1 hour (Ebbinghaus S parameter)
+STABILITY_GROWTH_FACTOR = 2.0  # Each access doubles stability (spacing effect / SM-2 inspired)
+MAX_STABILITY_S = 7 * 86400.0  # Cap at 7 days
+
+# Park 2023 retrieval weights (relevance-dominant)
+WEIGHT_RECENCY = 0.5
+WEIGHT_IMPORTANCE = 2.0
+WEIGHT_RELEVANCE = 3.0
+
+# L3: Knowledge categories for a robot agent
+KNOWLEDGE_CATEGORIES = {
+    "environment":    "环境布局、空间结构、地标、路径",
+    "entities":       "识别的人、动物、物体及其特征",
+    "routines":       "时间规律、日程、周期性事件",
+    "interactions":   "交互经验、命令响应、沟通模式",
+    "self_knowledge": "自身能力、限制、校准、性能",
+}
+
+# Importance scoring rules (event_type → base importance)
+IMPORTANCE_RULES: dict[str, float] = {
+    "perception": 0.3,   # Routine sensing
+    "action":     0.2,   # Routine action
+    "outcome":    0.3,   # Action result
+    "command":    0.7,   # User interaction — high value
+    "error":      0.8,   # Errors are important to remember
+    "system":     0.1,   # System housekeeping — low importance
+}
+
+# Context-based importance boosts
+IMPORTANCE_BOOSTS: dict[str, float] = {
+    "person":     0.5,   # Detecting a person is significant
+    "new":        0.4,   # New entity / first-time detection
+    "danger":     0.6,   # Safety-related events
+    "fail":       0.3,   # Failure in action
+    "success":    0.1,   # Expected success — small boost
+    "surprise":   0.4,   # Unexpected event (novelty / prediction error)
+}
+
+# ── Prompts ────────────────────────────────────────────────
+
+REFLECT_PROMPT = """\
+你是一个机器人的记忆反思系统。以下是最近发生的事件记录（带重要性评分）。
+请像一个聪明的观察者一样，从这些经历中提取有价值的认知。
+
+事件记录:
+{episodes}
+
+当前已知知识:
+{existing_knowledge}
+
+请完成以下任务:
+1. **归纳总结**: 用 2-3 句话概括这段时间发生了什么
+2. **新发现**: 列出从这些事件中学到的新信息（如果有），并分类
+3. **模式识别**: 是否发现重复出现的规律？（如果有）
+4. **知识更新**: 需要更新或修正的已有认知（如果有）
+
+知识分类说明:
+- environment: 环境布局、空间、地标
+- entities: 人、动物、物体
+- routines: 时间规律、日程
+- interactions: 交互经验、命令响应
+- self_knowledge: 自身能力、限制
+
+用 JSON 格式回复:
+{{
+  "summary": "这段时间的概要",
+  "new_facts": [{{"fact": "新发现内容", "category": "分类名"}}],
+  "patterns": [{{"pattern": "规律描述", "category": "分类名", "confidence": 0.8}}],
+  "updates": [{{"old": "旧认知", "new": "新认知", "category": "分类名"}}],
+  "importance": "low|medium|high"
+}}"""
+
+
+class Episode:
+    """A single event in the robot's experience stream with importance, stability, and decay.
+
+    Memory model based on Ebbinghaus forgetting curve (R = e^(-t/S)):
+      - stability (S) starts at DEFAULT_STABILITY_S
+      - Each access doubles S (spacing effect / SM-2 inspired)
+      - Higher importance → higher initial stability
+      - Retrievability R decays exponentially but slows with each retrieval
+    """
+
+    __slots__ = (
+        "timestamp", "event_type", "description", "context",
+        "importance", "stability", "access_count", "last_accessed",
+    )
+
+    def __init__(
+        self,
+        event_type: str,
+        description: str,
+        context: dict[str, Any] | None = None,
+        importance: float = 0.0,
+    ) -> None:
+        self.timestamp: float = time.time()
+        self.event_type: str = event_type
+        self.description: str = description
+        self.context: dict[str, Any] = context or {}
+        self.importance: float = importance
+        # Ebbinghaus stability: higher importance → higher initial S
+        self.stability: float = DEFAULT_STABILITY_S * (1.0 + importance)
+        self.access_count: int = 0
+        self.last_accessed: float = self.timestamp
+
+    def access(self) -> None:
+        """Record an access (retrieval). Each access doubles stability (spacing effect)."""
+        self.access_count += 1
+        self.last_accessed = time.time()
+        # SM-2 inspired: each successful retrieval doubles stability
+        self.stability = min(self.stability * STABILITY_GROWTH_FACTOR, MAX_STABILITY_S)
+
+    def retrievability(self, now: float | None = None) -> float:
+        """Ebbinghaus forgetting curve: R = e^(-t/S).
+
+        R ∈ [0, 1]: 1.0 = perfect recall, 0.0 = forgotten.
+        S grows on each access → memory becomes more durable over time.
+        """
+        now = now or time.time()
+        t = now - self.last_accessed
+        return math.exp(-t / self.stability)
+
+    # Keep compute_activation as alias for backward compatibility
+    def compute_activation(self, now: float | None = None) -> float:
+        """Alias for retrievability() — backward compatible."""
+        return self.retrievability(now)
+
+    def retrieval_score(self, query_keywords: set[str] | None = None, now: float | None = None) -> float:
+        """Park 2023 weighted retrieval: recency(0.5) + importance(2.0) + relevance(3.0).
+
+        Weights from Stanford Generative Agents paper — relevance dominates.
+        """
+        recency = self.retrievability(now)
+        relevance = 0.0
+        if query_keywords:
+            desc_lower = self.description.lower()
+            matches = sum(1 for kw in query_keywords if kw in desc_lower)
+            relevance = min(matches / max(len(query_keywords), 1), 1.0)
+        return (WEIGHT_RECENCY * recency
+                + WEIGHT_IMPORTANCE * self.importance
+                + WEIGHT_RELEVANCE * relevance)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ts": self.timestamp,
+            "time": datetime.fromtimestamp(self.timestamp).strftime("%H:%M:%S"),
+            "type": self.event_type,
+            "desc": self.description,
+            "ctx": self.context,
+            "importance": round(self.importance, 2),
+            "stability": round(self.stability, 1),
+            "access_count": self.access_count,
+            "last_accessed": self.last_accessed,
+            "retrievability": round(self.retrievability(), 3),
+        }
+
+    def to_log_line(self) -> str:
+        """Human-readable format for LLM reflection prompt."""
+        time_str = datetime.fromtimestamp(self.timestamp).strftime("%H:%M:%S")
+        imp_str = f" [imp={self.importance:.1f}]"
+        ctx_str = f" ({json.dumps(self.context, ensure_ascii=False)})" if self.context else ""
+        return f"[{time_str}] [{self.event_type}]{imp_str} {self.description}{ctx_str}"
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> Episode:
+        """Recreate an episode from persisted JSON data."""
+        episode = cls(
+            str(payload.get("type", "system")),
+            str(payload.get("desc", "")),
+            payload.get("ctx") or {},
+            importance=float(payload.get("importance", 0.0)),
+        )
+        episode.timestamp = float(payload.get("ts", episode.timestamp))
+        episode.stability = float(payload.get("stability", episode.stability))
+        episode.access_count = int(payload.get("access_count", 0))
+        episode.last_accessed = float(payload.get("last_accessed", episode.timestamp))
+        return episode
+
+
+def score_importance(event_type: str, description: str, context: dict[str, Any] | None = None) -> float:
+    """Rule-based importance scoring for a robot episode.
+
+    Scoring layers:
+      1. Base score from event type (command > error > perception > action > system)
+      2. Context boosts (person detected, new entity, danger, failure)
+      3. Confidence weighting for perception events
+      4. Clamped to [0, 1]
+    """
+    base = IMPORTANCE_RULES.get(event_type, 0.3)
+    boost = 0.0
+    ctx = context or {}
+
+    # Detection-based boosts
+    detections = ctx.get("detections", [])
+    desc_lower = description.lower()
+
+    for det in detections:
+        label = det.get("label", "").lower()
+        conf = det.get("conf", det.get("confidence", 0.5))
+        if label == "person":
+            boost += IMPORTANCE_BOOSTS["person"] * conf
+        elif label in ("fire", "smoke", "weapon"):
+            boost += IMPORTANCE_BOOSTS["danger"] * conf
+
+    # Keyword-based boosts
+    if any(kw in desc_lower for kw in ("新", "first", "new", "未知", "unknown")):
+        boost += IMPORTANCE_BOOSTS["new"]
+    if any(kw in desc_lower for kw in ("失败", "fail", "error", "异常")):
+        boost += IMPORTANCE_BOOSTS["fail"]
+    if any(kw in desc_lower for kw in ("危险", "danger", "警告", "warning")):
+        boost += IMPORTANCE_BOOSTS["danger"]
+    # Person detection from text descriptions (e.g., vision "我看到了: 1个person")
+    if not detections and any(kw in desc_lower for kw in ("person", "人", "行人")):
+        boost += IMPORTANCE_BOOSTS["person"]
+
+    # Surprise/novelty boost from context
+    if ctx.get("surprise") or ctx.get("novel"):
+        boost += IMPORTANCE_BOOSTS["surprise"]
+
+    # High confidence perception gets a small boost
+    if event_type == "perception" and detections:
+        avg_conf = sum(d.get("conf", d.get("confidence", 0.5)) for d in detections) / len(detections)
+        if avg_conf > 0.9:
+            boost += 0.1
+
+    return min(base + boost, 1.0)
+
+
+class EpisodicMemory:
+    """Three-layer episodic memory for embodied robot agents.
+
+    Layer 1: Episode buffer (in-memory ring buffer + JSONL on disk)
+    Layer 2: Episode digests (reflected summaries as .md files)
+    Layer 3: World knowledge (categorized .md files per KNOWLEDGE_CATEGORIES)
+
+    Reflection trigger: cumulative importance > IMPORTANCE_THRESHOLD (Park 2023)
+    """
+
+    def __init__(self, *, llm: LLMClient | None = None) -> None:
+        cfg = get_config()
+        data_dir = cfg.get("app", {}).get("data_dir", "data")
+        episodic_cfg = cfg.get("memory", {}).get("episodic", {})
+        resolved = Path(data_dir)
+        if not resolved.is_absolute():
+            resolved = project_root() / resolved
+
+        self._data_dir = resolved / "memory"
+        self._episodes_dir = self._data_dir / "episodes"
+        self._digests_dir = self._data_dir / "digests"
+        self._knowledge_dir = self._data_dir / "knowledge"
+        self._active_file = self._episodes_dir / "_active.jsonl"
+
+        for d in (self._episodes_dir, self._digests_dir, self._knowledge_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        self._llm = llm
+        self._flush_threshold = int(episodic_cfg.get("flush_threshold", FLUSH_THRESHOLD))
+        self._episode_retention_hours = int(
+            episodic_cfg.get("episode_retention_hours", EPISODE_RETENTION_HOURS)
+        )
+        self._reflect_min_events = int(
+            episodic_cfg.get("reflect_min_events", REFLECT_MIN_EVENTS)
+        )
+        self._reflect_cooldown_s = float(
+            episodic_cfg.get("reflect_cooldown_seconds", REFLECT_COOLDOWN_S)
+        )
+        self._importance_threshold = float(
+            episodic_cfg.get("importance_threshold", IMPORTANCE_THRESHOLD)
+        )
+        self._knowledge_context_chars = int(
+            episodic_cfg.get("knowledge_context_chars", 1000)
+        )
+        self._digest_context_chars = int(
+            episodic_cfg.get("digest_context_chars", 600)
+        )
+        self._relevant_context_chars = int(
+            episodic_cfg.get("relevant_context_chars", 600)
+        )
+        self._relevant_top_k = int(episodic_cfg.get("relevant_top_k", 5))
+
+        # L1: In-memory episode buffer
+        self._buffer: deque[Episode] = deque(maxlen=MAX_BUFFER_SIZE)
+        self._last_reflect_time: float = 0.0
+        self._total_logged: int = 0
+        self._cumulative_importance: float = 0.0  # Park 2023 trigger
+        self._reflecting: bool = False
+
+        self._restore_active_buffer()
+
+    # ── L1: Episode Logging ────────────────────────────────
+
+    def log(
+        self,
+        event_type: str,
+        description: str,
+        context: dict[str, Any] | None = None,
+        importance: float | None = None,
+    ) -> Episode:
+        """Log an event to the episode buffer.
+
+        Args:
+            event_type: One of perception, action, outcome, command, error, system
+            description: Human-readable description of the event
+            context: Optional structured data (detection labels, coordinates, etc.)
+            importance: Override importance score (0-1). If None, auto-scored by rules.
+
+        Returns:
+            The created Episode for further use.
+        """
+        if importance is None:
+            importance = score_importance(event_type, description, context)
+
+        episode = Episode(event_type, description, context, importance=importance)
+        self._buffer.append(episode)
+        self._total_logged += 1
+        self._cumulative_importance += importance
+        self._append_to_active_journal(episode)
+
+        # Periodic flush to disk
+        if len(self._buffer) >= self._flush_threshold:
+            self._flush_to_disk()
+
+        logger.debug("Episode [%s] imp=%.2f: %s", event_type, importance, description[:60])
+        return episode
+
+    def get_recent(self, n: int = 20) -> list[Episode]:
+        """Get the N most recent episodes."""
+        return list(self._buffer)[-n:]
+
+    def retrieve(self, query: str, top_k: int = 10) -> list[Episode]:
+        """Retrieve episodes most relevant to query (Park 2023 style scoring).
+
+        Scores each episode by: activation (recency+decay) + importance + keyword relevance
+        """
+        keywords = set(query.lower().split())
+        now = time.time()
+        scored = [
+            (ep, ep.retrieval_score(keywords, now))
+            for ep in self._buffer
+        ]
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        # Mark retrieved episodes as accessed (Hebbian strengthening)
+        results = []
+        for ep, _ in scored[:top_k]:
+            ep.access()
+            results.append(ep)
+        return results
+
+    @property
+    def buffer_size(self) -> int:
+        return len(self._buffer)
+
+    @property
+    def cumulative_importance(self) -> float:
+        return self._cumulative_importance
+
+    # ── L2: Reflection ─────────────────────────────────────
+
+    async def reflect(self, force: bool = False) -> str | None:
+        """Trigger a reflection cycle: summarize recent episodes and extract knowledge.
+
+        Returns the reflection summary, or None if skipped.
+        """
+        if not self._llm:
+            return None
+        if self._reflecting:
+            logger.debug("Reflection skipped: already running")
+            return None
+
+        # Check cooldown
+        now = time.time()
+        if not force and (now - self._last_reflect_time) < self._reflect_cooldown_s:
+            logger.debug("Reflection skipped: cooldown (%.0fs remaining)",
+                         self._reflect_cooldown_s - (now - self._last_reflect_time))
+            return None
+
+        # Check minimum events
+        if not force and len(self._buffer) < self._reflect_min_events:
+            logger.debug("Reflection skipped: only %d events", len(self._buffer))
+            return None
+
+        self._reflecting = True
+        episodes_text = "\n".join(ep.to_log_line() for ep in self._buffer)
+        existing_knowledge = self._load_all_knowledge()
+
+        prompt = REFLECT_PROMPT.format(
+            episodes=episodes_text,
+            existing_knowledge=existing_knowledge or "暂无已知知识。",
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                self._llm.chat([
+                    {"role": "system", "content": "你是一个机器人的认知反思系统。用中文回答。"},
+                    {"role": "user", "content": prompt},
+                ]),
+                timeout=15.0,
+            )
+
+            reflection = self._parse_reflection(response)
+            if reflection:
+                self._save_digest(reflection)
+                self._update_knowledge(reflection)
+                self._last_reflect_time = time.time()
+                logger.info("[EpisodicMemory] Reflection complete: %s",
+                            reflection.get("summary", "")[:80])
+
+                # Clear reflected episodes from buffer
+                self._flush_to_disk()
+                self._buffer.clear()
+                self._cumulative_importance = 0.0
+                self._clear_active_journal()
+
+                return reflection.get("summary", "")
+
+        except Exception as exc:
+            logger.warning("[EpisodicMemory] Reflection failed: %s", exc)
+        finally:
+            self._reflecting = False
+
+        return None
+
+    def should_reflect(self) -> bool:
+        """Check if reflection should be triggered.
+
+        Uses Park 2023 hybrid approach:
+          1. Primary: cumulative importance exceeds threshold
+          2. Fallback: buffer count exceeds minimum (for low-importance event streams)
+          3. Cooldown prevents excessive reflection
+        """
+        if self._reflecting:
+            return False
+        now = time.time()
+        if (now - self._last_reflect_time) < self._reflect_cooldown_s:
+            return False
+        # Primary: importance-based trigger
+        if self._cumulative_importance >= self._importance_threshold:
+            return True
+        # Fallback: count-based
+        return len(self._buffer) >= self._reflect_min_events
+
+    # ── L3: World Knowledge ────────────────────────────────
+
+    def get_knowledge_context(self, max_chars: int | None = None) -> str:
+        """Load world knowledge for system prompt injection."""
+        if max_chars is None:
+            max_chars = self._knowledge_context_chars
+        knowledge = self._load_all_knowledge()
+        if not knowledge:
+            return ""
+        if len(knowledge) > max_chars:
+            knowledge = knowledge[:max_chars] + "\n..."
+        return f"世界知识:\n{knowledge}"
+
+    def get_recent_digest(self, n: int = 3, max_chars: int | None = None) -> str:
+        """Load recent episode digests for system prompt."""
+        if max_chars is None:
+            max_chars = self._digest_context_chars
+        digest_files = sorted(self._digests_dir.glob("*.md"), reverse=True)
+        if not digest_files:
+            return ""
+
+        entries = []
+        total_chars = 0
+        for f in digest_files[:n]:
+            try:
+                content = f.read_text(encoding="utf-8").strip()
+                if content:
+                    if total_chars + len(content) > max_chars:
+                        remaining = max_chars - total_chars
+                        if remaining <= 0:
+                            break
+                        entries.append(content[:remaining] + "...")
+                        total_chars = max_chars
+                        break
+                    entries.append(content)
+                    total_chars += len(content)
+            except Exception:
+                continue
+
+        if not entries:
+            return ""
+        return "近期经历:\n" + "\n---\n".join(entries)
+
+    # ── Internal: Disk operations ──────────────────────────
+
+    def get_relevant_context(
+        self,
+        query: str,
+        *,
+        top_k: int | None = None,
+        max_chars: int | None = None,
+    ) -> str:
+        """Return decayed/relevance-ranked episodic context for the current turn."""
+        if not query.strip() or not self._buffer:
+            return ""
+        if top_k is None:
+            top_k = self._relevant_top_k
+        if max_chars is None:
+            max_chars = self._relevant_context_chars
+
+        entries: list[str] = []
+        total_chars = 0
+        for episode in self.retrieve(query, top_k=top_k):
+            line = episode.to_log_line()
+            if total_chars + len(line) > max_chars:
+                remaining = max_chars - total_chars
+                if remaining > 0:
+                    entries.append(line[:remaining] + "...")
+                break
+            entries.append(line)
+            total_chars += len(line)
+
+        if not entries:
+            return ""
+        return "Relevant episodes:\n" + "\n".join(entries)
+
+    def _flush_to_disk(self) -> None:
+        """Write current buffer to a timestamped JSONL file."""
+        if not self._buffer:
+            return
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        filepath = self._episodes_dir / f"{timestamp}.jsonl"
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                for ep in self._buffer:
+                    f.write(json.dumps(ep.to_dict(), ensure_ascii=False) + "\n")
+            logger.debug("Flushed %d episodes to %s", len(self._buffer), filepath.name)
+        except Exception as exc:
+            logger.warning("Episode flush failed: %s", exc)
+
+    def _append_to_active_journal(self, episode: Episode) -> None:
+        """Persist the live, unreflected buffer so restarts can restore it."""
+        try:
+            with open(self._active_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(episode.to_dict(), ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning("Episode journal append failed: %s", exc)
+
+    def _restore_active_buffer(self) -> None:
+        """Replay the live journal into the in-memory buffer on startup."""
+        if not self._active_file.exists():
+            return
+        try:
+            with open(self._active_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    payload = json.loads(line)
+                    self._buffer.append(Episode.from_dict(payload))
+            self._total_logged = len(self._buffer)
+            self._cumulative_importance = sum(ep.importance for ep in self._buffer)
+            if self._buffer:
+                logger.info(
+                    "[EpisodicMemory] Restored %d live episodes from journal",
+                    len(self._buffer),
+                )
+        except Exception as exc:
+            logger.warning("Episode journal restore failed: %s", exc)
+            self._buffer.clear()
+            self._total_logged = 0
+            self._cumulative_importance = 0.0
+
+    def _clear_active_journal(self) -> None:
+        """Clear the live journal after a successful reflection."""
+        try:
+            self._active_file.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("Episode journal cleanup failed: %s", exc)
+
+    def _save_digest(self, reflection: dict[str, Any]) -> None:
+        """Save a reflection digest as a dated .md file."""
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
+        summary = reflection.get("summary", "")
+        new_facts = reflection.get("new_facts", [])
+        patterns = reflection.get("patterns", [])
+        importance = reflection.get("importance", "medium")
+
+        lines = [f"## {datetime.now().strftime('%Y-%m-%d %H:%M')} [{importance}]"]
+        lines.append(summary)
+        if new_facts:
+            lines.append("\n新发现:")
+            for item in new_facts:
+                if isinstance(item, dict):
+                    lines.append(f"- [{item.get('category', '?')}] {item.get('fact', item)}")
+                else:
+                    lines.append(f"- {item}")
+        if patterns:
+            lines.append("\n规律:")
+            for item in patterns:
+                if isinstance(item, dict):
+                    conf = item.get("confidence", "?")
+                    lines.append(f"- [{item.get('category', '?')}] {item.get('pattern', item)} (conf={conf})")
+                else:
+                    lines.append(f"- {item}")
+
+        filepath = self._digests_dir / f"{timestamp}.md"
+        filepath.write_text("\n".join(lines), encoding="utf-8")
+
+    def _update_knowledge(self, reflection: dict[str, Any]) -> None:
+        """Update categorized world knowledge files based on reflection output."""
+        new_facts = reflection.get("new_facts", [])
+        updates = reflection.get("updates", [])
+        patterns = reflection.get("patterns", [])
+
+        if not new_facts and not updates and not patterns:
+            return
+
+        # Group by category
+        categorized: dict[str, list[str]] = {}
+        update_map: dict[str, list[dict[str, str]]] = {}
+
+        for item in new_facts:
+            if isinstance(item, dict):
+                cat = item.get("category", "general")
+                fact = item.get("fact", "")
+            else:
+                cat, fact = "general", str(item)
+            if cat not in KNOWLEDGE_CATEGORIES:
+                cat = "general"
+            categorized.setdefault(cat, []).append(fact)
+
+        for item in patterns:
+            if isinstance(item, dict):
+                cat = item.get("category", "routines")
+                pattern = item.get("pattern", "")
+                conf = item.get("confidence", "?")
+                text = f"{pattern} (conf={conf})"
+            else:
+                cat, text = "routines", str(item)
+            if cat not in KNOWLEDGE_CATEGORIES:
+                cat = "routines"
+            categorized.setdefault(cat, []).append(text)
+
+        for item in updates:
+            cat = item.get("category", "general")
+            if cat not in KNOWLEDGE_CATEGORIES:
+                cat = "general"
+            update_map.setdefault(cat, []).append(item)
+
+        # Write to category files
+        all_cats = set(categorized.keys()) | set(update_map.keys())
+        for cat in all_cats:
+            self._write_category_knowledge(
+                cat,
+                categorized.get(cat, []),
+                update_map.get(cat, []),
+            )
+
+    def _write_category_knowledge(
+        self,
+        category: str,
+        new_facts: list[str],
+        updates: list[dict[str, str]],
+    ) -> None:
+        """Write knowledge to a category-specific file."""
+        knowledge_file = self._knowledge_dir / f"{category}.md"
+        existing = ""
+        if knowledge_file.exists():
+            existing = knowledge_file.read_text(encoding="utf-8")
+
+        cat_label = KNOWLEDGE_CATEGORIES.get(category, category)
+        header = f"# {category}: {cat_label}"
+        lines = existing.rstrip().split("\n") if existing.strip() else [header]
+
+        # Handle updates (replace old facts)
+        for update in updates:
+            old_fact = update.get("old", "")
+            new_fact = update.get("new", "")
+            if old_fact and new_fact:
+                for i, line in enumerate(lines):
+                    if old_fact in line:
+                        lines[i] = f"- {new_fact}"
+                        logger.info("[Knowledge/%s] Updated: %s -> %s",
+                                    category, old_fact[:30], new_fact[:30])
+                        break
+
+        # Append new facts (dedup)
+        for fact in new_facts:
+            if not fact:
+                continue
+            fact_line = f"- {fact}"
+            if fact_line not in lines:
+                lines.append(fact_line)
+
+        knowledge_file.write_text("\n".join(lines), encoding="utf-8")
+
+    def _load_all_knowledge(self) -> str:
+        """Load all knowledge .md files into a single string."""
+        parts = []
+        for f in sorted(self._knowledge_dir.glob("*.md")):
+            try:
+                content = f.read_text(encoding="utf-8").strip()
+                if content:
+                    parts.append(content)
+            except Exception:
+                continue
+        return "\n\n".join(parts)
+
+    def _parse_reflection(self, response: str) -> dict[str, Any] | None:
+        """Extract JSON from LLM reflection response."""
+        try:
+            # Find JSON in response
+            start = response.find("{")
+            end = response.rfind("}") + 1
+            if start >= 0 and end > start:
+                return json.loads(response[start:end])
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Failed to parse reflection JSON: %s", response[:100])
+        return None
+
+    # ── Cleanup ────────────────────────────────────────────
+
+    def cleanup_old_episodes(self) -> int:
+        """Remove episode files older than EPISODE_RETENTION_HOURS. Returns count removed."""
+        cutoff = time.time() - (self._episode_retention_hours * 3600)
+        removed = 0
+        for f in self._episodes_dir.glob("*.jsonl"):
+            if f.name == self._active_file.name:
+                continue
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    removed += 1
+            except Exception:
+                continue
+        if removed:
+            logger.info("[EpisodicMemory] Cleaned up %d old episode files", removed)
+        return removed

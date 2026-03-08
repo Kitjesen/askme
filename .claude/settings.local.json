@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:qwenlm.github.io)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:cursor.scihub.edu.kg)"
+    ]
+  }
+}
