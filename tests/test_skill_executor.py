@@ -21,6 +21,16 @@ class DangerousCommandTool(BaseTool):
         return "command executed"
 
 
+class EchoTool(BaseTool):
+    name = "echo_tool"
+    description = "Normal echo tool"
+    parameters = {"type": "object", "properties": {}}
+    safety_level = "normal"
+
+    def execute(self, **kwargs):
+        return "echo result"
+
+
 def _tool_call_response(name: str, arguments: str = "{}"):
     tool_call = SimpleNamespace(
         id="call-1",
@@ -49,6 +59,16 @@ class _FakeLLM:
     def __init__(self, responses):
         self.completions = _FakeCompletions(responses)
         self.chat = SimpleNamespace(completions=self.completions)
+
+
+class _FakeResilientLLM:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    async def chat_completion(self, messages, **kwargs):
+        self.calls.append({"messages": messages, **kwargs})
+        return self._responses.pop(0)
 
 
 @pytest.mark.asyncio
@@ -96,3 +116,51 @@ async def test_dangerous_skill_returns_approval_request_for_allowed_dangerous_to
     assert result.startswith("[Approval Required]")
     assert llm.completions.calls[0]["tools"][0]["function"]["name"] == "run_command"
     assert len(llm.completions.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_skill_executor_supports_llm_client_style_interface():
+    registry = ToolRegistry(config={"default_timeout": 1.0, "timeout_cooldown": 0.0})
+    registry.register(EchoTool())
+    llm = _FakeResilientLLM([
+        _tool_call_response("echo_tool"),
+        _text_response("done"),
+    ])
+    executor = SkillExecutor(llm, registry)
+    skill = SkillDefinition(
+        name="echo",
+        safety_level="normal",
+        tools_section="echo_tool",
+        prompt_template="Use tools if needed.",
+    )
+
+    result = await executor.execute(skill, {"user_input": "echo this"})
+
+    assert result == "done"
+    assert llm.calls[0]["tools"][0]["function"]["name"] == "echo_tool"
+    tool_messages = [
+        msg for msg in llm.calls[1]["messages"]
+        if msg["role"] == "tool"
+    ]
+    assert tool_messages[0]["content"] == "echo result"
+
+
+@pytest.mark.asyncio
+async def test_skill_executor_returns_error_when_llm_fails():
+    registry = ToolRegistry(config={"default_timeout": 1.0, "timeout_cooldown": 0.0})
+    llm = _FakeResilientLLM([])
+
+    async def _boom(messages, **kwargs):
+        raise RuntimeError("relay unavailable")
+
+    llm.chat_completion = _boom
+    executor = SkillExecutor(llm, registry)
+    skill = SkillDefinition(
+        name="echo",
+        safety_level="normal",
+        prompt_template="Reply directly.",
+    )
+
+    result = await executor.execute(skill, {"user_input": "echo this"})
+
+    assert result == "[Error] Skill 'echo' execution failed: relay unavailable"

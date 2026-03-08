@@ -29,7 +29,7 @@ class SkillExecutor:
     ) -> None:
         """
         Args:
-            llm_client: An AsyncOpenAI-compatible client.
+            llm_client: An LLMClient or AsyncOpenAI-compatible client.
             tool_registry: The tool registry for tool definitions and execution.
             default_model: Fallback model if skill doesn't specify one.
         """
@@ -107,6 +107,9 @@ class SkillExecutor:
         except asyncio.TimeoutError:
             logger.warning("Skill '%s' timed out after %ds", skill.name, timeout)
             return f"[Timeout] Skill '{skill.name}' execution timed out after {timeout}s."
+        except Exception as exc:
+            logger.warning("Skill '%s' failed: %s", skill.name, exc)
+            return f"[Error] Skill '{skill.name}' execution failed: {exc}"
 
     async def _run_tool_loop(
         self,
@@ -120,15 +123,11 @@ class SkillExecutor:
     ) -> str:
         """Run the LLM -> tool-call -> LLM loop until a text response is produced."""
         for iteration in range(max_iterations):
-            kwargs: dict[str, Any] = {
-                "model": model,
-                "messages": messages,
-            }
-            if tool_definitions:
-                kwargs["tools"] = tool_definitions
-                kwargs["tool_choice"] = "auto"
-
-            response = await self._llm.chat.completions.create(**kwargs)
+            response = await self._create_completion(
+                messages,
+                model=model,
+                tool_definitions=tool_definitions,
+            )
             choice = response.choices[0]
             message = choice.message
 
@@ -181,3 +180,27 @@ class SkillExecutor:
         # Exhausted iterations
         logger.warning("Tool loop exhausted after %d iterations", max_iterations)
         return "[Error] Maximum tool-call iterations reached."
+
+    async def _create_completion(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        tool_definitions: list[dict[str, Any]],
+    ) -> Any:
+        if hasattr(self._llm, "chat_completion"):
+            return await self._llm.chat_completion(
+                messages,
+                tools=tool_definitions or None,
+                tool_choice="auto" if tool_definitions else None,
+                model=model,
+            )
+
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+        }
+        if tool_definitions:
+            kwargs["tools"] = tool_definitions
+            kwargs["tool_choice"] = "auto"
+        return await self._llm.chat.completions.create(**kwargs)

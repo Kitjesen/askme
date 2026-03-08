@@ -88,6 +88,29 @@ async def test_chat_falls_back_to_next_model(monkeypatch):
     assert calls[1].kwargs["model"] == "fallback-1"
 
 
+async def test_chat_completion_falls_back_to_next_model(monkeypatch):
+    """chat_completion() falls back to next model when primary fails."""
+    client = _make_client(monkeypatch, max_retries=0)
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "from fallback"
+
+    client._client.chat.completions.create = AsyncMock(
+        side_effect=[
+            APITimeoutError(request=MagicMock()),
+            mock_response,
+        ]
+    )
+
+    result = await client.chat_completion([{"role": "user", "content": "hi"}])
+
+    assert result is mock_response
+    calls = client._client.chat.completions.create.call_args_list
+    assert calls[0].kwargs["model"] == "primary-model"
+    assert calls[1].kwargs["model"] == "fallback-1"
+
+
 async def test_chat_retries_on_500(monkeypatch):
     """chat() retries on HTTP 500."""
     client = _make_client(monkeypatch, max_retries=1)

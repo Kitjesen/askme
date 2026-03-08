@@ -128,6 +128,23 @@ class LLMClient:
 
         Retries on transient errors and falls back to alternate models.
         """
+        response = await self.chat_completion(
+            messages,
+            model=model,
+            temperature=temperature,
+        )
+        return response.choices[0].message.content or ""
+
+    async def chat_completion(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        tools: list[dict] | None = None,
+        tool_choice: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+    ) -> Any:
+        """Return the raw non-streaming completion object with retry/fallback."""
         kwargs: dict[str, Any] = {
             "messages": messages,
             "stream": False,
@@ -135,13 +152,17 @@ class LLMClient:
         }
         if self.max_tokens:
             kwargs["max_tokens"] = self.max_tokens
+        if tools:
+            kwargs["tools"] = tools
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
 
         models_to_try = self._model_chain(model)
 
         for model_name in models_to_try:
             kwargs["model"] = model_name
             try:
-                return await self._chat_with_retry(kwargs)
+                return await self._completion_with_retry(kwargs)
             except (APITimeoutError, APIConnectionError) as exc:
                 logger.warning("[LLM] %s failed (%s), trying next model", model_name, exc)
                 continue
@@ -221,14 +242,13 @@ class LLMClient:
         if last_exc:
             raise last_exc
 
-    async def _chat_with_retry(self, kwargs: dict[str, Any]) -> str:
+    async def _completion_with_retry(self, kwargs: dict[str, Any]) -> Any:
         """Retry non-streaming call up to ``_max_retries`` times with backoff."""
         last_exc: Exception | None = None
 
         for attempt in range(self._max_retries + 1):
             try:
-                response = await self._client.chat.completions.create(**kwargs)
-                return response.choices[0].message.content or ""
+                return await self._client.chat.completions.create(**kwargs)
             except (APITimeoutError, APIConnectionError) as exc:
                 last_exc = exc
                 if attempt < self._max_retries:
@@ -253,7 +273,7 @@ class LLMClient:
 
         if last_exc:
             raise last_exc
-        return ""
+        return None
 
 
 def _backoff(attempt: int) -> float:

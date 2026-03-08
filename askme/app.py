@@ -78,7 +78,7 @@ class AskmeApp:
         self.skill_manager = SkillManager()
         self.skill_manager.load()
         self.skill_executor = SkillExecutor(
-            self.llm.raw_client,
+            self.llm,
             self.tools,
             default_model=self.cfg.get("brain", {}).get("model", "deepseek-chat"),
         )

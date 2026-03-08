@@ -91,7 +91,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     ctx.skill_manager = SkillManager()
     ctx.skill_manager.load()
     ctx.skill_executor = SkillExecutor(
-        ctx.llm_client.raw_client,
+        ctx.llm_client,
         ctx.tool_registry,
         default_model=ctx.config.get("brain", {}).get("model", "deepseek-chat"),
     )
