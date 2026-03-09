@@ -1,8 +1,11 @@
 """Shared pytest fixtures for askme tests."""
 
 import os
-import pytest
+import shutil
+import tempfile
 from pathlib import Path
+
+import pytest
 
 
 @pytest.fixture(autouse=True)
@@ -22,6 +25,18 @@ def _set_test_env(monkeypatch):
 def project_root() -> Path:
     """Return the askme project root directory."""
     return Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def tmp_path(project_root: Path) -> Path:
+    """Create a writable temp directory inside the repository workspace."""
+    base_dir = project_root / "data" / "pytest-tmp"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    path = Path(tempfile.mkdtemp(prefix="case-", dir=base_dir))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 @pytest.fixture

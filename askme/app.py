@@ -97,7 +97,7 @@ class AskmeApp:
         )
 
         # Audio / voice
-        self.audio = AudioAgent(self.cfg, voice_mode=voice_mode, metrics=self.ota_metrics)
+        self.audio = AudioAgent(self.cfg, voice_mode=voice_mode)
         self.voice_runtime_bridge = VoiceRuntimeBridge(
             self.cfg.get("runtime", {}).get("voice_bridge", {})
         )
