@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 import sounddevice as sd
 
+from askme.ota_bridge import OTABridgeMetrics, get_ota_runtime_metrics
+
 from .asr import ASREngine
 from .kws import KWSEngine
 from .tts import TTSEngine
@@ -43,9 +45,16 @@ class AudioAgent:
         If False, only TTS is initialised (text-input mode).
     """
 
-    def __init__(self, config: dict[str, Any], voice_mode: bool = True) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        voice_mode: bool = True,
+        *,
+        metrics: OTABridgeMetrics | None = None,
+    ) -> None:
         voice_cfg = config.get("voice", {})
         self.voice_mode = voice_mode
+        self._metrics = metrics or get_ota_runtime_metrics()
 
         # Shared state
         self.audio_queue: queue.Queue[str] = queue.Queue()
@@ -78,6 +87,7 @@ class AudioAgent:
 
         # -- Output engine --
         self.tts = TTSEngine(voice_cfg.get("tts", {}))
+        self._refresh_voice_metrics()
 
     # ------------------------------------------------------------------
     # Convenience wrappers (delegate to TTS)
@@ -91,19 +101,24 @@ class AudioAgent:
     def speak(self, text: str) -> None:
         """Queue text for TTS (strips emoji/markdown internally)."""
         self.tts.speak(text)
+        self._refresh_voice_metrics()
 
     def start_playback(self) -> None:
         self.tts.start_playback()
+        self._refresh_voice_metrics()
 
     def stop_playback(self) -> None:
         self.tts.stop_playback()
+        self._refresh_voice_metrics()
 
     def wait_speaking_done(self) -> None:
         self.tts.wait_done()
+        self._refresh_voice_metrics()
 
     def drain_buffers(self) -> None:
         """Clear any leftover TTS text/audio from a previous turn."""
         self.tts.drain_buffers()
+        self._refresh_voice_metrics()
 
     def acknowledge(self) -> None:
         """Play a brief confirmation tone: 'heard you, thinking'.
@@ -115,8 +130,10 @@ class AudioAgent:
 
     def speak_error(self) -> None:
         """Speak a short error notification to the user."""
+        self._metrics.mark_voice_error("voice interaction error")
         self._play_tone(440, 0.1)
-        self.tts.speak("抱歉，出了点问题，请再试一次。")
+        self.tts.speak("Sorry, there was a problem. Please try again.")
+        self._refresh_voice_metrics()
 
     # ------------------------------------------------------------------
     # Microphone listen loop
@@ -139,66 +156,83 @@ class AudioAgent:
         sample_rate: int = self.asr.sample_rate
         samples_per_read: int = int(0.1 * sample_rate)  # 100ms chunks
 
-        with sd.InputStream(channels=1, dtype="float32", samplerate=sample_rate) as mic:
-            # Phase 1: Wait for wake word (if KWS available)
-            if self.kws and self.kws.available and self.kws_stream:
-                if not self._wait_for_wake_word(mic, sample_rate, samples_per_read):
-                    return None  # stop_event was set
-                self._play_tone(880, 0.12)  # short high beep = "I'm listening"
+        self._metrics.mark_voice_listen_started()
+        self._refresh_voice_metrics()
 
-            # Phase 2: VAD-gated ASR with timeout
-            logger.info("Listening for speech...")
-            speech_active = False
-            deadline = time.monotonic() + self._asr_timeout
+        try:
+            with sd.InputStream(channels=1, dtype="float32", samplerate=sample_rate) as mic:
+                # Phase 1: Wait for wake word (if KWS available)
+                if self.kws and self.kws.available and self.kws_stream:
+                    self.woken_up = False
+                    self._refresh_voice_metrics()
+                    if not self._wait_for_wake_word(mic, sample_rate, samples_per_read):
+                        return None  # stop_event was set
+                    self._play_tone(880, 0.12)  # short high beep = "I'm listening"
 
-            while not self.stop_event.is_set():
-                # Timeout check
-                if time.monotonic() > deadline:
-                    logger.info("ASR timeout — no speech detected within %.0fs.", self._asr_timeout)
-                    self.asr.reset(self.asr_stream)
-                    self.asr_stream = self.asr.create_stream()
-                    return None
+                # Phase 2: VAD-gated ASR with timeout
+                logger.info("Listening for speech...")
+                speech_active = False
+                deadline = time.monotonic() + self._asr_timeout
 
-                samples, _ = mic.read(samples_per_read)
-                samples = samples.reshape(-1)
-
-                # Feed VAD with int16 samples
-                samples_int16 = (samples * 32768).astype(np.int16)
-                self.vad.accept_waveform(samples_int16)
-
-                # Only feed ASR when VAD detects speech
-                if self.vad.is_speech_detected():
-                    if not speech_active:
-                        speech_active = True
-                        logger.debug("VAD: speech detected — barge-in")
-                        self.tts.drain_buffers()
-                    # Extend deadline while user is actively speaking
-                    deadline = time.monotonic() + self._asr_timeout
-
-                    self.asr_stream.accept_waveform(sample_rate, samples)
-
-                    while self.asr.is_ready(self.asr_stream):
-                        self.asr.decode_stream(self.asr_stream)
-                else:
-                    if speech_active:
-                        # Speech just ended -- feed remaining and check
-                        speech_active = False
-                        self.asr_stream.accept_waveform(sample_rate, samples)
-                        while self.asr.is_ready(self.asr_stream):
-                            self.asr.decode_stream(self.asr_stream)
-
-                # Check for endpoint
-                is_endpoint = self.asr.is_endpoint(self.asr_stream)
-                text = self.asr.get_result(self.asr_stream)
-
-                if is_endpoint and text:
-                    text = text.strip()
-                    if len(text) > 0:
-                        logger.info("Recognized: %s", text)
-                        self.audio_queue.put(text)
+                while not self.stop_event.is_set():
+                    # Timeout check
+                    if time.monotonic() > deadline:
+                        logger.info(
+                            "ASR timeout: no speech detected within %.0fs.",
+                            self._asr_timeout,
+                        )
                         self.asr.reset(self.asr_stream)
                         self.asr_stream = self.asr.create_stream()
-                        return text
+                        self._refresh_voice_metrics()
+                        return None
+
+                    samples, _ = mic.read(samples_per_read)
+                    samples = samples.reshape(-1)
+
+                    # Feed VAD with int16 samples
+                    samples_int16 = (samples * 32768).astype(np.int16)
+                    self.vad.accept_waveform(samples_int16)
+
+                    # Only feed ASR when VAD detects speech
+                    if self.vad.is_speech_detected():
+                        if not speech_active:
+                            speech_active = True
+                            logger.debug("VAD: speech detected, draining pending TTS")
+                            self.tts.drain_buffers()
+                            self._refresh_voice_metrics()
+                        # Extend deadline while user is actively speaking
+                        deadline = time.monotonic() + self._asr_timeout
+
+                        self.asr_stream.accept_waveform(sample_rate, samples)
+
+                        while self.asr.is_ready(self.asr_stream):
+                            self.asr.decode_stream(self.asr_stream)
+                    else:
+                        if speech_active:
+                            # Speech just ended -- feed remaining and check
+                            speech_active = False
+                            self.asr_stream.accept_waveform(sample_rate, samples)
+                            while self.asr.is_ready(self.asr_stream):
+                                self.asr.decode_stream(self.asr_stream)
+
+                    # Check for endpoint
+                    is_endpoint = self.asr.is_endpoint(self.asr_stream)
+                    text = self.asr.get_result(self.asr_stream)
+
+                    if is_endpoint and text:
+                        text = text.strip()
+                        if len(text) > 0:
+                            logger.info("Recognized: %s", text)
+                            self.audio_queue.put(text)
+                            self._metrics.mark_voice_input(text)
+                            self._refresh_voice_metrics()
+                            self.asr.reset(self.asr_stream)
+                            self.asr_stream = self.asr.create_stream()
+                            return text
+        except Exception as exc:
+            self._metrics.mark_voice_error(str(exc))
+            self._refresh_voice_metrics(pipeline_ok=False)
+            raise
 
         return None
 
@@ -224,8 +258,10 @@ class AudioAgent:
             result = self.kws.spotter.get_result(self.kws_stream)
             if result:
                 logger.info("Wake word detected: %s", result.strip())
+                self.woken_up = True
                 # Reset stream for next detection cycle
                 self.kws_stream = self.kws.create_stream()
+                self._refresh_voice_metrics()
                 return True
 
         return False
@@ -258,18 +294,36 @@ class AudioAgent:
         """Signal all background threads to stop."""
         self.stop_event.set()
         self.tts.shutdown()
+        self._refresh_voice_metrics(
+            input_ready=False,
+            output_ready=False,
+            pipeline_ok=False,
+            tts_busy=False,
+        )
 
     def status_snapshot(self) -> dict[str, Any]:
         """Return a compact voice-pipeline health snapshot for telemetry."""
-        return {
+        return self._refresh_voice_metrics()
+
+    def _refresh_voice_metrics(self, **overrides: Any) -> dict[str, Any]:
+        snapshot = {
             "mode": "voice" if self.voice_mode else "text",
+            "enabled": self.voice_mode,
+            "input_ready": bool(not self.voice_mode or self.asr is not None),
+            "output_ready": self.tts is not None,
             "pipeline_ok": bool(self.tts) and (
                 not self.voice_mode or (self.asr is not None and self.vad is not None)
             ),
             "asr_available": self.asr is not None,
             "vad_available": self.vad is not None,
             "kws_available": bool(self.kws and getattr(self.kws, "available", False)),
+            "wake_word_enabled": bool(
+                self.voice_mode and self.kws and getattr(self.kws, "available", False)
+            ),
             "woken_up": self.woken_up,
             "tts_backend": self.tts.backend,
             "tts_busy": self.is_busy,
         }
+        snapshot.update(overrides)
+        self._metrics.update_voice_state(**snapshot)
+        return snapshot
