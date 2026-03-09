@@ -289,6 +289,9 @@ class OTABridge:
                 "server_url": self._server_url,
                 "product": self._product,
                 "channel": self._channel,
+                "serial_number": self._serial_number,
+                "robot_id": self._robot_id,
+                "site_id": self._site_id,
                 "task_running": bool(self._task and not self._task.done()),
             }
 

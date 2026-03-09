@@ -178,8 +178,11 @@ def test_ota_bridge_status_snapshot_reports_registration_state(project_root, mon
             "server_url": "https://ota.example.com/api",
             "channel": "stable",
             "state_file": str(_state_path(project_root)),
+            "serial_number": "SN-THUNDER-001",
             "device": {
                 "product": "inovxio-dog",
+                "robot_id": "thunder-01",
+                "site_id": "factory-a",
             },
         },
         metrics=OTABridgeMetrics(),
@@ -190,6 +193,9 @@ def test_ota_bridge_status_snapshot_reports_registration_state(project_root, mon
     assert initial["registered"] is False
     assert initial["state"] == "stopped"
     assert initial["channel"] == "stable"
+    assert initial["serial_number"] == "SN-THUNDER-001"
+    assert initial["robot_id"] == "thunder-01"
+    assert initial["site_id"] == "factory-a"
 
     bridge._set_registration(  # noqa: SLF001
         device_id="INVX-THUNDER-001",

@@ -17,7 +17,7 @@ from askme.runtime_health import RuntimeHealthSnapshot, merge_voice_pipeline_sta
 logger = logging.getLogger(__name__)
 
 _PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
-_DEGRADED_OTA_STATES = {"auth_error", "degraded", "stopped"}
+_DEGRADED_OTA_STATES = {"auth_error", "degraded"}
 
 HealthProvider = Callable[[], dict[str, Any]]
 MetricsProvider = Callable[[], dict[str, Any]]
