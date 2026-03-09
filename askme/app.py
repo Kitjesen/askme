@@ -15,32 +15,37 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-import sys
-
 import os
 import re
+import sys
 
-from askme.config import get_config, get_section
-from askme.brain.llm_client import LLMClient
+from askme import __version__ as ASKME_VERSION
 from askme.brain.conversation import ConversationManager
-from askme.brain.memory_bridge import MemoryBridge
 from askme.brain.episodic_memory import EpisodicMemory
+from askme.brain.intent_router import IntentRouter
+from askme.brain.llm_client import LLMClient
+from askme.brain.memory_bridge import MemoryBridge
 from askme.brain.session_memory import SessionMemory
 from askme.brain.vision_bridge import VisionBridge
-from askme.brain.intent_router import IntentRouter
-from askme.skills.skill_manager import SkillManager
-from askme.skills.skill_executor import SkillExecutor
-from askme.tools.tool_registry import ToolRegistry
-from askme.tools.builtin_tools import register_builtin_tools
-from askme.voice.audio_agent import AudioAgent
-from askme.voice.runtime_bridge import VoiceRuntimeBridge
-from askme.voice.stream_splitter import StreamSplitter
+from askme.config import get_config, get_section
+from askme.health_server import (
+    AskmeHealthServer,
+    build_health_snapshot,
+    merge_voice_pipeline_status,
+)
+from askme.ota_bridge import OTABridgeMetrics
 from askme.pipeline.brain_pipeline import BrainPipeline
 from askme.pipeline.commands import CommandHandler
 from askme.pipeline.proactive_agent import ProactiveAgent
 from askme.pipeline.text_loop import TextLoop
 from askme.pipeline.voice_loop import VoiceLoop
-from askme.ota_bridge import OTABridge, OTABridgeMetrics
+from askme.skills.skill_executor import SkillExecutor
+from askme.skills.skill_manager import SkillManager
+from askme.tools.builtin_tools import register_builtin_tools
+from askme.tools.tool_registry import ToolRegistry
+from askme.voice.audio_agent import AudioAgent
+from askme.voice.runtime_bridge import VoiceRuntimeBridge
+from askme.voice.stream_splitter import StreamSplitter
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +63,8 @@ class AskmeApp:
             sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
         self.cfg = get_config()
+        self._app_name = self.cfg.get("app", {}).get("name", "askme")
+        self._app_version = self.cfg.get("app", {}).get("version") or ASKME_VERSION
         self._setup_logging()
 
         # ── Create modules ──────────────────────────────────
@@ -170,14 +177,11 @@ class AskmeApp:
             llm=self.llm,
             config=self.cfg,
         )
-        self.ota_bridge = OTABridge(
-            self.cfg.get("ota", {}),
-            metrics=self.ota_metrics,
-            voice_status_provider=self.audio.status_snapshot,
-            app_name=self.cfg.get("app", {}).get("name", "askme"),
-            app_version=self.cfg.get("app", {}).get("version", ""),
-            voice_mode=voice_mode,
-            robot_mode=self.robot_mode,
+        # askme 只暴露本地 HTTP 健康/指标端点，不直接连接 OTA Server。
+        # Terminal Agent (OTA Agent) 负责拉取此端点并统一上报给 OTA Server。
+        self.health_server = AskmeHealthServer(
+            self.cfg.get("health_server", {}),
+            snapshot_provider=self.health_snapshot,
         )
 
         logger.info(
@@ -191,22 +195,28 @@ class AskmeApp:
 
     async def run(self) -> None:
         """Start the appropriate main loop."""
-        # Pre-warm memory in background (avoids cold-start on first query)
-        warmup_task = asyncio.create_task(self.memory.warmup())
         stop_event = asyncio.Event()
-        proactive_task = asyncio.create_task(self._proactive.run(stop_event))
-        self.ota_bridge.start()
+        warmup_task: asyncio.Task[None] | None = None
+        proactive_task: asyncio.Task[None] | None = None
         try:
+            await self.health_server.start()
+            warmup_task = asyncio.create_task(self.memory.warmup())
+            proactive_task = asyncio.create_task(self._proactive.run(stop_event))
             if self.voice_mode:
                 await self._voice_loop.run()
             else:
                 await self._text_loop.run()
         finally:
             stop_event.set()
-            warmup_task.cancel()
-            proactive_task.cancel()
-            await asyncio.gather(warmup_task, proactive_task, return_exceptions=True)
-            await self.ota_bridge.stop()
+            pending_tasks = [
+                task for task in (warmup_task, proactive_task)
+                if task is not None
+            ]
+            for task in pending_tasks:
+                task.cancel()
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
+            await self.health_server.stop()
             await self.shutdown()
 
     async def shutdown(self) -> None:
@@ -234,7 +244,7 @@ class AskmeApp:
             return []
 
         try:
-            with open(soul_file, "r", encoding="utf-8") as f:
+            with open(soul_file, encoding="utf-8") as f:
                 raw = f.read()
         except OSError:
             return []
@@ -277,4 +287,28 @@ class AskmeApp:
             level=level,
             format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
             datefmt="%H:%M:%S",
+        )
+
+    def health_snapshot(self) -> dict[str, object]:
+        """Return the compact HTTP health payload."""
+        return build_health_snapshot(
+            app_name=self._app_name,
+            app_version=self._app_version,
+            model_name=self.llm.model,
+            metrics_snapshot=self.ota_metrics.snapshot(),
+            active_skills=[skill.name for skill in self.skill_manager.get_enabled()],
+            voice_status=self._voice_status_snapshot(),
+            ota_status=self.ota_bridge.status_snapshot(),
+        )
+
+    def metrics_snapshot(self) -> dict[str, object]:
+        """Return the latest runtime metrics snapshot."""
+        return self.ota_metrics.snapshot()
+
+    def _voice_status_snapshot(self) -> dict[str, object]:
+        """Combine live voice readiness with recent OTA voice metrics."""
+        live_status = self.audio.status_snapshot()
+        return merge_voice_pipeline_status(
+            live_status,
+            self.ota_metrics.snapshot().get("voice_pipeline", {}),
         )
