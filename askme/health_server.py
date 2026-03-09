@@ -1,26 +1,30 @@
-﻿"""Embedded HTTP health endpoints for the askme runtime."""
+"""Embedded HTTP health endpoints for the askme runtime."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import math
-from collections.abc import Callable
-from typing import Any
+import time
+from typing import Any, Callable
 
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 import uvicorn
 
-from askme.runtime_health import RuntimeHealthSnapshot
+from askme.runtime_health import RuntimeHealthSnapshot, merge_voice_pipeline_status
 
 logger = logging.getLogger(__name__)
 
 _PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+_DEGRADED_OTA_STATES = {"auth_error", "degraded", "stopped"}
+
+HealthProvider = Callable[[], dict[str, Any]]
+MetricsProvider = Callable[[], dict[str, Any]]
 
 
-class HealthSnapshotProvider:
-    """Compatibility wrapper that builds runtime health snapshots on demand."""
+class HealthSnapshotProvider(RuntimeHealthSnapshot):
+    """Compatibility adapter for tests and lightweight standalone usage."""
 
     def __init__(
         self,
@@ -34,45 +38,95 @@ class HealthSnapshotProvider:
         voice_mode: bool,
         robot_mode: bool,
         ota_status_provider: Callable[[], dict[str, Any]] | None = None,
+        voice_model: str | None = None,
     ) -> None:
-        self._snapshotter = RuntimeHealthSnapshot(
+        if callable(metrics):
+            metrics_provider = metrics
+        elif hasattr(metrics, "snapshot"):
+            metrics_provider = metrics.snapshot
+        else:
+            raise TypeError("metrics must be callable or expose snapshot()")
+
+        super().__init__(
             app_name=app_name,
             app_version=app_version,
-            brain_config={"model": default_model},
+            brain_config={
+                "model": default_model,
+                "voice_model": voice_model,
+            },
             voice_mode=voice_mode,
             robot_mode=robot_mode,
-            metrics_provider=metrics.snapshot,
+            metrics_provider=metrics_provider,
             active_skill_names_provider=lambda: [
                 skill.name for skill in skill_manager.get_enabled()
             ],
             voice_status_provider=voice_status_provider,
-            ota_status_provider=(
-                ota_status_provider
-                if ota_status_provider is not None
-                else lambda: {
-                    "enabled": False,
-                    "state": "disabled",
-                    "registered": False,
-                    "device_id": None,
-                    "channel": "",
-                    "product": "",
-                }
-            ),
+            ota_status_provider=ota_status_provider or _disabled_ota_status,
         )
 
-    def health_snapshot(self) -> dict[str, Any]:
-        return self._snapshotter.health_snapshot()
-
-    def metrics_snapshot(self) -> dict[str, Any]:
-        return self._snapshotter.metrics_snapshot()
+    def __call__(self) -> dict[str, Any]:
+        return self.health_snapshot()
 
 
-def build_health_app(
+def build_health_snapshot(
     *,
-    health_provider: Callable[[], dict[str, Any]],
-    metrics_provider: Callable[[], dict[str, Any]],
+    app_name: str,
+    app_version: str,
+    model_name: str,
+    metrics_snapshot: dict[str, Any],
+    active_skills: list[str],
+    voice_status: dict[str, Any],
+    ota_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the structured runtime payload returned by `/health`."""
+    llm_snapshot = metrics_snapshot.get("llm", {})
+    resolved_model_name = llm_snapshot.get("last_model") or model_name or "unknown"
+    enabled_skills = sorted(
+        skill_name.strip()
+        for skill_name in active_skills
+        if isinstance(skill_name, str) and skill_name.strip()
+    )
+    merged_voice_status = merge_voice_pipeline_status(
+        voice_status,
+        metrics_snapshot.get("voice_pipeline", {}),
+    )
+
+    degraded_reasons: list[str] = []
+    if not merged_voice_status.get("pipeline_ok", True):
+        degraded_reasons.append("voice_pipeline")
+    if ota_status and ota_status.get("enabled") and ota_status.get("state") in _DEGRADED_OTA_STATES:
+        degraded_reasons.append("ota_bridge")
+
+    snapshot: dict[str, Any] = {
+        "status": "degraded" if degraded_reasons else "ok",
+        "service": app_name or "askme",
+        "version": app_version or "unknown",
+        "uptime_seconds": metrics_snapshot.get("uptime_seconds", 0.0),
+        "model_name": resolved_model_name,
+        "last_llm_latency_ms": llm_snapshot.get("last_latency_ms"),
+        "total_conversations": metrics_snapshot.get("conversation_count", 0),
+        "active_skills": enabled_skills,
+        "active_skill_count": len(enabled_skills),
+        "voice_pipeline_status": merged_voice_status,
+        "degraded_reasons": degraded_reasons,
+    }
+    if ota_status is not None:
+        snapshot["ota_bridge_status"] = ota_status
+    return snapshot
+
+
+def create_health_app(
+    provider: HealthProvider | None = None,
+    *,
+    health_provider: HealthProvider | None = None,
+    metrics_provider: MetricsProvider | None = None,
 ) -> FastAPI:
     """Create the HTTP app used for readiness and telemetry probes."""
+    resolved_health_provider = health_provider or provider
+    if resolved_health_provider is None:
+        raise ValueError("health_provider is required")
+    resolved_metrics_provider = metrics_provider or resolved_health_provider
+
     app = FastAPI(
         title="askme-health",
         docs_url=None,
@@ -81,24 +135,47 @@ def build_health_app(
     )
 
     @app.get("/health", tags=["System"])
-    async def health() -> dict[str, Any]:
-        return health_provider()
+    async def health() -> JSONResponse:
+        return _json_snapshot_response(resolved_health_provider, "health")
 
-    @app.get("/metrics", include_in_schema=False, tags=["System"])
-    async def metrics(request: Request) -> Any:
-        snapshot = metrics_provider()
-        accept = request.headers.get("accept", "")
-        if "text/plain" in accept:
+    @app.get(
+        "/metrics",
+        include_in_schema=False,
+        tags=["System"],
+        response_model=None,
+    )
+    async def metrics() -> Response:
+        payload = _snapshot_payload(resolved_metrics_provider, "metrics")
+        if isinstance(payload, JSONResponse):
+            return payload
+        return PlainTextResponse(
+            content=render_prometheus_metrics(payload),
+            media_type=_PROMETHEUS_CONTENT_TYPE,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get(
+        "/metrics/prometheus",
+        include_in_schema=False,
+        tags=["System"],
+        response_model=None,
+    )
+    async def metrics_prometheus() -> Response:
+        payload = _snapshot_payload(resolved_metrics_provider, "metrics")
+        if isinstance(payload, JSONResponse):
             return PlainTextResponse(
-                content=render_prometheus_metrics(snapshot),
+                content=render_prometheus_metrics({"status": "error"}),
                 media_type=_PROMETHEUS_CONTENT_TYPE,
+                status_code=payload.status_code,
+                headers={"Cache-Control": "no-store"},
             )
-        return snapshot
+        return PlainTextResponse(
+            content=render_prometheus_metrics(payload),
+            media_type=_PROMETHEUS_CONTENT_TYPE,
+            headers={"Cache-Control": "no-store"},
+        )
 
     return app
-
-
-create_health_app = build_health_app
 
 
 class AskmeHealthServer:
@@ -108,16 +185,16 @@ class AskmeHealthServer:
         self,
         config: dict[str, Any] | None,
         *,
-        health_provider: Callable[[], dict[str, Any]],
-        metrics_provider: Callable[[], dict[str, Any]],
+        health_provider: HealthProvider | None = None,
+        metrics_provider: MetricsProvider | None = None,
+        snapshot_provider: HealthProvider | None = None,
+        provider: HealthProvider | None = None,
     ) -> None:
         cfg = config or {}
         self.enabled = bool(cfg.get("enabled", True))
         self.host = str(cfg.get("host", "0.0.0.0")).strip() or "0.0.0.0"
         self._access_log = bool(cfg.get("access_log", False))
         self._log_level = str(cfg.get("log_level", "warning")).strip().lower() or "warning"
-        self._startup_timeout_s = max(0.1, float(cfg.get("startup_timeout", 5.0)))
-        self._shutdown_timeout_s = max(0.1, float(cfg.get("shutdown_timeout", 5.0)))
 
         raw_port = cfg.get("port", 8765)
         try:
@@ -125,24 +202,55 @@ class AskmeHealthServer:
         except (TypeError, ValueError):
             port = 8765
         self.port = min(max(port, 1), 65535)
+        self._startup_timeout_s = max(0.1, float(cfg.get("startup_timeout", 5.0)))
+        self._shutdown_timeout_s = max(0.1, float(cfg.get("shutdown_timeout", 5.0)))
 
-        self._app = build_health_app(
-            health_provider=health_provider,
-            metrics_provider=metrics_provider,
+        resolved_health_provider = health_provider or snapshot_provider or provider
+        if resolved_health_provider is None:
+            raise ValueError("health_provider is required")
+        resolved_metrics_provider = metrics_provider or resolved_health_provider
+
+        self._app = create_health_app(
+            health_provider=resolved_health_provider,
+            metrics_provider=resolved_metrics_provider,
         )
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task[None] | None = None
+        self._started_event = asyncio.Event()
+        self._bound_port: int | None = None
 
     @property
     def url(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        return f"http://{self.host}:{self.bound_port}"
+
+    @property
+    def bound_port(self) -> int:
+        """Return the actual bound port once the server has started."""
+        return self._bound_port or self.port
 
     async def start(self) -> asyncio.Task[None] | None:
+        """Start the background health server if enabled."""
         if not self.enabled:
             return None
         if self._task is not None and not self._task.done():
             return self._task
 
+        self._task = asyncio.create_task(self.serve(), name="askme-health-server")
+        await self.wait_started(self._task, timeout_s=self._startup_timeout_s)
+        logger.info("Askme health server listening on %s", self.url)
+        return self._task
+
+    async def serve(self) -> None:
+        """Run the HTTP server until ``stop()`` is called."""
+        if not self.enabled:
+            return
+
+        current_task = asyncio.current_task()
+        if self._task is None and current_task is not None:
+            self._task = current_task
+
+        self._started_event = asyncio.Event()
+        self._bound_port = None
         config = uvicorn.Config(
             self._app,
             host=self.host,
@@ -153,41 +261,50 @@ class AskmeHealthServer:
         )
         self._server = uvicorn.Server(config)
         self._server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
-        self._task = asyncio.create_task(
-            self._server.serve(),
-            name="askme-health-server",
-        )
-        await self._wait_until_started(timeout_s=self._startup_timeout_s)
-        logger.info("Askme health server listening on %s", self.url)
-        return self._task
+
+        try:
+            await self._server.serve()
+        finally:
+            self._started_event.set()
+            self._bound_port = None
+            self._server = None
+            if current_task is self._task:
+                self._task = None
 
     async def stop(self) -> None:
-        task = self._task
+        """Stop the background health server."""
         server = self._server
-        if task is None or server is None:
+        if server is None:
             return
 
         server.should_exit = True
+        task = self._task
+        if task is None or task.done():
+            return
+
         try:
             await asyncio.wait_for(task, timeout=self._shutdown_timeout_s)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        finally:
-            self._task = None
-            self._server = None
 
-    async def _wait_until_started(self, *, timeout_s: float) -> None:
-        assert self._task is not None
-        assert self._server is not None
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_s
-        while loop.time() < deadline:
-            if self._server.started:
+    async def wait_started(
+        self,
+        task: asyncio.Task[None],
+        *,
+        timeout_s: float = 5.0,
+    ) -> None:
+        """Wait until the background task has either started or failed."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self._server is not None and self._server.started:
+                self._bound_port = self._resolve_bound_port()
+                self._started_event.set()
                 return
-            if self._task.done():
-                exc = self._task.exception()
+            if self._started_event.is_set():
+                return
+            if task.done():
+                exc = task.exception()
                 if exc is not None:
                     raise exc
                 raise RuntimeError(
@@ -195,22 +312,28 @@ class AskmeHealthServer:
                 )
             await asyncio.sleep(0.05)
 
-        raise RuntimeError(
-            f"Askme health server did not start within {timeout_s:.1f}s"
-        )
+        raise RuntimeError(f"Askme health server did not start within {timeout_s:.1f}s")
 
+    def _resolve_bound_port(self) -> int:
+        if self._server is None:
+            return self.port
 
-AskmeHealthHTTPServer = AskmeHealthServer
-HealthServer = AskmeHealthServer
+        servers = getattr(self._server, "servers", None) or []
+        for running_server in servers:
+            sockets = getattr(running_server, "sockets", None) or []
+            if sockets:
+                return int(sockets[0].getsockname()[1])
+
+        return self.port
 
 
 def render_prometheus_metrics(snapshot: dict[str, Any]) -> str:
     """Render the runtime snapshot as Prometheus text exposition."""
-    lines: list[str] = []
     voice_status = snapshot.get("voice_pipeline_status", {})
     active_skills = snapshot.get("active_skills", [])
-    ota_status = snapshot.get("ota_bridge_status", {})
+    ota_status = snapshot.get("ota_bridge_status") or snapshot.get("ota_bridge") or {}
 
+    lines: list[str] = []
     _append_metric(lines, "askme_up", "Whether the askme process is running", "gauge", 1)
     _append_metric(
         lines,
@@ -219,17 +342,24 @@ def render_prometheus_metrics(snapshot: dict[str, Any]) -> str:
         "gauge",
         1,
         labels={
-            "service": snapshot.get("service_name", "askme"),
-            "version": snapshot.get("service_version", "unknown"),
+            "service": snapshot.get("service") or snapshot.get("service_name", "askme"),
+            "version": snapshot.get("version") or snapshot.get("service_version", "unknown"),
         },
     )
     _append_metric(
         lines,
         "askme_model_info",
-        "Active LLM model metadata",
+        "Configured primary LLM model",
         "gauge",
         1,
         labels={"model_name": snapshot.get("model_name", "unknown")},
+    )
+    _append_metric(
+        lines,
+        "askme_health_status",
+        "Overall askme health status (1=ok, 0=degraded)",
+        "gauge",
+        snapshot.get("status") == "ok",
     )
     _append_metric(
         lines,
@@ -257,7 +387,7 @@ def render_prometheus_metrics(snapshot: dict[str, Any]) -> str:
         "askme_active_skills",
         "Number of currently enabled skills",
         "gauge",
-        snapshot.get("active_skill_count", 0),
+        snapshot.get("active_skill_count", len(active_skills) if isinstance(active_skills, list) else 0),
     )
 
     for skill_name in active_skills if isinstance(active_skills, list) else []:
@@ -300,6 +430,42 @@ def render_prometheus_metrics(snapshot: dict[str, Any]) -> str:
     )
     _append_metric(
         lines,
+        "askme_voice_asr_available",
+        "Whether the ASR engine is available",
+        "gauge",
+        voice_status.get("asr_available"),
+    )
+    _append_metric(
+        lines,
+        "askme_voice_vad_available",
+        "Whether the VAD engine is available",
+        "gauge",
+        voice_status.get("vad_available"),
+    )
+    _append_metric(
+        lines,
+        "askme_voice_kws_available",
+        "Whether the wake-word detector is available",
+        "gauge",
+        voice_status.get("kws_available"),
+    )
+    _append_metric(
+        lines,
+        "askme_voice_tts_busy",
+        "Whether TTS is currently playing or queued",
+        "gauge",
+        voice_status.get("tts_busy"),
+    )
+    _append_metric(
+        lines,
+        "askme_voice_last_input_chars",
+        "Character length of the most recent recognized voice input",
+        "gauge",
+        voice_status.get("last_input_chars"),
+    )
+
+    _append_metric(
+        lines,
         "askme_ota_bridge_enabled",
         "Whether OTA bridge reporting is enabled",
         "gauge",
@@ -312,8 +478,43 @@ def render_prometheus_metrics(snapshot: dict[str, Any]) -> str:
         "gauge",
         ota_status.get("registered"),
     )
+    _append_metric(
+        lines,
+        "askme_ota_bridge_info",
+        "Static OTA bridge metadata",
+        "gauge",
+        1,
+        labels={
+            "channel": ota_status.get("channel", ""),
+            "device_id": ota_status.get("device_id", ""),
+            "product": ota_status.get("product", ""),
+            "state": ota_status.get("state", ""),
+        },
+    )
 
     return "".join(lines)
+
+
+def _json_snapshot_response(provider: HealthProvider, endpoint_name: str) -> JSONResponse:
+    payload = _snapshot_payload(provider, endpoint_name)
+    if isinstance(payload, JSONResponse):
+        return payload
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+def _snapshot_payload(
+    provider: Callable[[], dict[str, Any]],
+    endpoint_name: str,
+) -> dict[str, Any] | JSONResponse:
+    try:
+        return provider()
+    except Exception as exc:
+        logger.error("Askme %s endpoint failed: %s", endpoint_name, exc, exc_info=True)
+        return JSONResponse(
+            {"status": "error", "error": str(exc)},
+            status_code=500,
+            headers={"Cache-Control": "no-store"},
+        )
 
 
 def _append_metric(
@@ -365,3 +566,19 @@ def _format_metric_value(value: Any) -> str:
     if not math.isfinite(numeric):
         return "NaN"
     return f"{numeric:.6f}".rstrip("0").rstrip(".")
+
+
+def _disabled_ota_status() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "state": "disabled",
+        "registered": False,
+        "device_id": None,
+        "channel": "",
+        "product": "",
+    }
+
+
+build_health_app = create_health_app
+HealthServer = AskmeHealthServer
+AskmeHealthHTTPServer = AskmeHealthServer

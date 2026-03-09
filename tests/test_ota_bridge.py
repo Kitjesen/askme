@@ -85,6 +85,8 @@ async def test_ota_bridge_registers_and_reports_runtime_metrics(project_root, mo
             "device": {
                 "product": "inovxio-dog",
                 "tags": ["thunder", "askme"],
+                "robot_id": "thunder-01",
+                "site_id": "factory-a",
             },
         },
         metrics=metrics,
@@ -117,6 +119,17 @@ async def test_ota_bridge_registers_and_reports_runtime_metrics(project_root, mo
     assert custom_metrics["llm_latency_ms"]["last_latency_ms"] == 245.0
     assert custom_metrics["skill_success_rate"] == 0.5
     assert custom_metrics["voice_pipeline_status"]["pipeline_ok"] is True
+    assert custom_metrics["robot_id"] == "thunder-01"
+    assert custom_metrics["site_id"] == "factory-a"
+    assert calls[0]["json"]["system_info"]["robot_id"] == "thunder-01"
+    assert calls[1]["json"]["system_info"]["site_id"] == "factory-a"
+    status = bridge.status_snapshot()
+    assert status["state"] == "connected"
+    assert status["registered"] is True
+    assert status["device_id"] == "INVX-THUNDER-001"
+    assert status["last_registration_attempt_at"] is not None
+    assert status["last_heartbeat_at"] is not None
+    assert status["last_telemetry_at"] is not None
 
     persisted = json.loads(Path(state_path).read_text(encoding="utf-8"))
     assert persisted["device_id"] == "INVX-THUNDER-001"
@@ -154,3 +167,38 @@ async def test_ota_bridge_reloads_persisted_credentials(project_root, monkeypatc
     assert len(calls) == 1
     assert calls[0]["url"] == "https://ota.example.com/api/agent/heartbeat"
     assert calls[0]["headers"]["X-Device-Token"] == "persisted-token"
+
+
+def test_ota_bridge_status_snapshot_reports_registration_state(project_root, monkeypatch) -> None:
+    monkeypatch.setattr("askme.ota_bridge.requests.Session", lambda: _Session([]))
+
+    bridge = OTABridge(
+        {
+            "enabled": True,
+            "server_url": "https://ota.example.com/api",
+            "channel": "stable",
+            "state_file": str(_state_path(project_root)),
+            "device": {
+                "product": "inovxio-dog",
+            },
+        },
+        metrics=OTABridgeMetrics(),
+    )
+
+    initial = bridge.status_snapshot()
+    assert initial["enabled"] is True
+    assert initial["registered"] is False
+    assert initial["state"] == "stopped"
+    assert initial["channel"] == "stable"
+
+    bridge._set_registration(  # noqa: SLF001
+        device_id="INVX-THUNDER-001",
+        device_token="token",
+        registered_at="2026-03-09T04:00:00Z",
+    )
+    bridge._set_connection_state("connected", clear_error=True)  # noqa: SLF001
+
+    registered = bridge.status_snapshot()
+    assert registered["registered"] is True
+    assert registered["device_id"] == "INVX-THUNDER-001"
+    assert registered["state"] == "connected"

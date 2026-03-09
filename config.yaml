@@ -6,7 +6,7 @@
 
 app:
   name: askme
-  version: "2.0.0"
+  version: "4.0.0"
   data_dir: data
   log_level: INFO
 
@@ -242,6 +242,14 @@ ota:
     serial_number: ""
     robot_id: ""
     site_id: ""
+
+# ----------------------------------------------------------
+# Health server: HTTP probes for OTA and local diagnostics
+# ----------------------------------------------------------
+health_server:
+  enabled: true
+  host: 0.0.0.0
+  port: 8765
 
 # ----------------------------------------------------------
 # Runtime: NOVA Dog runtime bridge

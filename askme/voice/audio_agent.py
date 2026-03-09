@@ -309,7 +309,9 @@ class AudioAgent:
         snapshot = {
             "mode": "voice" if self.voice_mode else "text",
             "enabled": self.voice_mode,
-            "input_ready": bool(not self.voice_mode or self.asr is not None),
+            "input_ready": bool(
+                self.voice_mode and self.asr is not None and self.vad is not None
+            ),
             "output_ready": self.tts is not None,
             "pipeline_ok": bool(self.tts) and (
                 not self.voice_mode or (self.asr is not None and self.vad is not None)

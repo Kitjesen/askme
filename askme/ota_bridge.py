@@ -12,8 +12,9 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import requests
 
@@ -190,6 +191,12 @@ class OTABridge:
         self._serial_number = _clean_optional(
             cfg.get("serial_number", device_cfg.get("serial_number"))
         )
+        self._robot_id = _clean_optional(
+            cfg.get("robot_id", device_cfg.get("robot_id"))
+        )
+        self._site_id = _clean_optional(
+            cfg.get("site_id", device_cfg.get("site_id"))
+        )
         self._timeout_s = max(1.0, float(cfg.get("timeout", 10.0)))
         self._heartbeat_interval_s = max(5.0, float(cfg.get("heartbeat_interval", 60.0)))
         self._telemetry_interval_s = max(5.0, float(cfg.get("telemetry_interval", 60.0)))
@@ -223,11 +230,17 @@ class OTABridge:
         self._device_id: str | None = None
         self._device_token: str | None = None
         self._registered_at: str | None = None
+        self._connection_state = "disabled" if not self.enabled else "stopped"
+        self._last_error: str | None = None
+        self._last_registration_attempt_at: str | None = None
+        self._last_heartbeat_at: str | None = None
+        self._last_telemetry_at: str | None = None
         self._load_state()
 
         if self.enabled and not self._server_url:
             logger.warning("OTABridge enabled but server_url is empty; disabling bridge")
             self.enabled = False
+            self._connection_state = "disabled"
 
     def start(self) -> asyncio.Task[None] | None:
         """Start the OTA bridge background task."""
@@ -235,6 +248,7 @@ class OTABridge:
             return None
         if self._task is not None and not self._task.done():
             return self._task
+        self._set_connection_state("starting", clear_error=True)
         self._stop_event = asyncio.Event()
         self._task = asyncio.create_task(self._run(), name="askme-ota-bridge")
         return self._task
@@ -244,6 +258,8 @@ class OTABridge:
         task = self._task
         if task is None:
             self._session.close()
+            if self.enabled:
+                self._set_connection_state("stopped", clear_error=True)
             return
 
         self._stop_event.set()
@@ -254,6 +270,27 @@ class OTABridge:
         finally:
             self._task = None
             self._session.close()
+            if self.enabled:
+                self._set_connection_state("stopped", clear_error=True)
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """Return OTA bridge registration and connectivity state."""
+        with self._state_lock:
+            return {
+                "enabled": self.enabled,
+                "state": self._connection_state,
+                "registered": self._is_registered(),
+                "device_id": self._device_id,
+                "registered_at": self._registered_at,
+                "last_registration_attempt_at": self._last_registration_attempt_at,
+                "last_heartbeat_at": self._last_heartbeat_at,
+                "last_telemetry_at": self._last_telemetry_at,
+                "last_error": self._last_error,
+                "server_url": self._server_url,
+                "product": self._product,
+                "channel": self._channel,
+                "task_running": bool(self._task and not self._task.done()),
+            }
 
     async def _run(self) -> None:
         next_heartbeat = 0.0
@@ -293,6 +330,7 @@ class OTABridge:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            self._set_connection_state("degraded", error=f"runtime error: {exc}")
             logger.error("OTA bridge stopped after unexpected error: %s", exc, exc_info=True)
         finally:
             logger.info("OTA bridge stopped")
@@ -301,6 +339,7 @@ class OTABridge:
         if self._is_registered():
             return True
 
+        self._mark_registration_attempt()
         payload = self._build_registration_payload()
         logger.info(
             "Registering askme with OTA server (product=%s, channel=%s)",
@@ -314,15 +353,24 @@ class OTABridge:
                 require_token=False,
             )
         except requests.RequestException as exc:
+            self._set_connection_state("degraded", error=f"registration failed: {exc}")
             logger.warning("OTA registration failed: %s", exc)
             return False
         except ValueError as exc:
+            self._set_connection_state(
+                "degraded",
+                error=f"registration returned invalid payload: {exc}",
+            )
             logger.warning("OTA registration returned invalid payload: %s", exc)
             return False
 
         device_id = _clean_optional(response.get("device_id") or response.get("id"))
         device_token = _clean_optional(response.get("device_token"))
         if not device_id or not device_token:
+            self._set_connection_state(
+                "degraded",
+                error="registration response missing device credentials",
+            )
             logger.warning("OTA registration response missing credentials: %s", response)
             return False
 
@@ -331,6 +379,7 @@ class OTABridge:
             device_token=device_token,
             registered_at=_clean_optional(response.get("registered_at")) or _iso_utc_now(),
         )
+        self._set_connection_state("connected", clear_error=True)
         logger.info("OTA bridge registered successfully as %s", device_id)
         return True
 
@@ -352,15 +401,23 @@ class OTABridge:
                 require_token=True,
             )
         except OTABridgeAuthError as exc:
+            self._set_connection_state("auth_error", error=str(exc))
             logger.warning("OTA heartbeat rejected persisted credentials: %s", exc)
             self._clear_registration()
             return
         except requests.RequestException as exc:
+            self._set_connection_state("degraded", error=f"heartbeat failed: {exc}")
             logger.warning("OTA heartbeat failed: %s", exc)
             return
         except ValueError as exc:
+            self._set_connection_state(
+                "degraded",
+                error=f"heartbeat returned invalid payload: {exc}",
+            )
             logger.warning("OTA heartbeat returned invalid payload: %s", exc)
             return
+
+        self._mark_heartbeat()
 
         pending_configs = response.get("pending_configs") or []
         if pending_configs:
@@ -401,6 +458,8 @@ class OTABridge:
                 "skill_success_rate": metrics["skills"]["success_rate"],
                 "skill_stats": metrics["skills"],
                 "voice_pipeline_status": voice_status,
+                "robot_id": self._robot_id,
+                "site_id": self._site_id,
             },
         }
 
@@ -411,12 +470,20 @@ class OTABridge:
                 require_token=True,
             )
         except OTABridgeAuthError as exc:
+            self._set_connection_state("auth_error", error=str(exc))
             logger.warning("OTA telemetry rejected persisted credentials: %s", exc)
             self._clear_registration()
         except requests.RequestException as exc:
+            self._set_connection_state("degraded", error=f"telemetry failed: {exc}")
             logger.warning("OTA telemetry upload failed: %s", exc)
         except ValueError as exc:
+            self._set_connection_state(
+                "degraded",
+                error=f"telemetry returned invalid payload: {exc}",
+            )
             logger.warning("OTA telemetry returned invalid payload: %s", exc)
+        else:
+            self._mark_telemetry()
 
     async def _post_json(
         self,
@@ -480,7 +547,7 @@ class OTABridge:
         return payload
 
     def _build_system_info(self) -> dict[str, Any]:
-        return {
+        system_info = {
             "hostname": socket.gethostname(),
             "platform": platform.system(),
             "arch": platform.machine(),
@@ -490,13 +557,18 @@ class OTABridge:
             "voice_mode": self._voice_mode,
             "robot_mode": self._robot_mode,
         }
+        if self._robot_id:
+            system_info["robot_id"] = self._robot_id
+        if self._site_id:
+            system_info["site_id"] = self._site_id
+        return system_info
 
     def _load_state(self) -> None:
         if not self._state_path.exists():
             return
 
         try:
-            with open(self._state_path, "r", encoding="utf-8") as fh:
+            with open(self._state_path, encoding="utf-8") as fh:
                 data = json.load(fh)
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("Failed to load OTA bridge state from %s: %s", self._state_path, exc)
@@ -511,6 +583,38 @@ class OTABridge:
         self._device_id = device_id
         self._device_token = device_token
         self._registered_at = _clean_optional(data.get("registered_at"))
+
+    def _set_connection_state(
+        self,
+        state: str,
+        *,
+        error: str | None = None,
+        clear_error: bool = False,
+    ) -> None:
+        with self._state_lock:
+            self._connection_state = state
+            if clear_error:
+                self._last_error = None
+            elif error is not None:
+                self._last_error = str(error)
+
+    def _mark_registration_attempt(self) -> None:
+        with self._state_lock:
+            self._last_registration_attempt_at = _iso_utc_now()
+            self._connection_state = "registering"
+            self._last_error = None
+
+    def _mark_heartbeat(self) -> None:
+        with self._state_lock:
+            self._last_heartbeat_at = _iso_utc_now()
+            self._connection_state = "connected"
+            self._last_error = None
+
+    def _mark_telemetry(self) -> None:
+        with self._state_lock:
+            self._last_telemetry_at = _iso_utc_now()
+            self._connection_state = "connected"
+            self._last_error = None
 
     def _save_state(self) -> None:
         payload = {
@@ -551,7 +655,7 @@ class OTABridge:
     async def _sleep_or_stop(self, delay_s: float) -> None:
         try:
             await asyncio.wait_for(self._stop_event.wait(), timeout=delay_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return
 
 
@@ -574,7 +678,7 @@ def _build_hardware_info() -> dict[str, Any]:
         cpuinfo = Path("/proc/cpuinfo")
         if cpuinfo.exists():
             try:
-                with open(cpuinfo, "r", encoding="utf-8") as fh:
+                with open(cpuinfo, encoding="utf-8") as fh:
                     for line in fh:
                         if line.lower().startswith("serial"):
                             info["cpu_serial"] = line.split(":", 1)[1].strip()
@@ -596,7 +700,7 @@ def _get_ip_address() -> str:
 
 
 def _iso_utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
 
 
 def _clean_optional(value: Any) -> str | None:
