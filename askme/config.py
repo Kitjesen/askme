@@ -186,4 +186,9 @@ def validate_config(config: dict | None = None) -> list[str]:
 
     # Voice TTS (no validation needed -- edge-tts requires no API key)
 
+    ota = config.get("ota", {})
+    if ota.get("enabled"):
+        if not ota.get("server_url"):
+            errors.append("ota.server_url (OTA_SERVER_URL) is required when ota.enabled=true")
+
     return errors

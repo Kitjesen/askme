@@ -12,6 +12,8 @@ import json
 import logging
 from typing import Any
 
+from askme.ota_bridge import OTABridgeMetrics
+
 from .skill_model import SkillDefinition
 from ..tools.tool_registry import ToolRegistry
 
@@ -26,6 +28,7 @@ class SkillExecutor:
         llm_client: Any,
         tool_registry: ToolRegistry,
         default_model: str = "deepseek-chat",
+        metrics: OTABridgeMetrics | None = None,
     ) -> None:
         """
         Args:
@@ -36,6 +39,7 @@ class SkillExecutor:
         self._llm = llm_client
         self._tools = tool_registry
         self._default_model = default_model
+        self._metrics = metrics
 
     async def execute(
         self,
@@ -103,12 +107,20 @@ class SkillExecutor:
                 ),
                 timeout=timeout,
             )
+            if self._metrics is not None:
+                self._metrics.record_skill_execution(
+                    success=not result.startswith("[Error]") and not result.startswith("[Timeout]")
+                )
             return result
         except asyncio.TimeoutError:
             logger.warning("Skill '%s' timed out after %ds", skill.name, timeout)
+            if self._metrics is not None:
+                self._metrics.record_skill_execution(success=False)
             return f"[Timeout] Skill '{skill.name}' execution timed out after {timeout}s."
         except Exception as exc:
             logger.warning("Skill '%s' failed: %s", skill.name, exc)
+            if self._metrics is not None:
+                self._metrics.record_skill_execution(success=False)
             return f"[Error] Skill '{skill.name}' execution failed: {exc}"
 
     async def _run_tool_loop(

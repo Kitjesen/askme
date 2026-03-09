@@ -220,6 +220,30 @@ swarm:
   agents: []
 
 # ----------------------------------------------------------
+# OTA: Remote registration, heartbeat, and telemetry
+# ----------------------------------------------------------
+ota:
+  enabled: false
+  server_url: ${OTA_SERVER_URL}
+  channel: stable
+  package_name: askme
+  serial_number: ${NOVA_DOG_SERIAL_NUMBER}
+  heartbeat_interval: 60
+  telemetry_interval: 60
+  registration_retry_interval: 30
+  timeout: 10.0
+  state_file: data/ota_bridge_state.json
+  device:
+    product: inovxio-dog
+    tags:
+      - thunder
+      - askme
+      - edge-ai
+    serial_number: ""
+    robot_id: ""
+    site_id: ""
+
+# ----------------------------------------------------------
 # Runtime: NOVA Dog runtime bridge
 # ----------------------------------------------------------
 runtime:

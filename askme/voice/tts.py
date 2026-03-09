@@ -227,6 +227,11 @@ class TTSEngine:
         if self._worker_thread.is_alive():
             self._worker_thread.join(timeout=1.0)
 
+    @property
+    def backend(self) -> str:
+        """Return the active TTS backend name."""
+        return self._backend
+
     # ------------------------------------------------------------------
     # Sounddevice callback
     # ------------------------------------------------------------------

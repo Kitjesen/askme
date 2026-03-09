@@ -8,8 +8,6 @@ import threading
 import time
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 import numpy as np
 import sounddevice as sd
 
@@ -17,6 +15,8 @@ from .asr import ASREngine
 from .kws import KWSEngine
 from .tts import TTSEngine
 from .vad import VADEngine
+
+logger = logging.getLogger(__name__)
 
 # Default ASR timeout (overridden by config voice.asr.asr_timeout)
 _DEFAULT_ASR_TIMEOUT = 10.0
@@ -37,7 +37,7 @@ class AudioAgent:
     Parameters
     ----------
     config : dict
-        Full configuration dict.  The ``voice`` sub-dict is read automatically.
+        Full configuration dict. The ``voice`` sub-dict is read automatically.
     voice_mode : bool
         If True (default), initialise ASR/VAD/KWS for microphone input.
         If False, only TTS is initialised (text-input mode).
@@ -45,6 +45,7 @@ class AudioAgent:
 
     def __init__(self, config: dict[str, Any], voice_mode: bool = True) -> None:
         voice_cfg = config.get("voice", {})
+        self.voice_mode = voice_mode
 
         # Shared state
         self.audio_queue: queue.Queue[str] = queue.Queue()
@@ -257,3 +258,18 @@ class AudioAgent:
         """Signal all background threads to stop."""
         self.stop_event.set()
         self.tts.shutdown()
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """Return a compact voice-pipeline health snapshot for telemetry."""
+        return {
+            "mode": "voice" if self.voice_mode else "text",
+            "pipeline_ok": bool(self.tts) and (
+                not self.voice_mode or (self.asr is not None and self.vad is not None)
+            ),
+            "asr_available": self.asr is not None,
+            "vad_available": self.vad is not None,
+            "kws_available": bool(self.kws and getattr(self.kws, "available", False)),
+            "woken_up": self.woken_up,
+            "tts_backend": self.tts.backend,
+            "tts_busy": self.is_busy,
+        }

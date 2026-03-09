@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from askme.config import get_config, project_root
+from askme.ota_bridge import OTABridgeMetrics
 
 if TYPE_CHECKING:
     from askme.brain.session_memory import SessionMemory
@@ -52,6 +53,7 @@ class ConversationManager:
         history_file: str | Path | None = None,
         max_history: int | None = None,
         session_memory: SessionMemory | None = None,
+        metrics: OTABridgeMetrics | None = None,
     ) -> None:
         cfg = get_config().get("conversation", {})
 
@@ -64,6 +66,7 @@ class ConversationManager:
 
         self.max_history: int = max_history or cfg.get("max_history", 40)
         self._session_memory = session_memory
+        self._metrics = metrics
         self.history: list[dict[str, Any]] = []
         self._load()
 
@@ -74,6 +77,8 @@ class ConversationManager:
     def add_user_message(self, content: str) -> None:
         """Append a user message and persist."""
         self.history.append({"role": "user", "content": content})
+        if self._metrics is not None:
+            self._metrics.record_conversation_turn()
         self._trim()
         self._save()
 

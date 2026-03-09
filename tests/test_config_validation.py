@@ -28,6 +28,24 @@ class TestValidateConfig:
         errors = validate_config(config)
         assert len(errors) == 0
 
+    def test_ota_enabled_requires_server_url(self):
+        """OTA bridge config must include server_url when enabled."""
+        config = {
+            "brain": {"api_key": "sk-test", "base_url": "https://api.deepseek.com"},
+            "ota": {"enabled": True, "device": {}},
+        }
+        errors = validate_config(config)
+        assert any("ota.server_url" in e for e in errors)
+
+    def test_ota_disabled_allows_empty_server_url(self):
+        """Disabled OTA bridge should not fail validation."""
+        config = {
+            "brain": {"api_key": "sk-test", "base_url": "https://api.deepseek.com"},
+            "ota": {"enabled": False, "server_url": ""},
+        }
+        errors = validate_config(config)
+        assert len(errors) == 0
+
 
 class TestFeatureFlags:
     def test_robot_off(self, monkeypatch):

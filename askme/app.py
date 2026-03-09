@@ -40,6 +40,7 @@ from askme.pipeline.commands import CommandHandler
 from askme.pipeline.proactive_agent import ProactiveAgent
 from askme.pipeline.text_loop import TextLoop
 from askme.pipeline.voice_loop import VoiceLoop
+from askme.ota_bridge import OTABridge, OTABridgeMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +61,13 @@ class AskmeApp:
         self._setup_logging()
 
         # ── Create modules ──────────────────────────────────
-        self.llm = LLMClient()
+        self.ota_metrics = OTABridgeMetrics()
+        self.llm = LLMClient(metrics=self.ota_metrics)
         self.session_memory = SessionMemory(llm=self.llm)
-        self.conversation = ConversationManager(session_memory=self.session_memory)
+        self.conversation = ConversationManager(
+            session_memory=self.session_memory,
+            metrics=self.ota_metrics,
+        )
         self.memory = MemoryBridge()
         self.episodic = EpisodicMemory(llm=self.llm)
         self.vision = VisionBridge()
@@ -81,6 +86,7 @@ class AskmeApp:
             self.llm,
             self.tools,
             default_model=self.cfg.get("brain", {}).get("model", "deepseek-chat"),
+            metrics=self.ota_metrics,
         )
 
         # Intent router
@@ -91,7 +97,7 @@ class AskmeApp:
         )
 
         # Audio / voice
-        self.audio = AudioAgent(self.cfg, voice_mode=voice_mode)
+        self.audio = AudioAgent(self.cfg, voice_mode=voice_mode, metrics=self.ota_metrics)
         self.voice_runtime_bridge = VoiceRuntimeBridge(
             self.cfg.get("runtime", {}).get("voice_bridge", {})
         )
@@ -160,6 +166,15 @@ class AskmeApp:
             llm=self.llm,
             config=self.cfg,
         )
+        self.ota_bridge = OTABridge(
+            self.cfg.get("ota", {}),
+            metrics=self.ota_metrics,
+            voice_status_provider=self.audio.status_snapshot,
+            app_name=self.cfg.get("app", {}).get("name", "askme"),
+            app_version=self.cfg.get("app", {}).get("version", ""),
+            voice_mode=voice_mode,
+            robot_mode=self.robot_mode,
+        )
 
         logger.info(
             "Askme initialised (voice=%s, robot=%s, skills=%d, tools=%d)",
@@ -176,6 +191,7 @@ class AskmeApp:
         warmup_task = asyncio.create_task(self.memory.warmup())
         stop_event = asyncio.Event()
         proactive_task = asyncio.create_task(self._proactive.run(stop_event))
+        self.ota_bridge.start()
         try:
             if self.voice_mode:
                 await self._voice_loop.run()
@@ -185,6 +201,8 @@ class AskmeApp:
             stop_event.set()
             warmup_task.cancel()
             proactive_task.cancel()
+            await asyncio.gather(warmup_task, proactive_task, return_exceptions=True)
+            await self.ota_bridge.stop()
             await self.shutdown()
 
     async def shutdown(self) -> None:
