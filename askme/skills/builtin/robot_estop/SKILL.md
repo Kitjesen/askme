@@ -3,13 +3,13 @@ name: robot_estop
 description: 紧急停止机械臂所有运动
 version: 1.0.0
 trigger: voice
-model: deepseek-chat
+model: ""
 timeout: 5
 tags: [robot, safety, emergency]
 depends: []
 conflicts: []
 safety_level: critical
-voice_trigger: 紧急停止
+voice_trigger: 紧急停止,急停,停下来,别动,停止
 ---
 
 ## Tools

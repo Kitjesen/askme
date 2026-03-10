@@ -89,10 +89,17 @@ class AskmeApp:
         # Skills
         self.skill_manager = SkillManager()
         self.skill_manager.load()
+        # In voice mode, skills use the faster voice_model for low latency
+        brain_cfg_skills = self.cfg.get("brain", {})
+        skill_model = (
+            brain_cfg_skills.get("voice_model")
+            if voice_mode
+            else brain_cfg_skills.get("model")
+        ) or brain_cfg_skills.get("model", "claude-sonnet-4-5-20250929")
         self.skill_executor = SkillExecutor(
             self.llm,
             self.tools,
-            default_model=self.cfg.get("brain", {}).get("model", "deepseek-chat"),
+            default_model=skill_model,
             metrics=self.ota_metrics,
         )
 
@@ -261,6 +268,8 @@ class AskmeApp:
         return [
             {"role": "user", "content": f"你的角色设定如下，严格遵守：\n{brief}"},
             {"role": "assistant", "content": "收到。我是Thunder，穹沛的巡检机器人。等待指令。"},
+            {"role": "user", "content": "重要：你不是AI助手，不是Claude，不是开发工具。你就是Thunder巡检机器人。只用中文口语回答，绝不用英文，绝不用markdown。"},
+            {"role": "assistant", "content": "明白。我是Thunder，穹沛的四足巡检机器人。中文口语回答，简洁汇报。"},
         ]
 
     def _init_robot(self) -> None:
@@ -283,11 +292,17 @@ class AskmeApp:
         """Configure logging from config."""
         level_str = self.cfg.get("app", {}).get("log_level", "INFO")
         level = getattr(logging, level_str.upper(), logging.INFO)
-        logging.basicConfig(
-            level=level,
-            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-            datefmt="%H:%M:%S",
-        )
+        fmt = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+        datefmt = "%H:%M:%S"
+        logging.basicConfig(level=level, format=fmt, datefmt=datefmt)
+
+        # Also log to file so external tools can tail the output
+        log_file = self.cfg.get("app", {}).get("log_file")
+        if log_file:
+            fh = logging.FileHandler(log_file, encoding="utf-8", mode="w")
+            fh.setLevel(level)
+            fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+            logging.getLogger().addHandler(fh)
 
     def health_snapshot(self) -> dict[str, object]:
         """Return the compact HTTP health payload."""
@@ -298,7 +313,7 @@ class AskmeApp:
             metrics_snapshot=self.ota_metrics.snapshot(),
             active_skills=[skill.name for skill in self.skill_manager.get_enabled()],
             voice_status=self._voice_status_snapshot(),
-            ota_status=self.ota_bridge.status_snapshot(),
+            ota_status=self.ota_bridge.status_snapshot() if hasattr(self, "ota_bridge") and self.ota_bridge else None,
         )
 
     def metrics_snapshot(self) -> dict[str, object]:

@@ -37,20 +37,24 @@ class ASREngine:
 
         tokens = os.path.join(model_dir, config.get("tokens", "tokens.txt"))
 
-        # Auto-detect int8 vs float32 model files
-        encoder_name = config.get("encoder", "encoder-epoch-99-avg-1.int8.onnx")
-        decoder_name = config.get("decoder", "decoder-epoch-99-avg-1.int8.onnx")
-        joiner_name = config.get("joiner", "joiner-epoch-99-avg-1.int8.onnx")
-
-        encoder = os.path.join(model_dir, encoder_name)
-        decoder = os.path.join(model_dir, decoder_name)
-        joiner = os.path.join(model_dir, joiner_name)
-
-        # Fallback to float32 if int8 not found
-        if not os.path.exists(encoder):
-            encoder = os.path.join(model_dir, "encoder-epoch-99-avg-1.onnx")
-            decoder = os.path.join(model_dir, "decoder-epoch-99-avg-1.onnx")
-            joiner = os.path.join(model_dir, "joiner-epoch-99-avg-1.onnx")
+        # Auto-detect model files: try config overrides first, then common names
+        encoder = self._find_model_file(model_dir, config.get("encoder"), [
+            "encoder.int8.onnx",
+            "encoder-epoch-99-avg-1.int8.onnx",
+            "encoder.onnx",
+            "encoder-epoch-99-avg-1.onnx",
+        ])
+        decoder = self._find_model_file(model_dir, config.get("decoder"), [
+            "decoder.onnx",
+            "decoder-epoch-99-avg-1.int8.onnx",
+            "decoder-epoch-99-avg-1.onnx",
+        ])
+        joiner = self._find_model_file(model_dir, config.get("joiner"), [
+            "joiner.int8.onnx",
+            "joiner-epoch-99-avg-1.int8.onnx",
+            "joiner.onnx",
+            "joiner-epoch-99-avg-1.onnx",
+        ])
 
         self.sample_rate: int = int(config.get("sample_rate", 16000))
 
@@ -69,6 +73,22 @@ class ASREngine:
         )
 
         logger.info("ASR initialized.")
+
+    @staticmethod
+    def _find_model_file(
+        model_dir: str,
+        config_override: str | None,
+        candidates: list[str],
+    ) -> str:
+        """Return the first existing model file from config override or candidates."""
+        if config_override:
+            return os.path.join(model_dir, config_override)
+        for name in candidates:
+            path = os.path.join(model_dir, name)
+            if os.path.exists(path):
+                return path
+        # Fallback to first candidate (will fail at init with clear error)
+        return os.path.join(model_dir, candidates[0])
 
     def create_stream(self) -> sherpa_onnx.OnlineStream:
         """Create and return a new ASR stream."""

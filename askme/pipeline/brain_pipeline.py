@@ -151,7 +151,7 @@ class BrainPipeline:
         if self._episodic:
             self._episodic.log("command", f"用户说: {user_text}")
 
-        # 5. Stream LLM + TTS (non-blocking: don't wait for playback to finish)
+        # 5. Stream LLM → TTS: start playback, wait for TTS to finish
         self._audio.start_playback()
         try:
             full_response = await self._stream_with_tools(
@@ -159,16 +159,25 @@ class BrainPipeline:
             )
             self._conversation.add_assistant_message(full_response)
 
+            # Wait for TTS to finish speaking before returning
+            await asyncio.to_thread(self._audio.wait_speaking_done)
+
             # Log response as episode
             if self._episodic:
                 self._episodic.log("action", f"回复: {full_response[:100]}")
-                # Trigger reflection if conditions met (fire-and-forget with logging)
+                # Defer reflection to avoid 429 rate-limit collision with
+                # the next user query.  A 5-second delay lets the relay
+                # quota window reset.
                 if self._episodic.should_reflect():
-                    task = asyncio.create_task(self._episodic.reflect())
-                    task.add_done_callback(
-                        lambda t: logger.error("[Episodic] Reflection failed: %s", t.exception())
-                        if not t.cancelled() and t.exception() else None
-                    )
+
+                    async def _delayed_reflect() -> None:
+                        await asyncio.sleep(5)
+                        try:
+                            await self._episodic.reflect()
+                        except Exception as e:
+                            logger.error("[Episodic] Reflection failed: %s", e)
+
+                    asyncio.create_task(_delayed_reflect())
 
             return full_response
         except Exception as exc:
@@ -178,6 +187,8 @@ class BrainPipeline:
             # Audio feedback so user knows something went wrong
             self._audio.speak_error()
             return f"[Error] {exc}"
+        finally:
+            self._audio.stop_playback()
 
     async def execute_skill(self, skill_name: str, user_text: str) -> str:
         """Execute a named skill and speak the result."""
@@ -187,6 +198,7 @@ class BrainPipeline:
 
         logger.info("Executing skill: %s", skill_name)
         self._audio.drain_buffers()
+        self._audio.speak("收到，正在处理。")
         if self._episodic:
             self._episodic.log("action", f"执行技能: {skill_name}")
 
@@ -203,19 +215,25 @@ class BrainPipeline:
 
         self._audio.start_playback()
         try:
-            result = await self._skill_executor.execute(skill, context)
+            def _on_tool_call(tool_name: str) -> None:
+                self._audio.speak(f"正在查询。")
+
+            result = await self._skill_executor.execute(
+                skill, context, on_tool_call=_on_tool_call,
+            )
             logger.info("Skill result: %s", result[:100])
             self._audio.speak(result)
             self._conversation.add_user_message(user_text)
             self._conversation.add_assistant_message(result)
             if self._episodic:
-                self._episodic.log("outcome", f"技能结果 {skill_name}: {result[:100]}")
+                self._episodic.log("outcome", f"直接回复: {result[:100]}")
             await asyncio.to_thread(self._audio.wait_speaking_done)
             return result
         except Exception as exc:
             logger.error("Skill error (%s): %s", skill_name, exc)
             if self._episodic:
                 self._episodic.log("error", f"技能错误 {skill_name}: {exc}")
+            self._audio.speak_error()
             return f"[Skill Error] {exc}"
         finally:
             self._audio.stop_playback()
@@ -246,8 +264,8 @@ class BrainPipeline:
         self._conversation.add_user_message(user_text)
         self._conversation.add_assistant_message(assistant_text)
         if self._episodic:
-            self._episodic.log("command", f"鐢ㄦ埛璇? {user_text}")
-            self._episodic.log("outcome", f"鐩存帴鍥炲: {assistant_text[:100]}")
+            self._episodic.log("command", f"用户说: {user_text}")
+            self._episodic.log("outcome", f"直接回复: {assistant_text[:100]}")
         await asyncio.to_thread(self._audio.wait_speaking_done)
         self._audio.stop_playback()
         return assistant_text
@@ -257,10 +275,11 @@ class BrainPipeline:
     def _prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Inject prompt seed and user format prefix for relay compatibility.
 
-        The relay service may override our system prompt with its own.
-        To counter this:
-          1. Insert seed messages (fake user/assistant turn) after system prompt
-             to establish our assistant's identity.
+        The relay service overrides our system prompt with its own developer
+        assistant identity. To counter this:
+          1. DROP the system message when prompt_seed is present — the seed
+             establishes identity via fake user/assistant turns, which the
+             relay cannot override.
           2. Prepend a TTS format tag to the latest user message to enforce
              output constraints (no markdown, short, Chinese).
 
@@ -270,9 +289,41 @@ class BrainPipeline:
         if not self._prompt_seed and not self._user_prefix:
             return messages
 
-        result = [messages[0]]  # system prompt
-        result.extend(self._prompt_seed)
-        rest = list(messages[1:])
+        # When seed is present, skip system message to avoid relay conflict.
+        # The relay injects its own system prompt regardless; including ours
+        # creates competing identities. Seed messages work better alone.
+        #
+        # BUT: the dropped system prompt contained tool instructions.
+        # Inject tool awareness as a seed exchange so the LLM knows it
+        # CAN and SHOULD call tools for factual queries.
+        if self._prompt_seed:
+            result = list(self._prompt_seed)
+
+            # Inject tool context that would otherwise be lost
+            tool_defs = self._tools.get_definitions(
+                max_safety_level=self._general_tool_max_safety_level
+            )
+            if tool_defs:
+                tool_names = [
+                    td.get("function", {}).get("name", "")
+                    for td in tool_defs
+                ]
+                result.append({
+                    "role": "user",
+                    "content": (
+                        f"你有以下工具可用: {', '.join(tool_names)}。"
+                        "涉及时间、文件等真实数据时必须调用工具，不要编造。"
+                    ),
+                })
+                result.append({
+                    "role": "assistant",
+                    "content": "明白，需要真实数据时我会调用工具获取。",
+                })
+
+            rest = [m for m in messages if m.get("role") != "system"]
+        else:
+            result = [messages[0]]  # keep system prompt (no seed to compete)
+            rest = list(messages[1:])
 
         # Prepend format tag to the last user message
         if self._user_prefix:
@@ -301,41 +352,59 @@ class BrainPipeline:
         tool_definitions = self._tools.get_definitions(
             max_safety_level=self._general_tool_max_safety_level
         )
+        tool_names = [td.get("function", {}).get("name") for td in tool_definitions]
+        logger.info("LLM tools available (%d): %s", len(tool_definitions), tool_names)
         full_response = ""
         tool_calls_acc: dict[int, dict[str, str]] = {}
         spoke_any = False
+        got_first_token = False
         self._splitter.reset()
 
-        async for chunk in self._llm.chat_stream(
-            messages, tools=tool_definitions, tool_choice="auto", model=model
-        ):
-            delta = chunk.choices[0].delta
+        # Thinking feedback: if LLM takes > 2.5s, speak a brief prompt
+        async def _thinking_timer() -> None:
+            await asyncio.sleep(2.5)
+            if not got_first_token:
+                self._audio.speak("让我想想。")
 
-            # Accumulate tool call fragments
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    idx = tc.index
-                    if idx not in tool_calls_acc:
-                        tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
-                    if tc.id:
-                        tool_calls_acc[idx]["id"] = tc.id
-                    if tc.function:
-                        if tc.function.name:
-                            tool_calls_acc[idx]["name"] = tc.function.name
-                        if tc.function.arguments:
-                            tool_calls_acc[idx]["arguments"] += tc.function.arguments
+        timer_task = asyncio.create_task(_thinking_timer())
 
-                # Tool calls detected — drain any sentences already sent to TTS
-                if spoke_any:
-                    self._audio.drain_buffers()
-                    spoke_any = False
+        try:
+            async for chunk in self._llm.chat_stream(
+                messages, tools=tool_definitions, tool_choice="auto", model=model
+            ):
+                # Cancel thinking prompt on first token
+                if not got_first_token:
+                    got_first_token = True
+                    timer_task.cancel()
+                delta = chunk.choices[0].delta
 
-            # Text content — speak immediately (don't buffer)
-            if delta.content:
-                full_response += delta.content
-                for sentence in self._splitter.feed(delta.content):
-                    self._audio.speak(sentence)
-                    spoke_any = True
+                # Accumulate tool call fragments
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                        if tc.id:
+                            tool_calls_acc[idx]["id"] = tc.id
+                        if tc.function:
+                            if tc.function.name:
+                                tool_calls_acc[idx]["name"] = tc.function.name
+                            if tc.function.arguments:
+                                tool_calls_acc[idx]["arguments"] += tc.function.arguments
+
+                    # Tool calls detected — drain any sentences already sent to TTS
+                    if spoke_any:
+                        self._audio.drain_buffers()
+                        spoke_any = False
+
+                # Text content — speak immediately (don't buffer)
+                if delta.content:
+                    full_response += delta.content
+                    for sentence in self._splitter.feed(delta.content):
+                        self._audio.speak(sentence)
+                        spoke_any = True
+        finally:
+            timer_task.cancel()
 
         remainder = self._splitter.flush()
         if remainder:
@@ -346,6 +415,7 @@ class BrainPipeline:
         if tool_calls_acc:
             if spoke_any:
                 self._audio.drain_buffers()
+            self._audio.speak("正在执行。")
             full_response = await self._execute_tools(
                 tool_calls_acc, system_prompt, model=model
             )
@@ -467,40 +537,18 @@ class BrainPipeline:
             if scene_desc:
                 prompt += f"\n当前视野: {scene_desc}"
 
-        skill_catalog = self._skill_manager.get_skill_catalog()
-        if skill_catalog != "none":
-            prompt += f"\n可用技能: {skill_catalog}"
-
-        return prompt
-
-        # Episodic: World knowledge from reflection (robot experiences)
-        if self._episodic:
-            world_ctx = self._episodic.get_knowledge_context()
-            if world_ctx:
-                prompt += f"\n{world_ctx}"
-            digest_ctx = self._episodic.get_recent_digest()
-            if digest_ctx:
-                prompt += f"\n{digest_ctx}"
-            relevant_ctx = self._episodic.get_relevant_context(user_text)
-            if relevant_ctx:
-                prompt += f"\n{relevant_ctx}"
-
-        # Layer 2: Session summaries (medium-term memory)
-        if self._session_memory:
-            session_ctx = self._session_memory.get_recent_summaries()
-            if session_ctx:
-                prompt += f"\n{session_ctx}"
-
-        # Layer 3: Long-term memory (MemU vector retrieval)
-        if context_str:
-            prompt += f"\n记忆上下文:\n{context_str}"
-        else:
-            prompt += "\n记忆上下文: 无"
-
-        if self._vision and self._vision.available:
-            prompt += "\n视觉能力: 已启用（可以看到周围环境）"
-            if scene_desc:
-                prompt += f"\n当前视野: {scene_desc}"
+        # Tool use guidance: list available tools and instruct LLM to use them
+        tool_defs = self._tools.get_definitions(
+            max_safety_level=self._general_tool_max_safety_level
+        )
+        if tool_defs:
+            tool_names = [
+                td.get("function", {}).get("name", "") for td in tool_defs
+            ]
+            prompt += (
+                f"\n你可以主动调用以下工具: {', '.join(tool_names)}。"
+                "当用户提问涉及时间、文件、目录等信息时，主动调用对应工具获取真实数据再回答。"
+            )
 
         skill_catalog = self._skill_manager.get_skill_catalog()
         if skill_catalog != "none":

@@ -97,11 +97,19 @@ class SkillManager:
         return skill.build_prompt(context)
 
     def get_voice_triggers(self) -> dict[str, str]:
-        """Return a mapping of voice_trigger phrase -> skill name for enabled skills."""
+        """Return a mapping of voice_trigger phrase -> skill name for enabled skills.
+
+        The ``voice_trigger`` field supports comma-separated phrases, e.g.
+        ``voice_trigger: 现在几点,星期几,今天几号`` will register three
+        separate trigger phrases pointing to the same skill.
+        """
         triggers: dict[str, str] = {}
         for skill in self.get_enabled():
             if skill.voice_trigger:
-                triggers[skill.voice_trigger] = skill.name
+                for phrase in skill.voice_trigger.split(","):
+                    phrase = phrase.strip()
+                    if phrase:
+                        triggers[phrase] = skill.name
         return triggers
 
     def check_dependencies(self, name: str) -> tuple[bool, list[str]]:
@@ -186,7 +194,7 @@ class SkillManager:
             description=meta.get("description", ""),
             version=meta.get("version", "1.0.0"),
             trigger=meta.get("trigger", "manual"),
-            model=meta.get("model", "deepseek-chat"),
+            model=meta.get("model", ""),
             timeout=int(meta.get("timeout", 30)),
             tags=self._ensure_list(meta.get("tags", [])),
             depends=self._ensure_list(meta.get("depends", [])),

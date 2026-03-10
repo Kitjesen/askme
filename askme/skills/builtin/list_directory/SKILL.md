@@ -3,7 +3,7 @@ name: list_directory
 description: 列出指定目录中的文件和文件夹
 version: 1.0.0
 trigger: auto
-model: deepseek-chat
+model: ""
 timeout: 10
 tags: [utility, filesystem]
 depends: []

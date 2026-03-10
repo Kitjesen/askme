@@ -3,13 +3,13 @@ name: get_time
 description: 获取当前系统时间并以自然语言回复
 version: 1.0.0
 trigger: auto
-model: deepseek-chat
+model: ""
 timeout: 10
 tags: [utility, time]
 depends: []
 conflicts: []
 safety_level: normal
-voice_trigger: 现在几点
+voice_trigger: 现在几点,几点了,什么时间,星期几,今天几号,几月几号,今天日期
 ---
 
 ## Tools

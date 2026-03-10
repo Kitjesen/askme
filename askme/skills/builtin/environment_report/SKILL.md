@@ -3,13 +3,13 @@ name: environment_report
 description: 描述当前环境，报告视野内看到的物体和场景布局
 version: 1.0.0
 trigger: voice
-model: deepseek-chat
+model: ""
 timeout: 15
 tags: [robot, vision, environment, dog]
 depends: []
 conflicts: []
 safety_level: normal
-voice_trigger: 看看周围
+voice_trigger: 看看周围,周围有什么,环境怎么样,看一下环境,描述环境
 ---
 
 ## Tools

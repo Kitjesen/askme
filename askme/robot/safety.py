@@ -105,6 +105,11 @@ class SafetyChecker:
     def is_estop_command(self, text: str) -> bool:
         """Check if text contains an emergency-stop keyword.
 
+        Single-character keywords (e.g. "停") only trigger on exact match
+        (ignoring trailing punctuation) to avoid false positives like
+        "停止播放" triggering E-STOP.  Multi-character keywords use
+        substring matching.
+
         Args:
             text: User input text to check.
 
@@ -112,9 +117,17 @@ class SafetyChecker:
             True if an e-stop word is found.
         """
         text_lower = text.lower().strip()
+        # Strip trailing punctuation for short-word exact matching
+        text_core = re.sub(r'[。！!？?\s]+$', '', text_lower)
         for word in self._estop_words:
-            if word.lower() in text_lower:
-                return True
+            word_lower = word.lower()
+            if len(word_lower) <= 1:
+                # Single char: exact match only (avoid "停止播放" → E-STOP)
+                if text_core == word_lower:
+                    return True
+            else:
+                if word_lower in text_lower:
+                    return True
         return False
 
     def emergency_stop(self) -> None:

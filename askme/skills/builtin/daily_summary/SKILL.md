@@ -3,14 +3,14 @@ name: daily_summary
 description: 生成每日工作总结和待办事项
 version: 1.0.0
 trigger: schedule
-model: deepseek-chat
+model: ""
 timeout: 30
 tags: [productivity, summary, schedule]
 depends: []
 conflicts: []
 safety_level: normal
 schedule: "0 18 * * *"
-voice_trigger: 今日总结
+voice_trigger: 今日总结,今天总结,工作总结,总结一下
 ---
 
 ## Tools

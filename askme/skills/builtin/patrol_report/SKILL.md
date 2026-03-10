@@ -3,13 +3,13 @@ name: patrol_report
 description: 巡逻结束后生成巡逻报告，总结看到的人、物体和异常
 version: 1.0.0
 trigger: voice
-model: deepseek-chat
+model: ""
 timeout: 20
 tags: [robot, patrol, report, dog]
 depends: []
 conflicts: []
 safety_level: normal
-voice_trigger: 巡逻报告
+voice_trigger: 巡逻报告,巡检报告,巡逻情况,汇报巡逻
 ---
 
 ## Tools

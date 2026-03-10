@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import logging
 import queue
 import threading
@@ -15,6 +16,7 @@ from askme.ota_bridge import OTABridgeMetrics, get_ota_runtime_metrics
 
 from .asr import ASREngine
 from .kws import KWSEngine
+from .punctuation import PunctuationRestorer
 from .tts import TTSEngine
 from .vad import VADEngine
 
@@ -22,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 # Default ASR timeout (overridden by config voice.asr.asr_timeout)
 _DEFAULT_ASR_TIMEOUT = 10.0
+
+# Number of audio chunks to buffer before VAD triggers (pre-roll).
+# Each chunk is ~100ms, so 5 chunks = ~500ms lookback.
+_PRE_ROLL_CHUNKS = 5
 
 
 class AudioAgent:
@@ -70,6 +76,7 @@ class AudioAgent:
             self.asr = ASREngine(voice_cfg.get("asr", {}))
             self.vad = VADEngine(voice_cfg.get("vad", {}))
             self.kws = KWSEngine(voice_cfg.get("kws", {}))
+            self.punct = PunctuationRestorer(voice_cfg.get("punctuation", {}))
             self.asr_stream = self.asr.create_stream()
 
             if self.kws.available:
@@ -81,6 +88,7 @@ class AudioAgent:
             self.asr = None  # type: ignore[assignment]
             self.vad = None  # type: ignore[assignment]
             self.kws = None  # type: ignore[assignment]
+            self.punct = PunctuationRestorer({})
             self.asr_stream = None
             self.kws_stream = None
             self.woken_up = True
@@ -126,13 +134,13 @@ class AudioAgent:
         Non-blocking. Fires immediately after ASR so the user has audio
         feedback during the LLM latency gap instead of dead silence.
         """
-        self._play_tone(660, 0.07)
+        self._play_chime("acknowledge")
 
     def speak_error(self) -> None:
         """Speak a short error notification to the user."""
         self._metrics.mark_voice_error("voice interaction error")
-        self._play_tone(440, 0.1)
-        self.tts.speak("Sorry, there was a problem. Please try again.")
+        self._play_chime("error")
+        self.tts.speak("抱歉，出现了问题，请重试。")
         self._refresh_voice_metrics()
 
     # ------------------------------------------------------------------
@@ -167,12 +175,20 @@ class AudioAgent:
                     self._refresh_voice_metrics()
                     if not self._wait_for_wake_word(mic, sample_rate, samples_per_read):
                         return None  # stop_event was set
-                    self._play_tone(880, 0.12)  # short high beep = "I'm listening"
+                    self._play_chime("wake")  # bright chime = "I'm listening"
 
                 # Phase 2: VAD-gated ASR with timeout
                 logger.info("Listening for speech...")
                 speech_active = False
                 deadline = time.monotonic() + self._asr_timeout
+                _vol_log_interval = 0.5  # log volume every 0.5s
+                _vol_log_next = time.monotonic() + _vol_log_interval
+
+                # Pre-roll buffer: keep recent chunks so VAD latency
+                # doesn't lose the beginning of speech.
+                pre_roll: collections.deque[np.ndarray] = collections.deque(
+                    maxlen=_PRE_ROLL_CHUNKS
+                )
 
                 while not self.stop_event.is_set():
                     # Timeout check
@@ -193,13 +209,32 @@ class AudioAgent:
                     samples_int16 = (samples * 32768).astype(np.int16)
                     self.vad.accept_waveform(samples_int16)
 
+                    # Periodically log audio level for diagnostics
+                    now = time.monotonic()
+                    if now >= _vol_log_next:
+                        peak = int(np.max(np.abs(samples_int16)))
+                        vad_on = self.vad.is_speech_detected()
+                        bar_len = min(peak // 500, 30)
+                        bar = "#" * bar_len
+                        logger.info(
+                            "MIC peak=%5d VAD=%s %s",
+                            peak, "SPEECH" if vad_on else "silent", bar,
+                        )
+                        _vol_log_next = now + _vol_log_interval
+
                     # Only feed ASR when VAD detects speech
                     if self.vad.is_speech_detected():
                         if not speech_active:
                             speech_active = True
-                            logger.debug("VAD: speech detected, draining pending TTS")
+                            logger.info("VAD: speech start")
                             self.tts.drain_buffers()
                             self._refresh_voice_metrics()
+                            # Flush pre-roll buffer → catch the speech onset
+                            for buffered in pre_roll:
+                                self.asr_stream.accept_waveform(
+                                    sample_rate, buffered
+                                )
+                            pre_roll.clear()
                         # Extend deadline while user is actively speaking
                         deadline = time.monotonic() + self._asr_timeout
 
@@ -208,8 +243,11 @@ class AudioAgent:
                         while self.asr.is_ready(self.asr_stream):
                             self.asr.decode_stream(self.asr_stream)
                     else:
+                        # Buffer recent silence chunks for pre-roll
+                        pre_roll.append(samples.copy())
                         if speech_active:
                             # Speech just ended -- feed remaining and check
+                            logger.info("VAD: speech end")
                             speech_active = False
                             self.asr_stream.accept_waveform(sample_rate, samples)
                             while self.asr.is_ready(self.asr_stream):
@@ -222,6 +260,9 @@ class AudioAgent:
                     if is_endpoint and text:
                         text = text.strip()
                         if len(text) > 0:
+                            # Add punctuation to raw ASR output
+                            if self.punct.available:
+                                text = self.punct.restore(text)
                             logger.info("Recognized: %s", text)
                             self.audio_queue.put(text)
                             self._metrics.mark_voice_input(text)
@@ -267,24 +308,101 @@ class AudioAgent:
         return False
 
     # ------------------------------------------------------------------
-    # Audio feedback
+    # Audio feedback — chime synthesis
     # ------------------------------------------------------------------
 
-    def _play_tone(self, frequency: float, duration: float) -> None:
-        """Play a short tone for audio feedback (non-blocking)."""
+    _SR = 44100
+
+    def _play_chime(self, event: str) -> None:
+        """Synthesize and play a short chime for the given event.
+
+        Supported events: ``acknowledge``, ``wake``, ``error``.
+        """
         try:
-            sr = self.asr.sample_rate if self.asr else 16000
-            n_samples = int(sr * duration)
-            t = np.linspace(0, duration, n_samples, endpoint=False, dtype=np.float32)
-            tone = 0.3 * np.sin(2 * np.pi * frequency * t)
-            # Fade in/out to avoid clicks (10ms)
-            fade_len = min(int(0.01 * sr), n_samples // 4)
-            if fade_len > 0:
-                tone[:fade_len] *= np.linspace(0, 1, fade_len)
-                tone[-fade_len:] *= np.linspace(1, 0, fade_len)
-            sd.play(tone, sr, blocking=False)
+            generators = {
+                "acknowledge": self._chime_acknowledge,
+                "wake": self._chime_wake,
+                "error": self._chime_error,
+            }
+            gen = generators.get(event, self._chime_acknowledge)
+            audio = gen()
+            sd.play(audio, self._SR, blocking=False)
         except Exception:
             pass  # non-critical audio feedback
+
+    # -- Individual chime generators --
+
+    def _chime_acknowledge(self) -> np.ndarray:
+        """Two-note ascending major third — quick, warm, like iOS 'received'."""
+        sr = self._SR
+        notes = [880, 1108.73]  # A5 → C#6 (major third)
+        note_dur = 0.06
+        gap = 0.015
+        total = len(notes) * note_dur + (len(notes) - 1) * gap
+        audio = np.zeros(int(sr * total), dtype=np.float32)
+
+        offset = 0
+        for freq in notes:
+            n = int(sr * note_dur)
+            t = np.linspace(0, note_dur, n, endpoint=False, dtype=np.float32)
+            # Bell-like: fundamental + inharmonic partials (2.76x, 5.40x)
+            tone = (
+                0.30 * np.sin(2 * np.pi * freq * t)
+                + 0.12 * np.sin(2 * np.pi * freq * 2.76 * t)
+                + 0.05 * np.sin(2 * np.pi * freq * 5.40 * t)
+            )
+            tone *= np.exp(-t * 25)  # fast decay
+            audio[offset:offset + n] += tone
+            offset += n + int(sr * gap)
+
+        return audio
+
+    def _chime_wake(self) -> np.ndarray:
+        """Three-note ascending pentatonic arpeggio — bright, alert."""
+        sr = self._SR
+        # C6 → E6 → G6 (major triad, bright register)
+        notes = [1046.50, 1318.51, 1567.98]
+        note_dur = 0.055
+        gap = 0.01
+        total = len(notes) * note_dur + (len(notes) - 1) * gap + 0.15
+        audio = np.zeros(int(sr * total), dtype=np.float32)
+
+        offset = 0
+        for i, freq in enumerate(notes):
+            n = int(sr * note_dur)
+            t = np.linspace(0, note_dur, n, endpoint=False, dtype=np.float32)
+            # Metallic bell partials (tubular bell ratios ≈ 2:3:4.2)
+            tone = (
+                0.28 * np.sin(2 * np.pi * freq * t)
+                + 0.14 * np.sin(2 * np.pi * freq * 1.5 * t)
+                + 0.07 * np.sin(2 * np.pi * freq * 2.1 * t)
+            )
+            # Each note slightly louder for rising energy
+            tone *= (0.7 + 0.15 * i) * np.exp(-t * 20)
+            audio[offset:offset + n] += tone
+            offset += n + int(sr * gap)
+
+        return audio
+
+    def _chime_error(self) -> np.ndarray:
+        """Descending minor second — gentle 'something went wrong'."""
+        sr = self._SR
+        notes = [523.25, 493.88]  # C5 → B4 (descending semitone)
+        note_dur = 0.08
+        gap = 0.02
+        total = len(notes) * note_dur + gap + 0.1
+        audio = np.zeros(int(sr * total), dtype=np.float32)
+
+        offset = 0
+        for freq in notes:
+            n = int(sr * note_dur)
+            t = np.linspace(0, note_dur, n, endpoint=False, dtype=np.float32)
+            tone = 0.25 * np.sin(2 * np.pi * freq * t)
+            tone *= np.exp(-t * 12)
+            audio[offset:offset + n] += tone
+            offset += n + int(sr * gap)
+
+        return audio
 
     # ------------------------------------------------------------------
     # Lifecycle

@@ -264,6 +264,13 @@ class AskmeHealthServer:
 
         try:
             await self._server.serve()
+        except SystemExit:
+            logger.warning(
+                "Health server failed to bind on %s:%d (port in use?). "
+                "Continuing without health endpoint.",
+                self.host,
+                self.port,
+            )
         finally:
             self._started_event.set()
             self._bound_port = None

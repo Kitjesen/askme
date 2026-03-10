@@ -39,7 +39,7 @@ def test_kws_rewrites_keywords_file_from_config(tmp_path):
     spotter_cls.assert_called_once()
 
 
-def test_kws_migrates_legacy_default_keywords(tmp_path):
+def test_kws_writes_configured_keywords_directly(tmp_path):
     from askme.voice.kws import KWSEngine
 
     model_dir = _create_model_dir(tmp_path)
@@ -48,10 +48,26 @@ def test_kws_migrates_legacy_default_keywords(tmp_path):
         KWSEngine(
             {
                 "model_dir": str(model_dir),
-                "keywords": ["浣犲ソ", "灏忔櫤"],
+                "keywords": ["你好", "小智"],
             }
         )
 
     keywords_text = (model_dir / "keywords.txt").read_text(encoding="utf-8")
-    assert "雷霆 @雷霆" in keywords_text
-    assert "Thunder @Thunder" in keywords_text
+    assert "你好 @你好" in keywords_text
+    assert "小智 @小智" in keywords_text
+
+
+def test_kws_empty_keywords_disables(tmp_path):
+    from askme.voice.kws import KWSEngine
+
+    model_dir = _create_model_dir(tmp_path)
+
+    engine = KWSEngine(
+        {
+            "model_dir": str(model_dir),
+            "keywords": [],
+        }
+    )
+
+    assert engine.available is False
+    assert engine.spotter is None

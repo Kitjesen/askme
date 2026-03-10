@@ -150,6 +150,11 @@ class MemoryBridge:
         or an empty string if memory is unavailable / times out / finds
         nothing.
         """
+        # Fast path: if init was already attempted and failed, return immediately
+        # without logging — the WARNING was already emitted once at startup.
+        if self._init_attempted and self._service is None:
+            return ""
+
         if not await self._ensure_service():
             return ""
 

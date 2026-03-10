@@ -90,10 +90,46 @@ class TTSEngine:
             self._init_local_tts()
 
         logger.info("TTS backend: %s", self._backend)
+        self._log_output_devices()
 
         # Start TTS worker thread
         self._worker_thread = threading.Thread(target=self._tts_loop, daemon=True)
         self._worker_thread.start()
+
+    # ------------------------------------------------------------------
+    # Output device discovery
+    # ------------------------------------------------------------------
+
+    def _log_output_devices(self) -> None:
+        """Log available output devices so the user can pick the right one."""
+        try:
+            import sounddevice as _sd
+
+            devices = _sd.query_devices()
+            default_out = _sd.default.device[1]
+            output_lines: list[str] = []
+            for i, dev in enumerate(devices):
+                if dev["max_output_channels"] > 0:
+                    marker = " << SELECTED" if (
+                        self._output_device == i
+                        or (self._output_device is None and i == default_out)
+                    ) else ""
+                    output_lines.append(
+                        f"  [{i}] {dev['name']} (ch={dev['max_output_channels']}){marker}"
+                    )
+
+            selected_label = (
+                f"index {self._output_device}"
+                if self._output_device is not None
+                else f"system default [{default_out}]"
+            )
+            logger.info(
+                "TTS output device: %s\nAvailable output devices:\n%s",
+                selected_label,
+                "\n".join(output_lines),
+            )
+        except Exception as exc:
+            logger.debug("Could not enumerate output devices: %s", exc)
 
     # ------------------------------------------------------------------
     # Local TTS init

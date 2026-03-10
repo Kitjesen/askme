@@ -18,7 +18,7 @@ class SkillDefinition:
     description: str = ""
     version: str = "1.0.0"
     trigger: str = "manual"  # manual | auto | voice | schedule
-    model: str = "deepseek-chat"
+    model: str = ""
     timeout: int = 30
     tags: list[str] = field(default_factory=list)
     depends: list[str] = field(default_factory=list)

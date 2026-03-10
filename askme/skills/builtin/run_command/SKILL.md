@@ -3,7 +3,7 @@ name: run_command
 description: 在本地执行 shell 命令并返回结果
 version: 1.0.0
 trigger: manual
-model: deepseek-chat
+model: ""
 timeout: 30
 tags: [utility, system, shell]
 depends: []

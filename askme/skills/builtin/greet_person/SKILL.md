@@ -3,13 +3,13 @@ name: greet_person
 description: 检测到人时主动问候，根据时间和记忆上下文生成个性化问候语
 version: 1.0.0
 trigger: auto
-model: deepseek-chat
+model: ""
 timeout: 10
 tags: [robot, social, greeting, dog]
 depends: []
 conflicts: []
 safety_level: normal
-voice_trigger: 打个招呼
+voice_trigger: 打个招呼,说你好,问个好,跟他打招呼
 ---
 
 ## Tools

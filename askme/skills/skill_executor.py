@@ -27,7 +27,7 @@ class SkillExecutor:
         self,
         llm_client: Any,
         tool_registry: ToolRegistry,
-        default_model: str = "deepseek-chat",
+        default_model: str = "",
         metrics: OTABridgeMetrics | None = None,
     ) -> None:
         """
@@ -45,6 +45,8 @@ class SkillExecutor:
         self,
         skill: SkillDefinition,
         context: dict[str, str] | None = None,
+        *,
+        on_tool_call: Any | None = None,
     ) -> str:
         """Execute a skill end-to-end.
 
@@ -104,6 +106,7 @@ class SkillExecutor:
                     tool_definitions,
                     allowed_tool_names=allowed_tool_names,
                     max_safety_level=max_safety_level,
+                    on_tool_call=on_tool_call,
                 ),
                 timeout=timeout,
             )
@@ -132,6 +135,7 @@ class SkillExecutor:
         allowed_tool_names: set[str] | None = None,
         max_safety_level: str = "critical",
         max_iterations: int = 5,
+        on_tool_call: Any | None = None,
     ) -> str:
         """Run the LLM -> tool-call -> LLM loop until a text response is produced."""
         for iteration in range(max_iterations):
@@ -170,6 +174,8 @@ class SkillExecutor:
                         "Skill tool call [%d/%d]: %s(%s)",
                         iteration + 1, max_iterations, tool_name, tool_args,
                     )
+                    if on_tool_call:
+                        on_tool_call(tool_name)
                     result = await asyncio.to_thread(
                         self._tools.execute,
                         tool_name,

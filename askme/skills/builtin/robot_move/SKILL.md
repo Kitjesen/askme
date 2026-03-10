@@ -3,13 +3,13 @@ name: robot_move
 description: 控制机械臂移动到指定位置
 version: 1.0.0
 trigger: voice
-model: deepseek-chat
+model: ""
 timeout: 15
 tags: [robot, movement, arm]
 depends: []
 conflicts: [robot_estop]
 safety_level: dangerous
-voice_trigger: 移动到
+voice_trigger: 移动到,往前走,往后退,往左,往右,走过去,过来
 ---
 
 ## Tools

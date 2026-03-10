@@ -53,45 +53,59 @@ class StreamSplitter:
         """Feed a new token/chunk and return a list of complete sentences to speak.
 
         Returns an empty list if no sentence boundary was found yet.
+
+        Trigger conditions check the *new content* only (to avoid re-splitting
+        on punctuation already in the buffer).  When triggered, the buffer is
+        split at the **last** occurrence of the relevant punctuation so that
+        text after it stays in the buffer for the next sentence.
         """
         self._buffer += content
         self._total_chars += len(content)
 
-        should_split = False
+        has_strong = any(p in content for p in _STRONG_PUNCT)
+        has_medium = any(p in content for p in _MEDIUM_PUNCT)
+        has_comma = any(c in content for c in _COMMAS)
 
-        # Rule 1: Strong punctuation - always split
-        if any(p in content for p in _STRONG_PUNCT):
-            should_split = True
+        split_pos = -1
 
-        # Rule 2: Medium punctuation (;:) - split after 8+ chars
-        elif any(p in content for p in _MEDIUM_PUNCT) and len(self._buffer) > 8:
-            should_split = True
+        # Rule 1: Strong punctuation in new content → split at last strong punct
+        if has_strong:
+            split_pos = self._rfind_any(self._buffer, _STRONG_PUNCT) + 1
 
-        # Rule 3: First sentence - split aggressively on comma after 5 chars
+        # Rule 2: Medium punctuation (;:) after 8+ chars
+        elif has_medium and len(self._buffer) > 8:
+            split_pos = self._rfind_any(self._buffer, _MEDIUM_PUNCT) + 1
+
+        # Rule 3: First sentence — aggressive comma split
         elif (
-            self._total_chars < self._first_threshold
-            and any(c in content for c in _COMMAS)
+            has_comma
+            and self._total_chars < self._first_threshold
             and len(self._buffer) > self._first_min
         ):
-            should_split = True
+            split_pos = self._rfind_any(self._buffer, _COMMAS) + 1
 
         # Rule 4: Normal comma split after 15 chars
-        elif len(self._buffer) > self._comma_min and any(c in content for c in _COMMAS):
-            should_split = True
+        elif has_comma and len(self._buffer) > self._comma_min:
+            split_pos = self._rfind_any(self._buffer, _COMMAS) + 1
 
-        # Rule 5: Emergency split — split at best boundary, keep remainder
-        elif len(self._buffer) > self._emergency_max:
-            pos = self._find_split_point(self._buffer)
-            head = self._buffer[:pos].strip()
-            self._buffer = self._buffer[pos:]
+        # Rule 5: Emergency split — prevent infinite buffering
+        if split_pos <= 0 and len(self._buffer) > self._emergency_max:
+            split_pos = self._find_split_point(self._buffer)
+
+        if split_pos > 0:
+            head = self._buffer[:split_pos].strip()
+            self._buffer = self._buffer[split_pos:]
             return [head] if head else []
 
-        if should_split and self._buffer.strip():
-            sentence = self._buffer.strip()
-            self._buffer = ""
-            return [sentence]
-
         return []
+
+    @staticmethod
+    def _rfind_any(text: str, chars: frozenset[str]) -> int:
+        """Return the index of the last occurrence of any char in *chars*, or -1."""
+        for i in range(len(text) - 1, -1, -1):
+            if text[i] in chars:
+                return i
+        return -1
 
     @staticmethod
     def _find_split_point(text: str) -> int:

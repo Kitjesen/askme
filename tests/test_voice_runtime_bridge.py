@@ -1,3 +1,5 @@
+import pytest
+
 from askme.voice.runtime_bridge import VoiceRuntimeBridge
 
 
@@ -10,6 +12,15 @@ class _Response:
 
     def json(self):
         return self._payload
+
+
+@pytest.fixture(autouse=True)
+def _fake_precheck(monkeypatch):
+    """Make the init pre-check succeed so tests control failures via requests.post."""
+    monkeypatch.setattr(
+        "askme.voice.runtime_bridge.requests.get",
+        lambda *args, **kwargs: _Response({}),
+    )
 
 
 def test_voice_runtime_bridge_posts_turn(monkeypatch) -> None:
@@ -42,10 +53,13 @@ def test_voice_runtime_bridge_posts_turn(monkeypatch) -> None:
     result = bridge.handle_voice_text("start patrol")
 
     assert result["handled"] is True
-    assert captured["url"] == "http://127.0.0.1:5100/api/voice/turns"
+    assert captured["url"] == "http://127.0.0.1:5100/api/v1/voice/turns"
     assert captured["json"]["operator_id"] == "askme.voice"
     assert captured["headers"]["Authorization"] == "Bearer shared-secret"
     assert captured["json"]["channel"] == "voice"
+    assert captured["headers"]["X-Request-Id"]
+    assert captured["headers"]["X-Correlation-Id"] == captured["headers"]["X-Request-Id"]
+    assert captured["headers"]["Idempotency-Key"].startswith("voice-turn-")
 
 
 def test_voice_runtime_bridge_posts_text_turn_with_text_channel(monkeypatch) -> None:

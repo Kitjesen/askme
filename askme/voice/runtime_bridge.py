@@ -6,8 +6,11 @@ import logging
 import threading
 import time
 from typing import Any
+from uuid import uuid4
 
 import requests
+
+from .generated_contracts import AskmeEdgeVoiceContract
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,20 @@ class VoiceRuntimeBridge:
             logger.warning("VoiceRuntimeBridge enabled but base_url is empty; disabling bridge")
             self.enabled = False
             self.text_enabled = False
+
+        # Fast connectivity pre-check: if the upstream is unreachable at init
+        # time, disable immediately instead of waiting for 2 slow failures.
+        if (self.enabled or self.text_enabled) and self._base_url:
+            try:
+                requests.get(f"{self._base_url}{AskmeEdgeVoiceContract.HEALTH.path()}", timeout=0.5)
+            except requests.RequestException:
+                logger.info(
+                    "Voice runtime bridge: upstream %s unreachable at startup; "
+                    "disabling bridge (no retries)",
+                    self._base_url,
+                )
+                self.enabled = False
+                self.text_enabled = False
 
     def handle_voice_text(self, text: str) -> dict[str, Any] | None:
         return self.handle_turn(
@@ -87,17 +104,21 @@ class VoiceRuntimeBridge:
         if metadata:
             payload["metadata"] = metadata
 
+        request_id = uuid4().hex[:16]
         headers = {
             "Content-Type": "application/json",
             "X-Operator-Id": payload["operator_id"],
             "X-Service-Name": "askme",
+            "X-Request-Id": request_id,
+            "X-Correlation-Id": request_id,
+            "Idempotency-Key": f"voice-turn-{request_id}",
         }
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
         try:
             response = requests.post(
-                f"{self._base_url}/api/voice/turns",
+                f"{self._base_url}{AskmeEdgeVoiceContract.PROCESS_TURN.path()}",
                 json=payload,
                 headers=headers,
                 timeout=self._timeout_s,

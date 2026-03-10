@@ -3,13 +3,13 @@ name: robot_grab
 description: 控制机械臂抓取或释放物体
 version: 1.0.0
 trigger: voice
-model: deepseek-chat
+model: ""
 timeout: 15
 tags: [robot, gripper, grab]
 depends: []
 conflicts: [robot_estop]
 safety_level: dangerous
-voice_trigger: 抓住
+voice_trigger: 抓住,抓取,拿起来,放下,松开
 ---
 
 ## Tools

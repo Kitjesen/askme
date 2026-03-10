@@ -3,13 +3,13 @@ name: web_search
 description: 搜索互联网获取最新信息
 version: 1.0.0
 trigger: auto
-model: deepseek-chat
+model: ""
 timeout: 30
 tags: [search, web, information]
 depends: []
 conflicts: []
 safety_level: dangerous
-voice_trigger: 帮我搜索
+voice_trigger: 帮我搜索,搜索一下,搜一下,查一下,查询一下,上网查
 ---
 
 ## Tools

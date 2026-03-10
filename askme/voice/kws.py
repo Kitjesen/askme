@@ -56,9 +56,11 @@ class KWSEngine:
         )
 
         configured_keywords: list[str] = config.get("keywords", [])
-        legacy_keywords = {"你好", "小智", "浣犲ソ", "灏忔櫤"}
-        if configured_keywords and set(map(str, configured_keywords)).issubset(legacy_keywords):
-            configured_keywords = ["雷霆", "Thunder"]
+        # Empty keywords list = skip KWS entirely (always-on listening)
+        if not configured_keywords:
+            logger.info("KWS disabled: no keywords configured (always-on mode).")
+            self.spotter = None
+            return
 
         # Configured keywords take precedence over any existing keywords file so
         # wake-word changes apply immediately without manual file edits.

@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any
 
 from askme.config import get_config
@@ -198,6 +200,42 @@ class VisionBridge:
         except Exception as exc:
             logger.warning("[Vision] get_tracks error: %s", exc)
             return []
+
+    async def save_snapshot(
+        self,
+        frame: Any = None,
+        *,
+        label: str = "snapshot",
+        output_dir: str = "data/captures",
+    ) -> str | None:
+        """Capture current frame and save to disk. Returns file path or None.
+
+        Saved as: ``{output_dir}/{timestamp}_{label}.jpg``
+        """
+        try:
+            if frame is None:
+                frame = await asyncio.to_thread(self._capture_frame)
+            if frame is None:
+                return None
+            return await asyncio.to_thread(self._write_frame, frame, label, output_dir)
+        except Exception as exc:
+            logger.warning("[Vision] save_snapshot error: %s", exc)
+            return None
+
+    @staticmethod
+    def _write_frame(frame: Any, label: str, output_dir: str) -> str | None:
+        try:
+            import cv2  # type: ignore[import-untyped]
+        except ImportError:
+            return None
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        safe_label = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)
+        filename = f"{ts}_{safe_label}.jpg"
+        filepath = os.path.join(output_dir, filename)
+        cv2.imwrite(filepath, frame)
+        logger.info("[Vision] Snapshot saved: %s", filepath)
+        return filepath
 
     # ------------------------------------------------------------------
     # VLM (Claude Sonnet) fallback

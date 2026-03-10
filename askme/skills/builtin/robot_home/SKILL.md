@@ -3,13 +3,13 @@ name: robot_home
 description: 将机械臂归位到初始安全位置
 version: 1.0.0
 trigger: voice
-model: deepseek-chat
+model: ""
 timeout: 15
 tags: [robot, home, reset]
 depends: []
 conflicts: [robot_estop]
 safety_level: dangerous
-voice_trigger: 回到原位
+voice_trigger: 回到原位,回原位,归位,复位,回初始位置
 ---
 
 ## Tools

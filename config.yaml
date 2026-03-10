@@ -9,6 +9,7 @@ app:
   version: "4.0.0"
   data_dir: data
   log_level: INFO
+  log_file: dev-loop-main.log
 
 # ----------------------------------------------------------
 # Brain: LLM / Reasoning
@@ -18,7 +19,8 @@ brain:
   base_url: ${LLM_BASE_URL}
   model: claude-opus-4-6
   # Lightweight model for real-time voice turns (lower TTFT)
-  voice_model: claude-haiku-4-5-20251001
+  # NOTE: Haiku refuses character identity through relay — use Sonnet instead
+  voice_model: claude-sonnet-4-5-20250929
   # Max tokens for a single completion (0 = model default)
   max_tokens: 0
   temperature: 0.7
@@ -45,7 +47,9 @@ brain:
 # Memory: MemU / Embedding
 # ----------------------------------------------------------
 memory:
-  enabled: true
+  # Requires local embedding server (python -m memu.embed_server)
+  # Set true when embed server is running, false for standalone mode
+  enabled: false
   embed_url: ${LOCAL_EMBED_URL}
   embed_model: Qwen/Qwen3-Embedding-0.6B
   # Timeout (seconds) for embedding server reachability check
@@ -77,10 +81,11 @@ conversation:
 # ----------------------------------------------------------
 voice:
   asr:
-    model_dir: models/asr/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
+    # 2025-06 model: much better accuracy than 2023-02 bilingual
+    model_dir: models/asr/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30
     sample_rate: 16000
     feature_dim: 80
-    num_threads: 1
+    num_threads: 2
     # Endpoint detection silence thresholds (seconds)
     # rule1: long silence after short utterance, rule2: normal speech
     rule1_min_trailing_silence: 1.6
@@ -96,27 +101,40 @@ voice:
     sample_rate: 16000
     buffer_size_seconds: 30
 
+  punctuation:
+    # CT-Transformer: adds punctuation to raw ASR output for better TTS
+    model_path: models/punct/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.int8.onnx
+    num_threads: 2
+
   kws:
     model_dir: models/kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01
     num_threads: 1
-    keywords:
-      - "你好"
-      - "小智"
+    # Wake words (must be Chinese for wenetspeech model)
+    # Set empty to disable KWS (always-on listening mode for testing)
+    keywords: []
 
   tts:
-    # Backend: "local" (sherpa-onnx, fast) or "edge" (Edge TTS, network)
-    backend: edge
-    # Local backend settings
-    model_dir: models/tts/vits-zh-aishell3
+    # Backend: "local" (sherpa-onnx, fast, offline) or "edge" (Edge TTS, network)
+    # "local" = 低延迟，离线，声音固定
+    # "edge"  = 需要网络，声音丰富可选（见下方 voice 列表）
+    backend: local
+    # Local backend settings (MeloTTS: 44100Hz, natural Chinese)
+    model_dir: models/tts/vits-melo-tts-zh_en
     num_threads: 4
     speed: 1.0
-    sid: 0
-    # Edge backend settings (fallback)
-    voice: zh-CN-YunxiNeural
+    sid: 0   # speaker ID (this model has 1 speaker only)
+    # Edge backend settings — 切换 backend: edge 后生效
+    # 中文男声: zh-CN-YunxiNeural (活泼), zh-CN-YunjianNeural (沉稳)
+    # 中文女声: zh-CN-XiaoxiaoNeural (温柔), zh-CN-XiaoyiNeural (活力)
+    # 英文男声: en-US-GuyNeural, en-US-AndrewNeural
+    # 完整列表: edge-tts --list-voices
+    voice: zh-CN-YunjianNeural
     rate: "+0%"
     # Common
-    sample_rate: 24000
-    output_device: 3
+    sample_rate: 44100
+    # Output device index (see startup log for available devices)
+    # null = system default, or set to device index number e.g. 3
+    output_device: null
 
 # ----------------------------------------------------------
 # Vision: qp-perception (YOLO detection + tracking)
@@ -256,8 +274,10 @@ health_server:
 # ----------------------------------------------------------
 runtime:
   voice_bridge:
-    enabled: true
-    text_enabled: true
+    # Requires askme-edge-service running locally
+    # Set true when connected to NOVA Dog runtime stack
+    enabled: false
+    text_enabled: false
     base_url: ${ASKME_EDGE_SERVICE_URL}
     api_key: ${NOVA_DOG_RUNTIME_API_KEY}
     operator_id: askme.voice
