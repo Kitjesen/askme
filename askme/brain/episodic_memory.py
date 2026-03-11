@@ -448,7 +448,8 @@ class EpisodicMemory:
             return None
 
         self._reflecting = True
-        episodes_text = "\n".join(ep.to_log_line() for ep in self._buffer)
+        buffer_snapshot = list(self._buffer)  # snapshot before async LLM call
+        episodes_text = "\n".join(ep.to_log_line() for ep in buffer_snapshot)
         existing_knowledge = self._load_all_knowledge()
 
         prompt = REFLECT_PROMPT.format(
@@ -473,14 +474,35 @@ class EpisodicMemory:
                 logger.info("[EpisodicMemory] Reflection complete: %s",
                             reflection.get("summary", "")[:80])
 
-                # Clear reflected episodes from buffer
+                # Clear only the episodes we reflected on (preserve items added during await).
+                # Use identity-based drain: if maxlen eviction occurred during the 15s LLM
+                # call, the deque's left end may no longer contain the snapshot items.
                 self._flush_to_disk()
-                self._buffer.clear()
-                self._cumulative_importance = 0.0
+                snapshot_ids = {id(ep) for ep in buffer_snapshot}
+                importance_reflected = sum(
+                    ep.importance for ep in self._buffer if id(ep) in snapshot_ids
+                )
+                self._buffer = deque(
+                    (ep for ep in self._buffer if id(ep) not in snapshot_ids),
+                    maxlen=MAX_BUFFER_SIZE,
+                )
+                self._cumulative_importance = max(
+                    0.0, self._cumulative_importance - importance_reflected
+                )
+                # Re-write events that arrived during the LLM await so they
+                # survive a restart (the old journal file contains them too,
+                # but _restore_active_buffer only reads _active.jsonl).
                 self._clear_active_journal()
+                for ep in self._buffer:
+                    self._append_to_active_journal(ep)
 
                 return reflection.get("summary", "")
 
+        except asyncio.CancelledError:
+            # Re-raise so asyncio.Task.cancel() propagates correctly.
+            # Without this, the task appears "successfully completed" and
+            # _pending_tasks callbacks never see the cancelled state.
+            raise
         except Exception as exc:
             logger.warning("[EpisodicMemory] Reflection failed: %s", exc)
         finally:
@@ -609,20 +631,40 @@ class EpisodicMemory:
         """Replay the live journal into the in-memory buffer on startup."""
         if not self._active_file.exists():
             return
+        cutoff = time.time() - self._episode_retention_hours * 3600
+        skipped_expired = 0
+        skipped_corrupt = 0
         try:
             with open(self._active_file, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
-                    payload = json.loads(line)
-                    self._buffer.append(Episode.from_dict(payload))
+                    # Parse each line independently — a truncated/corrupt line
+                    # from an unclean shutdown must not discard the valid ones.
+                    try:
+                        payload = json.loads(line)
+                        ep = Episode.from_dict(payload)
+                    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+                        logger.warning(
+                            "Episode journal: skipping corrupt line: %s", exc
+                        )
+                        skipped_corrupt += 1
+                        continue
+                    # Skip episodes older than retention window — restoring
+                    # them after a long shutdown pollutes the reflection context
+                    # and causes immediate spurious should_reflect() triggers.
+                    if ep.timestamp < cutoff:
+                        skipped_expired += 1
+                        continue
+                    self._buffer.append(ep)
             self._total_logged = len(self._buffer)
             self._cumulative_importance = sum(ep.importance for ep in self._buffer)
-            if self._buffer:
+            if self._buffer or skipped_corrupt or skipped_expired:
                 logger.info(
-                    "[EpisodicMemory] Restored %d live episodes from journal",
-                    len(self._buffer),
+                    "[EpisodicMemory] Restored %d live episodes from journal "
+                    "(skipped: %d expired, %d corrupt)",
+                    len(self._buffer), skipped_expired, skipped_corrupt,
                 )
         except Exception as exc:
             logger.warning("Episode journal restore failed: %s", exc)
@@ -724,35 +766,43 @@ class EpisodicMemory:
     ) -> None:
         """Write knowledge to a category-specific file."""
         knowledge_file = self._knowledge_dir / f"{category}.md"
-        existing = ""
-        if knowledge_file.exists():
-            existing = knowledge_file.read_text(encoding="utf-8")
+        try:
+            existing = ""
+            if knowledge_file.exists():
+                existing = knowledge_file.read_text(encoding="utf-8")
 
-        cat_label = KNOWLEDGE_CATEGORIES.get(category, category)
-        header = f"# {category}: {cat_label}"
-        lines = existing.rstrip().split("\n") if existing.strip() else [header]
+            cat_label = KNOWLEDGE_CATEGORIES.get(category, category)
+            header = f"# {category}: {cat_label}"
+            lines = existing.rstrip().split("\n") if existing.strip() else [header]
 
-        # Handle updates (replace old facts)
-        for update in updates:
-            old_fact = update.get("old", "")
-            new_fact = update.get("new", "")
-            if old_fact and new_fact:
-                for i, line in enumerate(lines):
-                    if old_fact in line:
-                        lines[i] = f"- {new_fact}"
-                        logger.info("[Knowledge/%s] Updated: %s -> %s",
-                                    category, old_fact[:30], new_fact[:30])
-                        break
+            # Handle updates (replace old facts)
+            for update in updates:
+                old_fact = update.get("old", "")
+                new_fact = update.get("new", "")
+                if old_fact and new_fact:
+                    for i, line in enumerate(lines):
+                        if old_fact in line:
+                            lines[i] = f"- {new_fact}"
+                            logger.info("[Knowledge/%s] Updated: %s -> %s",
+                                        category, old_fact[:30], new_fact[:30])
+                            break
 
-        # Append new facts (dedup)
-        for fact in new_facts:
-            if not fact:
-                continue
-            fact_line = f"- {fact}"
-            if fact_line not in lines:
-                lines.append(fact_line)
+            # Append new facts (dedup)
+            for fact in new_facts:
+                if not fact:
+                    continue
+                fact_line = f"- {fact}"
+                if fact_line not in lines:
+                    lines.append(fact_line)
 
-        knowledge_file.write_text("\n".join(lines), encoding="utf-8")
+            knowledge_file.write_text("\n".join(lines), encoding="utf-8")
+        except OSError as exc:
+            # Disk full, permission error, Windows file lock, etc.
+            # Log and return — do NOT propagate. The caller (_update_knowledge)
+            # must still reach the buffer-drain step; an unhandled exception
+            # here would leave the buffer un-cleared while the cooldown timer
+            # has already been advanced, causing duplicate knowledge entries.
+            logger.warning("[Knowledge/%s] Write failed, skipping: %s", category, exc)
 
     def _load_all_knowledge(self) -> str:
         """Load all knowledge .md files into a single string."""
@@ -767,15 +817,38 @@ class EpisodicMemory:
         return "\n\n".join(parts)
 
     def _parse_reflection(self, response: str) -> dict[str, Any] | None:
-        """Extract JSON from LLM reflection response."""
-        try:
-            # Find JSON in response
-            start = response.find("{")
-            end = response.rfind("}") + 1
-            if start >= 0 and end > start:
-                return json.loads(response[start:end])
-        except (json.JSONDecodeError, ValueError):
-            logger.warning("Failed to parse reflection JSON: %s", response[:100])
+        """Extract JSON from LLM reflection response using balanced brace matching."""
+        start = response.find("{")
+        if start < 0:
+            return None
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i, ch in enumerate(response[start:], start):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\" and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(response[start : i + 1])
+                    except (json.JSONDecodeError, ValueError):
+                        logger.warning(
+                            "Failed to parse reflection JSON: %s", response[:100]
+                        )
+                        return None
+        logger.warning("Failed to parse reflection JSON: %s", response[:100])
         return None
 
     # ── Cleanup ────────────────────────────────────────────

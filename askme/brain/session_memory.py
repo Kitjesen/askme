@@ -129,7 +129,9 @@ class SessionMemory:
 
     def _save_summary(self, summary: str) -> None:
         """Write summary to a timestamped .md file."""
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        # Use microsecond precision to avoid silent overwrite when two trim
+        # tasks fire within the same second (e.g. rapid consecutive turns).
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
         filepath = self._sessions_dir / f"{timestamp}.md"
         filepath.write_text(summary, encoding="utf-8")
 

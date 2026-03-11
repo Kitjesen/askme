@@ -164,3 +164,26 @@ async def test_skill_executor_returns_error_when_llm_fails():
     result = await executor.execute(skill, {"user_input": "echo this"})
 
     assert result == "[Error] Skill 'echo' execution failed: relay unavailable"
+
+
+def test_build_prompt_strips_unresolved_placeholders() -> None:
+    """Unresolved {{vars}} should not reach the LLM as literal template syntax."""
+    skill = SkillDefinition(
+        name="patrol_report",
+        prompt_template="Time: {{current_time}}\nData: {{patrol_data}}\nInput: {{user_input}}",
+    )
+    result = skill.build_prompt({"current_time": "2026-01-01 12:00:00"})
+    assert "{{" not in result
+    assert "2026-01-01 12:00:00" in result
+    assert "Data: " in result   # placeholder stripped, label preserved
+    assert "Input: " in result  # placeholder stripped, label preserved
+
+
+def test_build_prompt_with_full_context() -> None:
+    """All placeholders should be substituted when context is complete."""
+    skill = SkillDefinition(
+        name="test",
+        prompt_template="Hello {{name}}, time is {{time}}.",
+    )
+    result = skill.build_prompt({"name": "Thunder", "time": "noon"})
+    assert result == "Hello Thunder, time is noon."

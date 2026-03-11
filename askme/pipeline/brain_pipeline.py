@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from askme.brain.memory_bridge import MemoryBridge
     from askme.brain.session_memory import SessionMemory
     from askme.brain.vision_bridge import VisionBridge
+    from askme.dog_control_client import DogControlClient
+    from askme.dog_safety_client import DogSafetyClient
     from askme.robot.arm_controller import ArmController
     from askme.skills.skill_executor import SkillExecutor
     from askme.skills.skill_manager import SkillManager
@@ -100,6 +102,8 @@ class BrainPipeline:
         audio: AudioAgent,
         splitter: StreamSplitter,
         arm_controller: ArmController | None = None,
+        dog_safety_client: DogSafetyClient | None = None,
+        dog_control_client: DogControlClient | None = None,
         vision: VisionBridge | None = None,
         session_memory: SessionMemory | None = None,
         episodic_memory: EpisodicMemory | None = None,
@@ -118,6 +122,8 @@ class BrainPipeline:
         self._audio = audio
         self._splitter = splitter
         self._arm = arm_controller
+        self._dog_safety = dog_safety_client
+        self._dog_control = dog_control_client
         self._vision = vision
         self._session_memory = session_memory
         self._episodic = episodic_memory
@@ -127,6 +133,7 @@ class BrainPipeline:
         self._voice_model = voice_model  # fast model for real-time voice turns
         self._general_tool_max_safety_level = general_tool_max_safety_level
         self._think_filter = _ThinkFilter()
+        self._pending_tasks: set[asyncio.Task[Any]] = set()
 
     # ── Public API ───────────────────────────────────────────
 
@@ -235,40 +242,101 @@ class BrainPipeline:
                         except Exception as e:
                             logger.error("[Episodic] Reflection failed: %s", e)
 
-                    asyncio.create_task(_delayed_reflect())
+                    t = asyncio.create_task(_delayed_reflect())
+                    self._pending_tasks.add(t)
+                    t.add_done_callback(self._pending_tasks.discard)
 
             return full_response
         except Exception as exc:
             logger.error("LLM pipeline error: %s", exc)
             if self._episodic:
                 self._episodic.log("error", f"LLM错误: {exc}")
-            # Audio feedback so user knows something went wrong
-            self._audio.speak_error()
-            return f"[Error] {exc}"
+            self._audio.speak(self._classify_error_message(exc))
+            # Write an error placeholder so conversation history stays
+            # user/assistant alternating. Without this, the next request
+            # arrives with a history ending on "user" and some LLM APIs
+            # return 400 — permanently breaking the session until /clear.
+            error_msg = f"[Error] {exc}"
+            self._conversation.add_assistant_message(error_msg)
+            return error_msg
         finally:
             self._audio.stop_playback()
 
-    async def execute_skill(self, skill_name: str, user_text: str) -> str:
-        """Execute a named skill and speak the result."""
+    async def execute_skill(
+        self, skill_name: str, user_text: str, extra_context: str = ""
+    ) -> str:
+        """Execute a named skill and speak the result.
+
+        *extra_context* is injected as ``mission_context`` into the skill's
+        execution context dict — used by SkillDispatcher to pass prior mission
+        step history so multi-step skills share state.
+        """
         skill = self._skill_manager.get(skill_name)
         if not skill:
             return f"[Skill] Not found: {skill_name}"
+
+        # Task 2: Dependency check — warn only, never block execution
+        if skill.depends:
+            for dep in skill.depends:
+                dep_skill = self._skill_manager.get(dep)
+                if dep_skill is None:
+                    logger.warning(
+                        "Skill '%s' depends on '%s' which is not available",
+                        skill_name, dep,
+                    )
 
         logger.info("Executing skill: %s", skill_name)
         self._audio.drain_buffers()
         if self._episodic:
             self._episodic.log("action", f"执行技能: {skill_name}")
 
+        _now = __import__("datetime").datetime.now()
         context: dict[str, str] = {
             "user_input": user_text,
-            "current_time": __import__("datetime").datetime.now().strftime(
-                "%Y-%m-%d %H:%M:%S"
-            ),
+            "current_time": _now.strftime("%Y-%m-%d %H:%M:%S"),
+            "current_date": _now.strftime("%Y-%m-%d"),
+            "semantic_target": self._extract_semantic_target(user_text),
         }
+        if extra_context:
+            context["mission_context"] = extra_context
         if self._arm:
             context["robot_state"] = json.dumps(
                 self._arm.get_state(), ensure_ascii=False
             )
+        # Task 1: dog_control skill — dispatch capability to dog-control-service
+        # Maps voice姿态 intents to runtime capability names, then falls through
+        # to the LLM prompt for user-facing confirmation.
+        if skill_name == "dog_control" and self._dog_control and self._dog_control.is_configured():
+            _capability_map = {
+                "站起来": "stand",
+                "站立": "stand",
+                "坐下": "sit",
+                "趴下": "sit",  # dog-control-service does not yet distinguish sit vs prone
+            }
+            for phrase, capability in _capability_map.items():
+                if phrase in user_text:
+                    logger.info(
+                        "[DogControl] Dispatching capability '%s' for phrase '%s'",
+                        capability, phrase,
+                    )
+                    dispatch_result = await asyncio.to_thread(
+                        self._dog_control.dispatch_capability, capability, {}
+                    )
+                    if "error" in dispatch_result:
+                        logger.warning(
+                            "[DogControl] Capability dispatch failed: %s",
+                            dispatch_result["error"],
+                        )
+                    break
+
+        # Inject episodic data for patrol_report so LLM doesn't fabricate
+        if skill_name == "patrol_report" and self._episodic:
+            parts = [
+                self._episodic.get_recent_digest(),
+                self._episodic.get_knowledge_context(),
+            ]
+            patrol_data = "\n".join(p for p in parts if p)
+            context["patrol_data"] = patrol_data or ""
 
         self._audio.start_playback()
         try:
@@ -291,17 +359,35 @@ class BrainPipeline:
             logger.error("Skill error (%s): %s", skill_name, exc)
             if self._episodic:
                 self._episodic.log("error", f"技能错误 {skill_name}: {exc}")
-            self._audio.speak_error()
+            self._audio.speak(self._classify_skill_error_message(exc, skill_name))
             return f"[Skill Error] {exc}"
         finally:
             self._audio.stop_playback()
 
+    async def shutdown(self) -> None:
+        """Cancel all in-flight background tasks (delayed reflections, etc.)."""
+        tasks = list(self._pending_tasks)
+        if tasks:
+            logger.info("BrainPipeline shutdown: cancelling %d pending tasks", len(tasks))
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._pending_tasks.clear()
+
     def handle_estop(self) -> None:
-        """Emergency stop — immediately halt robot motion."""
+        """Emergency stop — halt local arm motion and notify dog-safety-service.
+
+        Local arm stop is synchronous (immediate).
+        Runtime safety notification is fire-and-forget (non-blocking).
+        """
         logger.warning("E-STOP triggered!")
         if self._arm:
             self._arm.emergency_stop()
-        logger.warning("E-STOP: All motion halted.")
+        # Notify Thunder runtime safety layer — non-blocking, best-effort
+        if self._dog_safety and self._dog_safety.is_configured():
+            self._dog_safety.notify_estop()
+            logger.warning("E-STOP: notified dog-safety-service")
+        logger.warning("E-STOP: local motion halted.")
 
     def has_pending_tool_approval(self) -> bool:
         """Whether a dangerous tool invocation is waiting for operator approval."""
@@ -516,22 +602,12 @@ class BrainPipeline:
                 approval_response = str(result)
                 break
 
-        # Append ONE assistant message with all tool calls
-        self._conversation.history.append({
-            "role": "assistant",
-            "content": None,
-            "tool_calls": tool_call_objs,
-        })
-        # Append each tool result
-        for tr in tool_results:
-            self._conversation.history.append({
-                "role": "tool",
-                "tool_call_id": tr["tool_call_id"],
-                "content": tr["content"],
-            })
-
         if approval_response is not None:
+            # Do NOT record to history when approval is pending —
+            # the tool will be re-executed after operator confirmation.
             return approval_response
+
+        self._conversation.add_tool_exchange(tool_call_objs, tool_results)
 
         # Follow-up LLM call with tool results
         follow_msgs = self._prepare_messages(
@@ -565,6 +641,47 @@ class BrainPipeline:
             self._audio.speak(remainder)
 
         return full_response
+
+    def _extract_semantic_target(self, user_text: str) -> str:
+        """Extract navigation target from natural language commands."""
+        patterns = [
+            r"导航到(.{1,20}?)(?:吧|啊|嗯|[。！？]|$)",
+            r"带我去(.{1,20}?)(?:吧|啊|嗯|[。！？]|$)",
+            r"前往(.{1,20}?)(?:吧|啊|嗯|[。！？]|$)",
+            r"走到(.{1,20}?)(?:吧|啊|嗯|[。！？]|$)",
+            r"去(.{1,20}?)(?:吧|啊|嗯|[。！？]|$)",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, user_text)
+            if m:
+                target = m.group(1).strip()
+                if target:
+                    return target
+        return user_text
+
+    def _classify_error_message(self, exc: Exception) -> str:
+        """Return a user-facing voice message for an LLM pipeline error."""
+        try:
+            from openai import APIConnectionError, APITimeoutError
+            if isinstance(exc, (asyncio.TimeoutError, APITimeoutError)):
+                return "响应超时，请再说一遍。"
+            if isinstance(exc, APIConnectionError):
+                return "网络连接异常，请稍候重试。"
+        except ImportError:
+            pass
+        if "timeout" in str(exc).lower():
+            return "响应超时，请再说一遍。"
+        if "connect" in str(exc).lower() or "network" in str(exc).lower():
+            return "网络连接异常，请稍候重试。"
+        return "处理出错，请重试。"
+
+    def _classify_skill_error_message(self, exc: Exception, skill_name: str) -> str:
+        """Return a user-facing voice message for a skill execution error."""
+        if isinstance(exc, asyncio.TimeoutError):
+            return f"技能执行超时，已跳过。"
+        if "connect" in str(exc).lower() or "network" in str(exc).lower():
+            return "网络异常，技能执行失败。"
+        return "技能执行失败，请重试。"
 
     def _build_system_prompt(
         self,

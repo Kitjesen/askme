@@ -93,7 +93,8 @@ class TTSEngine:
         self._generation_lock = threading.Lock()
         self._generation = 0
 
-        # Playback state
+        # Playback state — guarded by _playback_lock
+        self._playback_lock = threading.Lock()
         self._is_playing = False
         self._playback_thread: threading.Thread | None = None
 
@@ -247,25 +248,39 @@ class TTSEngine:
 
     def start_playback(self) -> None:
         """Start the sounddevice output stream in a background thread."""
-        if self._is_playing:
-            return
-        self._is_playing = True
-        self._playback_thread = threading.Thread(target=self._playback_loop, daemon=True)
-        self._playback_thread.start()
+        with self._playback_lock:
+            if self._is_playing:
+                return
+            self._is_playing = True
+            self._playback_thread = threading.Thread(target=self._playback_loop, daemon=True)
+            self._playback_thread.start()
 
     def stop_playback(self) -> None:
         """Stop the sounddevice output stream."""
-        self._is_playing = False
-        if self._playback_thread is not None and self._playback_thread.is_alive():
-            self._playback_thread.join(timeout=1.0)
+        with self._playback_lock:
+            self._is_playing = False
+            thread = self._playback_thread
             self._playback_thread = None
+        # Join outside the lock — _playback_loop reads _is_playing to exit its while loop
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
+    def is_active(self) -> bool:
+        """Return True if audio is buffered or playback is in progress."""
+        with self._playback_lock:
+            playing = self._is_playing
+        return playing or self._has_buffered_audio()
 
     def wait_done(self) -> None:
         """Block until all queued text has been synthesised and played."""
         self.tts_text_queue.join()
         while self._has_buffered_audio():
-            time.sleep(0.1)
-        time.sleep(0.5)  # grace period for the last audio chunk
+            time.sleep(0.05)
+        # Wait for the last block to drain through the sounddevice ring buffer.
+        # 1024 frames @ 24kHz ≈ 43ms, but Windows time.sleep() has ~15ms
+        # granularity plus scheduling jitter — 150ms provides a safe margin
+        # so the tail of each utterance is not clipped by stop_playback().
+        time.sleep(0.15)
 
     def drain_buffers(self) -> None:
         """Clear all pending TTS text and audio buffers."""
@@ -370,11 +385,11 @@ class TTSEngine:
 
     def _run_async(self, coro) -> bool:
         """Run an async coroutine in a new event loop. Returns True on success."""
+        loop = None
         try:
-            loop = asyncio.new_event_loop()
             if sys.platform == "win32":
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-                loop = asyncio.new_event_loop()
+            loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(coro)
             return True
@@ -382,7 +397,8 @@ class TTSEngine:
             logger.error("TTS async error: %s", exc)
             return False
         finally:
-            loop.close()
+            if loop is not None:
+                loop.close()
 
     # ------------------------------------------------------------------
     # Local backend (sherpa-onnx)
@@ -537,6 +553,12 @@ class TTSEngine:
                     sd.sleep(100)
         except Exception as e:
             logger.error("Playback error: %s", e)
+        finally:
+            # Always clear _is_playing on exit — prevents start_playback() from
+            # getting permanently blocked and wait_done() from deadlocking when
+            # the audio device is unavailable or throws.
+            with self._playback_lock:
+                self._is_playing = False
 
     # ------------------------------------------------------------------
     # Generation tracking

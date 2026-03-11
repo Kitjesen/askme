@@ -171,6 +171,8 @@ def validate_config(config: dict | None = None) -> list[str]:
     """Return a list of configuration problems (empty = all OK).
 
     Checks required fields and reports missing/invalid values.
+    Warnings about type/range issues are also included — callers should
+    log them but must not crash; only hard-missing fields are errors.
     """
     if config is None:
         config = get_config()
@@ -183,6 +185,80 @@ def validate_config(config: dict | None = None) -> list[str]:
         errors.append("brain.api_key (DEEPSEEK_API_KEY) is required")
     if not brain.get("base_url"):
         errors.append("brain.base_url (DEEPSEEK_BASE_URL) is required")
+
+    # brain.timeout — must be a number > 0
+    timeout_val = brain.get("timeout")
+    if timeout_val is not None:
+        try:
+            timeout_f = float(timeout_val)
+            if timeout_f <= 0:
+                errors.append(
+                    f"brain.timeout must be > 0, got {timeout_val!r}"
+                )
+        except (TypeError, ValueError):
+            errors.append(
+                f"brain.timeout must be a number, got {timeout_val!r}"
+            )
+
+    # brain.max_retries — must be integer 0-10
+    max_retries_val = brain.get("max_retries")
+    if max_retries_val is not None:
+        try:
+            max_retries_i = int(max_retries_val)
+            if not (0 <= max_retries_i <= 10):
+                errors.append(
+                    f"brain.max_retries must be 0-10, got {max_retries_val!r}"
+                )
+        except (TypeError, ValueError):
+            errors.append(
+                f"brain.max_retries must be an integer, got {max_retries_val!r}"
+            )
+
+    # brain.model — must not be empty when present
+    model_val = brain.get("model")
+    if model_val is not None and not str(model_val).strip():
+        errors.append("brain.model must not be an empty string")
+
+    # conversation.max_history — must be integer 10-200
+    conv = config.get("conversation", {})
+    max_history_val = conv.get("max_history")
+    if max_history_val is not None:
+        try:
+            max_history_i = int(max_history_val)
+            if not (10 <= max_history_i <= 200):
+                errors.append(
+                    f"conversation.max_history must be 10-200, got {max_history_val!r}"
+                )
+        except (TypeError, ValueError):
+            errors.append(
+                f"conversation.max_history must be an integer, got {max_history_val!r}"
+            )
+
+    # health_server.port — must be integer 1024-65535
+    health_cfg = config.get("health_server", {})
+    port_val = health_cfg.get("port")
+    if port_val is not None:
+        try:
+            port_i = int(port_val)
+            if not (1024 <= port_i <= 65535):
+                errors.append(
+                    f"health_server.port must be 1024-65535, got {port_val!r}"
+                )
+        except (TypeError, ValueError):
+            errors.append(
+                f"health_server.port must be an integer, got {port_val!r}"
+            )
+
+    # tools.general_chat_max_safety_level — must be one of the allowed values
+    _ALLOWED_SAFETY_LEVELS = {"normal", "dangerous", "critical"}
+    tools_cfg = config.get("tools", {})
+    safety_level_val = tools_cfg.get("general_chat_max_safety_level")
+    if safety_level_val is not None:
+        if str(safety_level_val) not in _ALLOWED_SAFETY_LEVELS:
+            errors.append(
+                f"tools.general_chat_max_safety_level must be one of "
+                f"{sorted(_ALLOWED_SAFETY_LEVELS)}, got {safety_level_val!r}"
+            )
 
     # Voice TTS (no validation needed -- edge-tts requires no API key)
 

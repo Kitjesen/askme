@@ -72,6 +72,13 @@ class SkillExecutor:
             max_safety_level=max_safety_level,
         )
 
+        # Exclude dispatch_skill from skill tool sets — prevents recursive dispatch
+        # which would saturate the thread pool via asyncio.run_coroutine_threadsafe.
+        tool_definitions = [
+            td for td in tool_definitions
+            if td.get("function", {}).get("name") != "dispatch_skill"
+        ]
+
         # If the skill specifies a tools section, filter to only those tools
         allowed_tools: list[str] | None = None
         if skill.tools_section:
@@ -98,6 +105,8 @@ class SkillExecutor:
         if context and "user_input" in context:
             messages.append({"role": "user", "content": context["user_input"]})
 
+        import time as _time
+        t_start = _time.perf_counter()
         try:
             result = await asyncio.wait_for(
                 self._run_tool_loop(
@@ -110,20 +119,30 @@ class SkillExecutor:
                 ),
                 timeout=timeout,
             )
+            duration_s = _time.perf_counter() - t_start
             if self._metrics is not None:
+                success = not result.startswith("[Error]") and not result.startswith("[Timeout]")
                 self._metrics.record_skill_execution(
-                    success=not result.startswith("[Error]") and not result.startswith("[Timeout]")
+                    success=success,
+                    skill_name=skill.name,
+                    duration_s=duration_s,
                 )
             return result
         except asyncio.TimeoutError:
+            duration_s = _time.perf_counter() - t_start
             logger.warning("Skill '%s' timed out after %ds", skill.name, timeout)
             if self._metrics is not None:
-                self._metrics.record_skill_execution(success=False)
+                self._metrics.record_skill_execution(
+                    success=False, skill_name=skill.name, duration_s=duration_s,
+                )
             return f"[Timeout] Skill '{skill.name}' execution timed out after {timeout}s."
         except Exception as exc:
+            duration_s = _time.perf_counter() - t_start
             logger.warning("Skill '%s' failed: %s", skill.name, exc)
             if self._metrics is not None:
-                self._metrics.record_skill_execution(success=False)
+                self._metrics.record_skill_execution(
+                    success=False, skill_name=skill.name, duration_s=duration_s,
+                )
             return f"[Error] Skill '{skill.name}' execution failed: {exc}"
 
     async def _run_tool_loop(

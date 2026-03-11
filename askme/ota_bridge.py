@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -45,9 +46,13 @@ class OTABridgeMetrics:
             self._llm_last_latency_ms: float | None = None
             self._llm_last_mode: str | None = None
             self._llm_last_model: str | None = None
+            # Rolling window of last 100 LLM latencies (ms) for percentile calc
+            self._llm_latency_window: deque[float] = deque(maxlen=100)
             self._skill_run_count = 0
             self._skill_success_count = 0
             self._skill_failure_count = 0
+            # Per-skill stats: {skill_name: {calls, success, failure, total_ms, last_ms}}
+            self._skill_stats: dict[str, dict[str, Any]] = {}
             self._voice_state: dict[str, Any] = {
                 "mode": "text",
                 "enabled": False,
@@ -86,18 +91,39 @@ class OTABridgeMetrics:
                 self._llm_failure_count += 1
             self._llm_total_latency_ms += latency_ms
             self._llm_last_latency_ms = latency_ms
+            self._llm_latency_window.append(latency_ms)
             if mode:
                 self._llm_last_mode = mode
             if model:
                 self._llm_last_model = model
 
-    def record_skill_execution(self, *, success: bool) -> None:
+    def record_skill_execution(
+        self,
+        *,
+        success: bool,
+        skill_name: str = "",
+        duration_s: float = 0.0,
+    ) -> None:
+        latency_ms = round(max(duration_s, 0.0) * 1000.0, 2)
         with self._lock:
             self._skill_run_count += 1
             if success:
                 self._skill_success_count += 1
             else:
                 self._skill_failure_count += 1
+            if skill_name:
+                s = self._skill_stats.setdefault(
+                    skill_name,
+                    {"calls": 0, "success": 0, "failure": 0,
+                     "total_ms": 0.0, "last_ms": None},
+                )
+                s["calls"] += 1
+                s["total_ms"] += latency_ms
+                s["last_ms"] = latency_ms
+                if success:
+                    s["success"] += 1
+                else:
+                    s["failure"] += 1
 
     def update_voice_state(self, **updates: Any) -> None:
         with self._lock:
@@ -134,6 +160,16 @@ class OTABridgeMetrics:
                 if skill_run_count
                 else None
             )
+            latency_percentiles = _compute_percentiles(list(self._llm_latency_window))
+            per_skill = {
+                name: {
+                    **stats,
+                    "avg_ms": round(stats["total_ms"] / stats["calls"], 2)
+                    if stats["calls"]
+                    else None,
+                }
+                for name, stats in self._skill_stats.items()
+            }
             return {
                 "uptime_seconds": round(max(time.time() - self._started_at, 0.0), 2),
                 "conversation_count": self._conversation_count,
@@ -143,6 +179,9 @@ class OTABridgeMetrics:
                     "failure_count": self._llm_failure_count,
                     "last_latency_ms": self._llm_last_latency_ms,
                     "average_latency_ms": llm_average,
+                    "p50_latency_ms": latency_percentiles.get("p50"),
+                    "p95_latency_ms": latency_percentiles.get("p95"),
+                    "p99_latency_ms": latency_percentiles.get("p99"),
                     "last_mode": self._llm_last_mode,
                     "last_model": self._llm_last_model,
                 },
@@ -151,9 +190,26 @@ class OTABridgeMetrics:
                     "success_count": self._skill_success_count,
                     "failure_count": self._skill_failure_count,
                     "success_rate": skill_success_rate,
+                    "per_skill": per_skill,
                 },
                 "voice_pipeline": dict(self._voice_state),
             }
+
+
+def _compute_percentiles(values: list[float]) -> dict[str, float | None]:
+    """Return p50/p95/p99 for a sorted list of latency samples."""
+    if not values:
+        return {"p50": None, "p95": None, "p99": None}
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+
+    def _pct(p: float) -> float:
+        idx = (p / 100.0) * (n - 1)
+        lo, hi = int(idx), min(int(idx) + 1, n - 1)
+        frac = idx - lo
+        return round(sorted_vals[lo] * (1 - frac) + sorted_vals[hi] * frac, 2)
+
+    return {"p50": _pct(50), "p95": _pct(95), "p99": _pct(99)}
 
 
 _GLOBAL_OTA_METRICS = OTABridgeMetrics()
@@ -248,6 +304,11 @@ class OTABridge:
             return None
         if self._task is not None and not self._task.done():
             return self._task
+        # Clear a dead task so a fresh one can be created. Without this,
+        # an unexpected exception in _run() would permanently stop the bridge
+        # because start() would return the already-done task on every call.
+        if self._task is not None and self._task.done():
+            self._task = None
         self._set_connection_state("starting", clear_error=True)
         self._stop_event = asyncio.Event()
         self._task = asyncio.create_task(self._run(), name="askme-ota-bridge")
@@ -653,7 +714,8 @@ class OTABridge:
             self._save_state()
 
     def _is_registered(self) -> bool:
-        return bool(self._device_id and self._device_token)
+        with self._state_lock:
+            return bool(self._device_id and self._device_token)
 
     async def _sleep_or_stop(self, delay_s: float) -> None:
         try:

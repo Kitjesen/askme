@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -68,6 +69,7 @@ class ConversationManager:
         self._session_memory = session_memory
         self._metrics = metrics
         self.history: list[dict[str, Any]] = []
+        self._compress_backoff_until: float = 0.0  # back off after compression failure
         self._load()
 
     # ------------------------------------------------------------------
@@ -88,6 +90,31 @@ class ConversationManager:
         self._trim()
         self._save()
 
+    def add_tool_exchange(
+        self,
+        tool_calls: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+    ) -> None:
+        """Record one assistant tool-call turn and its results.
+
+        Tool messages are ephemeral — ``_trim()`` strips them on the next
+        regular turn, keeping only user/assistant text in long-term history.
+        No ``_save()`` here: tool exchanges are transient within a single turn.
+        """
+        if not tool_calls:
+            return
+        self.history.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": tool_calls,
+        })
+        for tr in tool_results:
+            self.history.append({
+                "role": "tool",
+                "tool_call_id": tr["tool_call_id"],
+                "content": tr["content"],
+            })
+
     def get_messages(self, system_prompt: str) -> list[dict[str, Any]]:
         """Return the full message list with system prompt prepended."""
         return [{"role": "system", "content": system_prompt}] + self.history
@@ -107,6 +134,14 @@ class ConversationManager:
 
         Called by BrainPipeline at the start of each turn.
         """
+        if time.monotonic() < self._compress_backoff_until:
+            return
+
+        # Skip compression while a tool exchange is in flight — compressing
+        # mid-exchange would drop the tool messages and corrupt the API context.
+        if any(m.get("role") == "assistant" and m.get("tool_calls") for m in self.history):
+            return
+
         regular = [
             m for m in self.history
             if m.get("role") in ("user", "assistant") and m.get("content")
@@ -160,6 +195,7 @@ class ConversationManager:
             logger.info("[Conversation] Compressed %d messages into summary", len(to_compress))
         except Exception as exc:
             logger.warning("[Conversation] Compression failed: %s", exc)
+            self._compress_backoff_until = time.monotonic() + 60.0  # retry after 60s
 
     # ------------------------------------------------------------------
     # Internal
@@ -182,8 +218,13 @@ class ConversationManager:
             # Summarize dropped messages in background (fire-and-forget)
             if dropped and self._session_memory:
                 try:
-                    asyncio.get_running_loop().create_task(
+                    task = asyncio.get_running_loop().create_task(
                         self._session_memory.summarize_and_save(dropped)
+                    )
+                    task.add_done_callback(
+                        lambda t: t.exception() and logger.warning(
+                            "[Conversation] Session summary failed: %s", t.exception()
+                        )
                     )
                 except RuntimeError:
                     # No event loop running (e.g. during tests)
@@ -205,6 +246,36 @@ class ConversationManager:
         try:
             if self._history_file.exists():
                 with open(self._history_file, "r", encoding="utf-8") as fh:
-                    self.history = json.load(fh)
+                    raw = json.load(fh)
+                self.history = self._strip_orphan_tool_messages(raw)
         except Exception:
             self.history = []
+
+    @staticmethod
+    def _strip_orphan_tool_messages(history: list[dict]) -> list[dict]:
+        """Remove tool-call messages that lack a proper context on load.
+
+        Guards against rare crash windows where a tool exchange was partially
+        persisted to disk without the paired assistant or follow-up message.
+        """
+        clean: list[dict] = []
+        for msg in history:
+            role = msg.get("role")
+            if role == "tool":
+                # Keep if preceded by an assistant tool_calls msg OR another tool result
+                # (multiple tool results from the same assistant tool_calls are all valid)
+                prev = clean[-1] if clean else None
+                preceded_by_assistant = (
+                    prev is not None
+                    and prev.get("role") == "assistant"
+                    and prev.get("tool_calls")
+                )
+                preceded_by_tool = prev is not None and prev.get("role") == "tool"
+                if preceded_by_assistant or preceded_by_tool:
+                    clean.append(msg)
+                # else drop orphan tool message
+            elif role == "assistant" and not msg.get("content") and not msg.get("tool_calls"):
+                pass  # drop degenerate empty assistant message
+            else:
+                clean.append(msg)
+        return clean

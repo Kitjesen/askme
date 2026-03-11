@@ -217,8 +217,11 @@ class AudioAgent:
                     # Echo gate: during TTS playback, suppress low-energy mic
                     # input to prevent speaker echo from triggering VAD.
                     # High-energy input (user barge-in) still passes through.
-                    tts_active = self.tts._has_buffered_audio() or self.tts._is_playing
-                    if tts_active and self._echo_gate_peak > 0 and peak < self._echo_gate_peak:
+                    # Do NOT gate once speech_active=True — the user is already
+                    # speaking (barge-in), so we must keep feeding VAD+ASR even
+                    # if volume drops, or the utterance will be silently truncated.
+                    tts_active = self.tts.is_active()
+                    if tts_active and self._echo_gate_peak > 0 and peak < self._echo_gate_peak and not speech_active:
                         pre_roll.append(samples.copy())
                         # Still log periodically
                         now = time.monotonic()

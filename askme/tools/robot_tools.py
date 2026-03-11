@@ -1,8 +1,24 @@
 """
-Robot control tools for askme.
+Robot arm control tools for askme (standalone arm product scope).
 
-These tools wrap an ArmController instance and expose robot operations
-as LLM-callable tools. Only registered when robot mode is enabled.
+These tools wrap an ArmController instance and expose arm operations
+as LLM-callable tools.  Only registered when robot mode is enabled.
+
+ARCHITECTURE NOTE
+-----------------
+These tools communicate directly with the robot arm (via ArmController →
+SerialBridge) because the arm product does not yet have a runtime control
+service layer.  They are intentionally separate from the NOVA Dog runtime
+control plane (dog-control-service / dog-safety-service), which governs
+Thunder (四足) motion.
+
+When an arm-control-service is added to the runtime, these tools should be
+updated to route through that service rather than calling ArmController
+directly.
+
+Voice-triggered E-STOP (IntentRouter → pipeline.handle_estop()) does NOT
+use these tools — it calls ArmController directly AND notifies
+dog-safety-service via DogSafetyClient for Thunder runtime awareness.
 """
 
 from __future__ import annotations

@@ -158,15 +158,21 @@ class LLMClient:
         *,
         model: str | None = None,
         temperature: float | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | None = None,
     ) -> str:
         """Non-streaming convenience: return the full assistant reply as a string.
 
         Retries on transient errors and falls back to alternate models.
+        Supports tool calling — pass ``tools`` and ``tool_choice`` as needed.
+        For callers that only need text, omit both (defaults to None).
         """
         response = await self.chat_completion(
             messages,
             model=model,
             temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         return response.choices[0].message.content or ""
 
@@ -342,7 +348,7 @@ class LLMClient:
 
         if last_exc:
             raise last_exc
-        return None
+        raise RuntimeError("_completion_with_retry: exhausted all retries with no exception recorded")
 
 
 def _backoff(attempt: int) -> float:

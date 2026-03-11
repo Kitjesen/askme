@@ -112,3 +112,26 @@ class TestHealthServer:
         assert 'askme_active_skill_info{skill="dock_charge"} 1' in response.text
         assert "askme_voice_pipeline_ok 1" in response.text
         assert "askme_ota_bridge_registered 1" in response.text
+
+
+class TestVoiceBridgeSnapshot:
+    """Cover the voice_bridge=None / voice_bridge=<dict> branches of build_health_snapshot."""
+
+    _BASE_KWARGS = dict(
+        app_name="askme",
+        app_version="4.0.0",
+        model_name="claude-opus-4-6",
+        metrics_snapshot={"uptime_seconds": 1.0},
+        active_skills=[],
+        voice_status={"pipeline_ok": True},
+    )
+
+    def test_voice_bridge_none_key_absent(self):
+        snapshot = build_health_snapshot(**self._BASE_KWARGS)
+        assert "voice_bridge" not in snapshot
+
+    def test_voice_bridge_present_key_included(self):
+        bridge_payload = {"status": "connected"}
+        snapshot = build_health_snapshot(**self._BASE_KWARGS, voice_bridge=bridge_payload)
+        assert "voice_bridge" in snapshot
+        assert snapshot["voice_bridge"] == bridge_payload

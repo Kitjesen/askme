@@ -7,6 +7,7 @@ plus the prompt template body.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -45,4 +46,7 @@ class SkillDefinition:
         if context:
             for key, value in context.items():
                 prompt = prompt.replace("{{" + key + "}}", str(value))
+        # Replace any remaining unresolved {{placeholders}} with empty string
+        # so the LLM doesn't see confusing template syntax
+        prompt = re.sub(r"\{\{[^}]+\}\}", "", prompt)
         return prompt

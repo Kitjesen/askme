@@ -19,6 +19,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .skill_model import SkillDefinition
 
 logger = logging.getLogger(__name__)
@@ -211,35 +213,12 @@ class SkillManager:
 
     @staticmethod
     def _parse_yaml(yaml_text: str) -> dict[str, Any]:
-        """Lightweight YAML frontmatter parser (handles simple key: value pairs)."""
-        result: dict[str, Any] = {}
-        for line in yaml_text.split("\n"):
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            m = re.match(r"^(\w[\w_-]*):\s*(.+)$", line)
-            if m is None:
-                continue
-            key = m.group(1)
-            val: Any = m.group(2).strip()
-            # Strip surrounding quotes
-            if (val.startswith('"') and val.endswith('"')) or \
-               (val.startswith("'") and val.endswith("'")):
-                val = val[1:-1]
-            # Parse inline list: [a, b, c]
-            elif val.startswith("[") and val.endswith("]"):
-                inner = val[1:-1]
-                val = [s.strip().strip("'\"") for s in inner.split(",") if s.strip()]
-            # Parse booleans
-            elif val.lower() == "true":
-                val = True
-            elif val.lower() == "false":
-                val = False
-            # Parse None
-            elif val.lower() in ("null", "none", "~"):
-                val = None
-            result[key] = val
-        return result
+        """Parse YAML frontmatter using PyYAML."""
+        try:
+            result = yaml.safe_load(yaml_text)
+            return result if isinstance(result, dict) else {}
+        except Exception:
+            return {}
 
     @staticmethod
     def _ensure_list(value: Any) -> list[str]:

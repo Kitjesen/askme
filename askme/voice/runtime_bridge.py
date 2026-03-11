@@ -56,6 +56,22 @@ class VoiceRuntimeBridge:
                 self.enabled = False
                 self.text_enabled = False
 
+    def status_snapshot(self) -> dict[str, Any]:
+        """Return current bridge health status for observability endpoints."""
+        now = time.monotonic()
+        with self._state_lock:
+            circuit_open = self._circuit_open_until > now
+            cooldown_remaining = (
+                max(0.0, self._circuit_open_until - now) if circuit_open else 0.0
+            )
+            consecutive_failures = self._consecutive_failures
+        return {
+            "enabled": self.enabled,
+            "circuit_open": circuit_open,
+            "consecutive_failures": consecutive_failures,
+            "cooldown_remaining_s": cooldown_remaining,
+        }
+
     def handle_voice_text(self, text: str) -> dict[str, Any] | None:
         return self.handle_turn(
             text,
@@ -167,8 +183,13 @@ class VoiceRuntimeBridge:
             self._consecutive_failures += 1
             failure_count = self._consecutive_failures
             should_open = failure_count >= self._failure_threshold
-            if should_open and self._failure_cooldown_s > 0:
-                self._circuit_open_until = time.monotonic() + self._failure_cooldown_s
+            if should_open:
+                # Use at least 0.001s so _circuit_open_until > 0 is always
+                # true when the breaker is open. With cooldown=0, the probe
+                # fires on the very next call (≈ immediately), which is the
+                # expected "no delay, but still gate failures" behavior.
+                cooldown = max(self._failure_cooldown_s, 0.001)
+                self._circuit_open_until = time.monotonic() + cooldown
 
         if should_open:
             logger.warning(

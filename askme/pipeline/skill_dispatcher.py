@@ -96,6 +96,9 @@ class SkillDispatcher:
     LLM can compose skills during general conversation.
     """
 
+    # Per-step timeout (seconds). Skills call the LLM so give them time.
+    _STEP_TIMEOUT = 60.0
+
     def __init__(
         self,
         *,
@@ -107,6 +110,8 @@ class SkillDispatcher:
         self._skill_manager = skill_manager
         self._audio = audio
         self._current_mission: MissionContext | None = None
+        # Captured lazily on first async dispatch — used by execute_skill_sync
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ── Public API (called by loops) ──────────────────────────────
 
@@ -123,20 +128,45 @@ class SkillDispatcher:
         If no mission is active, one is created automatically.
         Returns the skill result string.
         """
+        # Capture the running event loop for use by execute_skill_sync
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+
+        # Fail fast for unknown skills — avoids a silent error step in mission history
+        if skill_name and not self._skill_manager.get(skill_name):
+            available = self._skill_manager.get_skill_catalog()
+            logger.warning("Dispatch called with unknown skill: '%s'", skill_name)
+            return f"[Error] 技能不存在: {skill_name}。可用技能: {available}"
+
         # Start or continue mission
         if self._current_mission is None:
             self._current_mission = MissionContext(source=source)
             logger.info("Mission started: %s", self._current_mission.mission_id)
 
-        # Inject mission history into the skill's context
+        # Build combined context: prior mission steps + caller-supplied context
         mission_history = self._current_mission.history_for_context()
+        combined_context = "\n".join(filter(None, [mission_history, extra_context]))
         if mission_history:
             logger.info(
-                "Mission context available (%d prior steps)",
+                "Mission context injected (%d prior steps)",
                 self._current_mission.step_count,
             )
 
-        result = await self._pipeline.execute_skill(skill_name, user_text)
+        # Use skill's own timeout + a 10s safety margin for the dispatcher guard.
+        # The skill executor has its own inner timeout that fires first; the outer
+        # wait_for here is a last-resort catch for hangs that don't raise TimeoutError.
+        skill_def = self._skill_manager.get(skill_name)
+        step_timeout = (
+            float(skill_def.timeout) + 10.0 if skill_def else self._STEP_TIMEOUT
+        )
+        try:
+            result = await asyncio.wait_for(
+                self._pipeline.execute_skill(skill_name, user_text, combined_context),
+                timeout=step_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Skill '%s' timed out after %.0fs", skill_name, step_timeout)
+            result = f"[超时] 技能 {skill_name} 执行超过 {int(step_timeout)} 秒，已跳过。"
 
         # Track step
         self._current_mission.add_step(skill_name, user_text, result)
@@ -184,7 +214,11 @@ class SkillDispatcher:
     def execute_skill_sync(self, skill_name: str, reason: str = "") -> str:
         """Synchronous skill execution — called by the dispatch_skill tool.
 
-        Bridges async ``execute_skill`` into the sync tool execution context.
+        Bridges async ``dispatch`` into the sync tool execution context.
+        Tools run inside ``asyncio.to_thread()`` — a worker thread separate
+        from the event loop.  ``asyncio.run_coroutine_threadsafe`` is the
+        correct cross-thread bridge; the loop reference is captured lazily
+        on the first async ``dispatch`` call.
         """
         skill = self._skill_manager.get(skill_name)
         if not skill:
@@ -194,34 +228,19 @@ class SkillDispatcher:
         if reason:
             logger.info("LLM dispatching skill '%s': %s", skill_name, reason)
 
-        # Build a minimal user_text from reason
         user_text = reason or f"执行技能: {skill_name}"
 
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return "[Error] 事件循环未就绪，无法执行技能"
+
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # We're inside an async context (tool called from LLM stream)
-                # Create a future and run it in the existing loop
-                import concurrent.futures
-
-                future: concurrent.futures.Future[str] = concurrent.futures.Future()
-
-                async def _run() -> None:
-                    try:
-                        result = await self.dispatch(
-                            skill_name, user_text, source="llm",
-                        )
-                        future.set_result(result)
-                    except Exception as exc:
-                        future.set_exception(exc)
-
-                asyncio.ensure_future(_run())
-                # Wait with timeout — skill_executor has its own timeout
-                return future.result(timeout=30)
-            else:
-                return loop.run_until_complete(
-                    self.dispatch(skill_name, user_text, source="llm")
-                )
+            future = asyncio.run_coroutine_threadsafe(
+                self.dispatch(skill_name, user_text, source="llm"),
+                loop,
+            )
+            sync_timeout = float(skill.timeout) + 15.0  # skill + dispatch margin + thread overhead
+            return future.result(timeout=sync_timeout)
         except Exception as exc:
             logger.error("dispatch_skill tool error: %s", exc)
             return f"[Error] 技能执行失败: {exc}"

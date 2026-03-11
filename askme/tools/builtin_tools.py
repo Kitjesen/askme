@@ -11,9 +11,35 @@ import datetime
 import os
 import shlex
 import subprocess
+from pathlib import Path
 from typing import Any
 
+from askme.config import project_root
 from .tool_registry import BaseTool, ToolRegistry
+
+# Directories the LLM is allowed to read. Data produced by askme itself
+# (sessions, memory, logs) is fair game; source code and credentials are not.
+_ALLOWED_READ_ROOTS: tuple[Path, ...] = (
+    project_root() / "data",
+    project_root() / "logs",
+    project_root() / "askme" / "skills",  # skill SKILL.md files
+)
+
+
+def _is_path_allowed(raw_path: str) -> bool:
+    """Return True if *raw_path* resolves to a directory allowed for LLM reads.
+
+    Prevents prompt-injection attacks that try to exfiltrate credentials
+    (e.g. ``read_file(".env")`` or ``read_file("config.yaml")``).
+    """
+    try:
+        resolved = Path(raw_path).resolve()
+    except Exception:
+        return False
+    return any(
+        resolved == allowed or allowed in resolved.parents
+        for allowed in _ALLOWED_READ_ROOTS
+    )
 
 
 class GetTimeTool(BaseTool):
@@ -44,6 +70,7 @@ class RunCommandTool(BaseTool):
         "required": ["command"],
     }
     safety_level = "dangerous"
+    dev_only = True  # excluded in production_mode
 
     def execute(self, *, command: str = "", **kwargs: Any) -> str:
         if not command:
@@ -88,6 +115,11 @@ class ReadFileTool(BaseTool):
     def execute(self, *, path: str = "", **kwargs: Any) -> str:
         if not path:
             return "[Error] No path provided."
+        if not _is_path_allowed(path):
+            return (
+                "[Error] 路径不在允许的读取范围内。"
+                " LLM 只能读取 data/、logs/、askme/skills/ 目录下的文件。"
+            )
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 return f.read(3000)
@@ -113,11 +145,39 @@ class ListDirectoryTool(BaseTool):
 
     def execute(self, *, path: str = ".", **kwargs: Any) -> str:
         target = path or "."
+        if not _is_path_allowed(target):
+            return (
+                "[Error] 路径不在允许的列目录范围内。"
+                " LLM 只能列出 data/、logs/、askme/skills/ 目录。"
+            )
         try:
             entries = os.listdir(target)
             return "\n".join(entries[:50])
         except Exception as exc:
             return f"[Error] {exc}"
+
+
+class NavStatusTool(BaseTool):
+    """Query navigation system status from the runtime service."""
+
+    name = "nav_status"
+    description = "查询机器人当前导航状态（当前任务、位置、运行状态）"
+    parameters: dict[str, Any] = {"type": "object", "properties": {}}
+    safety_level = "normal"
+
+    def execute(self, **kwargs: Any) -> str:
+        import json as _json
+        import urllib.request
+
+        url = os.environ.get("NAV_GATEWAY_URL", "").rstrip("/")
+        if not url:
+            return "[导航状态] 导航服务未配置（NAV_GATEWAY_URL 未设置）"
+        try:
+            with urllib.request.urlopen(url + "/api/v1/nav/status", timeout=3) as resp:
+                data = _json.loads(resp.read())
+                return _json.dumps(data, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            return f"[导航状态] 查询失败: {exc}"
 
 
 class DispatchSkillTool(BaseTool):
@@ -147,7 +207,7 @@ class DispatchSkillTool(BaseTool):
         },
         "required": ["skill_name"],
     }
-    safety_level = "normal"
+    safety_level = "dangerous"  # requires operator confirmation before execution
 
     def __init__(self) -> None:
         # Dispatcher is set after construction via set_dispatcher()
@@ -172,12 +232,26 @@ _BUILTIN_TOOLS: list[type[BaseTool]] = [
     RunCommandTool,
     ReadFileTool,
     ListDirectoryTool,
+    NavStatusTool,
 ]
 
 
-def register_builtin_tools(registry: ToolRegistry) -> None:
-    """Instantiate and register all built-in tools into the given registry."""
+def register_builtin_tools(registry: ToolRegistry, *, production_mode: bool = False) -> None:
+    """Instantiate and register all built-in tools into the given registry.
+
+    Args:
+        registry: the ToolRegistry to populate.
+        production_mode: when True, tools marked ``dev_only = True`` are
+            skipped — this prevents development/debug tools (e.g.
+            RunCommandTool) from being available in production deployments.
+    """
     for tool_cls in _BUILTIN_TOOLS:
+        if production_mode and getattr(tool_cls, "dev_only", False):
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "production_mode: skipping dev_only tool '%s'", tool_cls.name
+            )
+            continue
         registry.register(tool_cls())
     # dispatch_skill is registered separately in app.py after SkillDispatcher
     # is constructed (circular dependency: tool needs dispatcher, dispatcher

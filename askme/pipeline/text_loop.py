@@ -28,6 +28,8 @@ class TextLoop:
     :class:`BrainPipeline` or :class:`CommandHandler`.
     """
 
+    MAX_CONSECUTIVE_ERRORS = 5  # text mode is more tolerant than voice (3)
+
     def __init__(
         self,
         *,
@@ -57,6 +59,7 @@ class TextLoop:
         logger.info("Loaded %d previous messages.", len(self._conversation.history))
         logger.info("Skills: %s", self._skill_manager.get_skill_catalog())
 
+        consecutive_errors = 0
         idle_task = self._pipeline.start_idle_reflection()
         while True:
             memory_task: asyncio.Task[str] | None = None
@@ -65,6 +68,8 @@ class TextLoop:
                 user_text = user_text.strip()
                 if not user_text:
                     continue
+
+                consecutive_errors = 0  # reset on successful input
 
                 # Cancel idle reflection on user activity
                 if idle_task and not idle_task.done():
@@ -91,6 +96,16 @@ class TextLoop:
                     continue
 
                 if intent.type == IntentType.VOICE_TRIGGER:
+                    # Cancel memory prefetch — skill path never uses the result
+                    if memory_task and not memory_task.done():
+                        memory_task.cancel()
+                    memory_task = None
+                    # Try runtime bridge first — edge service may route to arbiter
+                    bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
+                    if bridge_handled:
+                        idle_task = self._pipeline.start_idle_reflection()
+                        continue
+                    # Bridge not configured / failed — local skill dispatch
                     if self._dispatcher:
                         await self._dispatcher.dispatch(
                             intent.skill_name or "", user_text, source="text",
@@ -116,8 +131,10 @@ class TextLoop:
                     reply = await self._pipeline.process(user_text, memory_task=memory_task)
                 memory_task = None  # pipeline took ownership
                 logger.info("[Assistant]: %s", reply)
-                await asyncio.to_thread(self._audio.wait_speaking_done)
-                self._audio.stop_playback()
+                try:
+                    await asyncio.to_thread(self._audio.wait_speaking_done)
+                finally:
+                    self._audio.stop_playback()
 
                 # Restart idle reflection timer
                 idle_task = self._pipeline.start_idle_reflection()
@@ -125,10 +142,23 @@ class TextLoop:
             except (KeyboardInterrupt, EOFError):
                 break
             except Exception as exc:
-                logger.error("Error: %s", exc)
+                consecutive_errors += 1
+                logger.error("Text loop error: %s", exc)
+                if consecutive_errors >= self.MAX_CONSECUTIVE_ERRORS:
+                    logger.warning(
+                        "Text loop degraded: %d consecutive errors, pausing 3s",
+                        consecutive_errors,
+                    )
+                    print("⚠️ 多次错误，系统暂时异常，请稍候...")  # noqa: T201
+                    await asyncio.sleep(3)
+                    consecutive_errors = 0
             finally:
                 if memory_task is not None and not memory_task.done():
                     memory_task.cancel()
+                    try:
+                        await memory_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
         logger.info("Bye!")
 

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from fastapi import FastAPI
@@ -77,6 +78,7 @@ def build_health_snapshot(
     active_skills: list[str],
     voice_status: dict[str, Any],
     ota_status: dict[str, Any] | None = None,
+    voice_bridge: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the structured runtime payload returned by `/health`."""
     llm_snapshot = metrics_snapshot.get("llm", {})
@@ -91,16 +93,38 @@ def build_health_snapshot(
         metrics_snapshot.get("voice_pipeline", {}),
     )
 
+    # Inject recorded_at into voice_pipeline_status so consumers can detect stale data.
+    # Prefer a timestamp already in the metrics snapshot; otherwise stamp now.
+    voice_pipeline_metrics = metrics_snapshot.get("voice_pipeline", {})
+    recorded_at_raw = voice_pipeline_metrics.get("recorded_at") or voice_status.get("recorded_at")
+    if recorded_at_raw:
+        merged_voice_status["recorded_at"] = str(recorded_at_raw)
+    else:
+        _now_rec = datetime.now(timezone.utc)
+        merged_voice_status["recorded_at"] = (
+            _now_rec.strftime("%Y-%m-%dT%H:%M:%S.")
+            + f"{_now_rec.microsecond // 1000:03d}Z"
+        )
+
     degraded_reasons: list[str] = []
     if not merged_voice_status.get("pipeline_ok", True):
         degraded_reasons.append("voice_pipeline")
     if ota_status and ota_status.get("enabled") and ota_status.get("state") in _DEGRADED_OTA_STATES:
         degraded_reasons.append("ota_bridge")
 
+    # ISO 8601 UTC timestamp for this snapshot — lets OTA Agent detect stale payloads.
+    now_utc = datetime.now(timezone.utc)
+    snapshot_at = (
+        now_utc.strftime("%Y-%m-%dT%H:%M:%S.")
+        + f"{now_utc.microsecond // 1000:03d}Z"
+    )
+
     snapshot: dict[str, Any] = {
         "status": "degraded" if degraded_reasons else "ok",
         "service": app_name or "askme",
         "version": app_version or "unknown",
+        "snapshot_at": snapshot_at,
+        "schema_version": "2",
         "uptime_seconds": metrics_snapshot.get("uptime_seconds", 0.0),
         "model_name": resolved_model_name,
         "last_llm_latency_ms": llm_snapshot.get("last_latency_ms"),
@@ -112,6 +136,8 @@ def build_health_snapshot(
     }
     if ota_status is not None:
         snapshot["ota_bridge_status"] = ota_status
+    if voice_bridge is not None:
+        snapshot["voice_bridge"] = voice_bridge
     return snapshot
 
 
@@ -201,7 +227,7 @@ class AskmeHealthServer:
             port = int(raw_port)
         except (TypeError, ValueError):
             port = 8765
-        self.port = min(max(port, 1), 65535)
+        self.port = min(max(port, 1024), 65535)
         self._startup_timeout_s = max(0.1, float(cfg.get("startup_timeout", 5.0)))
         self._shutdown_timeout_s = max(0.1, float(cfg.get("shutdown_timeout", 5.0)))
 
@@ -388,6 +414,28 @@ def render_prometheus_metrics(snapshot: dict[str, Any]) -> str:
         "Latency of the most recent LLM call in milliseconds",
         "gauge",
         snapshot.get("last_llm_latency_ms"),
+    )
+    llm_snap = snapshot.get("llm", {})
+    _append_metric(
+        lines,
+        "askme_llm_latency_p50_ms",
+        "LLM call latency p50 over last 100 calls (ms)",
+        "gauge",
+        llm_snap.get("p50_latency_ms"),
+    )
+    _append_metric(
+        lines,
+        "askme_llm_latency_p95_ms",
+        "LLM call latency p95 over last 100 calls (ms)",
+        "gauge",
+        llm_snap.get("p95_latency_ms"),
+    )
+    _append_metric(
+        lines,
+        "askme_llm_latency_p99_ms",
+        "LLM call latency p99 over last 100 calls (ms)",
+        "gauge",
+        llm_snap.get("p99_latency_ms"),
     )
     _append_metric(
         lines,

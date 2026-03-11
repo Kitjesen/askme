@@ -86,6 +86,16 @@ class VoiceLoop:
                     continue
 
                 if intent.type == IntentType.VOICE_TRIGGER:
+                    # Cancel memory prefetch — skill path never uses the result
+                    if memory_task and not memory_task.done():
+                        memory_task.cancel()
+                    memory_task = None
+                    # Try runtime bridge first — edge service may route to arbiter
+                    bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
+                    if bridge_handled:
+                        idle_task = self._pipeline.start_idle_reflection()
+                        continue
+                    # Bridge not configured / failed — local skill dispatch
                     if self._dispatcher:
                         await self._dispatcher.dispatch(
                             intent.skill_name or "", user_text, source="voice",
@@ -130,13 +140,27 @@ class VoiceLoop:
                 consecutive_errors += 1
                 logger.error("Voice loop error: %s", exc)
                 if consecutive_errors >= self.MAX_CONSECUTIVE_ERRORS:
-                    logger.critical("Too many consecutive errors, exiting.")
-                    break
+                    logger.warning(
+                        "Voice loop degraded: %d consecutive errors, pausing 5s",
+                        consecutive_errors,
+                    )
+                    try:
+                        await self._audio.speak("系统暂时遇到问题，请稍候。")
+                    except Exception:
+                        pass
+                    await asyncio.sleep(5)
+                    consecutive_errors = 0
                 await asyncio.sleep(1)
             finally:
-                # Always clean up dangling memory task
+                # Always clean up dangling memory task.
+                # Await after cancel to suppress "Task exception was never
+                # retrieved" GC warnings that mask real errors in log output.
                 if memory_task is not None and not memory_task.done():
                     memory_task.cancel()
+                    try:
+                        await memory_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
         logger.info("Bye!")
 

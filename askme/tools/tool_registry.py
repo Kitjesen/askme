@@ -44,7 +44,11 @@ _DEFAULT_REJECTION_PHRASES = {
     "cancel",
     "deny",
 }
-_DEFAULT_CONFIRMATION_BYPASS_TOOLS = {"robot_emergency_stop"}
+_DEFAULT_CONFIRMATION_BYPASS_TOOLS: set[str] = set()
+# NOTE: robot_emergency_stop is intentionally NOT in this bypass set.
+# LLM-triggered emergency stop requires explicit operator confirmation.
+# Voice-triggered E-STOP goes through IntentRouter → pipeline.handle_estop()
+# which is a separate, confirmation-free path for genuine emergencies.
 
 
 def _normalize_safety_level(level: str | None) -> str:
@@ -76,12 +80,16 @@ class BaseTool(ABC):
       - description: human-readable description
       - parameters: JSON Schema dict for the tool's parameters
       - execute(**kwargs) -> str: the tool's implementation
+
+    Optional class attributes:
+      - dev_only: if True, the tool is skipped when production_mode is enabled
     """
 
     name: str = ""
     description: str = ""
     parameters: dict[str, Any] = {}
     safety_level: str = "normal"  # normal | dangerous | critical
+    dev_only: bool = False  # if True, excluded when production_mode=True
 
     @abstractmethod
     def execute(self, **kwargs: Any) -> str:
@@ -348,6 +356,9 @@ class ToolRegistry:
             timeout=self._resolve_timeout(tool, timeout),
         )
 
+    _RESULT_MAX_CHARS = 5000
+    _RESULT_TRUNCATION_SUFFIX = "...[截断]"
+
     def _execute_tool(
         self,
         tool: BaseTool,
@@ -355,16 +366,35 @@ class ToolRegistry:
         *,
         timeout: float,
     ) -> str:
+        safety = _normalize_safety_level(tool.safety_level)
         try:
             logger.info(
                 "Executing tool: %s(%s) [safety=%s timeout=%.1fs]",
                 tool.name,
                 kwargs,
-                _normalize_safety_level(tool.safety_level),
+                safety,
                 timeout,
             )
-            result = self._run_with_timeout(tool, kwargs, timeout=timeout)
-            return str(result)
+            result = str(self._run_with_timeout(tool, kwargs, timeout=timeout))
+
+            # Task 4: truncate oversized results to prevent information leakage
+            if len(result) > self._RESULT_MAX_CHARS:
+                result = result[: self._RESULT_MAX_CHARS] + self._RESULT_TRUNCATION_SUFFIX
+
+            # Task 3: structured audit log for dangerous / critical tools
+            if safety in ("dangerous", "critical"):
+                _args_preview = self._format_kwargs(kwargs)
+                if len(_args_preview) > 200:
+                    _args_preview = _args_preview[:200] + "..."
+                logger.warning(
+                    "[AUDIT] tool_call tool=%s safety=%s args=%s result_len=%d",
+                    tool.name,
+                    safety,
+                    _args_preview,
+                    len(result),
+                )
+
+            return result
         except ToolExecutionTimeoutError:
             self._mark_timed_out(tool.name)
             logger.error("Tool execution timed out: %s", tool.name)
@@ -440,9 +470,9 @@ class ToolRegistry:
 
     def _format_approval_pending(self, pending: PendingToolApproval) -> str:
         return (
-            f"{_APPROVAL_PENDING_PREFIX} High-risk operation still waiting: "
-            f"{pending.tool_name}({self._format_kwargs(pending.kwargs)}). "
-            "Reply 'confirm' to continue or 'cancel' to reject before starting another command."
+            f"{_APPROVAL_PENDING_PREFIX} 高风险操作等待确认: "
+            f"{pending.tool_name}({self._format_kwargs(pending.kwargs)})。"
+            " 请先回复【确认执行】继续，或【取消】放弃，再发起新指令。"
         )
 
     def _is_tool_exposed(
