@@ -60,11 +60,28 @@ class LLMClient:
         self._fallback_models: list[str] = cfg.get("fallback_models", [])
         self._metrics = metrics
 
+        # Disable SDK internal retry — we handle retry + model fallback ourselves
+        # in _stream_with_retry / _completion_with_retry.  SDK retry just wastes
+        # time retrying the same model instead of falling back to a faster one.
         self._client = AsyncOpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
             timeout=self._timeout,
+            max_retries=0,
         )
+
+        # MiniMax client (optional — enabled when minimax_api_key is set)
+        minimax_key = cfg.get("minimax_api_key", "")
+        minimax_url = cfg.get("minimax_base_url", "https://api.minimax.chat/v1")
+        self._minimax_client: AsyncOpenAI | None = None
+        if minimax_key:
+            self._minimax_client = AsyncOpenAI(
+                api_key=minimax_key,
+                base_url=minimax_url,
+                timeout=self._timeout,
+                max_retries=0,
+            )
+            logger.info("MiniMax LLM client enabled: %s", minimax_url)
 
     # ------------------------------------------------------------------
     # Public API
@@ -218,8 +235,14 @@ class LLMClient:
         return self._client
 
     # ------------------------------------------------------------------
-    # Internal: retry logic
+    # Internal: client routing & retry logic
     # ------------------------------------------------------------------
+
+    def _client_for_model(self, model: str) -> AsyncOpenAI:
+        """Return the MiniMax client for MiniMax-* models, default client otherwise."""
+        if self._minimax_client and model.lower().startswith("minimax"):
+            return self._minimax_client
+        return self._client
 
     def _model_chain(self, override: str | None = None) -> list[str]:
         """Build ordered list of models to try: override/primary -> fallbacks."""
@@ -244,7 +267,8 @@ class LLMClient:
 
         for attempt in range(self._max_retries + 1):
             try:
-                response = await self._client.chat.completions.create(**kwargs)
+                client = self._client_for_model(kwargs.get("model", ""))
+                response = await client.chat.completions.create(**kwargs)
             except (APITimeoutError, APIConnectionError) as exc:
                 last_exc = exc
                 if attempt < self._max_retries:
@@ -286,7 +310,8 @@ class LLMClient:
 
         for attempt in range(self._max_retries + 1):
             try:
-                return await self._client.chat.completions.create(**kwargs)
+                client = self._client_for_model(kwargs.get("model", ""))
+                return await client.chat.completions.create(**kwargs)
             except (APITimeoutError, APIConnectionError) as exc:
                 last_exc = exc
                 if attempt < self._max_retries:
@@ -321,6 +346,12 @@ class LLMClient:
 
 
 def _backoff(attempt: int) -> float:
-    """Exponential backoff with jitter: 1s, 2s, 4s, ..."""
-    base = min(2 ** attempt, 8)
+    """Exponential backoff with jitter: 0.3s, 1s, 2s, ...
+
+    First retry is fast (0.3s) to handle transient 503s without
+    wasting time.  Subsequent retries back off normally.
+    """
+    if attempt == 0:
+        return 0.3 + random.uniform(0, 0.2)
+    base = min(2 ** (attempt - 1), 8)
     return base + random.uniform(0, 0.5)

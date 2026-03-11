@@ -9,7 +9,7 @@ tags: [robot, navigation, lingtu]
 depends: []
 conflicts: [robot_estop]
 safety_level: dangerous
-voice_trigger: 去,导航到,带我去,走到,前往,过去,去厨房,去会议室,去门口
+voice_trigger: 导航到,带我去,走到,前往,去厨房,去会议室,去门口
 ---
 
 ## Tools

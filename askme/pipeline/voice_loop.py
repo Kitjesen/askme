@@ -11,6 +11,7 @@ from askme.pipeline.external_turns import record_external_turn
 if TYPE_CHECKING:
     from askme.brain.intent_router import IntentRouter
     from askme.pipeline.brain_pipeline import BrainPipeline
+    from askme.pipeline.skill_dispatcher import SkillDispatcher
     from askme.voice.audio_agent import AudioAgent
     from askme.voice.runtime_bridge import VoiceRuntimeBridge
 
@@ -33,11 +34,13 @@ class VoiceLoop:
         pipeline: BrainPipeline,
         audio: AudioAgent,
         voice_runtime_bridge: VoiceRuntimeBridge | None = None,
+        dispatcher: SkillDispatcher | None = None,
     ) -> None:
         self._router = router
         self._pipeline = pipeline
         self._audio = audio
         self._voice_runtime_bridge = voice_runtime_bridge
+        self._dispatcher = dispatcher
 
     async def run(self) -> None:
         """Block until Ctrl+C or too many consecutive errors."""
@@ -83,9 +86,14 @@ class VoiceLoop:
                     continue
 
                 if intent.type == IntentType.VOICE_TRIGGER:
-                    await self._pipeline.execute_skill(
-                        intent.skill_name or "", user_text
-                    )
+                    if self._dispatcher:
+                        await self._dispatcher.dispatch(
+                            intent.skill_name or "", user_text, source="voice",
+                        )
+                    else:
+                        await self._pipeline.execute_skill(
+                            intent.skill_name or "", user_text,
+                        )
                     continue
 
                 if intent.type == IntentType.COMMAND:
@@ -102,8 +110,16 @@ class VoiceLoop:
                         continue
 
                 # General → LLM (pass pre-fetched memory)
-                await self._pipeline.process(user_text, memory_task=memory_task)
+                if self._dispatcher:
+                    await self._dispatcher.handle_general(
+                        user_text, source="voice", memory_task=memory_task,
+                    )
+                else:
+                    await self._pipeline.process(user_text, memory_task=memory_task)
                 memory_task = None  # pipeline took ownership
+
+                # Don't block on wait_speaking_done — echo gate in listen_loop
+                # suppresses speaker echo while allowing user barge-in.
 
                 # Restart idle reflection timer
                 idle_task = self._pipeline.start_idle_reflection()
@@ -156,7 +172,12 @@ class VoiceLoop:
         skill_name = turn.get("skill_name")
 
         if action_type == "skill" and isinstance(skill_name, str) and skill_name:
-            await self._pipeline.execute_skill(skill_name, user_text)
+            if self._dispatcher:
+                await self._dispatcher.dispatch(
+                    skill_name, user_text, source="runtime",
+                )
+            else:
+                await self._pipeline.execute_skill(skill_name, user_text)
             return True
 
         spoken_reply = turn.get("spoken_reply")

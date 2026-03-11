@@ -19,8 +19,7 @@ brain:
   base_url: ${LLM_BASE_URL}
   model: claude-opus-4-6
   # Lightweight model for real-time voice turns (lower TTFT)
-  # NOTE: Haiku refuses character identity through relay — use Sonnet instead
-  voice_model: claude-sonnet-4-5-20250929
+  voice_model: MiniMax-M2.5-highspeed
   # Max tokens for a single completion (0 = model default)
   max_tokens: 0
   temperature: 0.7
@@ -30,6 +29,10 @@ brain:
   fallback_models:
     - claude-sonnet-4-5-20250929
     - claude-haiku-4-5-20251001
+  # MiniMax LLM (OpenAI-compatible, 100 tps)
+  minimax_api_key: ${MINIMAX_API_KEY}
+  minimax_base_url: https://api.minimax.chat/v1
+  minimax_model: MiniMax-M2.5-highspeed
   # Character definition file (overrides prompt_seed when present)
   soul_file: SOUL.md
   # System prompt template (relay may override, SOUL.md compensates via seed)
@@ -95,11 +98,18 @@ voice:
 
   vad:
     model_path: models/vad/silero_vad.onnx
-    threshold: 0.5
+    # Raised from 0.5 to reduce false positives in noisy environments
+    threshold: 0.6
     min_silence_duration: 0.5
-    min_speech_duration: 0.25
+    # Raised from 0.25 to filter out noise blips
+    min_speech_duration: 0.4
     sample_rate: 16000
     buffer_size_seconds: 30
+
+  # Echo gate: suppress mic during TTS playback when peak < threshold
+  # Enables barge-in (user can interrupt) while blocking speaker echo
+  # Speaker echo ~50-500, user speech ~800+. Set 0 to disable.
+  echo_gate_peak: 800
 
   punctuation:
     # CT-Transformer: adds punctuation to raw ASR output for better TTS
@@ -114,10 +124,11 @@ voice:
     keywords: []
 
   tts:
-    # Backend: "local" (sherpa-onnx, fast, offline) or "edge" (Edge TTS, network)
-    # "local" = 低延迟，离线，声音固定
-    # "edge"  = 需要网络，声音丰富可选（见下方 voice 列表）
-    backend: local
+    # Backend: "local" | "edge" | "minimax"
+    # "local"   = sherpa-onnx, 低延迟，离线，声音固定
+    # "edge"    = Microsoft Edge TTS, 需要网络，声音丰富
+    # "minimax" = MiniMax SSE流式, 低延迟, 支持语音克隆/情绪调节
+    backend: minimax
     # Local backend settings (MeloTTS: 44100Hz, natural Chinese)
     model_dir: models/tts/vits-melo-tts-zh_en
     num_threads: 4
@@ -130,6 +141,23 @@ voice:
     # 完整列表: edge-tts --list-voices
     voice: zh-CN-YunjianNeural
     rate: "+0%"
+    # MiniMax backend settings — 切换 backend: minimax 后生效
+    # SSE流式传输，低延迟，增量播放（不等完整音频）
+    minimax_api_key: ${MINIMAX_API_KEY}
+    minimax_tts_url: https://api.minimax.chat/v1
+    minimax_tts_model: speech-2.8-turbo
+    minimax_voice_id: male-qn-qingse
+    minimax_sample_rate: 24000
+    # Voice tuning (MiniMax)
+    # speed: 0.5-2.0 (default 1.0), vol: 0-10 (default 1.0), pitch: -12 to 12 semitones (default 0)
+    minimax_speed: 1.0
+    minimax_vol: 1.0
+    minimax_pitch: 0
+    # emotion: "" (auto), happy, sad, angry, fearful, disgusted, surprised, calm
+    minimax_emotion: ""
+    # Voice cloning: run `python scripts/clone_voice.py <audio> --voice-id <id>`
+    # then set minimax_voice_id to the cloned voice_id above.
+    # Cloned voice expires in 7 days if not used in any T2A call.
     # Common
     sample_rate: 44100
     # Output device index (see startup log for available devices)

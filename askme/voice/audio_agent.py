@@ -72,6 +72,11 @@ class AudioAgent:
             "asr_timeout", _DEFAULT_ASR_TIMEOUT
         )
 
+        # Echo gate: suppress mic input during TTS playback when peak is low.
+        # Speaker echo is typically peak 50-500; direct speech is peak 800+.
+        # Set 0 to disable (fall back to wait-until-done behaviour).
+        self._echo_gate_peak: int = int(voice_cfg.get("echo_gate_peak", 800))
+
         if voice_mode:
             self.asr = ASREngine(voice_cfg.get("asr", {}))
             self.vad = VADEngine(voice_cfg.get("vad", {}))
@@ -207,12 +212,28 @@ class AudioAgent:
 
                     # Feed VAD with int16 samples
                     samples_int16 = (samples * 32768).astype(np.int16)
+                    peak = int(np.max(np.abs(samples_int16)))
+
+                    # Echo gate: during TTS playback, suppress low-energy mic
+                    # input to prevent speaker echo from triggering VAD.
+                    # High-energy input (user barge-in) still passes through.
+                    tts_active = self.tts._has_buffered_audio() or self.tts._is_playing
+                    if tts_active and self._echo_gate_peak > 0 and peak < self._echo_gate_peak:
+                        pre_roll.append(samples.copy())
+                        # Still log periodically
+                        now = time.monotonic()
+                        if now >= _vol_log_next:
+                            logger.info(
+                                "MIC peak=%5d VAD=gated (TTS playing)", peak,
+                            )
+                            _vol_log_next = now + _vol_log_interval
+                        continue
+
                     self.vad.accept_waveform(samples_int16)
 
                     # Periodically log audio level for diagnostics
                     now = time.monotonic()
                     if now >= _vol_log_next:
-                        peak = int(np.max(np.abs(samples_int16)))
                         vad_on = self.vad.is_speech_detected()
                         bar_len = min(peak // 500, 30)
                         bar = "#" * bar_len

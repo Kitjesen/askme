@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -22,6 +23,62 @@ if TYPE_CHECKING:
     from askme.voice.stream_splitter import StreamSplitter
 
 logger = logging.getLogger(__name__)
+
+
+class _ThinkFilter:
+    """Strip ``<think>...</think>`` blocks from incremental streaming text.
+
+    MiniMax-M2.5 (and other reasoning models) emit a ``<think>`` block before
+    the actual answer.  This filter removes it in O(n) without buffering the
+    entire response — safe for real-time TTS piping.
+    """
+
+    def __init__(self) -> None:
+        self._in_think = False
+        self._buf = ""
+
+    def feed(self, text: str) -> str:
+        self._buf += text
+        out: list[str] = []
+        while True:
+            if self._in_think:
+                idx = self._buf.find("</think>")
+                if idx < 0:
+                    if len(self._buf) > 8:
+                        self._buf = self._buf[-8:]
+                    return "".join(out)
+                self._buf = self._buf[idx + 8:]
+                self._in_think = False
+            else:
+                idx = self._buf.find("<think>")
+                if idx < 0:
+                    safe = max(0, len(self._buf) - 7)
+                    out.append(self._buf[:safe])
+                    self._buf = self._buf[safe:]
+                    return "".join(out)
+                out.append(self._buf[:idx])
+                self._buf = self._buf[idx + 7:]
+                self._in_think = True
+
+    def flush(self) -> str:
+        if self._in_think:
+            self._buf = ""
+            return ""
+        r = self._buf
+        self._buf = ""
+        return r
+
+    def reset(self) -> None:
+        self._in_think = False
+        self._buf = ""
+
+
+_RE_THINK = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
+
+
+def strip_think_blocks(text: str) -> str:
+    """Remove all ``<think>...</think>`` blocks from a complete string."""
+    return _RE_THINK.sub("", text).strip()
 
 
 class BrainPipeline:
@@ -69,6 +126,7 @@ class BrainPipeline:
         self._user_prefix = user_prefix
         self._voice_model = voice_model  # fast model for real-time voice turns
         self._general_tool_max_safety_level = general_tool_max_safety_level
+        self._think_filter = _ThinkFilter()
 
     # ── Public API ───────────────────────────────────────────
 
@@ -198,7 +256,6 @@ class BrainPipeline:
 
         logger.info("Executing skill: %s", skill_name)
         self._audio.drain_buffers()
-        self._audio.speak("收到，正在处理。")
         if self._episodic:
             self._episodic.log("action", f"执行技能: {skill_name}")
 
@@ -216,11 +273,12 @@ class BrainPipeline:
         self._audio.start_playback()
         try:
             def _on_tool_call(tool_name: str) -> None:
-                self._audio.speak(f"正在查询。")
+                pass  # no filler — let the result speak for itself
 
-            result = await self._skill_executor.execute(
+            raw_result = await self._skill_executor.execute(
                 skill, context, on_tool_call=_on_tool_call,
             )
+            result = strip_think_blocks(raw_result)
             logger.info("Skill result: %s", result[:100])
             self._audio.speak(result)
             self._conversation.add_user_message(user_text)
@@ -349,6 +407,8 @@ class BrainPipeline:
         model: str | None = None,
     ) -> str:
         """Stream LLM response, speak sentences immediately, handle tool calls."""
+        import time as _time
+
         tool_definitions = self._tools.get_definitions(
             max_safety_level=self._general_tool_max_safety_level
         )
@@ -357,55 +417,52 @@ class BrainPipeline:
         full_response = ""
         tool_calls_acc: dict[int, dict[str, str]] = {}
         spoke_any = False
-        got_first_token = False
+        ttft_logged = False
+        t_start = _time.perf_counter()
         self._splitter.reset()
+        self._think_filter.reset()
 
-        # Thinking feedback: if LLM takes > 2.5s, speak a brief prompt
-        async def _thinking_timer() -> None:
-            await asyncio.sleep(2.5)
-            if not got_first_token:
-                self._audio.speak("让我想想。")
+        async for chunk in self._llm.chat_stream(
+            messages, tools=tool_definitions, tool_choice="auto", model=model
+        ):
+            if not ttft_logged:
+                ttft_logged = True
+                logger.info("TTFT: %.2fs", _time.perf_counter() - t_start)
+            delta = chunk.choices[0].delta
 
-        timer_task = asyncio.create_task(_thinking_timer())
+            # Accumulate tool call fragments
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc.id:
+                        tool_calls_acc[idx]["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            tool_calls_acc[idx]["name"] = tc.function.name
+                        if tc.function.arguments:
+                            tool_calls_acc[idx]["arguments"] += tc.function.arguments
 
-        try:
-            async for chunk in self._llm.chat_stream(
-                messages, tools=tool_definitions, tool_choice="auto", model=model
-            ):
-                # Cancel thinking prompt on first token
-                if not got_first_token:
-                    got_first_token = True
-                    timer_task.cancel()
-                delta = chunk.choices[0].delta
+                # Tool calls detected — drain any sentences already sent to TTS
+                if spoke_any:
+                    self._audio.drain_buffers()
+                    spoke_any = False
 
-                # Accumulate tool call fragments
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        idx = tc.index
-                        if idx not in tool_calls_acc:
-                            tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
-                        if tc.id:
-                            tool_calls_acc[idx]["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                tool_calls_acc[idx]["name"] = tc.function.name
-                            if tc.function.arguments:
-                                tool_calls_acc[idx]["arguments"] += tc.function.arguments
-
-                    # Tool calls detected — drain any sentences already sent to TTS
-                    if spoke_any:
-                        self._audio.drain_buffers()
-                        spoke_any = False
-
-                # Text content — speak immediately (don't buffer)
-                if delta.content:
-                    full_response += delta.content
-                    for sentence in self._splitter.feed(delta.content):
+            # Text content — strip <think> blocks, then speak
+            if delta.content:
+                full_response += delta.content
+                clean = self._think_filter.feed(delta.content)
+                if clean:
+                    for sentence in self._splitter.feed(clean):
                         self._audio.speak(sentence)
                         spoke_any = True
-        finally:
-            timer_task.cancel()
 
+        think_tail = self._think_filter.flush()
+        if think_tail:
+            for sentence in self._splitter.feed(think_tail):
+                self._audio.speak(sentence)
+                spoke_any = True
         remainder = self._splitter.flush()
         if remainder:
             self._audio.speak(remainder)
@@ -415,7 +472,6 @@ class BrainPipeline:
         if tool_calls_acc:
             if spoke_any:
                 self._audio.drain_buffers()
-            self._audio.speak("正在执行。")
             full_response = await self._execute_tools(
                 tool_calls_acc, system_prompt, model=model
             )
@@ -489,14 +545,21 @@ class BrainPipeline:
         """Stream a follow-up LLM response and pipe to TTS."""
         full_response = ""
         self._splitter.reset()
+        self._think_filter.reset()
 
         async for chunk in self._llm.chat_stream(messages, model=model):
             delta = chunk.choices[0].delta
             if delta.content:
                 full_response += delta.content
-                for sentence in self._splitter.feed(delta.content):
-                    self._audio.speak(sentence)
+                clean = self._think_filter.feed(delta.content)
+                if clean:
+                    for sentence in self._splitter.feed(clean):
+                        self._audio.speak(sentence)
 
+        think_tail = self._think_filter.flush()
+        if think_tail:
+            for sentence in self._splitter.feed(think_tail):
+                self._audio.speak(sentence)
         remainder = self._splitter.flush()
         if remainder:
             self._audio.speak(remainder)

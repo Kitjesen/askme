@@ -37,11 +37,12 @@ from askme.ota_bridge import OTABridgeMetrics
 from askme.pipeline.brain_pipeline import BrainPipeline
 from askme.pipeline.commands import CommandHandler
 from askme.pipeline.proactive_agent import ProactiveAgent
+from askme.pipeline.skill_dispatcher import SkillDispatcher
 from askme.pipeline.text_loop import TextLoop
 from askme.pipeline.voice_loop import VoiceLoop
 from askme.skills.skill_executor import SkillExecutor
 from askme.skills.skill_manager import SkillManager
-from askme.tools.builtin_tools import register_builtin_tools
+from askme.tools.builtin_tools import DispatchSkillTool, register_builtin_tools
 from askme.tools.tool_registry import ToolRegistry
 from askme.voice.audio_agent import AudioAgent
 from askme.voice.runtime_bridge import VoiceRuntimeBridge
@@ -148,12 +149,24 @@ class AskmeApp:
             ),
             prompt_seed=prompt_seed,
             user_prefix=brain_cfg.get("user_prefix", ""),
-            voice_model=brain_cfg.get("voice_model") if voice_mode else None,
+            voice_model=brain_cfg.get("voice_model"),
             general_tool_max_safety_level=tools_cfg.get(
                 "general_chat_max_safety_level",
                 "normal",
             ),
         )
+
+        # ── Skill dispatcher (unified orchestration) ────────────
+        self.dispatcher = SkillDispatcher(
+            pipeline=self._pipeline,
+            skill_manager=self.skill_manager,
+            audio=self.audio,
+        )
+
+        # Register dispatch_skill meta-tool (LLM can invoke skills)
+        dispatch_tool = DispatchSkillTool()
+        dispatch_tool.set_dispatcher(self.dispatcher)
+        self.tools.register(dispatch_tool)
 
         self._commands = CommandHandler(
             conversation=self.conversation,
@@ -168,6 +181,7 @@ class AskmeApp:
             skill_manager=self.skill_manager,
             audio=self.audio,
             voice_runtime_bridge=self.voice_runtime_bridge,
+            dispatcher=self.dispatcher,
         )
 
         self._voice_loop = VoiceLoop(
@@ -175,6 +189,7 @@ class AskmeApp:
             pipeline=self._pipeline,
             audio=self.audio,
             voice_runtime_bridge=self.voice_runtime_bridge,
+            dispatcher=self.dispatcher,
         )
 
         self._proactive = ProactiveAgent(

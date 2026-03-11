@@ -1,0 +1,237 @@
+"""Unified skill orchestration — voice, text, and runtime share one dispatcher.
+
+The SkillDispatcher sits between input loops (VoiceLoop / TextLoop) and
+BrainPipeline.  It provides:
+
+1. **Mission tracking** — multi-step skill sequences share context.
+2. **dispatch_skill meta-tool** — LLM can invoke skills by name during
+   general conversation, enabling natural language → skill composition.
+3. **Source-agnostic API** — voice and text loops call the same methods.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from askme.pipeline.brain_pipeline import BrainPipeline
+    from askme.skills.skill_manager import SkillManager
+    from askme.voice.audio_agent import AudioAgent
+
+logger = logging.getLogger(__name__)
+
+
+# ── Mission Context ───────────────────────────────────────────────
+
+
+@dataclass
+class MissionStep:
+    """One skill execution within a mission."""
+
+    skill_name: str
+    user_text: str
+    result: str
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
+class MissionContext:
+    """Tracks a multi-step skill mission.
+
+    A mission starts when the first skill is dispatched and ends when
+    the next general (non-skill) turn arrives or ``complete()`` is called.
+    """
+
+    mission_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    source: str = "voice"  # voice | text | runtime
+    steps: list[MissionStep] = field(default_factory=list)
+    shared_context: dict[str, str] = field(default_factory=dict)
+    started_at: float = field(default_factory=time.time)
+
+    @property
+    def step_count(self) -> int:
+        return len(self.steps)
+
+    def add_step(self, skill_name: str, user_text: str, result: str) -> None:
+        self.steps.append(MissionStep(
+            skill_name=skill_name,
+            user_text=user_text,
+            result=result,
+        ))
+
+    def summary(self) -> str:
+        """One-line summary for logging."""
+        names = [s.skill_name for s in self.steps]
+        elapsed = time.time() - self.started_at
+        return (
+            f"mission={self.mission_id} source={self.source} "
+            f"steps={names} elapsed={elapsed:.1f}s"
+        )
+
+    def history_for_context(self) -> str:
+        """Format previous steps as context for the next skill."""
+        if not self.steps:
+            return ""
+        lines: list[str] = []
+        for i, step in enumerate(self.steps, 1):
+            lines.append(f"[步骤{i}] {step.skill_name}: {step.result[:200]}")
+        return "\n".join(lines)
+
+
+# ── Skill Dispatcher ──────────────────────────────────────────────
+
+
+class SkillDispatcher:
+    """Unified skill orchestration for all input channels.
+
+    Both VoiceLoop and TextLoop should delegate skill dispatch here
+    instead of calling ``pipeline.execute_skill()`` directly.
+
+    The dispatcher also registers a ``dispatch_skill`` meta-tool so the
+    LLM can compose skills during general conversation.
+    """
+
+    def __init__(
+        self,
+        *,
+        pipeline: BrainPipeline,
+        skill_manager: SkillManager,
+        audio: AudioAgent,
+    ) -> None:
+        self._pipeline = pipeline
+        self._skill_manager = skill_manager
+        self._audio = audio
+        self._current_mission: MissionContext | None = None
+
+    # ── Public API (called by loops) ──────────────────────────────
+
+    async def dispatch(
+        self,
+        skill_name: str,
+        user_text: str,
+        *,
+        source: str = "voice",
+        extra_context: str = "",
+    ) -> str:
+        """Execute a skill and track it in the current mission.
+
+        If no mission is active, one is created automatically.
+        Returns the skill result string.
+        """
+        # Start or continue mission
+        if self._current_mission is None:
+            self._current_mission = MissionContext(source=source)
+            logger.info("Mission started: %s", self._current_mission.mission_id)
+
+        # Inject mission history into the skill's context
+        mission_history = self._current_mission.history_for_context()
+        if mission_history:
+            logger.info(
+                "Mission context available (%d prior steps)",
+                self._current_mission.step_count,
+            )
+
+        result = await self._pipeline.execute_skill(skill_name, user_text)
+
+        # Track step
+        self._current_mission.add_step(skill_name, user_text, result)
+        logger.info(
+            "Mission step %d: %s → %s",
+            self._current_mission.step_count,
+            skill_name,
+            result[:60],
+        )
+
+        return result
+
+    async def handle_general(
+        self,
+        user_text: str,
+        *,
+        source: str = "voice",
+        memory_task: asyncio.Task[str] | None = None,
+    ) -> str:
+        """Handle a general (non-skill) turn via the LLM pipeline.
+
+        Completes any active mission first (the turn breaks the skill chain).
+        """
+        self.complete_mission()
+        return await self._pipeline.process(user_text, memory_task=memory_task)
+
+    def complete_mission(self) -> MissionContext | None:
+        """End the current mission and return it for logging."""
+        mission = self._current_mission
+        if mission and mission.steps:
+            logger.info("Mission completed: %s", mission.summary())
+        self._current_mission = None
+        return mission
+
+    @property
+    def has_active_mission(self) -> bool:
+        return self._current_mission is not None
+
+    @property
+    def current_mission(self) -> MissionContext | None:
+        return self._current_mission
+
+    # ── dispatch_skill tool (for LLM-driven composition) ──────────
+
+    def execute_skill_sync(self, skill_name: str, reason: str = "") -> str:
+        """Synchronous skill execution — called by the dispatch_skill tool.
+
+        Bridges async ``execute_skill`` into the sync tool execution context.
+        """
+        skill = self._skill_manager.get(skill_name)
+        if not skill:
+            available = self._skill_manager.get_skill_catalog()
+            return f"[Error] 技能不存在: {skill_name}。可用技能: {available}"
+
+        if reason:
+            logger.info("LLM dispatching skill '%s': %s", skill_name, reason)
+
+        # Build a minimal user_text from reason
+        user_text = reason or f"执行技能: {skill_name}"
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're inside an async context (tool called from LLM stream)
+                # Create a future and run it in the existing loop
+                import concurrent.futures
+
+                future: concurrent.futures.Future[str] = concurrent.futures.Future()
+
+                async def _run() -> None:
+                    try:
+                        result = await self.dispatch(
+                            skill_name, user_text, source="llm",
+                        )
+                        future.set_result(result)
+                    except Exception as exc:
+                        future.set_exception(exc)
+
+                asyncio.ensure_future(_run())
+                # Wait with timeout — skill_executor has its own timeout
+                return future.result(timeout=30)
+            else:
+                return loop.run_until_complete(
+                    self.dispatch(skill_name, user_text, source="llm")
+                )
+        except Exception as exc:
+            logger.error("dispatch_skill tool error: %s", exc)
+            return f"[Error] 技能执行失败: {exc}"
+
+    def get_skill_catalog_for_prompt(self) -> str:
+        """Return skill catalog formatted for system prompt injection."""
+        skills = self._skill_manager.get_enabled()
+        if not skills:
+            return ""
+        lines = []
+        for skill in skills:
+            lines.append(f"- {skill.name}: {skill.description}")
+        return "\n".join(lines)

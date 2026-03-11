@@ -103,12 +103,19 @@ class IntentRouter:
             raw_text=stripped,
         )
 
+    # Minimum trigger length to avoid false positives from short substrings
+    # (e.g. "去" matching "进去", "出去", "回去")
+    MIN_TRIGGER_LENGTH = 2
+
     def _match_voice_trigger(self, text: str) -> str | None:
         """Find the best matching voice trigger in the text.
 
         Uses substring matching: if any trigger phrase appears in the text,
         it's considered a match. Longer triggers are checked first to avoid
         false positives from short substrings.
+
+        Triggers shorter than MIN_TRIGGER_LENGTH are skipped to prevent
+        single-character Chinese triggers from matching common suffixes.
         """
         if not self._voice_triggers:
             return None
@@ -123,6 +130,8 @@ class IntentRouter:
         )
 
         for trigger_phrase, skill_name in sorted_triggers:
+            if len(trigger_phrase) < self.MIN_TRIGGER_LENGTH:
+                continue
             if trigger_phrase.lower() in text_lower:
                 return skill_name
 

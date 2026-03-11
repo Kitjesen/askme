@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from askme.brain.intent_router import IntentRouter
     from askme.pipeline.brain_pipeline import BrainPipeline
     from askme.pipeline.commands import CommandHandler
+    from askme.pipeline.skill_dispatcher import SkillDispatcher
     from askme.skills.skill_manager import SkillManager
     from askme.voice.audio_agent import AudioAgent
     from askme.voice.runtime_bridge import VoiceRuntimeBridge
@@ -37,6 +38,7 @@ class TextLoop:
         skill_manager: SkillManager,
         audio: AudioAgent,
         voice_runtime_bridge: VoiceRuntimeBridge | None = None,
+        dispatcher: SkillDispatcher | None = None,
     ) -> None:
         self._router = router
         self._pipeline = pipeline
@@ -45,6 +47,7 @@ class TextLoop:
         self._skill_manager = skill_manager
         self._audio = audio
         self._voice_runtime_bridge = voice_runtime_bridge
+        self._dispatcher = dispatcher
 
     async def run(self) -> None:
         """Block until the user types /quit or presses Ctrl+C."""
@@ -88,9 +91,14 @@ class TextLoop:
                     continue
 
                 if intent.type == IntentType.VOICE_TRIGGER:
-                    await self._pipeline.execute_skill(
-                        intent.skill_name or "", user_text
-                    )
+                    if self._dispatcher:
+                        await self._dispatcher.dispatch(
+                            intent.skill_name or "", user_text, source="text",
+                        )
+                    else:
+                        await self._pipeline.execute_skill(
+                            intent.skill_name or "", user_text,
+                        )
                     continue
 
                 if intent.type == IntentType.GENERAL:
@@ -100,7 +108,12 @@ class TextLoop:
                         continue
 
                 # General → LLM (pass pre-fetched memory)
-                reply = await self._pipeline.process(user_text, memory_task=memory_task)
+                if self._dispatcher:
+                    reply = await self._dispatcher.handle_general(
+                        user_text, source="text", memory_task=memory_task,
+                    )
+                else:
+                    reply = await self._pipeline.process(user_text, memory_task=memory_task)
                 memory_task = None  # pipeline took ownership
                 logger.info("[Assistant]: %s", reply)
                 await asyncio.to_thread(self._audio.wait_speaking_done)
@@ -151,7 +164,12 @@ class TextLoop:
         skill_name = turn.get("skill_name")
 
         if action_type == "skill" and isinstance(skill_name, str) and skill_name:
-            await self._pipeline.execute_skill(skill_name, user_text)
+            if self._dispatcher:
+                await self._dispatcher.dispatch(
+                    skill_name, user_text, source="runtime",
+                )
+            else:
+                await self._pipeline.execute_skill(skill_name, user_text)
             return True
 
         spoken_reply = turn.get("spoken_reply")

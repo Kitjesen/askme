@@ -1,4 +1,4 @@
-"""TTS Engine - dual backend: local sherpa-onnx (fast) or edge-tts (fallback)."""
+"""TTS Engine - three backends: local sherpa-onnx, edge-tts, or MiniMax streaming."""
 
 from __future__ import annotations
 
@@ -20,14 +20,15 @@ logger = logging.getLogger(__name__)
 
 
 class TTSEngine:
-    """Text-to-speech engine with two backends:
+    """Text-to-speech engine with three backends:
 
     - **local** (default): sherpa-onnx VITS/MeloTTS — ~0.5-1s latency, no network.
     - **edge**: Microsoft Edge TTS — ~3s latency, requires internet.
+    - **minimax**: MiniMax T2A v2 — SSE streaming, ~1s TTFT, incremental playback.
 
     Config dict expected keys (under voice.tts)::
 
-        backend: str          - "local" or "edge" (default "local")
+        backend: str          - "local", "edge", or "minimax" (default "local")
         # Local backend
         model_dir: str        - path to sherpa-onnx TTS model directory
         num_threads: int      - inference threads (default 4)
@@ -36,6 +37,12 @@ class TTSEngine:
         # Edge backend
         voice: str            - Edge TTS voice name (default "zh-CN-YunxiNeural")
         rate: str             - Speed adjustment (default "+0%")
+        # MiniMax backend
+        minimax_api_key: str  - MiniMax API key
+        minimax_tts_url: str  - MiniMax TTS base URL
+        minimax_tts_model: str - TTS model name (default "speech-2.8-turbo")
+        minimax_voice_id: str - Voice ID (default "male-qn-qingse")
+        minimax_sample_rate: int - MiniMax output sample rate (default 24000)
         # Common
         sample_rate: int      - playback sample rate (default 24000)
         output_device: int|str - sounddevice output device
@@ -66,6 +73,19 @@ class TTSEngine:
         self._voice: str = config.get("voice", "zh-CN-YunxiNeural")
         self._rate: str = str(config.get("rate", "+0%"))
 
+        # MiniMax backend config
+        self._minimax_api_key: str = config.get("minimax_api_key", "")
+        self._minimax_tts_url: str = config.get("minimax_tts_url", "https://api.minimax.chat/v1")
+        self._minimax_tts_model: str = config.get("minimax_tts_model", "speech-2.8-turbo")
+        self._minimax_voice_id: str = config.get("minimax_voice_id", "male-qn-qingse")
+        self._minimax_sample_rate: int = int(config.get("minimax_sample_rate", 24000))
+        # Voice tuning: speed (0.5-2.0), vol (0-10), pitch (-12 to 12 semitones)
+        self._minimax_speed: float = float(config.get("minimax_speed", 1.0))
+        self._minimax_vol: float = float(config.get("minimax_vol", 1.0))
+        self._minimax_pitch: int = int(config.get("minimax_pitch", 0))
+        # Emotion: "" (auto), happy, sad, angry, fearful, disgusted, surprised, calm
+        self._minimax_emotion: str = config.get("minimax_emotion", "")
+
         # Queues and buffers
         self.tts_text_queue: queue.Queue[tuple[int, str] | None] = queue.Queue()
         self.tts_buffer: deque[np.ndarray] = deque()
@@ -82,6 +102,9 @@ class TTSEngine:
         self._local_sample_rate: int = 0
 
         # Auto-detect backend
+        if self._backend == "minimax" and not self._minimax_api_key:
+            logger.warning("MiniMax TTS: no API key configured, falling back to edge-tts")
+            self._backend = "edge"
         if self._backend == "local" and not os.path.isdir(self._model_dir):
             logger.warning("Local TTS model not found at %s, falling back to edge-tts", self._model_dir)
             self._backend = "edge"
@@ -325,7 +348,7 @@ class TTSEngine:
                 self.tts_text_queue.task_done()
 
     def _generate_audio(self, text: str, generation: int) -> None:
-        """Dispatch to local or edge backend."""
+        """Dispatch to local, edge, or minimax backend."""
         if not self._is_generation_current(generation):
             logger.debug("TTS: dropping stale request before synthesis")
             return
@@ -334,20 +357,32 @@ class TTSEngine:
 
         if self._backend == "local":
             self._generate_local(text, generation)
+        elif self._backend == "minimax":
+            if not self._run_async(self._generate_minimax(text, generation)):
+                # MiniMax failed — auto-fallback to local or edge
+                logger.warning("TTS minimax failed, falling back")
+                if self._local_tts is not None:
+                    self._generate_local(text, generation)
+                else:
+                    self._run_async(self._generate_edge(text, generation))
         else:
-            # asyncio.run() in a worker thread on Windows needs SelectorEventLoop
-            # (IocpProactor is only available on the main thread)
-            try:
+            self._run_async(self._generate_edge(text, generation))
+
+    def _run_async(self, coro) -> bool:
+        """Run an async coroutine in a new event loop. Returns True on success."""
+        try:
+            loop = asyncio.new_event_loop()
+            if sys.platform == "win32":
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
                 loop = asyncio.new_event_loop()
-                if sys.platform == "win32":
-                    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-                    loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(self._generate_edge(text, generation))
-            except Exception as exc:
-                logger.error("TTS edge synthesis error: %s", exc)
-            finally:
-                loop.close()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(coro)
+            return True
+        except Exception as exc:
+            logger.error("TTS async error: %s", exc)
+            return False
+        finally:
+            loop.close()
 
     # ------------------------------------------------------------------
     # Local backend (sherpa-onnx)
@@ -405,6 +440,78 @@ class TTSEngine:
                     self.tts_buffer.append(samples)
         except Exception as exc:
             logger.error("TTS edge decode error: %s", exc)
+
+    # ------------------------------------------------------------------
+    # MiniMax backend (SSE streaming, incremental playback)
+    # ------------------------------------------------------------------
+
+    async def _generate_minimax(self, text: str, generation: int) -> None:
+        """Synthesise via MiniMax T2A v2 — SSE hex-PCM stream → incremental buffer."""
+        import httpx
+        import json as _json
+
+        url = f"{self._minimax_tts_url}/t2a_v2"
+        headers = {
+            "Authorization": f"Bearer {self._minimax_api_key}",
+            "Content-Type": "application/json",
+        }
+        voice_setting: dict[str, Any] = {"voice_id": self._minimax_voice_id}
+        if self._minimax_speed != 1.0:
+            voice_setting["speed"] = self._minimax_speed
+        if self._minimax_vol != 1.0:
+            voice_setting["vol"] = self._minimax_vol
+        if self._minimax_pitch != 0:
+            voice_setting["pitch"] = self._minimax_pitch
+        if self._minimax_emotion:
+            voice_setting["emotion"] = self._minimax_emotion
+
+        body = {
+            "model": self._minimax_tts_model,
+            "text": text,
+            "stream": True,
+            "voice_setting": voice_setting,
+            "audio_setting": {
+                "sample_rate": self._minimax_sample_rate,
+                "format": "pcm",
+                "channel": 1,
+            },
+            "output_format": "hex",
+        }
+
+        need_resample = self._minimax_sample_rate != self._sample_rate
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async with client.stream("POST", url, json=body, headers=headers) as resp:
+                if resp.status_code != 200:
+                    body_text = await resp.aread()
+                    logger.error("MiniMax TTS HTTP %d: %s", resp.status_code, body_text[:200])
+                    return
+
+                async for line in resp.aiter_lines():
+                    if not self._is_generation_current(generation):
+                        return
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        payload = _json.loads(data_str)
+                        hex_audio = payload.get("data", {}).get("audio", "")
+                        if not hex_audio:
+                            continue
+                        pcm_bytes = bytes.fromhex(hex_audio)
+                        samples = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
+                        if need_resample and len(samples) > 1:
+                            ratio = self._sample_rate / self._minimax_sample_rate
+                            new_len = max(1, int(len(samples) * ratio))
+                            indices = np.linspace(0, len(samples) - 1, new_len)
+                            samples = np.interp(indices, np.arange(len(samples)), samples)
+                        if len(samples) > 0:
+                            with self._buffer_lock:
+                                self.tts_buffer.append(samples)
+                    except (_json.JSONDecodeError, ValueError) as exc:
+                        logger.debug("MiniMax TTS chunk parse: %s", exc)
 
     # ------------------------------------------------------------------
     # Playback
