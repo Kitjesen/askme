@@ -83,6 +83,10 @@ conversation:
 # Voice: ASR / VAD / KWS / TTS
 # ----------------------------------------------------------
 voice:
+  # Input device index for microphone (see startup log for available devices)
+  # null = system default. On sunrise: 0 = MCP01 USB Audio (hw:1,0)
+  input_device: 0
+
   asr:
     # 2025-06 model: much better accuracy than 2023-02 bilingual
     model_dir: models/asr/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30
@@ -98,13 +102,19 @@ voice:
 
   vad:
     model_path: models/vad/silero_vad.onnx
-    # Raised from 0.5 to reduce false positives in noisy environments
-    threshold: 0.6
+    # Raised to 0.75 to suppress USB mic ambient noise false positives.
+    # USB mic on sunrise has high noise floor; lower values cause continuous SPEECH.
+    threshold: 0.75
     min_silence_duration: 0.5
     # Raised from 0.25 to filter out noise blips
     min_speech_duration: 0.4
     sample_rate: 16000
     buffer_size_seconds: 30
+
+  # Noise gate: skip VAD when mic peak is below threshold (not in active speech).
+  # Prevents USB mic noise floor from triggering Silero VAD continuously.
+  # On sunrise MCP01: noise floor ~100-200, speech ~1000+. Set 0 to disable.
+  noise_gate_peak: 400
 
   # Echo gate: suppress mic during TTS playback when peak < threshold
   # Enables barge-in (user can interrupt) while blocking speaker echo

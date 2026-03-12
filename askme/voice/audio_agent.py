@@ -78,6 +78,16 @@ class AudioAgent:
         # Set 0 to disable (fall back to wait-until-done behaviour).
         self._echo_gate_peak: int = int(voice_cfg.get("echo_gate_peak", 800))
 
+        # Microphone input device index (None = system default).
+        # On sunrise: device 0 = MCP01 USB Audio (hw:1,0).
+        _raw_input = voice_cfg.get("input_device", None)
+        self._input_device: int | None = int(_raw_input) if _raw_input is not None else None
+
+        # Noise gate: skip VAD entirely when peak is below this threshold.
+        # Prevents USB mic noise floor from continuously triggering Silero VAD.
+        # Set 0 to disable. Typical values: 300-600 for noisy USB mics.
+        self._noise_gate_peak: int = int(voice_cfg.get("noise_gate_peak", 0))
+
         if voice_mode:
             self.asr = ASREngine(voice_cfg.get("asr", {}))
             self.vad = VADEngine(voice_cfg.get("vad", {}))
@@ -221,7 +231,12 @@ class AudioAgent:
         self._refresh_voice_metrics()
 
         try:
-            with sd.InputStream(channels=1, dtype="float32", samplerate=sample_rate) as mic:
+            with sd.InputStream(
+                device=self._input_device,
+                channels=1,
+                dtype="float32",
+                samplerate=sample_rate,
+            ) as mic:
                 # Phase 1: Wait for wake word (if KWS available)
                 if self.kws and self.kws.available and self.kws_stream:
                     self.woken_up = False
@@ -303,23 +318,33 @@ class AudioAgent:
                     # Only feed ASR when VAD detects speech
                     if self.vad.is_speech_detected():
                         if not speech_active:
-                            speech_active = True
-                            logger.info("VAD: speech start")
-                            self.tts.drain_buffers()
-                            self._refresh_voice_metrics()
-                            # Flush pre-roll buffer → catch the speech onset
-                            for buffered in pre_roll:
-                                self.asr_stream.accept_waveform(
-                                    sample_rate, buffered
-                                )
-                            pre_roll.clear()
-                        # Extend deadline while user is actively speaking
-                        deadline = time.monotonic() + self._asr_timeout
+                            # Noise gate: require amplitude above threshold to
+                            # start speech capture. This prevents USB mic noise
+                            # floor (peak ~100-200) from triggering ASR even
+                            # when Silero VAD classifies it as speech.
+                            # Always feed VAD (above) for correct state tracking;
+                            # only gate the speech_active transition.
+                            if self._noise_gate_peak > 0 and peak < self._noise_gate_peak:
+                                pre_roll.append(samples.copy())
+                            else:
+                                speech_active = True
+                                logger.info("VAD: speech start (peak=%d)", peak)
+                                self.tts.drain_buffers()
+                                self._refresh_voice_metrics()
+                                # Flush pre-roll buffer → catch the speech onset
+                                for buffered in pre_roll:
+                                    self.asr_stream.accept_waveform(
+                                        sample_rate, buffered
+                                    )
+                                pre_roll.clear()
+                        if speech_active:
+                            # Extend deadline while user is actively speaking
+                            deadline = time.monotonic() + self._asr_timeout
 
-                        self.asr_stream.accept_waveform(sample_rate, samples)
+                            self.asr_stream.accept_waveform(sample_rate, samples)
 
-                        while self.asr.is_ready(self.asr_stream):
-                            self.asr.decode_stream(self.asr_stream)
+                            while self.asr.is_ready(self.asr_stream):
+                                self.asr.decode_stream(self.asr_stream)
                     else:
                         # Buffer recent silence chunks for pre-roll
                         pre_roll.append(samples.copy())
