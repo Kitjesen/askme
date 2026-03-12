@@ -11,9 +11,9 @@ import json
 import logging
 import math
 import re
-import threading
 import time
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -34,6 +34,13 @@ _DEFAULT_CONFIRMATION_PHRASES = {
     "确认执行",
     "继续执行",
     "批准执行",
+    "确认",
+    "批准",
+    "同意",
+    "是",
+    "好的",
+    "ok",
+    "yes",
     "approve",
     "confirm",
 }
@@ -41,6 +48,10 @@ _DEFAULT_REJECTION_PHRASES = {
     "取消",
     "取消执行",
     "放弃",
+    "不",
+    "不行",
+    "拒绝",
+    "no",
     "cancel",
     "deny",
 }
@@ -455,10 +466,15 @@ class ToolRegistry:
         return pending
 
     def _format_approval_required(self, tool: BaseTool, kwargs: dict[str, Any]) -> str:
+        timeout_hint = (
+            f"({int(self._approval_timeout_seconds)}s timeout, auto-cancelled)"
+            if self._approval_timeout_seconds > 0
+            else ""
+        )
         return (
             f"{_APPROVAL_REQUIRED_PREFIX} 高风险操作待确认: "
             f"{tool.name}({self._format_kwargs(kwargs)})。"
-            " 回复“确认执行”继续，回复“取消”放弃。"
+            f" 请说[确认执行]继续，或说[取消]放弃。{timeout_hint}"
         )
 
     def _format_approval_expired(self, pending: PendingToolApproval) -> str:
@@ -521,29 +537,20 @@ class ToolRegistry:
         if timeout <= 0:
             return str(tool.execute(**kwargs))
 
-        result_box: dict[str, str] = {}
-        error_box: dict[str, Exception] = {}
-        done = threading.Event()
-
-        def _runner() -> None:
+        # Use concurrent.futures so the result and exception live in the
+        # Future object rather than shared mutable dicts, eliminating the
+        # race condition where a timed-out thread writes to result_box
+        # after the caller has already moved on.
+        with ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"askme-tool-{tool.name}",
+        ) as executor:
+            future = executor.submit(tool.execute, **kwargs)
             try:
-                result_box["result"] = str(tool.execute(**kwargs))
-            except Exception as exc:
-                error_box["error"] = exc
-            finally:
-                done.set()
-
-        thread = threading.Thread(
-            target=_runner,
-            name=f"askme-tool-{tool.name}",
-            daemon=True,
-        )
-        thread.start()
-        if not done.wait(timeout):
-            raise ToolExecutionTimeoutError(tool.name)
-        if "error" in error_box:
-            raise error_box["error"]
-        return result_box.get("result", "")
+                return str(future.result(timeout=timeout))
+            except _FuturesTimeoutError:
+                future.cancel()
+                raise ToolExecutionTimeoutError(tool.name)
 
     @staticmethod
     def _format_kwargs(kwargs: dict[str, Any]) -> str:

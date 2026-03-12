@@ -142,6 +142,11 @@ class SkillDispatcher:
         if self._current_mission is None:
             self._current_mission = MissionContext(source=source)
             logger.info("Mission started: %s", self._current_mission.mission_id)
+        else:
+            # Continuing an existing multi-step mission — let the user know
+            step_num = self._current_mission.step_count + 1
+            self._audio.speak(f"继续执行第{step_num}步：{skill_name}")
+            self._audio.start_playback()
 
         # Build combined context: prior mission steps + caller-supplied context
         mission_history = self._current_mission.history_for_context()
@@ -198,6 +203,10 @@ class SkillDispatcher:
         mission = self._current_mission
         if mission and mission.steps:
             logger.info("Mission completed: %s", mission.summary())
+            if len(mission.steps) > 1:
+                names = "、".join(s.skill_name for s in mission.steps)
+                self._audio.speak(f"多步任务完成：{names}")
+                self._audio.start_playback()
         self._current_mission = None
         return mission
 

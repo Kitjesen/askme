@@ -134,6 +134,10 @@ class BrainPipeline:
         self._general_tool_max_safety_level = general_tool_max_safety_level
         self._think_filter = _ThinkFilter()
         self._pending_tasks: set[asyncio.Task[Any]] = set()
+        # Semaphore(1) ensures reflection and user LLM calls never run
+        # concurrently — they share the same API quota.  Reflection always
+        # runs with try_acquire (non-blocking) so it never blocks the user.
+        self._llm_semaphore: asyncio.Semaphore | None = None  # lazy-init in async context
 
     # ── Public API ───────────────────────────────────────────
 
@@ -149,13 +153,23 @@ class BrainPipeline:
 
         async def _idle_reflect() -> None:
             await asyncio.sleep(idle_seconds)
-            if self._episodic and self._episodic.should_reflect():
-                logger.info("[Dream] Idle-time reflection triggered")
+            if not (self._episodic and self._episodic.should_reflect()):
+                return
+            # Only reflect when the LLM is idle — skip if a user turn is using it.
+            sem = self._llm_semaphore
+            if sem is not None and sem.locked():
+                logger.info("[Dream] Skipping reflection — LLM busy with user turn")
+                return
+            logger.info("[Dream] Idle-time reflection triggered")
+            try:
                 summary = await self._episodic.reflect()
                 if summary:
                     logger.info("[Dream] Reflection result: %s", summary[:80])
-                # Clean up old episode files while we're at it
                 self._episodic.cleanup_old_episodes()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("[Dream] Reflection failed: %s", exc)
 
         return asyncio.create_task(_idle_reflect())
 
@@ -168,6 +182,10 @@ class BrainPipeline:
     ) -> str:
         """Run the full brain pipeline for *user_text*. Returns assistant reply."""
         logger.info("Processing: %s", user_text[:60])
+
+        # Lazy-init semaphore (requires running event loop)
+        if self._llm_semaphore is None:
+            self._llm_semaphore = asyncio.Semaphore(1)
 
         # 0. Clear leftover audio from any previous turn
         self._audio.drain_buffers()
@@ -219,9 +237,10 @@ class BrainPipeline:
         # 5. Stream LLM → TTS: start playback, wait for TTS to finish
         self._audio.start_playback()
         try:
-            full_response = await self._stream_with_tools(
-                messages, system_prompt, model=self._voice_model
-            )
+            async with self._llm_semaphore:  # type: ignore[union-attr]
+                full_response = await self._stream_with_tools(
+                    messages, system_prompt, model=self._voice_model
+                )
             self._conversation.add_assistant_message(full_response)
 
             # Wait for TTS to finish speaking before returning

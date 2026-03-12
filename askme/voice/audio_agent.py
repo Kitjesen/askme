@@ -205,6 +205,12 @@ class AudioAgent:
                         self.asr.reset(self.asr_stream)
                         self.asr_stream = self.asr.create_stream()
                         self._refresh_voice_metrics()
+                        # Only prompt if VAD detected speech onset — the user
+                        # started talking but ASR got no result (too quiet,
+                        # cut off, or mumbled).  If speech_active is still
+                        # False the user simply stayed silent; don't disturb.
+                        if speech_active:
+                            self.tts.speak("没听清楚，请再说一遍。")
                         return None
 
                     samples, _ = mic.read(samples_per_read)
