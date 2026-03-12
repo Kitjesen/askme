@@ -8,6 +8,8 @@ import logging
 import os
 import queue
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -86,6 +88,9 @@ class TTSEngine:
         # Emotion: "" (auto), happy, sad, angry, fearful, disgusted, surprised, calm
         self._minimax_emotion: str = config.get("minimax_emotion", "")
 
+        # Volume multiplier applied to all PCM output (0.0–1.0)
+        self._volume: float = float(config.get("volume", 1.0))
+
         # Queues and buffers
         self.tts_text_queue: queue.Queue[tuple[int, str] | None] = queue.Queue()
         self.tts_buffer: deque[np.ndarray] = deque()
@@ -97,6 +102,9 @@ class TTSEngine:
         self._playback_lock = threading.Lock()
         self._is_playing = False
         self._playback_thread: threading.Thread | None = None
+        # aplay subprocess (Linux only); non-None while a chunk is being played
+        self._aplay_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        self._aplay_bin: str | None = shutil.which("aplay")
 
         # Local TTS engine (lazy init)
         self._local_tts: Any | None = None
@@ -244,6 +252,7 @@ class TTSEngine:
         clean = self._RE_LINK.sub(r'\1', clean)
         clean = clean.strip()
         if clean and len(clean) > 1:
+            logger.info("speak queued: %r", clean[:60])
             self.tts_text_queue.put((self._get_generation(), clean))
 
     def start_playback(self) -> None:
@@ -256,14 +265,14 @@ class TTSEngine:
             self._playback_thread.start()
 
     def stop_playback(self) -> None:
-        """Stop the sounddevice output stream."""
+        """Stop playback immediately."""
         with self._playback_lock:
             self._is_playing = False
             thread = self._playback_thread
             self._playback_thread = None
-        # Join outside the lock — _playback_loop reads _is_playing to exit its while loop
+        self._kill_aplay()
         if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)
+            thread.join(timeout=2.0)
 
     def is_active(self) -> bool:
         """Return True if audio is buffered or playback is in progress."""
@@ -276,11 +285,16 @@ class TTSEngine:
         self.tts_text_queue.join()
         while self._has_buffered_audio():
             time.sleep(0.05)
-        # Wait for the last block to drain through the sounddevice ring buffer.
-        # 1024 frames @ 24kHz ≈ 43ms, but Windows time.sleep() has ~15ms
-        # granularity plus scheduling jitter — 150ms provides a safe margin
-        # so the tail of each utterance is not clipped by stop_playback().
-        time.sleep(0.15)
+        # Wait for the last chunk to finish playing.
+        # aplay: proc.communicate() is synchronous, but _aplay_proc is cleared
+        # only after communicate() returns, so poll it.
+        while self._aplay_proc is not None:
+            time.sleep(0.02)
+        # Fallback: wait for any sounddevice stream (non-aplay systems).
+        try:
+            sd.wait()
+        except Exception:
+            pass
 
     def drain_buffers(self) -> None:
         """Clear all pending TTS text and audio buffers."""
@@ -292,6 +306,7 @@ class TTSEngine:
             except queue.Empty:
                 break
         self._clear_audio_buffer()
+        self._kill_aplay()
 
     def shutdown(self) -> None:
         """Signal the worker thread to exit and stop playback."""
@@ -495,6 +510,7 @@ class TTSEngine:
         }
 
         need_resample = self._minimax_sample_rate != self._sample_rate
+        all_samples: list[np.ndarray] = []
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
@@ -513,7 +529,14 @@ class TTSEngine:
                         break
                     try:
                         payload = _json.loads(data_str)
-                        hex_audio = payload.get("data", {}).get("audio", "")
+                        data_field = payload.get("data", {})
+                        # status=2 is the final summary event — MiniMax resends the
+                        # complete audio here as a duplicate.  Skip it; we already
+                        # have all the audio from the status=1 streaming chunks.
+                        # Note: MiniMax may return status as int 2 or string "2".
+                        if data_field.get("status") in (2, "2"):
+                            continue
+                        hex_audio = data_field.get("audio", "")
                         if not hex_audio:
                             continue
                         pcm_bytes = bytes.fromhex(hex_audio)
@@ -524,36 +547,86 @@ class TTSEngine:
                             indices = np.linspace(0, len(samples) - 1, new_len)
                             samples = np.interp(indices, np.arange(len(samples)), samples)
                         if len(samples) > 0:
-                            with self._buffer_lock:
-                                self.tts_buffer.append(samples)
+                            all_samples.append(samples)
                     except (_json.JSONDecodeError, ValueError) as exc:
                         logger.debug("MiniMax TTS chunk parse: %s", exc)
+
+        if all_samples and self._is_generation_current(generation):
+            combined = np.concatenate(all_samples)
+            with self._buffer_lock:
+                self.tts_buffer.append(combined)
 
     # ------------------------------------------------------------------
     # Playback
     # ------------------------------------------------------------------
 
+    def _kill_aplay(self) -> None:
+        """Terminate any running aplay subprocess (immediate interruption)."""
+        proc = self._aplay_proc
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
     def _playback_loop(self) -> None:
-        """Run ``sd.OutputStream`` until ``stop_playback`` is called."""
+        """Drain tts_buffer one sentence at a time.
+
+        On Linux with aplay available: pipe PCM to `aplay` via stdin.
+        aplay plays exactly once — confirmed on PipeWire-managed ALSA (sunrise
+        aarch64).  sounddevice (sd.OutputStream callback and sd.play()) both
+        cause audio to play twice on this system due to a PortAudio/PipeWire
+        interaction bug.
+
+        On other platforms: fall back to sd.play() + sd.wait().
+        """
         try:
             logger.info(
-                "TTS playback: device=%s, sample_rate=%d",
+                "TTS playback: device=%s, sample_rate=%d, aplay=%s",
                 self._output_device if self._output_device is not None else "default",
                 self._sample_rate,
+                self._aplay_bin is not None,
             )
-            with sd.OutputStream(
-                channels=1,
-                callback=self.play_audio_callback,
-                dtype="float32",
-                samplerate=self._sample_rate,
-                blocksize=1024,
-                device=self._output_device,
-            ):
-                while self._is_playing:
-                    sd.sleep(100)
+            while self._is_playing:
+                chunk = None
+                with self._buffer_lock:
+                    if self.tts_buffer:
+                        chunk = self.tts_buffer.popleft()
+
+                if chunk is not None and len(chunk) > 0:
+                    # Apply volume
+                    if self._volume != 1.0:
+                        chunk = chunk * self._volume
+                        np.clip(chunk, -1.0, 1.0, out=chunk)
+
+                    if self._aplay_bin:
+                        pcm = (chunk * 32767).clip(-32768, 32767).astype(np.int16)
+                        dur = len(chunk) / self._sample_rate
+                        logger.info(
+                            "aplay: %d samples = %.3fs", len(chunk), dur
+                        )
+                        cmd = [
+                            self._aplay_bin,
+                            "-r", str(self._sample_rate),
+                            "-f", "S16_LE",
+                            "-c", "1",
+                            "-q",
+                        ]
+                        self._aplay_proc = subprocess.Popen(
+                            cmd, stdin=subprocess.PIPE
+                        )
+                        self._aplay_proc.communicate(input=pcm.tobytes())
+                        self._aplay_proc = None
+                        logger.info("aplay: done")
+                    else:
+                        sd.play(chunk, samplerate=self._sample_rate, device=self._output_device)
+                        sd.wait()
+                else:
+                    time.sleep(0.02)
         except Exception as e:
             logger.error("Playback error: %s", e)
         finally:
+            self._aplay_proc = None
             # Always clear _is_playing on exit — prevents start_playback() from
             # getting permanently blocked and wait_done() from deadlocking when
             # the audio device is unavailable or throws.
