@@ -347,6 +347,11 @@ class AudioAgent:
         """Synthesize and play a short chime for the given event.
 
         Supported events: ``acknowledge``, ``wake``, ``error``.
+
+        On Linux with aplay available, chimes are piped to aplay in a
+        background thread.  This avoids ALSA half-duplex conflicts that
+        occur when sd.play() is called while sd.InputStream is open (wake
+        word + acknowledge chimes both fire inside listen_loop).
         """
         try:
             generators = {
@@ -356,7 +361,27 @@ class AudioAgent:
             }
             gen = generators.get(event, self._chime_acknowledge)
             audio = gen()
-            sd.play(audio, self._SR, blocking=False)
+
+            aplay_bin = getattr(self.tts, "_aplay_bin", None)
+            if aplay_bin:
+                # aplay path: non-blocking, runs in daemon thread
+                pcm = (audio * 32767).clip(-32768, 32767).astype("int16")
+                pcm_bytes = pcm.tobytes()
+
+                def _run() -> None:
+                    try:
+                        import subprocess
+                        proc = subprocess.Popen(
+                            [aplay_bin, "-r", str(self._SR), "-f", "S16_LE", "-c", "1", "-q"],
+                            stdin=subprocess.PIPE,
+                        )
+                        proc.communicate(input=pcm_bytes)
+                    except Exception:
+                        pass
+
+                threading.Thread(target=_run, daemon=True).start()
+            else:
+                sd.play(audio, self._SR, blocking=False)
         except Exception:
             pass  # non-critical audio feedback
 
