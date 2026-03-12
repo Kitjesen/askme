@@ -13,10 +13,13 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import sounddevice as sd
+
+if TYPE_CHECKING:
+    from askme.voice.audio_router import AudioRouter
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +63,7 @@ class TTSEngine:
     _RE_IMG = re.compile(r'!\[.*?\]\(.*?\)')
     _RE_LINK = re.compile(r'\[(.+?)\]\(.*?\)')
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any], *, audio_router: "AudioRouter | None" = None) -> None:
         self._backend: str = config.get("backend", "local")
         self._sample_rate: int = int(config.get("sample_rate", 24000))
         self._output_device: int | str | None = config.get("output_device")
@@ -105,6 +108,9 @@ class TTSEngine:
         # aplay subprocess (Linux only); non-None while a chunk is being played
         self._aplay_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         self._aplay_bin: str | None = shutil.which("aplay")
+
+        # AudioRouter for device ownership coordination (optional)
+        self._audio_router: AudioRouter | None = audio_router
 
         # Local TTS engine (lazy init)
         self._local_tts: Any | None = None
@@ -664,12 +670,21 @@ class TTSEngine:
                         self._aplay_proc = subprocess.Popen(
                             cmd, stdin=subprocess.PIPE
                         )
-                        self._aplay_proc.communicate(input=pcm.tobytes())
+                        if self._audio_router is not None:
+                            with self._audio_router.output_session():
+                                self._aplay_proc.communicate(input=pcm.tobytes())
+                        else:
+                            self._aplay_proc.communicate(input=pcm.tobytes())
                         self._aplay_proc = None
                         logger.info("aplay: done")
                     else:
-                        sd.play(chunk, samplerate=self._sample_rate, device=self._output_device)
-                        sd.wait()
+                        if self._audio_router is not None:
+                            with self._audio_router.output_session():
+                                sd.play(chunk, samplerate=self._sample_rate, device=self._output_device)
+                                sd.wait()
+                        else:
+                            sd.play(chunk, samplerate=self._sample_rate, device=self._output_device)
+                            sd.wait()
                 else:
                     time.sleep(0.02)
         except Exception as e:

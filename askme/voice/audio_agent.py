@@ -15,6 +15,7 @@ import sounddevice as sd
 from askme.ota_bridge import OTABridgeMetrics, get_ota_runtime_metrics
 
 from .asr import ASREngine
+from .audio_router import AudioRouter
 from .kws import KWSEngine
 from .punctuation import PunctuationRestorer
 from .tts import TTSEngine
@@ -57,10 +58,12 @@ class AudioAgent:
         voice_mode: bool = True,
         *,
         metrics: OTABridgeMetrics | None = None,
+        audio_router: AudioRouter | None = None,
     ) -> None:
         voice_cfg = config.get("voice", {})
         self.voice_mode = voice_mode
         self._metrics = metrics or get_ota_runtime_metrics()
+        self._audio_router = audio_router
 
         # Shared state
         self.audio_queue: queue.Queue[str] = queue.Queue()
@@ -110,7 +113,7 @@ class AudioAgent:
             self.woken_up = True
 
         # -- Output engine --
-        self.tts = TTSEngine(voice_cfg.get("tts", {}))
+        self.tts = TTSEngine(voice_cfg.get("tts", {}), audio_router=audio_router)
         self._refresh_voice_metrics()
 
     # ------------------------------------------------------------------
@@ -229,6 +232,13 @@ class AudioAgent:
 
         self._metrics.mark_voice_listen_started()
         self._refresh_voice_metrics()
+
+        # Wait for TTS output to release the device before opening the mic.
+        # On half-duplex ALSA hardware (sunrise) aplay and sd.InputStream share
+        # the same physical device; opening the mic while aplay is running
+        # causes an XRUN cascade on the next listen iteration.
+        if self._audio_router is not None:
+            self._audio_router.wait_for_input_ready(timeout=10.0)
 
         try:
             with sd.InputStream(

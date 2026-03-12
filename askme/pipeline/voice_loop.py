@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from askme.pipeline.external_turns import record_external_turn
+from askme.voice.audio_router import AudioErrorKind, AudioRouter
 
 if TYPE_CHECKING:
     from askme.brain.intent_router import IntentRouter
@@ -35,12 +36,14 @@ class VoiceLoop:
         audio: AudioAgent,
         voice_runtime_bridge: VoiceRuntimeBridge | None = None,
         dispatcher: SkillDispatcher | None = None,
+        audio_router: AudioRouter | None = None,
     ) -> None:
         self._router = router
         self._pipeline = pipeline
         self._audio = audio
         self._voice_runtime_bridge = voice_runtime_bridge
         self._dispatcher = dispatcher
+        self._audio_router = audio_router
 
     async def run(self) -> None:
         """Block until Ctrl+C or too many consecutive errors."""
@@ -220,15 +223,51 @@ class VoiceLoop:
             except KeyboardInterrupt:
                 break
             except Exception as exc:
+                kind = AudioRouter.classify_error(exc)
+
+                # ── XRUN: silent retry, no user notification ──────────────
+                # Buffer overrun after aplay finishes — expected on half-duplex
+                # ALSA hardware.  The AudioRouter ownership model prevents most
+                # XRUNs; the ones that slip through are recoverable silently.
+                if kind == AudioErrorKind.XRUN:
+                    logger.debug("Voice loop: XRUN (stream reset): %s", exc)
+                    await asyncio.sleep(0.1)
+                    continue
+
+                # ── DEVICE_BUSY: short backoff, silent retry ───────────────
+                if kind == AudioErrorKind.DEVICE_BUSY:
+                    logger.warning("Voice loop: audio device busy — retrying in 2s: %s", exc)
+                    await asyncio.sleep(2.0)
+                    continue
+
+                # ── TTS_FAIL: mic unaffected, retry quickly ───────────────
+                if kind == AudioErrorKind.TTS_FAIL:
+                    logger.error("Voice loop: TTS backend error: %s", exc)
+                    await asyncio.sleep(0.5)
+                    continue
+
+                # ── DEVICE_LOST: notify user once, long backoff ───────────
+                if kind == AudioErrorKind.DEVICE_LOST:
+                    logger.error("Voice loop: audio device lost: %s", exc)
+                    consecutive_errors += 1
+                    if consecutive_errors == 1:
+                        try:
+                            self._audio.tts.speak("麦克风断开，正在重连。")
+                        except Exception:
+                            pass
+                    await asyncio.sleep(5.0)
+                    continue
+
+                # ── UNKNOWN: standard consecutive-error escalation ────────
                 consecutive_errors += 1
-                logger.error("Voice loop error: %s", exc)
+                logger.error("Voice loop error [%s]: %s", kind.value, exc)
                 if consecutive_errors >= self.MAX_CONSECUTIVE_ERRORS:
                     logger.warning(
                         "Voice loop degraded: %d consecutive errors, pausing 5s",
                         consecutive_errors,
                     )
                     try:
-                        await self._audio.speak("系统暂时遇到问题，请稍候。")
+                        self._audio.tts.speak("系统暂时遇到问题，请稍候。")
                     except Exception:
                         pass
                     await asyncio.sleep(5)

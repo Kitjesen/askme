@@ -7,7 +7,7 @@ from askme.voice.audio_agent import AudioAgent
 
 
 class _DummyTTS:
-    def __init__(self, config):
+    def __init__(self, config, *, audio_router=None):
         self.backend = config.get("backend", "dummy")
         self._is_playing = False
         self.tts_text_queue = queue.Queue()

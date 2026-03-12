@@ -116,11 +116,18 @@ class AskmeApp:
             voice_triggers=self.skill_manager.get_voice_triggers(),
         )
 
+        # Audio router — shared between AudioAgent (input) and TTSEngine (output).
+        # Serialises mic open and aplay on half-duplex ALSA hardware (sunrise).
+        # None in text-only mode — no audio device coordination needed.
+        from askme.voice.audio_router import AudioRouter
+        self.audio_router: AudioRouter | None = AudioRouter() if voice_mode else None
+
         # Audio / voice
         self.audio = AudioAgent(
             self.cfg,
             voice_mode=voice_mode,
             metrics=self.ota_metrics,
+            audio_router=self.audio_router,
         )
         register_voice_tools(self.tools, self.audio)
         self.voice_runtime_bridge = VoiceRuntimeBridge(
@@ -211,6 +218,7 @@ class AskmeApp:
             audio=self.audio,
             voice_runtime_bridge=self.voice_runtime_bridge,
             dispatcher=self.dispatcher,
+            audio_router=self.audio_router,
         )
 
         self._proactive = ProactiveAgent(
