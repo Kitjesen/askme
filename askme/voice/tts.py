@@ -659,6 +659,8 @@ class TTSEngine:
                             "-c", "1",
                             "-q",
                         ]
+                        if self._output_device is not None:
+                            cmd += ["-D", str(self._output_device)]
                         self._aplay_proc = subprocess.Popen(
                             cmd, stdin=subprocess.PIPE
                         )
