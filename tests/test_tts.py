@@ -6,6 +6,8 @@ import threading
 import time
 import types
 
+import pytest
+
 
 def test_local_backend_generates_and_queues(monkeypatch):
     """Local backend: sherpa-onnx generate → resample → queue."""
@@ -43,6 +45,7 @@ def test_local_backend_generates_and_queues(monkeypatch):
 
 def test_edge_backend_calls_edge_tts_and_decodes(monkeypatch):
     """Edge backend: edge-tts stream → MP3 accumulate → decode → queue."""
+    pytest.importorskip("edge_tts", reason="edge_tts not installed")
     from askme.voice.tts import TTSEngine
 
     captured: list[bytes] = []

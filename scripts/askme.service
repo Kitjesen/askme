@@ -1,0 +1,21 @@
+[Unit]
+Description=askme 语音 AI 助手（Thunder 机器狗语音控制）
+After=network.target sound.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=sunrise
+WorkingDirectory=/home/sunrise/askme
+EnvironmentFile=-/home/sunrise/askme/.env
+ExecStart=/home/sunrise/askme/.venv/bin/python -m askme --legacy --voice
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:/home/sunrise/askme/logs/askme.log
+StandardError=append:/home/sunrise/askme/logs/askme.log
+
+# 语音硬件权限
+SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target
