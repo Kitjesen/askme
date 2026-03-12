@@ -413,6 +413,13 @@ class TTSEngine:
             return False
         finally:
             if loop is not None:
+                # Properly close any lingering async generators before shutting
+                # down the loop, suppressing the "Task was destroyed but pending"
+                # warning that appears when httpx SSE generators are abandoned.
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                except Exception:
+                    pass
                 loop.close()
 
     # ------------------------------------------------------------------

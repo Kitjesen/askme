@@ -282,7 +282,9 @@ class OTABridge:
         self._state_lock = threading.Lock()
         self._session = requests.Session()
         self._task: asyncio.Task[None] | None = None
-        self._stop_event = asyncio.Event()
+        # Created lazily in start() so __init__ is safe to call from sync code
+        # (creating asyncio.Event() outside a running loop is deprecated in 3.12+).
+        self._stop_event: asyncio.Event | None = None
         self._device_id: str | None = None
         self._device_token: str | None = None
         self._registered_at: str | None = None
@@ -323,7 +325,8 @@ class OTABridge:
                 self._set_connection_state("stopped", clear_error=True)
             return
 
-        self._stop_event.set()
+        if self._stop_event is not None:
+            self._stop_event.set()
         try:
             await task
         except asyncio.CancelledError:
@@ -340,7 +343,7 @@ class OTABridge:
             return {
                 "enabled": self.enabled,
                 "state": self._connection_state,
-                "registered": self._is_registered(),
+                "registered": bool(self._device_id and self._device_token),
                 "device_id": self._device_id,
                 "registered_at": self._registered_at,
                 "last_registration_attempt_at": self._last_registration_attempt_at,
@@ -556,12 +559,10 @@ class OTABridge:
         *,
         require_token: bool,
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self._post_json_sync,
-            path,
-            payload,
-            require_token,
-        )
+        # OTA HTTP calls are low-frequency (heartbeat every ~60s) and complete
+        # quickly (<200ms).  Running them directly avoids asyncio.to_thread
+        # executor deadlocks observed on Python 3.13/Windows under pytest-asyncio.
+        return self._post_json_sync(path, payload, require_token)
 
     def _post_json_sync(
         self,

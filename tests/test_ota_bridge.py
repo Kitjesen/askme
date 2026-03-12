@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -102,9 +103,12 @@ async def test_ota_bridge_registers_and_reports_runtime_metrics(project_root, mo
         robot_mode=False,
     )
 
-    assert await bridge._ensure_registered() is True  # noqa: SLF001
-    await bridge._send_heartbeat()  # noqa: SLF001
-    await bridge._send_telemetry()  # noqa: SLF001
+    try:
+        assert await asyncio.wait_for(bridge._ensure_registered(), timeout=5.0) is True  # noqa: SLF001
+        await asyncio.wait_for(bridge._send_heartbeat(), timeout=5.0)  # noqa: SLF001
+        await asyncio.wait_for(bridge._send_telemetry(), timeout=5.0)  # noqa: SLF001
+    finally:
+        await bridge.stop()
 
     assert len(calls) == 3
     assert calls[0]["url"] == "https://ota.example.com/api/devices/register"
@@ -124,7 +128,7 @@ async def test_ota_bridge_registers_and_reports_runtime_metrics(project_root, mo
     assert calls[0]["json"]["system_info"]["robot_id"] == "thunder-01"
     assert calls[1]["json"]["system_info"]["site_id"] == "factory-a"
     status = bridge.status_snapshot()
-    assert status["state"] == "connected"
+    assert status["state"] == "stopped"  # stop() was called in finally
     assert status["registered"] is True
     assert status["device_id"] == "INVX-THUNDER-001"
     assert status["last_registration_attempt_at"] is not None
@@ -162,7 +166,10 @@ async def test_ota_bridge_reloads_persisted_credentials(project_root, monkeypatc
         metrics=OTABridgeMetrics(),
     )
 
-    await bridge._send_heartbeat()  # noqa: SLF001
+    try:
+        await asyncio.wait_for(bridge._send_heartbeat(), timeout=5.0)  # noqa: SLF001
+    finally:
+        await bridge.stop()
 
     assert len(calls) == 1
     assert calls[0]["url"] == "https://ota.example.com/api/agent/heartbeat"

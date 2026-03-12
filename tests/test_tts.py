@@ -101,35 +101,32 @@ def test_drain_buffers_invalidates_inflight_generation(monkeypatch):
 
 
 def test_playback_loop_uses_configured_output_device(monkeypatch):
+    """_playback_loop passes the configured output_device to sd.play."""
+    import numpy as np
     from askme.voice.tts import TTSEngine
     import askme.voice.tts as tts_mod
 
-    captured: dict[str, object] = {}
+    played_kwargs: dict[str, object] = {}
 
-    class _FakeStream:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> bool:
-            return False
-
-    def fake_sleep(ms):
+    def fake_play(data, samplerate, device=None):
+        played_kwargs["device"] = device
+        # Stop playback loop after the first chunk so the test terminates.
         engine._is_playing = False
 
-    monkeypatch.setattr(tts_mod.sd, "OutputStream", _FakeStream)
-    monkeypatch.setattr(tts_mod.sd, "sleep", fake_sleep)
+    monkeypatch.setattr(tts_mod.sd, "play", fake_play)
+    monkeypatch.setattr(tts_mod.sd, "wait", lambda: None)
 
     engine = TTSEngine({"backend": "edge", "output_device": 3})
+    engine._aplay_bin = None  # disable aplay so we exercise the sd.play branch
     try:
+        # Queue a real audio chunk so the loop doesn't spin on empty buffer.
+        engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
         engine._is_playing = True
         engine._playback_loop()
     finally:
         engine.shutdown()
 
-    assert captured["device"] == 3
+    assert played_kwargs.get("device") == 3
 
 
 def test_auto_fallback_when_model_missing():

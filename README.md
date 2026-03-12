@@ -219,6 +219,7 @@ asyncio.run(t())
 
 | 版本 | 内容 |
 |------|------|
+| v4.3.5 | `OTABridge.status_snapshot()` 死锁修复：内联 `_is_registered()` 检查避免 `threading.Lock` 重入 |
 | v4.3.4 | TTS 双播根因修复：跳过 MiniMax SSE status=2 重复音频事件 |
 | v4.3.3 | TTS 播放器：`sd.OutputStream` callback → `subprocess+aplay` 逐句播放 |
 | v4.3.2 | `<think>` 块不再污染对话历史 |
