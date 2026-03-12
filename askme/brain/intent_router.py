@@ -55,10 +55,20 @@ class IntentRouter:
         """
         self._safety = safety_checker
         self._voice_triggers: dict[str, str] = voice_triggers or {}
+        self._sorted_triggers: list[tuple[str, str]] = self._build_sorted_triggers()
+
+    def _build_sorted_triggers(self) -> list[tuple[str, str]]:
+        """Return triggers sorted longest-first (cached; rebuild on update)."""
+        return sorted(
+            self._voice_triggers.items(),
+            key=lambda kv: len(kv[0]),
+            reverse=True,
+        )
 
     def update_voice_triggers(self, triggers: dict[str, str]) -> None:
         """Replace the voice trigger map (called after skill reload)."""
         self._voice_triggers = triggers
+        self._sorted_triggers = self._build_sorted_triggers()
 
     def route(self, text: str) -> Intent:
         """Determine the intent for a given user input.
@@ -122,14 +132,7 @@ class IntentRouter:
 
         text_lower = text.lower()
 
-        # Sort triggers by length (longest first) for greedy matching
-        sorted_triggers = sorted(
-            self._voice_triggers.items(),
-            key=lambda kv: len(kv[0]),
-            reverse=True,
-        )
-
-        for trigger_phrase, skill_name in sorted_triggers:
+        for trigger_phrase, skill_name in self._sorted_triggers:
             if len(trigger_phrase) < self.MIN_TRIGGER_LENGTH:
                 continue
             if trigger_phrase.lower() in text_lower:

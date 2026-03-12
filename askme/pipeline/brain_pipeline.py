@@ -556,15 +556,16 @@ class BrainPipeline:
 
             # Text content — strip <think> blocks, then speak
             if delta.content:
-                full_response += delta.content
                 clean = self._think_filter.feed(delta.content)
                 if clean:
+                    full_response += clean
                     for sentence in self._splitter.feed(clean):
                         self._audio.speak(sentence)
                         spoke_any = True
 
         think_tail = self._think_filter.flush()
         if think_tail:
+            full_response += think_tail
             for sentence in self._splitter.feed(think_tail):
                 self._audio.speak(sentence)
                 spoke_any = True
@@ -645,14 +646,15 @@ class BrainPipeline:
         async for chunk in self._llm.chat_stream(messages, model=model):
             delta = chunk.choices[0].delta
             if delta.content:
-                full_response += delta.content
                 clean = self._think_filter.feed(delta.content)
                 if clean:
+                    full_response += clean
                     for sentence in self._splitter.feed(clean):
                         self._audio.speak(sentence)
 
         think_tail = self._think_filter.flush()
         if think_tail:
+            full_response += think_tail
             for sentence in self._splitter.feed(think_tail):
                 self._audio.speak(sentence)
         remainder = self._splitter.flush()

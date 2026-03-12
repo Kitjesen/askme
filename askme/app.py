@@ -21,13 +21,15 @@ import sys
 
 from askme import __version__ as ASKME_VERSION
 from askme.brain.conversation import ConversationManager
+from askme.dog_control_client import DogControlClient
+from askme.dog_safety_client import DogSafetyClient
 from askme.brain.episodic_memory import EpisodicMemory
 from askme.brain.intent_router import IntentRouter
 from askme.brain.llm_client import LLMClient
 from askme.brain.memory_bridge import MemoryBridge
 from askme.brain.session_memory import SessionMemory
 from askme.brain.vision_bridge import VisionBridge
-from askme.config import get_config, get_section
+from askme.config import get_config, get_section, validate_config
 from askme.health_server import (
     AskmeHealthServer,
     build_health_snapshot,
@@ -80,7 +82,8 @@ class AskmeApp:
         self.episodic = EpisodicMemory(llm=self.llm)
         self.vision = VisionBridge()
         self.tools = ToolRegistry()
-        register_builtin_tools(self.tools)
+        _production_mode = bool(self.cfg.get("tools", {}).get("production_mode", False))
+        register_builtin_tools(self.tools, production_mode=_production_mode)
 
         # Robot (optional)
         self.arm_controller = None
@@ -122,6 +125,16 @@ class AskmeApp:
         )
         self.splitter = StreamSplitter()
 
+        # Dog safety client (optional — enabled when DOG_SAFETY_SERVICE_URL is set)
+        self.dog_safety = DogSafetyClient(
+            self.cfg.get("runtime", {}).get("dog_safety", {})
+        )
+
+        # Dog control client (optional — enabled when DOG_CONTROL_SERVICE_URL is set)
+        self.dog_control = DogControlClient(
+            self.cfg.get("runtime", {}).get("dog_control", {})
+        )
+
         # ── Assemble pipeline ───────────────────────────────
         brain_cfg = get_section("brain")
         tools_cfg = get_section("tools")
@@ -140,6 +153,8 @@ class AskmeApp:
             audio=self.audio,
             splitter=self.splitter,
             arm_controller=self.arm_controller,
+            dog_safety_client=self.dog_safety,
+            dog_control_client=self.dog_control,
             vision=self.vision,
             session_memory=self.session_memory,
             episodic_memory=self.episodic,
@@ -206,11 +221,34 @@ class AskmeApp:
             snapshot_provider=self.health_snapshot,
         )
 
+        # ── Config validation (warnings only — never crash) ─────────────
+        cfg_warnings = validate_config(self.cfg)
+        for w in cfg_warnings:
+            logger.warning("[Config] %s", w)
+
+        # ── Structured startup summary ───────────────────────────────────
+        enabled_skills = self.skill_manager.get_enabled()
+        skill_names = [s.name for s in enabled_skills]
+        brain_cfg_log = self.cfg.get("brain", {})
+        fallback_models = brain_cfg_log.get("fallback_models", [])
+        dog_safety_url = (
+            self.cfg.get("runtime", {}).get("dog_safety", {}).get("base_url", "")
+        )
         logger.info(
-            "Askme initialised (voice=%s, robot=%s, skills=%d, tools=%d)",
-            voice_mode, robot_mode,
-            len(self.skill_manager.get_enabled()),
+            "Askme started | app=%s v%s | voice=%s robot=%s | "
+            "llm=%s fallbacks=%s | skills(%d)=%s | tools=%d | "
+            "voice_bridge=%s | dog_safety=%s",
+            self._app_name,
+            self._app_version,
+            voice_mode,
+            robot_mode,
+            brain_cfg_log.get("model", "?"),
+            fallback_models or [],
+            len(skill_names),
+            skill_names,
             len(self.tools),
+            "enabled" if self.voice_runtime_bridge.enabled else "disabled",
+            "configured" if dog_safety_url else "not configured",
         )
 
     # ── Lifecycle ────────────────────────────────────────────
@@ -242,7 +280,8 @@ class AskmeApp:
             await self.shutdown()
 
     async def shutdown(self) -> None:
-        """Graceful cleanup."""
+        """Graceful cleanup — cancel in-flight tasks, drain audio, close hardware."""
+        await self._pipeline.shutdown()
         self.audio.shutdown()
         if self.arm_controller:
             self.arm_controller.close()
@@ -328,7 +367,8 @@ class AskmeApp:
             metrics_snapshot=self.ota_metrics.snapshot(),
             active_skills=[skill.name for skill in self.skill_manager.get_enabled()],
             voice_status=self._voice_status_snapshot(),
-            ota_status=self.ota_bridge.status_snapshot() if hasattr(self, "ota_bridge") and self.ota_bridge else None,
+            ota_status=None,  # OTA Agent pulls this endpoint and reports to OTA Server
+            voice_bridge=self.voice_runtime_bridge.status_snapshot(),
         )
 
     def metrics_snapshot(self) -> dict[str, object]:

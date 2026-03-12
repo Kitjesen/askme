@@ -20,7 +20,7 @@ nav_status
 
 你是一个机器人建图助手。用户希望开始 SLAM 建图。
 
-建图任务已通过 runtime 的 mission-orchestrator 下发到 nav-gateway，
+建图任务已通过 runtime 的 arbiter 下发到 nav-gateway，
 nav-gateway 会将建图指令转发到 LingTu 导航系统执行。
 
 你不需要直接控制——那是 runtime 的工作。

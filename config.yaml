@@ -195,6 +195,8 @@ robot:
 # Tools: local execution safety and timeout policy
 # ----------------------------------------------------------
 tools:
+  # Set true to exclude dev-only tools (e.g. run_command) in production deployments
+  production_mode: false
   general_chat_max_safety_level: normal
   default_timeout: 8.0
   dangerous_timeout: 8.0
@@ -319,3 +321,10 @@ runtime:
     timeout: 2.0
     failure_threshold: 2
     failure_cooldown: 15.0
+
+  dog_safety:
+    # dog-safety-service E-STOP notification (Thunder runtime integration)
+    # Set DOG_SAFETY_SERVICE_URL env var to enable, e.g. http://localhost:5070
+    base_url: ${DOG_SAFETY_SERVICE_URL}
+    bearer_token: ${RUNTIME_BEARER_TOKEN}
+    operator_id: askme
