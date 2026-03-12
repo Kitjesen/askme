@@ -58,6 +58,13 @@ class CreateSkillTool(BaseTool):
     description = (
         "动态创建新技能并立即热加载生效——当用户需求超出现有技能范围时使用。"
         "新技能写入 data/skills/ 并实时激活，无需重启。"
+        "\n\n可在 tools_section 中列出以下工具让技能真实调用服务："
+        "\n- http_request：向任意 REST API 发请求（GET/POST），需 URL 在白名单中"
+        "\n- nav_status：查询机器人当前导航状态"
+        "\n- get_current_time：获取当前时间"
+        "\n- read_file：读取 data/ 目录下的文件"
+        "\n示例：要让技能控制机器人站立，tools_section 填 'http_request'，"
+        "prompt 里写明调用 dog-control-service 的 URL 和请求体。"
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -76,11 +83,19 @@ class CreateSkillTool(BaseTool):
             },
             "prompt": {
                 "type": "string",
-                "description": "技能执行时给LLM的提示词，支持 {{user_input}} 占位符",
+                "description": (
+                    "技能执行时给LLM的提示词，支持 {{user_input}} 占位符。"
+                    "如果需要调用服务，在提示词里明确写出：用哪个工具、调用什么 URL、"
+                    "传什么参数、如何解读响应、最终说什么给用户。"
+                ),
             },
             "tools_section": {
                 "type": "string",
-                "description": "允许使用的工具名称，换行分隔（可选，留空表示不使用工具）",
+                "description": (
+                    "允许使用的工具名称，每行一个（如 'http_request\\nnav_status'）。"
+                    "留空表示纯对话技能，不调用任何工具。"
+                    "需要调用真实服务时必须填写。"
+                ),
             },
             "tags": {
                 "type": "string",

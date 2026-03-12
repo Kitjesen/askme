@@ -198,6 +198,17 @@ tools:
   # Set true to exclude dev-only tools (e.g. run_command) in production deployments
   production_mode: false
   general_chat_max_safety_level: normal
+
+  # Allowed URL prefixes for http_request tool.
+  # Empty list = localhost only (127.0.0.1, ::1, localhost).
+  # Add service base URLs here to let skills call them.
+  # Example:
+  #   http_allowlist:
+  #     - http://localhost:8080        # dog-control-service
+  #     - http://localhost:5070        # dog-safety-service
+  #     - http://localhost:5000        # nav-gateway
+  #     - http://192.168.66.190:8080   # remote robot service
+  http_allowlist: []
   default_timeout: 8.0
   dangerous_timeout: 8.0
   critical_timeout: 4.0

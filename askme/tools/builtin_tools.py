@@ -8,13 +8,17 @@ from the prototype as proper BaseTool subclasses.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import shlex
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
-from askme.config import project_root
+from askme.config import get_section, project_root
 from .tool_registry import BaseTool, ToolRegistry
 
 # Directories the LLM is allowed to read. Data produced by askme itself
@@ -157,6 +161,134 @@ class ListDirectoryTool(BaseTool):
             return f"[Error] {exc}"
 
 
+def _http_allowlist() -> list[str]:
+    """Load allowed URL prefixes from config tools.http_allowlist."""
+    try:
+        return get_section("tools").get("http_allowlist", [])
+    except Exception:
+        return []
+
+
+def _is_url_allowed(url: str, allowlist: list[str]) -> bool:
+    """Return True if url matches at least one prefix in allowlist.
+
+    Empty allowlist = allow localhost/127.0.0.1/[::1] only.
+    """
+    if not allowlist:
+        parsed = urllib.parse.urlparse(url)
+        return parsed.hostname in ("localhost", "127.0.0.1", "::1")
+    return any(url.startswith(prefix) for prefix in allowlist)
+
+
+class HttpRequestTool(BaseTool):
+    """Make an HTTP request to a configured service endpoint.
+
+    Skills use this to call real services (dog-control, nav-gateway,
+    custom REST APIs, etc.).  Allowed URL prefixes are configured in
+    config.yaml ``tools.http_allowlist``.
+    """
+
+    name = "http_request"
+    description = (
+        "向外部服务发送 HTTP 请求（GET/POST/PUT/DELETE）并返回响应。"
+        "用于调用机器人控制服务、导航服务等 REST API。"
+        "URL 必须在 config.yaml tools.http_allowlist 白名单中。"
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "method": {
+                "type": "string",
+                "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+                "description": "HTTP 方法",
+            },
+            "url": {
+                "type": "string",
+                "description": "请求 URL，如 http://localhost:8080/api/v1/action/stand",
+            },
+            "body": {
+                "type": "object",
+                "description": "请求体（JSON），仅 POST/PUT/PATCH 使用",
+            },
+            "headers": {
+                "type": "object",
+                "description": "额外的 HTTP 请求头（可选）",
+            },
+            "timeout": {
+                "type": "number",
+                "description": "超时秒数，默认 5",
+            },
+        },
+        "required": ["method", "url"],
+    }
+    safety_level = "normal"
+
+    def execute(
+        self,
+        *,
+        method: str = "GET",
+        url: str = "",
+        body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float = 5.0,
+        **kwargs: Any,
+    ) -> str:
+        if not url:
+            return "[Error] URL is required."
+
+        allowlist = _http_allowlist()
+        if not _is_url_allowed(url, allowlist):
+            allowed_display = ", ".join(allowlist) if allowlist else "localhost only"
+            return (
+                f"[Error] URL '{url}' 不在白名单中。"
+                f" 允许的前缀：{allowed_display}。"
+                " 请在 config.yaml tools.http_allowlist 中添加。"
+            )
+
+        method = method.upper()
+        data: bytes | None = None
+        req_headers: dict[str, str] = {"Accept": "application/json"}
+        if headers:
+            req_headers.update(headers)
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            req_headers["Content-Type"] = "application/json"
+
+        req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read(8192).decode("utf-8", errors="replace")
+                status = resp.status
+                content_type = resp.headers.get("Content-Type", "")
+                # Try to pretty-print JSON responses
+                if "json" in content_type:
+                    try:
+                        parsed = json.loads(raw)
+                        return json.dumps(
+                            {"status": status, "body": parsed},
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    except json.JSONDecodeError:
+                        pass
+                return json.dumps(
+                    {"status": status, "body": raw[:2000]},
+                    ensure_ascii=False,
+                )
+        except urllib.error.HTTPError as exc:
+            body_text = exc.read(512).decode("utf-8", errors="replace")
+            return json.dumps(
+                {"status": exc.code, "error": exc.reason, "body": body_text},
+                ensure_ascii=False,
+            )
+        except urllib.error.URLError as exc:
+            return f"[Error] 请求失败: {exc.reason}"
+        except TimeoutError:
+            return f"[Error] 请求超时 ({timeout}s): {url}"
+        except Exception as exc:
+            return f"[Error] {exc}"
+
+
 class NavStatusTool(BaseTool):
     """Query navigation system status from the runtime service."""
 
@@ -232,6 +364,7 @@ _BUILTIN_TOOLS: list[type[BaseTool]] = [
     RunCommandTool,
     ReadFileTool,
     ListDirectoryTool,
+    HttpRequestTool,
     NavStatusTool,
 ]
 
