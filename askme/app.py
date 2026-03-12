@@ -45,7 +45,9 @@ from askme.pipeline.voice_loop import VoiceLoop
 from askme.skills.skill_executor import SkillExecutor
 from askme.skills.skill_manager import SkillManager
 from askme.tools.builtin_tools import DispatchSkillTool, register_builtin_tools
+from askme.tools.skill_tools import register_skill_tools
 from askme.tools.tool_registry import ToolRegistry
+from askme.tools.voice_tools import register_voice_tools
 from askme.voice.audio_agent import AudioAgent
 from askme.voice.runtime_bridge import VoiceRuntimeBridge
 from askme.voice.stream_splitter import StreamSplitter
@@ -120,6 +122,7 @@ class AskmeApp:
             voice_mode=voice_mode,
             metrics=self.ota_metrics,
         )
+        register_voice_tools(self.tools, self.audio)
         self.voice_runtime_bridge = VoiceRuntimeBridge(
             self.cfg.get("runtime", {}).get("voice_bridge", {})
         )
@@ -182,6 +185,9 @@ class AskmeApp:
         dispatch_tool = DispatchSkillTool()
         dispatch_tool.set_dispatcher(self.dispatcher)
         self.tools.register(dispatch_tool)
+
+        # Register create_skill tool (LLM can create new skills at runtime)
+        register_skill_tools(self.tools, self.skill_manager, self.router)
 
         self._commands = CommandHandler(
             conversation=self.conversation,

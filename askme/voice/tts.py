@@ -322,6 +322,46 @@ class TTSEngine:
         return self._backend
 
     # ------------------------------------------------------------------
+    # Runtime volume / speed control
+    # ------------------------------------------------------------------
+
+    _VOLUME_MIN = 0.05
+    _VOLUME_MAX = 1.0
+    _SPEED_MIN = 0.5
+    _SPEED_MAX = 2.0
+
+    def set_volume(self, value: float) -> float:
+        """Set PCM output volume (0.05–1.0). Returns the new value."""
+        self._volume = max(self._VOLUME_MIN, min(self._VOLUME_MAX, float(value)))
+        return self._volume
+
+    def adjust_volume(self, delta: float) -> float:
+        """Adjust volume by delta (+/-). Returns the new value."""
+        return self.set_volume(self._volume + delta)
+
+    def set_speed(self, value: float) -> float:
+        """Set speech speed across all backends (0.5–2.0). Returns new value."""
+        speed = max(self._SPEED_MIN, min(self._SPEED_MAX, float(value)))
+        self._speed = speed
+        self._minimax_speed = speed
+        # edge-tts rate is a percent string, e.g. "+20%" or "-30%"
+        pct = round((speed - 1.0) * 100)
+        self._rate = f"+{pct}%" if pct >= 0 else f"{pct}%"
+        return speed
+
+    def adjust_speed(self, delta: float) -> float:
+        """Adjust speed by delta (+/-). Returns new value."""
+        return self.set_speed(self._speed + delta)
+
+    @property
+    def volume(self) -> float:
+        return self._volume
+
+    @property
+    def speed(self) -> float:
+        return self._speed
+
+    # ------------------------------------------------------------------
     # Sounddevice callback
     # ------------------------------------------------------------------
 

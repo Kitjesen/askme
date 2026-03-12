@@ -219,6 +219,8 @@ asyncio.run(t())
 
 | 版本 | 内容 |
 |------|------|
+| v4.5.0 | 音量/语速控制技能（volume_up/down/reset、speed_up/down/reset）；`create_skill` 工具支持运行时动态创建技能并热加载 |
+| v4.4.0 | 语音控制技能：`mute_mic`（闭麦）、`unmute_mic`（开麦）、`stop_speaking`（静音/停止TTS）；E-STOP 同步清空 TTS 队列 |
 | v4.3.5 | `OTABridge.status_snapshot()` 死锁修复：内联 `_is_registered()` 检查避免 `threading.Lock` 重入 |
 | v4.3.4 | TTS 双播根因修复：跳过 MiniMax SSE status=2 重复音频事件 |
 | v4.3.3 | TTS 播放器：`sd.OutputStream` callback → `subprocess+aplay` 逐句播放 |

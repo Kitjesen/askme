@@ -51,6 +51,7 @@ class SkillManager:
             (_PACKAGE_DIR / "builtin", "builtin"),
             (Path.home() / ".askme" / "skills", "user"),
             (self._project_dir / "skills", "project"),
+            (self.generated_skills_dir, "generated"),  # LLM-created skills
         ]
 
         for directory, source in locations:
@@ -62,6 +63,28 @@ class SkillManager:
                 self._skills[name].enabled = False
 
         logger.info("Loaded %d skills", len(self._skills))
+
+    def hot_reload(self, router: Any | None = None) -> int:
+        """Reload all skills from disk and optionally update the router's voice triggers.
+
+        Args:
+            router: An IntentRouter instance with update_voice_triggers().
+                    If provided, the router's trigger map is refreshed immediately.
+
+        Returns:
+            Number of skills loaded after reload.
+        """
+        self.load()
+        if router is not None:
+            router.update_voice_triggers(self.get_voice_triggers())
+            logger.info("Hot-reload: router voice triggers updated (%d triggers)",
+                        len(self.get_voice_triggers()))
+        return len(self._skills)
+
+    @property
+    def generated_skills_dir(self) -> Path:
+        """Directory where LLM-created skills are stored."""
+        return _DATA_DIR / "skills"
 
     def get(self, name: str) -> SkillDefinition | None:
         """Get a skill by name."""

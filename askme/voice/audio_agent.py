@@ -66,6 +66,7 @@ class AudioAgent:
         self.audio_queue: queue.Queue[str] = queue.Queue()
         self.stop_event = threading.Event()
         self.woken_up: bool = False
+        self._muted: bool = False  # software mute — still listens, VoiceLoop filters results
 
         # -- Input engines (only in voice mode) --
         self._asr_timeout: float = voice_cfg.get("asr", {}).get(
@@ -132,6 +133,53 @@ class AudioAgent:
         """Clear any leftover TTS text/audio from a previous turn."""
         self.tts.drain_buffers()
         self._refresh_voice_metrics()
+
+    # ------------------------------------------------------------------
+    # Volume / speed control
+    # ------------------------------------------------------------------
+
+    def set_volume(self, value: float) -> float:
+        """Set TTS output volume (0.05–1.0). Returns new value."""
+        v = self.tts.set_volume(value)
+        self._refresh_voice_metrics()
+        return v
+
+    def adjust_volume(self, delta: float) -> float:
+        """Adjust TTS volume by delta. Returns new value."""
+        return self.set_volume(self.tts.volume + delta)
+
+    def set_speed(self, value: float) -> float:
+        """Set TTS speech speed (0.5–2.0). Returns new value."""
+        v = self.tts.set_speed(value)
+        self._refresh_voice_metrics()
+        return v
+
+    def adjust_speed(self, delta: float) -> float:
+        """Adjust TTS speed by delta. Returns new value."""
+        return self.set_speed(self.tts.speed + delta)
+
+    # ------------------------------------------------------------------
+    # Microphone mute control
+    # ------------------------------------------------------------------
+
+    def mute(self) -> None:
+        """Software-mute: still listens, but VoiceLoop discards non-unmute input.
+
+        Use cases: "闭麦" to stop the assistant from responding while a
+        meeting/demo is happening; unmute with "开麦".
+        """
+        self._muted = True
+        self._refresh_voice_metrics()
+
+    def unmute(self) -> None:
+        """Resume normal voice processing after a mute()."""
+        self._muted = False
+        self._refresh_voice_metrics()
+
+    @property
+    def is_muted(self) -> bool:
+        """Whether the voice assistant is software-muted."""
+        return self._muted
 
     def acknowledge(self) -> None:
         """Play a brief confirmation tone: 'heard you, thinking'.
@@ -496,6 +544,7 @@ class AudioAgent:
                 self.voice_mode and self.kws and getattr(self.kws, "available", False)
             ),
             "woken_up": self.woken_up,
+            "muted": self._muted,
             "tts_backend": self.tts.backend,
             "tts_busy": self.is_busy,
         }

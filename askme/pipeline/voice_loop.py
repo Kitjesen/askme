@@ -59,6 +59,26 @@ class VoiceLoop:
 
                 consecutive_errors = 0
 
+                # ── Muted state gate ──────────────────────────────────────
+                # When muted, only the unmute_mic voice trigger and COMMAND
+                # (quit/exit) pass through. Everything else is silently discarded.
+                if self._audio.is_muted:
+                    _muted_intent = self._router.route(user_text)
+                    if (
+                        _muted_intent.type == IntentType.VOICE_TRIGGER
+                        and _muted_intent.skill_name == "unmute_mic"
+                    ):
+                        self._audio.unmute()
+                        self._audio.acknowledge()
+                        self._audio.speak("好的，重新开启。")
+                        self._audio.start_playback()
+                        self._audio.wait_speaking_done()
+                        self._audio.stop_playback()
+                    elif _muted_intent.type == IntentType.COMMAND:
+                        pass  # fall through to COMMAND handler below
+                    else:
+                        continue
+
                 # Immediate audio feedback — user knows we heard them
                 # Fires before LLM call to fill the latency gap
                 self._audio.acknowledge()
@@ -79,7 +99,70 @@ class VoiceLoop:
 
                 if intent.type == IntentType.ESTOP:
                     self._pipeline.handle_estop()
+                    self._audio.drain_buffers()  # stop any ongoing TTS immediately
                     self._audio.speak("已紧急停止。")
+                    self._audio.start_playback()
+                    self._audio.wait_speaking_done()
+                    self._audio.stop_playback()
+                    continue
+
+                # ── Stop speaking — zero latency, no LLM ─────────────────
+                if (
+                    intent.type == IntentType.VOICE_TRIGGER
+                    and intent.skill_name == "stop_speaking"
+                ):
+                    if memory_task and not memory_task.done():
+                        memory_task.cancel()
+                        memory_task = None
+                    self._audio.drain_buffers()
+                    # acknowledge already fired — no extra chime needed
+                    continue
+
+                # ── Mute mic — zero latency, no LLM ──────────────────────
+                if (
+                    intent.type == IntentType.VOICE_TRIGGER
+                    and intent.skill_name == "mute_mic"
+                ):
+                    if memory_task and not memory_task.done():
+                        memory_task.cancel()
+                        memory_task = None
+                    self._audio.drain_buffers()
+                    self._audio.mute()
+                    self._audio.speak('好的，已关闭麦克风。说"开麦"来重新打开。')
+                    self._audio.start_playback()
+                    self._audio.wait_speaking_done()
+                    self._audio.stop_playback()
+                    continue
+
+                # ── Volume / speed — zero latency, no LLM ────────────────
+                _vol_speed_skill = intent.skill_name if intent.type == IntentType.VOICE_TRIGGER else None
+                if _vol_speed_skill in (
+                    "volume_up", "volume_down", "volume_reset",
+                    "speed_up", "speed_down", "speed_reset",
+                ):
+                    if memory_task and not memory_task.done():
+                        memory_task.cancel()
+                        memory_task = None
+                    self._audio.drain_buffers()
+                    if _vol_speed_skill == "volume_up":
+                        v = self._audio.adjust_volume(+0.2)
+                        msg = f"好的，音量已调大，当前{int(v * 100)}%。"
+                    elif _vol_speed_skill == "volume_down":
+                        v = self._audio.adjust_volume(-0.2)
+                        msg = f"好的，音量已调小，当前{int(v * 100)}%。"
+                    elif _vol_speed_skill == "volume_reset":
+                        self._audio.set_volume(1.0)
+                        msg = "好的，已恢复默认音量。"
+                    elif _vol_speed_skill == "speed_up":
+                        s = self._audio.adjust_speed(+0.3)
+                        msg = f"好的，语速已加快，当前{s:.1f}倍。"
+                    elif _vol_speed_skill == "speed_down":
+                        s = self._audio.adjust_speed(-0.3)
+                        msg = f"好的，语速已降低，当前{s:.1f}倍。"
+                    else:  # speed_reset
+                        self._audio.set_speed(1.0)
+                        msg = "好的，已恢复默认语速。"
+                    self._audio.speak(msg)
                     self._audio.start_playback()
                     self._audio.wait_speaking_done()
                     self._audio.stop_playback()
