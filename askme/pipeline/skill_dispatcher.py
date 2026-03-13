@@ -71,6 +71,11 @@ class MissionContext:
     shared_context: dict[str, str] = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
     state: MissionState = MissionState.RUNNING
+    # Optional binding to an external runtime mission (mission-orchestrator).
+    # Set via SkillDispatcher.bind_runtime_mission() when the runtime creates a
+    # mission before asking askme to execute skills.  Stored in the persisted
+    # JSON so the mission log is traceable back to the runtime mission system.
+    runtime_mission_id: str | None = None
 
     @property
     def step_count(self) -> int:
@@ -87,8 +92,9 @@ class MissionContext:
         """One-line summary for logging."""
         names = [s.skill_name for s in self.steps]
         elapsed = time.time() - self.started_at
+        rt = f" rt={self.runtime_mission_id}" if self.runtime_mission_id else ""
         return (
-            f"mission={self.mission_id} source={self.source} state={self.state.value} "
+            f"mission={self.mission_id}{rt} source={self.source} state={self.state.value} "
             f"steps={names} elapsed={elapsed:.1f}s"
         )
 
@@ -292,6 +298,25 @@ class SkillDispatcher:
     def current_mission(self) -> MissionContext | None:
         return self._current_mission
 
+    def bind_runtime_mission(self, runtime_mission_id: str) -> None:
+        """Bind the current askme mission to an external runtime mission ID.
+
+        Call this when the runtime (mission-orchestrator) has already created a
+        mission and wants the askme skill sequence to be recorded as a sub-entity
+        of that mission.  The ID is persisted in the mission JSON for audit trails.
+
+        No-op when no mission is active.
+        """
+        if not self._current_mission:
+            return
+        self._current_mission.runtime_mission_id = runtime_mission_id
+        self._persist_mission()
+        logger.info(
+            "Mission %s bound to runtime_mission_id=%s",
+            self._current_mission.mission_id,
+            runtime_mission_id,
+        )
+
     # ── dispatch_skill tool (for LLM-driven composition) ──────────
 
     def execute_skill_sync(self, skill_name: str, reason: str = "") -> str:
@@ -353,7 +378,7 @@ class SkillDispatcher:
             path = missions_dir / f"{self._current_mission.mission_id}.json"
             d = dataclasses.asdict(self._current_mission)
             d["state"] = self._current_mission.state.value
-            path.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+            path.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as exc:
             logger.warning("Mission persist failed: %s", exc)
 

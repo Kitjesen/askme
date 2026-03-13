@@ -401,3 +401,47 @@ class TestDispatchEdgeCases:
             "handle_general() must complete the active mission"
         )
         mock_pipeline.process.assert_called_once()
+
+
+class TestBindRuntimeMission:
+    async def test_bind_sets_runtime_mission_id(self):
+        skill = _make_skill()
+        dispatcher, _, _, _ = _make_dispatcher(skill=skill)
+
+        await dispatcher.dispatch("navigate", "去仓库")
+        dispatcher.bind_runtime_mission("rt-abc123")
+
+        assert dispatcher.current_mission is not None
+        assert dispatcher.current_mission.runtime_mission_id == "rt-abc123"
+
+    async def test_bind_shows_in_summary(self):
+        skill = _make_skill()
+        dispatcher, _, _, _ = _make_dispatcher(skill=skill)
+
+        await dispatcher.dispatch("navigate", "去仓库")
+        dispatcher.bind_runtime_mission("rt-xyz")
+
+        summary = dispatcher.current_mission.summary()
+        assert "rt-xyz" in summary
+
+    def test_bind_noop_when_no_mission(self):
+        dispatcher, _, _, _ = _make_dispatcher()
+        # Should not raise
+        dispatcher.bind_runtime_mission("rt-noop")
+        assert dispatcher.current_mission is None
+
+    async def test_bind_persisted_in_json(self, tmp_path, monkeypatch):
+        import json
+        from askme.config import project_root as _pr
+        monkeypatch.setattr("askme.pipeline.skill_dispatcher.project_root", lambda: tmp_path)
+
+        skill = _make_skill()
+        dispatcher, _, _, _ = _make_dispatcher(skill=skill)
+        await dispatcher.dispatch("navigate", "去仓库")
+        dispatcher.bind_runtime_mission("rt-persist-test")
+
+        missions_dir = tmp_path / "data" / "missions"
+        files = list(missions_dir.glob("*.json"))
+        assert len(files) == 1
+        data = json.loads(files[0].read_text(encoding="utf-8"))
+        assert data["runtime_mission_id"] == "rt-persist-test"
