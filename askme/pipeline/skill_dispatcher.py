@@ -297,6 +297,10 @@ class SkillDispatcher:
                 )
                 self._audio.speak(f"多步任务完成：{names}")
                 self._audio.start_playback()
+                # Record in episodic memory so future turns can recall this mission
+                _episodic = getattr(self._pipeline, "_episodic", None)
+                if _episodic is not None:
+                    _episodic.log("mission_complete", mission.summary())
         if mission:
             if mission.state == MissionState.RUNNING:
                 mission.state = MissionState.SUCCEEDED
