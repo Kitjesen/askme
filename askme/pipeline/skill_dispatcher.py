@@ -237,10 +237,17 @@ class SkillDispatcher:
         """
         self.complete_mission()
 
-        # Attempt multi-step planning before handing off to the LLM
+        # Attempt multi-step planning before handing off to the LLM.
+        # 10 s timeout: if the planner LLM hangs, fall back to normal pipeline.
+        _PLANNER_TIMEOUT = 10.0
         if self._planner is not None:
             try:
-                steps = await self._planner.plan(user_text)
+                steps = await asyncio.wait_for(
+                    self._planner.plan(user_text), timeout=_PLANNER_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.warning("PlannerAgent timed out after %.0fs, falling back", _PLANNER_TIMEOUT)
+                steps = None
             except Exception as exc:
                 logger.warning("PlannerAgent raised unexpectedly: %s", exc)
                 steps = None
