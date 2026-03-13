@@ -64,9 +64,19 @@ class PlannerAgent:
         # steps = None  ← for single-skill or conversational input
     """
 
-    def __init__(self, llm_client: "LLMClient", skill_manager: "SkillManager") -> None:
+    def __init__(
+        self,
+        llm_client: "LLMClient",
+        skill_manager: "SkillManager",
+        *,
+        model: str | None = None,
+    ) -> None:
         self._llm = llm_client
         self._skill_manager = skill_manager
+        # Use a fast/cheap model for planning — haiku is ideal since the task
+        # is simple JSON generation.  Falls back to the LLM client's default
+        # when None (e.g. no voice_model configured).
+        self._model = model
 
     async def plan(self, user_text: str) -> list[PlanStep] | None:
         """Return an ordered plan, or None if the intent is single-step/conversational.
@@ -87,6 +97,7 @@ class PlannerAgent:
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=0,
+                model=self._model,
             )
             # Strip markdown code fences if model wraps in ```json
             text = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()

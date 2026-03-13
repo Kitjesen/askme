@@ -184,9 +184,13 @@ class AskmeApp:
         )
 
         # ── Skill dispatcher (unified orchestration) ────────────
+        # plan_model: fast/cheap model for JSON-only planning task (e.g. haiku).
+        # Falls back to the LLM client default when not configured.
+        _plan_model = brain_cfg.get("plan_model")
         _planner = PlannerAgent(
             llm_client=self._pipeline._llm,
             skill_manager=self.skill_manager,
+            model=_plan_model,
         )
         self.dispatcher = SkillDispatcher(
             pipeline=self._pipeline,
