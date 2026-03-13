@@ -45,6 +45,8 @@ brain:
       content: "收到。我是Thunder，穹沛的巡检机器人。等待指令。"
   # Format tag prepended to each user message for TTS output control
   user_prefix: "[工业巡检模式：中文口语，80字以内，简洁汇报式，不用markdown，不说英文]"
+  # Max characters to speak in voice mode (0 = unlimited, text mode always unlimited)
+  max_response_chars: 200
 
 # ----------------------------------------------------------
 # Memory: MemU / Embedding
@@ -96,7 +98,7 @@ voice:
     # Endpoint detection silence thresholds (seconds)
     # rule1: long silence after short utterance, rule2: normal speech
     rule1_min_trailing_silence: 1.6
-    rule2_min_trailing_silence: 0.8
+    rule2_min_trailing_silence: 0.4
     # Timeout (seconds) for ASR after wake word detection
     asr_timeout: 10.0
 
@@ -105,7 +107,7 @@ voice:
     # Noise gate (noise_gate_peak: 400) handles the USB mic noise floor,
     # so VAD threshold can stay at default 0.5 for good speech detection.
     threshold: 0.5
-    min_silence_duration: 0.5
+    min_silence_duration: 0.3
     # Raised from 0.25 to filter out noise blips
     min_speech_duration: 0.4
     sample_rate: 16000

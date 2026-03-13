@@ -196,7 +196,9 @@ class SkillDispatcher:
         Completes any active mission first (the turn breaks the skill chain).
         """
         self.complete_mission()
-        return await self._pipeline.process(user_text, memory_task=memory_task)
+        return await self._pipeline.process(
+            user_text, memory_task=memory_task, source=source,
+        )
 
     def complete_mission(self) -> MissionContext | None:
         """End the current mission and return it for logging."""

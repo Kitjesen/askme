@@ -30,6 +30,10 @@ _DEFAULT_ASR_TIMEOUT = 10.0
 # Each chunk is ~100ms, so 5 chunks = ~500ms lookback.
 _PRE_ROLL_CHUNKS = 5
 
+# Maximum continuous speech duration before forcing an ASR endpoint.
+# Prevents VAD deadlock from persistent background noise.
+_MAX_SPEECH_DURATION = 30.0
+
 
 class AudioAgent:
     """Unified audio agent that manages microphone listening, wake word detection,
@@ -147,6 +151,11 @@ class AudioAgent:
         self.tts.drain_buffers()
         self._refresh_voice_metrics()
 
+    def stop_immediately(self) -> None:
+        """Immediately stop TTS playback mid-chunk (barge-in support)."""
+        self.tts.stop_immediately()
+        self._refresh_voice_metrics()
+
     # ------------------------------------------------------------------
     # Volume / speed control
     # ------------------------------------------------------------------
@@ -258,6 +267,7 @@ class AudioAgent:
                 # Phase 2: VAD-gated ASR with timeout
                 logger.info("Listening for speech...")
                 speech_active = False
+                speech_start_time: float = 0.0  # monotonic time when speech started
                 deadline = time.monotonic() + self._asr_timeout
                 _vol_log_interval = 0.5  # log volume every 0.5s
                 _vol_log_next = time.monotonic() + _vol_log_interval
@@ -278,12 +288,10 @@ class AudioAgent:
                         self.asr.reset(self.asr_stream)
                         self.asr_stream = self.asr.create_stream()
                         self._refresh_voice_metrics()
-                        # Only prompt if VAD detected speech onset — the user
-                        # started talking but ASR got no result (too quiet,
-                        # cut off, or mumbled).  If speech_active is still
-                        # False the user simply stayed silent; don't disturb.
                         if speech_active:
                             self.tts.speak("没听清楚，请再说一遍。")
+                        else:
+                            self.tts.speak("还在听呢，有什么需要帮忙的？")
                         return None
 
                     samples, _ = mic.read(samples_per_read)
@@ -311,12 +319,20 @@ class AudioAgent:
                             _vol_log_next = now + _vol_log_interval
                         continue
 
-                    self.vad.accept_waveform(samples_int16)
+                    try:
+                        self.vad.accept_waveform(samples_int16)
+                    except Exception as e:
+                        logger.error("VAD accept_waveform error: %s", e)
+                        break
 
                     # Periodically log audio level for diagnostics
                     now = time.monotonic()
                     if now >= _vol_log_next:
-                        vad_on = self.vad.is_speech_detected()
+                        try:
+                            vad_on = self.vad.is_speech_detected()
+                        except Exception as e:
+                            logger.error("VAD is_speech_detected error: %s", e)
+                            break
                         bar_len = min(peak // 500, 30)
                         bar = "#" * bar_len
                         logger.info(
@@ -326,7 +342,18 @@ class AudioAgent:
                         _vol_log_next = now + _vol_log_interval
 
                     # Only feed ASR when VAD detects speech
-                    if self.vad.is_speech_detected():
+                    try:
+                        vad_speech = self.vad.is_speech_detected()
+                    except Exception as e:
+                        logger.error("VAD is_speech_detected error: %s", e)
+                        break
+
+                    if vad_speech:
+                        # Reset deadline on every frame with detected speech,
+                        # so the timeout is always relative to the last voice
+                        # activity, not the start of listening.
+                        deadline = time.monotonic() + self._asr_timeout
+
                         if not speech_active:
                             # Noise gate: require amplitude above threshold to
                             # start speech capture. This prevents USB mic noise
@@ -338,23 +365,68 @@ class AudioAgent:
                                 pre_roll.append(samples.copy())
                             else:
                                 speech_active = True
+                                speech_start_time = time.monotonic()
                                 logger.info("VAD: speech start (peak=%d)", peak)
                                 self.tts.drain_buffers()
+                                self.tts.stop_immediately()
                                 self._refresh_voice_metrics()
-                                # Flush pre-roll buffer → catch the speech onset
+                                # Flush pre-roll buffer -> catch the speech onset
                                 for buffered in pre_roll:
-                                    self.asr_stream.accept_waveform(
-                                        sample_rate, buffered
-                                    )
+                                    try:
+                                        self.asr_stream.accept_waveform(
+                                            sample_rate, buffered
+                                        )
+                                    except Exception as e:
+                                        logger.error("ASR accept_waveform (pre-roll) error: %s", e)
+                                        break
                                 pre_roll.clear()
                         if speech_active:
-                            # Extend deadline while user is actively speaking
-                            deadline = time.monotonic() + self._asr_timeout
+                            try:
+                                self.asr_stream.accept_waveform(sample_rate, samples)
+                            except Exception as e:
+                                logger.error("ASR accept_waveform error: %s", e)
+                                break
 
-                            self.asr_stream.accept_waveform(sample_rate, samples)
+                            try:
+                                while self.asr.is_ready(self.asr_stream):
+                                    self.asr.decode_stream(self.asr_stream)
+                            except Exception as e:
+                                logger.error("ASR decode error: %s", e)
+                                break
 
-                            while self.asr.is_ready(self.asr_stream):
-                                self.asr.decode_stream(self.asr_stream)
+                            # Max speech duration guard: continuous speech > 30s
+                            # means VAD is stuck (background noise). Force an
+                            # ASR endpoint to avoid infinite listen_loop.
+                            if (time.monotonic() - speech_start_time) > _MAX_SPEECH_DURATION:
+                                logger.warning(
+                                    "VAD: max speech duration (%.0fs) exceeded, forcing endpoint",
+                                    _MAX_SPEECH_DURATION,
+                                )
+                                try:
+                                    while self.asr.is_ready(self.asr_stream):
+                                        self.asr.decode_stream(self.asr_stream)
+                                    text = self.asr.get_result(self.asr_stream)
+                                except Exception as e:
+                                    logger.error("ASR forced-endpoint error: %s", e)
+                                    text = ""
+                                self.asr.reset(self.asr_stream)
+                                self.asr_stream = self.asr.create_stream()
+                                speech_active = False
+                                speech_start_time = 0.0
+                                # Result is likely noise -- only return if non-trivial
+                                if text and len(text.strip()) > 1:
+                                    text = text.strip()
+                                    if self.punct.available:
+                                        text = self.punct.restore(text)
+                                    logger.info("Recognized (forced): %s", text)
+                                    self.audio_queue.put(text)
+                                    self._metrics.mark_voice_input(text)
+                                    self._refresh_voice_metrics()
+                                    return text
+                                else:
+                                    logger.info("VAD: forced endpoint yielded noise, discarding")
+                                    deadline = time.monotonic() + self._asr_timeout
+                                    continue
                     else:
                         # Buffer recent silence chunks for pre-roll
                         pre_roll.append(samples.copy())
@@ -362,13 +434,22 @@ class AudioAgent:
                             # Speech just ended -- feed remaining and check
                             logger.info("VAD: speech end")
                             speech_active = False
-                            self.asr_stream.accept_waveform(sample_rate, samples)
-                            while self.asr.is_ready(self.asr_stream):
-                                self.asr.decode_stream(self.asr_stream)
+                            speech_start_time = 0.0
+                            try:
+                                self.asr_stream.accept_waveform(sample_rate, samples)
+                                while self.asr.is_ready(self.asr_stream):
+                                    self.asr.decode_stream(self.asr_stream)
+                            except Exception as e:
+                                logger.error("ASR error at speech end: %s", e)
+                                break
 
                     # Check for endpoint
-                    is_endpoint = self.asr.is_endpoint(self.asr_stream)
-                    text = self.asr.get_result(self.asr_stream)
+                    try:
+                        is_endpoint = self.asr.is_endpoint(self.asr_stream)
+                        text = self.asr.get_result(self.asr_stream)
+                    except Exception as e:
+                        logger.error("ASR endpoint/result error: %s", e)
+                        break
 
                     if is_endpoint and text:
                         text = text.strip()
@@ -404,12 +485,17 @@ class AudioAgent:
             samples, _ = mic.read(samples_per_read)
             samples = samples.reshape(-1)
 
-            self.kws_stream.accept_waveform(sample_rate, samples)
+            try:
+                self.kws_stream.accept_waveform(sample_rate, samples)
 
-            while self.kws.spotter.is_ready(self.kws_stream):
-                self.kws.spotter.decode(self.kws_stream)
+                while self.kws.spotter.is_ready(self.kws_stream):
+                    self.kws.spotter.decode(self.kws_stream)
 
-            result = self.kws.spotter.get_result(self.kws_stream)
+                result = self.kws.spotter.get_result(self.kws_stream)
+            except Exception as e:
+                logger.error("KWS error: %s", e)
+                return False
+
             if result:
                 logger.info("Wake word detected: %s", result.strip())
                 self.woken_up = True
@@ -451,13 +537,15 @@ class AudioAgent:
                 pcm = (audio * 32767).clip(-32768, 32767).astype("int16")
                 pcm_bytes = pcm.tobytes()
 
+                output_device = getattr(self.tts, "_output_device", None)
+                chime_cmd = [aplay_bin, "-r", str(self._SR), "-f", "S16_LE", "-c", "1", "-q"]
+                if output_device is not None:
+                    chime_cmd += ["-D", str(output_device)]
+
                 def _run() -> None:
                     try:
                         import subprocess
-                        proc = subprocess.Popen(
-                            [aplay_bin, "-r", str(self._SR), "-f", "S16_LE", "-c", "1", "-q"],
-                            stdin=subprocess.PIPE,
-                        )
+                        proc = subprocess.Popen(chime_cmd, stdin=subprocess.PIPE)
                         proc.communicate(input=pcm_bytes)
                     except Exception:
                         pass
@@ -473,7 +561,7 @@ class AudioAgent:
     def _chime_acknowledge(self) -> np.ndarray:
         """Two-note ascending major third — quick, warm, like iOS 'received'."""
         sr = self._SR
-        notes = [880, 1108.73]  # A5 → C#6 (major third)
+        notes = [880, 1108.73]  # A5 -> C#6 (major third)
         note_dur = 0.06
         gap = 0.015
         total = len(notes) * note_dur + (len(notes) - 1) * gap
@@ -498,7 +586,7 @@ class AudioAgent:
     def _chime_wake(self) -> np.ndarray:
         """Three-note ascending pentatonic arpeggio — bright, alert."""
         sr = self._SR
-        # C6 → E6 → G6 (major triad, bright register)
+        # C6 -> E6 -> G6 (major triad, bright register)
         notes = [1046.50, 1318.51, 1567.98]
         note_dur = 0.055
         gap = 0.01
@@ -509,7 +597,7 @@ class AudioAgent:
         for i, freq in enumerate(notes):
             n = int(sr * note_dur)
             t = np.linspace(0, note_dur, n, endpoint=False, dtype=np.float32)
-            # Metallic bell partials (tubular bell ratios ≈ 2:3:4.2)
+            # Metallic bell partials (tubular bell ratios ~ 2:3:4.2)
             tone = (
                 0.28 * np.sin(2 * np.pi * freq * t)
                 + 0.14 * np.sin(2 * np.pi * freq * 1.5 * t)
@@ -525,7 +613,7 @@ class AudioAgent:
     def _chime_error(self) -> np.ndarray:
         """Descending minor second — gentle 'something went wrong'."""
         sr = self._SR
-        notes = [523.25, 493.88]  # C5 → B4 (descending semitone)
+        notes = [523.25, 493.88]  # C5 -> B4 (descending semitone)
         note_dur = 0.08
         gap = 0.02
         total = len(notes) * note_dur + gap + 0.1

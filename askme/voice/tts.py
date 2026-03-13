@@ -86,7 +86,7 @@ class TTSEngine:
         self._minimax_sample_rate: int = int(config.get("minimax_sample_rate", 24000))
         # Voice tuning: speed (0.5-2.0), vol (0-10), pitch (-12 to 12 semitones)
         self._minimax_speed: float = float(config.get("minimax_speed", 1.0))
-        self._minimax_vol: float = float(config.get("minimax_vol", 1.0))
+        self._minimax_vol: float = min(10.0, max(0.0, float(config.get("minimax_vol", 1.0))))
         self._minimax_pitch: int = int(config.get("minimax_pitch", 0))
         # Emotion: "" (auto), happy, sad, angry, fearful, disgusted, surprised, calm
         self._minimax_emotion: str = config.get("minimax_emotion", "")
@@ -108,6 +108,8 @@ class TTSEngine:
         # aplay subprocess (Linux only); non-None while a chunk is being played
         self._aplay_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         self._aplay_bin: str | None = shutil.which("aplay")
+        # Immediate stop flag: checked by _playback_loop to abort mid-chunk
+        self._stop_requested = threading.Event()
 
         # AudioRouter for device ownership coordination (optional)
         self._audio_router: AudioRouter | None = audio_router
@@ -286,15 +288,28 @@ class TTSEngine:
             playing = self._is_playing
         return playing or self._has_buffered_audio()
 
-    def wait_done(self) -> None:
-        """Block until all queued text has been synthesised and played."""
+    def wait_done(self, timeout: float = 30.0) -> None:
+        """Block until all queued text has been synthesised and played.
+
+        Args:
+            timeout: Maximum seconds to wait for playback to finish after
+                     synthesis is complete.  Prevents infinite blocking when
+                     the audio device is unavailable.
+        """
         self.tts_text_queue.join()
+        deadline = time.monotonic() + timeout
         while self._has_buffered_audio():
+            if time.monotonic() >= deadline:
+                logger.warning("wait_done: timed out after %.1fs waiting for buffer drain", timeout)
+                return
             time.sleep(0.05)
         # Wait for the last chunk to finish playing.
         # aplay: proc.communicate() is synchronous, but _aplay_proc is cleared
         # only after communicate() returns, so poll it.
         while self._aplay_proc is not None:
+            if time.monotonic() >= deadline:
+                logger.warning("wait_done: timed out after %.1fs waiting for aplay", timeout)
+                return
             time.sleep(0.02)
         # Fallback: wait for any sounddevice stream (non-aplay systems).
         try:
@@ -312,6 +327,17 @@ class TTSEngine:
             except queue.Empty:
                 break
         self._clear_audio_buffer()
+        self._kill_aplay()
+
+    def stop_immediately(self) -> None:
+        """Signal the playback loop to abort the current chunk immediately.
+
+        Unlike drain_buffers() which clears pending queues, this also
+        interrupts the chunk currently being written to aplay/sounddevice.
+        The _playback_loop checks _stop_requested and exits the current
+        chunk early.  The flag is auto-cleared when _playback_loop resumes.
+        """
+        self._stop_requested.set()
         self._kill_aplay()
 
     def shutdown(self) -> None:
@@ -563,7 +589,11 @@ class TTSEngine:
         }
 
         need_resample = self._minimax_sample_rate != self._sample_rate
-        all_samples: list[np.ndarray] = []
+        # Minimum chunk size for immediate playback (150ms @ 16kHz = 2400 samples).
+        # Smaller chunks cause excessive context-switching in the playback loop.
+        _MIN_SAMPLES = 2400
+        pending: list[np.ndarray] = []
+        pending_len = 0
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
@@ -600,14 +630,23 @@ class TTSEngine:
                             indices = np.linspace(0, len(samples) - 1, new_len)
                             samples = np.interp(indices, np.arange(len(samples)), samples)
                         if len(samples) > 0:
-                            all_samples.append(samples)
+                            pending.append(samples)
+                            pending_len += len(samples)
+                            # Flush to playback buffer once we have enough samples
+                            if pending_len >= _MIN_SAMPLES:
+                                chunk = np.concatenate(pending) if len(pending) > 1 else pending[0]
+                                with self._buffer_lock:
+                                    self.tts_buffer.append(chunk)
+                                pending.clear()
+                                pending_len = 0
                     except (_json.JSONDecodeError, ValueError) as exc:
                         logger.debug("MiniMax TTS chunk parse: %s", exc)
 
-        if all_samples and self._is_generation_current(generation):
-            combined = np.concatenate(all_samples)
+        # Flush any remaining samples
+        if pending and self._is_generation_current(generation):
+            chunk = np.concatenate(pending) if len(pending) > 1 else pending[0]
             with self._buffer_lock:
-                self.tts_buffer.append(combined)
+                self.tts_buffer.append(chunk)
 
     # ------------------------------------------------------------------
     # Playback
@@ -641,6 +680,13 @@ class TTSEngine:
                 self._aplay_bin is not None,
             )
             while self._is_playing:
+                # Check and clear stop request from barge-in
+                if self._stop_requested.is_set():
+                    self._stop_requested.clear()
+                    self._clear_audio_buffer()
+                    logger.info("TTS playback: stop_requested, skipping queued audio")
+                    continue
+
                 chunk = None
                 with self._buffer_lock:
                     if self.tts_buffer:
@@ -667,14 +713,32 @@ class TTSEngine:
                         ]
                         if self._output_device is not None:
                             cmd += ["-D", str(self._output_device)]
+                        # Pre-roll: 18 Hz subsonic tone at -24 dBFS for 400 ms.
+                        # Why subsonic?  18 Hz is below the audible threshold for
+                        # humans and most small speakers; it forces the USB DAC's
+                        # analog output stage to fully unmute before real audio
+                        # starts.  USB DACs with pop-suppression circuits need a
+                        # signal amplitude well above their ~-70 dBFS detection
+                        # threshold — the previous ±1 (-90 dBFS) was too quiet.
+                        # The last 30 ms fade to zero avoids a click at the
+                        # pre-roll → speech transition.
+                        _n = int(self._sample_rate * 0.40)
+                        _t = np.arange(_n, dtype=np.float32) / self._sample_rate
+                        preroll = (np.sin(2 * np.pi * 18.0 * _t) * 2000.0).astype(np.int16)
+                        _fade = int(self._sample_rate * 0.03)
+                        preroll[-_fade:] = (
+                            preroll[-_fade:].astype(np.float32)
+                            * np.linspace(1.0, 0.0, _fade, dtype=np.float32)
+                        ).astype(np.int16)
+                        payload = preroll.tobytes() + pcm.tobytes()
                         self._aplay_proc = subprocess.Popen(
                             cmd, stdin=subprocess.PIPE
                         )
                         if self._audio_router is not None:
                             with self._audio_router.output_session():
-                                self._aplay_proc.communicate(input=pcm.tobytes())
+                                self._aplay_proc.communicate(input=payload)
                         else:
-                            self._aplay_proc.communicate(input=pcm.tobytes())
+                            self._aplay_proc.communicate(input=payload)
                         self._aplay_proc = None
                         logger.info("aplay: done")
                     else:

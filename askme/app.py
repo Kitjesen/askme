@@ -179,6 +179,7 @@ class AskmeApp:
                 "general_chat_max_safety_level",
                 "normal",
             ),
+            max_response_chars=int(brain_cfg.get("max_response_chars", 0)),
         )
 
         # ── Skill dispatcher (unified orchestration) ────────────
