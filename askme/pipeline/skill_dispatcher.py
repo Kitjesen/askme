@@ -271,12 +271,19 @@ class SkillDispatcher:
                 for step in steps:
                     result = await self.dispatch(step.skill_name, step.intent, source=source)
                     results.append(result)
-                    # Stop plan execution if a step failed
+                    # Stop plan execution if a step failed.
+                    # The timeout result is stored but execute_skill() was cancelled,
+                    # so the user has not heard it yet — speak it explicitly.
                     if (
                         self._current_mission is not None
                         and self._current_mission.state == MissionState.FAILED
                     ):
                         logger.warning("Plan aborted at step '%s' due to FAILED state", step.skill_name)
+                        _step_n = len(results)
+                        self._audio.speak(f"第{_step_n}步执行失败，任务中止。")
+                        self._audio.start_playback()
+                        await asyncio.to_thread(self._audio.wait_speaking_done)
+                        self._audio.stop_playback()
                         break
                 self.complete_mission()
                 return "\n".join(results)
