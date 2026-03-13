@@ -269,7 +269,13 @@ class SkillDispatcher:
 
                 results: list[str] = []
                 for step in steps:
-                    result = await self.dispatch(step.skill_name, step.intent, source=source)
+                    # Pass the original user request as extra_context so each skill has
+                    # full intent beyond the planner's terse per-step instruction.
+                    _orig_ctx = f"原始用户请求: {user_text}" if user_text else ""
+                    result = await self.dispatch(
+                        step.skill_name, step.intent, source=source,
+                        extra_context=_orig_ctx,
+                    )
                     results.append(result)
                     # Stop plan execution if a step failed.
                     # The timeout result is stored but execute_skill() was cancelled,
