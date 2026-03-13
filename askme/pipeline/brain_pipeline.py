@@ -339,6 +339,16 @@ class BrainPipeline:
         if not skill:
             return f"[Skill] Not found: {skill_name}"
 
+        # L0 Safety gate: block motion skills when estop is active.
+        # query_estop_state() may do a short network call on cache miss — run in
+        # a thread so we don't block the event loop.
+        if self._dog_safety and self._dog_safety.is_configured():
+            estop_state = await asyncio.to_thread(self._dog_safety.query_estop_state)
+            if estop_state is not None and estop_state.get("enabled"):
+                msg = f"[安全锁定] 急停已激活，无法执行 {skill_name}。请先解除急停。"
+                logger.warning("Safety gate blocked skill '%s': estop is active", skill_name)
+                return msg
+
         # Task 2: Dependency check — warn only, never block execution
         if skill.depends:
             for dep in skill.depends:
@@ -841,6 +851,20 @@ class BrainPipeline:
             return f"网络异常，{skill_name}执行失败。"
         return f"{skill_name}执行失败，请重试。"
 
+    def _build_l0_runtime_block(self) -> str:
+        """Return a compact L0 runtime truth block from authoritative services.
+
+        Non-blocking: reads only the in-memory cache on DogSafetyClient.
+        Returns an empty string when no services are configured.
+        """
+        if not (self._dog_safety and self._dog_safety.is_configured()):
+            return ""
+        import datetime
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        estop = self._dog_safety.is_estop_active()
+        estop_str = "⚠️ 已激活 — 禁止运动指令" if estop else "正常"
+        return f"[运行时状态 {ts}]\n急停: {estop_str}"
+
     def _build_system_prompt(
         self,
         context_str: str | None,
@@ -849,7 +873,9 @@ class BrainPipeline:
         user_text: str = "",
     ) -> str:
         """Assemble system prompt with episodic knowledge, session summaries, and memory context."""
-        prompt = self._base_prompt
+        l0 = self._build_l0_runtime_block()
+        prompt = (l0 + "\n") if l0 else ""
+        prompt += self._base_prompt
 
         if self._episodic:
             world_ctx = self._episodic.get_knowledge_context()
