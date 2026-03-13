@@ -466,3 +466,33 @@ class TestCompleteMissionFailedState:
         for call in mock_audio.speak.call_args_list:
             text = call[0][0]
             assert "多步任务完成" not in text, f"Should not announce success for failed mission: {text!r}"
+
+
+class TestHandleGeneralPlanOriginalContext:
+    async def test_plan_steps_receive_original_user_text(self):
+        """Each plan step's extra_context must contain the original user_text."""
+        from unittest.mock import AsyncMock as _AsyncMock, MagicMock as _MagicMock
+        from askme.pipeline.planner_agent import PlanStep
+
+        skill = _make_skill()
+        dispatcher, mock_pipeline, _, _ = _make_dispatcher(skill=skill)
+
+        planner = _MagicMock()
+        planner.plan = _AsyncMock(return_value=[
+            PlanStep(skill_name="navigate", intent="前往仓库"),
+            PlanStep(skill_name="navigate", intent="前往B点"),
+        ])
+        dispatcher._planner = planner
+
+        original_text = "去东区仓库取货然后送到B点"
+        await dispatcher.handle_general(original_text, source="text")
+
+        # execute_skill is called as (skill_name, user_text, extra_context)
+        calls = mock_pipeline.execute_skill.call_args_list
+        assert len(calls) == 2, f"Expected 2 calls, got {len(calls)}"
+        for call in calls:
+            args = call[0]
+            extra_context = args[2] if len(args) > 2 else ""
+            assert original_text in extra_context, (
+                f"original user_text not found in extra_context: {extra_context!r}"
+            )
