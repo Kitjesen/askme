@@ -212,7 +212,16 @@ class BrainPipeline:
         # 0. Clear leftover audio from any previous turn
         self._audio.drain_buffers()
 
-        # 0b. Sliding window compression (non-blocking, best-effort)
+        # 0b. Background estop state refresh — keeps L0 block in system prompt current.
+        # Fires a daemon thread via to_thread; result goes into DogSafetyClient cache.
+        # Never blocks this turn — the cache may be 0–30 s stale but is always available.
+        if self._dog_safety and self._dog_safety.is_configured():
+            asyncio.create_task(
+                asyncio.to_thread(self._dog_safety.query_estop_state),
+                name="estop_refresh",
+            )
+
+        # 0c. Sliding window compression (non-blocking, best-effort)
         try:
             await self._conversation.maybe_compress(self._llm)
         except Exception as _e:

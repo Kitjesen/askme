@@ -246,6 +246,20 @@ class SkillDispatcher:
                 steps = None
 
             if steps:
+                # Announce the plan so the user knows what's coming
+                _step_labels = [
+                    (self._skill_manager.get(s.skill_name).description
+                     if self._skill_manager.get(s.skill_name)
+                     and self._skill_manager.get(s.skill_name).description
+                     else s.skill_name)
+                    for s in steps
+                ]
+                _plan_summary = "、".join(_step_labels)
+                self._audio.speak(f"好的，分{len(steps)}步：{_plan_summary}")
+                self._audio.start_playback()
+                await asyncio.to_thread(self._audio.wait_speaking_done)
+                self._audio.stop_playback()
+
                 results: list[str] = []
                 for step in steps:
                     result = await self.dispatch(step.skill_name, step.intent, source=source)
