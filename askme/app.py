@@ -39,6 +39,7 @@ from askme.ota_bridge import OTABridgeMetrics
 from askme.pipeline.brain_pipeline import BrainPipeline
 from askme.pipeline.commands import CommandHandler
 from askme.pipeline.proactive_agent import ProactiveAgent
+from askme.pipeline.planner_agent import PlannerAgent
 from askme.pipeline.skill_dispatcher import SkillDispatcher
 from askme.pipeline.text_loop import TextLoop
 from askme.pipeline.voice_loop import VoiceLoop
@@ -183,10 +184,15 @@ class AskmeApp:
         )
 
         # ── Skill dispatcher (unified orchestration) ────────────
+        _planner = PlannerAgent(
+            llm_client=self._pipeline._llm,
+            skill_manager=self.skill_manager,
+        )
         self.dispatcher = SkillDispatcher(
             pipeline=self._pipeline,
             skill_manager=self.skill_manager,
             audio=self.audio,
+            planner=_planner,
         )
 
         # Register dispatch_skill meta-tool (LLM can invoke skills)

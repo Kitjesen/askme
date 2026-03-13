@@ -26,6 +26,7 @@ from askme.config import project_root
 
 if TYPE_CHECKING:
     from askme.pipeline.brain_pipeline import BrainPipeline
+    from askme.pipeline.planner_agent import PlannerAgent, PlanStep
     from askme.skills.skill_manager import SkillManager
     from askme.voice.audio_agent import AudioAgent
 
@@ -123,10 +124,12 @@ class SkillDispatcher:
         pipeline: BrainPipeline,
         skill_manager: SkillManager,
         audio: AudioAgent,
+        planner: "PlannerAgent | None" = None,
     ) -> None:
         self._pipeline = pipeline
         self._skill_manager = skill_manager
         self._audio = audio
+        self._planner = planner
         self._current_mission: MissionContext | None = None
         # Captured lazily on first async dispatch — used by execute_skill_sync
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -198,8 +201,9 @@ class SkillDispatcher:
             result = f"[超时] 技能 {skill_name} 执行超过 {int(step_timeout)} 秒，已跳过。"
             self._current_mission.state = MissionState.FAILED
 
-        # Track step and persist to disk
+        # Track step, store result in shared_context for cross-step data passing
         self._current_mission.add_step(skill_name, user_text, result)
+        self._current_mission.shared_context[skill_name] = result[:500]
         self._persist_mission()
         logger.info(
             "Mission step %d: %s → %s",
@@ -217,11 +221,40 @@ class SkillDispatcher:
         source: str = "voice",
         memory_task: asyncio.Task[str] | None = None,
     ) -> str:
-        """Handle a general (non-skill) turn via the LLM pipeline.
+        """Handle a general (non-skill) turn.
 
-        Completes any active mission first (the turn breaks the skill chain).
+        Tries PlannerAgent first: if the intent decomposes into a multi-step
+        skill sequence, executes all steps and returns a combined result.
+        Falls back to the LLM pipeline for single-step / conversational input.
+
+        Completes any active mission first (this turn breaks the skill chain).
         """
         self.complete_mission()
+
+        # Attempt multi-step planning before handing off to the LLM
+        if self._planner is not None:
+            try:
+                steps = await self._planner.plan(user_text)
+            except Exception as exc:
+                logger.warning("PlannerAgent raised unexpectedly: %s", exc)
+                steps = None
+
+            if steps:
+                results: list[str] = []
+                for step in steps:
+                    result = await self.dispatch(step.skill_name, step.intent, source=source)
+                    results.append(result)
+                    # Stop plan execution if a step failed
+                    if (
+                        self._current_mission is not None
+                        and self._current_mission.state == MissionState.FAILED
+                    ):
+                        logger.warning("Plan aborted at step '%s' due to FAILED state", step.skill_name)
+                        break
+                self.complete_mission()
+                return "\n".join(results)
+
+        # Single-step or conversational: delegate to LLM pipeline
         return await self._pipeline.process(
             user_text, memory_task=memory_task, source=source,
         )
