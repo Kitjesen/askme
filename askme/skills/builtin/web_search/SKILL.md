@@ -10,6 +10,11 @@ depends: []
 conflicts: []
 safety_level: dangerous
 voice_trigger: 帮我搜索,搜索一下,搜一下,查一下,查询一下,上网查
+required_prompt: 搜索什么内容？
+required_slots:
+  - name: query
+    type: text
+    prompt: 搜索什么内容？
 ---
 
 ## Tools

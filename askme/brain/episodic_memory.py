@@ -351,6 +351,9 @@ class EpisodicMemory:
         self._total_logged: int = 0
         self._cumulative_importance: float = 0.0  # Park 2023 trigger
         self._reflecting: bool = False
+        # Cache for _load_all_knowledge — invalidated by _update_knowledge
+        self._knowledge_cache: str | None = None
+        self._knowledge_cache_time: float = 0.0
 
         self._restore_active_buffer()
 
@@ -716,6 +719,8 @@ class EpisodicMemory:
 
         if not new_facts and not updates and not patterns:
             return
+        # Invalidate knowledge cache so next _load_all_knowledge() re-reads disk
+        self._knowledge_cache = None
 
         # Group by category
         categorized: dict[str, list[str]] = {}
@@ -805,7 +810,14 @@ class EpisodicMemory:
             logger.warning("[Knowledge/%s] Write failed, skipping: %s", category, exc)
 
     def _load_all_knowledge(self) -> str:
-        """Load all knowledge .md files into a single string."""
+        """Load all knowledge .md files into a single string (cached 10s)."""
+        import time as _time
+        now = _time.monotonic()
+        if (
+            self._knowledge_cache is not None
+            and (now - self._knowledge_cache_time) < 10.0
+        ):
+            return self._knowledge_cache
         parts = []
         for f in sorted(self._knowledge_dir.glob("*.md")):
             try:
@@ -814,7 +826,10 @@ class EpisodicMemory:
                     parts.append(content)
             except Exception:
                 continue
-        return "\n\n".join(parts)
+        result = "\n\n".join(parts)
+        self._knowledge_cache: str | None = result
+        self._knowledge_cache_time: float = now
+        return result
 
     def _parse_reflection(self, response: str) -> dict[str, Any] | None:
         """Extract JSON from LLM reflection response using balanced brace matching."""
@@ -864,7 +879,8 @@ class EpisodicMemory:
                 if f.stat().st_mtime < cutoff:
                     f.unlink()
                     removed += 1
-            except Exception:
+            except Exception as _e:
+                logger.debug("skip cleanup %s: %s", f, _e)
                 continue
         if removed:
             logger.info("[EpisodicMemory] Cleaned up %d old episode files", removed)

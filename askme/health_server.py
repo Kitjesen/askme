@@ -138,6 +138,14 @@ def build_health_snapshot(
         snapshot["ota_bridge_status"] = ota_status
     if voice_bridge is not None:
         snapshot["voice_bridge"] = voice_bridge
+
+    # Runtime service connectivity (nav-gateway, dog-control, dog-safety)
+    try:
+        from askme.runtime_health import get_service_summary
+        snapshot["services"] = get_service_summary()
+    except Exception:
+        pass
+
     return snapshot
 
 

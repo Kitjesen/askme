@@ -94,6 +94,10 @@ class BrainPipeline:
     _DEFAULT_MAX_RESPONSE_CHARS = 200
     # Seconds to wait before playing thinking indicator
     _THINKING_DELAY = 1.2
+    # Maximum time (seconds) to wait for a single tool execution.
+    # dispatch_skill has its own inner timeout; this is a safety net for
+    # other tools (get_time, http_request, etc.) that may hang.
+    _TOOL_TIMEOUT = 30.0
 
     def __init__(
         self,
@@ -142,6 +146,8 @@ class BrainPipeline:
             max_response_chars if max_response_chars > 0
             else self._DEFAULT_MAX_RESPONSE_CHARS
         )
+        # Last spoken text — for "repeat last" voice command
+        self._last_spoken_text: str = ""
         self._think_filter = _ThinkFilter()
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         # Semaphore(1) ensures reflection and user LLM calls never run
@@ -150,6 +156,11 @@ class BrainPipeline:
         self._llm_semaphore: asyncio.Semaphore | None = None  # lazy-init in async context
 
     # ── Public API ───────────────────────────────────────────
+
+    @property
+    def last_spoken_text(self) -> str:
+        """The most recent text spoken via TTS. Used by repeat_last skill."""
+        return self._last_spoken_text
 
     def start_idle_reflection(self, idle_seconds: float = 300.0) -> asyncio.Task[None] | None:
         """Start an idle-time reflection background task (dream consolidation).
@@ -204,8 +215,8 @@ class BrainPipeline:
         # 0b. Sliding window compression (non-blocking, best-effort)
         try:
             await self._conversation.maybe_compress(self._llm)
-        except Exception:
-            pass  # compression failure is non-critical
+        except Exception as _e:
+            logger.warning("Conversation compression failed (non-critical): %s", _e)
 
         # 1. Retrieve memory + vision scene concurrently
         if not memory_task:
@@ -254,6 +265,13 @@ class BrainPipeline:
                     source=source,
                 )
             self._conversation.add_assistant_message(full_response)
+            self._last_spoken_text = full_response
+
+            # Save to L4 vector memory (fire-and-forget, non-blocking)
+            if self._memory is not None:
+                _mt = asyncio.create_task(self._memory.save(user_text, full_response))
+                self._pending_tasks.add(_mt)
+                _mt.add_done_callback(self._pending_tasks.discard)
 
             # Wait for TTS to finish speaking before returning
             await asyncio.to_thread(self._audio.wait_speaking_done)
@@ -268,6 +286,10 @@ class BrainPipeline:
 
                     async def _delayed_reflect() -> None:
                         await asyncio.sleep(5)
+                        # Re-check after sleep — multiple turns may have fired
+                        # should_reflect() before any task ran, creating duplicates.
+                        if not self._episodic.should_reflect():
+                            return
                         try:
                             await self._episodic.reflect()
                         except Exception as e:
@@ -283,7 +305,9 @@ class BrainPipeline:
             if self._episodic:
                 self._episodic.log("error", f"LLM错误: {exc}")
             self._audio.speak(self._classify_error_message(exc))
-            error_msg = f"[Error] {exc}"
+            # Store only the exception type — not the full message — to prevent
+            # raw stack text from being compressed into long-term memory context.
+            error_msg = f"[系统错误] {type(exc).__name__}"
             # Write an error placeholder so conversation history stays
             # user/assistant alternating. But if the history already ends
             # with an assistant message (e.g. partial tool exchange wrote
@@ -335,7 +359,7 @@ class BrainPipeline:
             "user_input": user_text,
             "current_time": _now.strftime("%Y-%m-%d %H:%M:%S"),
             "current_date": _now.strftime("%Y-%m-%d"),
-            "semantic_target": self._extract_semantic_target(user_text),
+            "semantic_target": self.extract_semantic_target(user_text),
         }
         if extra_context:
             context["mission_context"] = extra_context
@@ -379,16 +403,29 @@ class BrainPipeline:
             context["patrol_data"] = patrol_data or ""
 
         self._audio.start_playback()
+        thinking_task: asyncio.Task[None] | None = None
         try:
+            # Thinking indicator: if skill execution takes > _THINKING_DELAY,
+            # speak "嗯..." so the user knows we're working on it.
+            async def _thinking_indicator() -> None:
+                await asyncio.sleep(self._THINKING_DELAY)
+                self._audio.speak("嗯...")
+
+            thinking_task = asyncio.create_task(_thinking_indicator())
+
             def _on_tool_call(tool_name: str) -> None:
                 pass  # no filler — let the result speak for itself
 
             raw_result = await self._skill_executor.execute(
                 skill, context, on_tool_call=_on_tool_call,
             )
+            if thinking_task is not None:
+                thinking_task.cancel()
+                thinking_task = None
             result = strip_think_blocks(raw_result)
             logger.info("Skill result: %s", result[:100])
             self._audio.speak(result)
+            self._last_spoken_text = result
             self._conversation.add_user_message(user_text)
             self._conversation.add_assistant_message(result)
             if self._episodic:
@@ -402,6 +439,8 @@ class BrainPipeline:
             self._audio.speak(self._classify_skill_error_message(exc, skill_name))
             return f"[Skill Error] {exc}"
         finally:
+            if thinking_task is not None:
+                thinking_task.cancel()
             self._audio.stop_playback()
 
     async def shutdown(self) -> None:
@@ -668,12 +707,21 @@ class BrainPipeline:
             logger.info("  -> %s(%s)", tc["name"], tc["arguments"])
             if self._episodic:
                 self._episodic.log("action", f"调用工具: {tc['name']}")
-            result = await asyncio.to_thread(
-                self._tools.execute,
-                tc["name"],
-                tc["arguments"],
-                max_safety_level=self._general_tool_max_safety_level,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._tools.execute,
+                        tc["name"],
+                        tc["arguments"],
+                        max_safety_level=self._general_tool_max_safety_level,
+                    ),
+                    timeout=self._TOOL_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Tool '%s' timed out after %.0fs", tc["name"], self._TOOL_TIMEOUT
+                )
+                result = f"[Error] 工具 {tc['name']} 执行超时（超过 {int(self._TOOL_TIMEOUT)} 秒）"
             logger.info("  <- %s", result)
             if self._episodic:
                 self._episodic.log("outcome", f"工具结果 {tc['name']}: {str(result)[:100]}")
@@ -752,7 +800,7 @@ class BrainPipeline:
 
         return full_response
 
-    def _extract_semantic_target(self, user_text: str) -> str:
+    def extract_semantic_target(self, user_text: str) -> str:
         """Extract navigation target from natural language commands."""
         patterns = [
             r"导航到(.{1,20}?)(?:吧|啊|嗯|[。！？]|$)",
@@ -788,10 +836,10 @@ class BrainPipeline:
     def _classify_skill_error_message(self, exc: Exception, skill_name: str) -> str:
         """Return a user-facing voice message for a skill execution error."""
         if isinstance(exc, asyncio.TimeoutError):
-            return f"技能执行超时，已跳过。"
+            return f"{skill_name}执行超时，已跳过。"
         if "connect" in str(exc).lower() or "network" in str(exc).lower():
-            return "网络异常，技能执行失败。"
-        return "技能执行失败，请重试。"
+            return f"网络异常，{skill_name}执行失败。"
+        return f"{skill_name}执行失败，请重试。"
 
     def _build_system_prompt(
         self,

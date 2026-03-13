@@ -1,4 +1,4 @@
-"""Tests for new BrainPipeline methods: _extract_semantic_target, _classify_error_message,
+"""Tests for new BrainPipeline methods: extract_semantic_target, _classify_error_message,
 _classify_skill_error_message."""
 
 from __future__ import annotations
@@ -52,14 +52,14 @@ class TestExtractSemanticTarget:
     ])
     def test_navigation_patterns(self, text, expected):
         pipeline = _make_pipeline()
-        result = pipeline._extract_semantic_target(text)
+        result = pipeline.extract_semantic_target(text)
         assert result == expected, f"Input: {text!r}, expected {expected!r}, got {result!r}"
 
     def test_fallback_returns_original(self):
         """No navigation pattern → return the full input unchanged."""
         pipeline = _make_pipeline()
         text = "随便说点什么"
-        result = pipeline._extract_semantic_target(text)
+        result = pipeline.extract_semantic_target(text)
         assert result == text
 
 

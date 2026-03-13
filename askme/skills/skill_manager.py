@@ -169,7 +169,7 @@ class SkillManager:
         enabled = self.get_enabled()
         if not enabled:
             return "none"
-        return ", ".join(s.name for s in enabled) + ", none"
+        return ", ".join(s.name for s in enabled)
 
     # ── Discovery & Parsing ─────────────────────────────────────
 
@@ -226,6 +226,9 @@ class SkillManager:
             conflicts=self._ensure_list(meta.get("conflicts", [])),
             safety_level=meta.get("safety_level", "normal"),
             voice_trigger=meta.get("voice_trigger"),
+            required_prompt=meta.get("required_prompt", ""),
+            confirm_before_execute=bool(meta.get("confirm_before_execute", False)),
+            required_slots=self._parse_slot_specs(meta.get("required_slots", [])),
             schedule=meta.get("schedule"),
             prompt_template=prompt,
             tools_section=tools_section,
@@ -233,6 +236,24 @@ class SkillManager:
             path=str(file_path),
             enabled=True,
         )
+
+    @staticmethod
+    def _parse_slot_specs(specs_raw: Any) -> list:
+        """Convert raw YAML list into SlotSpec objects."""
+        from askme.skills.skill_model import SlotSpec
+        if not isinstance(specs_raw, list):
+            return []
+        result = []
+        for item in specs_raw:
+            if isinstance(item, dict):
+                result.append(SlotSpec(
+                    name=str(item.get("name", "slot")),
+                    type=str(item.get("type", "text")),
+                    prompt=str(item.get("prompt", "")),
+                    optional=bool(item.get("optional", False)),
+                    default=str(item.get("default", "")),
+                ))
+        return result
 
     @staticmethod
     def _parse_yaml(yaml_text: str) -> dict[str, Any]:

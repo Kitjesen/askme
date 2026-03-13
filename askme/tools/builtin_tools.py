@@ -283,7 +283,7 @@ class HttpRequestTool(BaseTool):
             )
         except urllib.error.URLError as exc:
             return f"[Error] 请求失败: {exc.reason}"
-        except TimeoutError:
+        except (TimeoutError, OSError):
             return f"[Error] 请求超时 ({timeout}s): {url}"
         except Exception as exc:
             return f"[Error] {exc}"
@@ -310,6 +310,169 @@ class NavStatusTool(BaseTool):
                 return _json.dumps(data, ensure_ascii=False, indent=2)
         except Exception as exc:
             return f"[导航状态] 查询失败: {exc}"
+
+
+class NavDispatchTool(BaseTool):
+    """Dispatch a navigation task to nav-gateway → LingTu.
+
+    This is the actual execution tool for the navigate/mapping/follow_person
+    skills.  Without this, skills could only confirm — not execute.
+
+    Requires NAV_GATEWAY_URL environment variable.
+    """
+
+    name = "nav_dispatch"
+    description = (
+        "向 nav-gateway 下发导航任务（语义导航/建图/跟随）。"
+        "成功后机器人开始移动，失败时返回错误原因。"
+        "需要配置 NAV_GATEWAY_URL 环境变量。"
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "destination": {
+                "type": "string",
+                "description": "目标位置描述，如'仓库A'、'出口'、'充电桩'",
+            },
+            "task_type": {
+                "type": "string",
+                "enum": ["navigate", "mapping", "follow_person"],
+                "description": "任务类型：navigate=语义导航（默认），mapping=SLAM建图，follow_person=跟随人",
+            },
+            "params": {
+                "type": "object",
+                "description": "额外参数（可选），如 {\"map_scope\": \"全区\"}",
+            },
+        },
+        "required": ["destination"],
+    }
+    safety_level = "dangerous"
+
+    def execute(
+        self,
+        *,
+        destination: str = "",
+        task_type: str = "navigate",
+        params: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> str:
+        import json as _json
+        import urllib.request
+        from uuid import uuid4
+
+        url = os.environ.get("NAV_GATEWAY_URL", "").rstrip("/")
+        if not url:
+            return (
+                "[导航] 导航服务未配置。"
+                "请设置 NAV_GATEWAY_URL 环境变量，例如: http://localhost:8088"
+            )
+        if not destination and task_type != "follow_person":
+            return "[Error] 目标位置不能为空"
+
+        body: dict[str, Any] = {
+            "task_id": uuid4().hex[:16],
+            "task_type": task_type,
+            "destination": destination,
+            "params": params or {},
+        }
+        data = _json.dumps(body, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            url + "/api/v1/nav/tasks",
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw = resp.read(4096).decode("utf-8", errors="replace")
+                try:
+                    result = _json.loads(raw)
+                    status = result.get("status", "unknown")
+                    task_id = result.get("task_id", "")
+                    return f"[导航] 任务已下发 (status={status}, task_id={task_id})"
+                except _json.JSONDecodeError:
+                    return f"[导航] 任务已下发 (HTTP {resp.status})"
+        except urllib.error.HTTPError as exc:
+            body_text = exc.read(256).decode("utf-8", errors="replace")
+            return f"[导航] 下发失败 (HTTP {exc.code}): {body_text}"
+        except urllib.error.URLError as exc:
+            return f"[导航] 导航服务不可达: {exc.reason}。请检查 NAV_GATEWAY_URL={url}"
+        except (TimeoutError, OSError):
+            return f"[导航] 请求超时 (5s)，请检查导航服务是否在线"
+        except Exception as exc:
+            return f"[导航] 请求异常: {exc}"
+
+
+class DogControlDispatchTool(BaseTool):
+    """Dispatch posture/motion capability to Thunder via dog-control-service.
+
+    This is the actual execution tool for dog_control skill.
+    Uses DogControlClient which enforces the safety layer contract:
+    all motion commands go through dog-control-service, never bypassing
+    dog-safety-service.
+
+    Requires DOG_CONTROL_SERVICE_URL environment variable.
+    """
+
+    name = "dog_control_dispatch"
+    description = (
+        "向 Thunder 机器人下发姿态/运动指令（站立、坐下、趴下等）。"
+        "指令经由 dog-control-service 安全层执行，确保不绕过安全检查。"
+        "需要配置 DOG_CONTROL_SERVICE_URL 环境变量。"
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "capability": {
+                "type": "string",
+                "description": (
+                    "机器人能力名称，支持：stand（站立）、sit（坐下）、"
+                    "lie_down（趴下）、start_patrol（开始巡逻）、stop（停止）"
+                ),
+            },
+            "params": {
+                "type": "object",
+                "description": "额外参数（可选），如 {\"speed\": 0.5}",
+            },
+        },
+        "required": ["capability"],
+    }
+    safety_level = "dangerous"
+
+    def execute(
+        self,
+        *,
+        capability: str = "",
+        params: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> str:
+        if not capability:
+            return "[Error] 未指定能力名称"
+
+        # Import lazily to avoid circular imports at module load time
+        from askme.dog_control_client import DogControlClient
+
+        client = DogControlClient()
+        if not client.is_configured():
+            return (
+                "[Thunder] 机器人控制服务未配置。"
+                "请设置 DOG_CONTROL_SERVICE_URL 环境变量，例如: http://localhost:5080"
+            )
+
+        result = client.dispatch_capability(capability, params)
+        if "error" in result:
+            return f"[Thunder] 指令下发失败: {result['error']}"
+
+        status = result.get("status", "dispatched")
+        exec_id = result.get("execution_id", result.get("id", ""))
+        msg = f"[Thunder] 已下发 '{capability}' 指令 (status={status}"
+        if exec_id:
+            msg += f", id={exec_id}"
+        msg += ")"
+        return msg
 
 
 class DispatchSkillTool(BaseTool):
@@ -339,7 +502,7 @@ class DispatchSkillTool(BaseTool):
         },
         "required": ["skill_name"],
     }
-    safety_level = "dangerous"  # requires operator confirmation before execution
+    safety_level = "normal"  # meta-tool only; actual dangerous skills carry their own safety_level
 
     def __init__(self) -> None:
         # Dispatcher is set after construction via set_dispatcher()
@@ -366,6 +529,8 @@ _BUILTIN_TOOLS: list[type[BaseTool]] = [
     ListDirectoryTool,
     HttpRequestTool,
     NavStatusTool,
+    NavDispatchTool,
+    DogControlDispatchTool,
 ]
 
 

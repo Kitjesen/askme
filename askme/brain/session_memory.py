@@ -52,6 +52,9 @@ class SessionMemory:
         self._sessions_dir: Path = resolved / "sessions"
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         self._llm = llm
+        # Cache for get_recent_summaries() — avoids glob on every LLM turn
+        self._summary_cache: str = ""
+        self._summary_cache_time: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -88,10 +91,14 @@ class SessionMemory:
             logger.warning("[SessionMemory] Summarization failed: %s", exc)
 
     def get_recent_summaries(self) -> str:
-        """Load recent session summaries for system prompt injection.
+        """Load recent session summaries for system prompt injection (cached 5s).
 
         Returns a formatted string of recent session summaries, or empty string.
         """
+        import time as _time
+        now = _time.monotonic()
+        if (now - self._summary_cache_time) < 5.0:
+            return self._summary_cache
         session_files = sorted(self._sessions_dir.glob("*.md"), reverse=True)
         if not session_files:
             return ""
@@ -114,9 +121,12 @@ class SessionMemory:
                 continue
 
         if not summaries:
-            return ""
-
-        return "历史会话摘要:\n" + "\n".join(summaries)
+            result = ""
+        else:
+            result = "历史会话摘要:\n" + "\n".join(summaries)
+        self._summary_cache = result
+        self._summary_cache_time = now
+        return result
 
     def save_direct(self, summary: str) -> None:
         """Save a summary directly without LLM summarization."""
@@ -134,6 +144,7 @@ class SessionMemory:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
         filepath = self._sessions_dir / f"{timestamp}.md"
         filepath.write_text(summary, encoding="utf-8")
+        self._summary_cache_time = 0.0  # invalidate so next call re-reads
 
     @staticmethod
     def _format_messages(messages: list[dict[str, Any]]) -> str:

@@ -21,6 +21,48 @@ if TYPE_CHECKING:
     from askme.voice.runtime_bridge import VoiceRuntimeBridge
 
 
+class _TextClarificationAudio:
+    """Minimal audio adapter for text-mode proactive slot filling via stdin.
+
+    Speaks by printing to console; listens by reading from stdin.
+    This allows ClarificationPlannerAgent to fill slots interactively
+    in text mode without requiring a microphone.
+    """
+
+    def __init__(self) -> None:
+        self.spoken: list[str] = []
+
+    def speak(self, text: str) -> None:
+        self.spoken.append(text)
+        print(f"\n[Clarification]: {text}")  # noqa: T201
+
+    def start_playback(self) -> None: ...
+    def stop_playback(self) -> None: ...
+    def wait_speaking_done(self) -> None: ...
+    def drain_buffers(self) -> None: ...
+
+    _LISTEN_TIMEOUT = 30.0  # seconds before clarification auto-cancels in text mode
+
+    def listen_loop(self) -> str | None:
+        import queue
+        q: queue.Queue[str | None] = queue.Queue()
+
+        def _read() -> None:
+            try:
+                q.put(input("[You]: ").strip() or None)
+            except (EOFError, KeyboardInterrupt):
+                q.put(None)
+
+        import threading as _threading
+        t = _threading.Thread(target=_read, daemon=True)
+        t.start()
+        try:
+            return q.get(timeout=self._LISTEN_TIMEOUT)
+        except queue.Empty:
+            logger.info("TextClarification: listen_loop timed out after %.0fs", self._LISTEN_TIMEOUT)
+            return None
+
+
 class TextLoop:
     """Interactive text-input loop.
 
@@ -51,6 +93,12 @@ class TextLoop:
         self._voice_runtime_bridge = voice_runtime_bridge
         self._dispatcher = dispatcher
 
+        from askme.pipeline.proactive import ProactiveOrchestrator
+        self._proactive = ProactiveOrchestrator.default(
+            pipeline=pipeline, dispatcher=dispatcher
+        )
+        self._text_audio = _TextClarificationAudio()
+
     async def run(self) -> None:
         """Block until the user types /quit or presses Ctrl+C."""
         from askme.brain.intent_router import IntentType
@@ -63,6 +111,7 @@ class TextLoop:
         idle_task = self._pipeline.start_idle_reflection()
         while True:
             memory_task: asyncio.Task[str] | None = None
+            self._text_audio.spoken.clear()  # prevent unbounded growth across turns
             try:
                 user_text = await asyncio.to_thread(input, "[You]: ")
                 user_text = user_text.strip()
@@ -78,6 +127,8 @@ class TextLoop:
                 pending_reply = await self._pipeline.handle_pending_tool_response(user_text)
                 if pending_reply is not None:
                     logger.info("[Assistant]: %s", pending_reply)
+                    if idle_task and not idle_task.done():
+                        idle_task.cancel()
                     idle_task = self._pipeline.start_idle_reflection()
                     continue
 
@@ -103,13 +154,49 @@ class TextLoop:
                     # Try runtime bridge first — edge service may route to arbiter
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
+                        if idle_task and not idle_task.done():
+                            idle_task.cancel()
                         idle_task = self._pipeline.start_idle_reflection()
                         continue
                     # Bridge not configured / failed — local skill dispatch
                     if self._dispatcher:
-                        await self._dispatcher.dispatch(
-                            intent.skill_name or "", user_text, source="text",
+                        _result = await self._proactive.run(
+                            intent.skill_name or "", user_text, self._text_audio,
+                            source="text",
                         )
+                        if _result.proceed:
+                            await self._dispatcher.dispatch(
+                                intent.skill_name or "", _result.enriched_text,
+                                source="text",
+                            )
+                        elif _result.interrupt_payload:
+                            # User bailed out and issued a new intent in the same breath
+                            logger.info(
+                                "TextLoop: rerouting interrupt_payload: %r",
+                                _result.interrupt_payload,
+                            )
+                            _reroute_intent = self._router.route(_result.interrupt_payload)
+                            if (
+                                _reroute_intent.type == IntentType.VOICE_TRIGGER
+                                and _reroute_intent.skill_name
+                            ):
+                                _rr = await self._proactive.run(
+                                    _reroute_intent.skill_name,
+                                    _result.interrupt_payload,
+                                    self._text_audio,
+                                    source="text",
+                                )
+                                if _rr.proceed:
+                                    await self._dispatcher.dispatch(
+                                        _reroute_intent.skill_name,
+                                        _rr.enriched_text,
+                                        source="text",
+                                    )
+                            else:
+                                reply = await self._dispatcher.handle_general(
+                                    _result.interrupt_payload, source="text",
+                                )
+                                logger.info("[Assistant]: %s", reply or "")
                     else:
                         await self._pipeline.execute_skill(
                             intent.skill_name or "", user_text,
@@ -119,6 +206,8 @@ class TextLoop:
                 if intent.type == IntentType.GENERAL:
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
+                        if idle_task and not idle_task.done():
+                            idle_task.cancel()
                         idle_task = self._pipeline.start_idle_reflection()
                         continue
 
@@ -137,6 +226,8 @@ class TextLoop:
                     self._audio.stop_playback()
 
                 # Restart idle reflection timer
+                if idle_task and not idle_task.done():
+                    idle_task.cancel()
                 idle_task = self._pipeline.start_idle_reflection()
 
             except (KeyboardInterrupt, EOFError):

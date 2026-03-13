@@ -176,3 +176,80 @@ def _normalise_skill_names(skill_names: list[str]) -> list[str]:
         if str(skill_name).strip()
     }
     return sorted(cleaned)
+
+
+# ── External service connectivity ─────────────────────────────────────────────
+
+
+def _probe_http(url: str, timeout: float = 1.5) -> bool:
+    """Return True if *url* responds with HTTP < 500."""
+    import urllib.request
+    import urllib.error
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.status < 500
+    except urllib.error.HTTPError as exc:
+        return exc.code < 500
+    except Exception:
+        return False
+
+
+def _service_status(env_var: str, health_path: str = "/api/v1/health") -> dict[str, Any]:
+    """Check a single runtime service.
+
+    Returns ``{"configured": bool, "reachable": bool, "url": str}``.
+    Network probe only runs when the env var is set; otherwise returns
+    ``reachable=False`` immediately (no I/O).
+    """
+    import os
+    url = os.environ.get(env_var, "").rstrip("/")
+    if not url:
+        return {"configured": False, "reachable": False, "url": ""}
+    reachable = _probe_http(url + health_path)
+    return {"configured": True, "reachable": reachable, "url": url}
+
+
+def get_service_summary() -> dict[str, Any]:
+    """Return connectivity status for all configured runtime services.
+
+    Called by the health endpoint so operators can see service state
+    without SSH-ing into the machine.  Probes only configured services.
+    """
+    return {
+        "nav_gateway": _service_status("NAV_GATEWAY_URL"),
+        "dog_control": _service_status("DOG_CONTROL_SERVICE_URL"),
+        "dog_safety": _service_status("DOG_SAFETY_SERVICE_URL"),
+    }
+
+
+def log_startup_service_status() -> None:
+    """Log a human-readable service connectivity table at startup.
+
+    Checks env vars only (no HTTP probing) so startup is never delayed.
+    Skills themselves report errors at execution time if a service is
+    unreachable.
+    """
+    import logging as _logging
+    import os
+    _log = _logging.getLogger(__name__)
+
+    def _configured(var: str) -> str:
+        return "✓ 已配置" if os.environ.get(var, "").strip() else "✗ 未配置"
+
+    nav_url   = os.environ.get("NAV_GATEWAY_URL", "")
+    dog_url   = os.environ.get("DOG_CONTROL_SERVICE_URL", "")
+    safe_url  = os.environ.get("DOG_SAFETY_SERVICE_URL", "")
+
+    _log.info(
+        "运行时服务状态:\n"
+        "  nav-gateway        %s  %s\n"
+        "  dog-control        %s  %s\n"
+        "  dog-safety         %s  %s\n"
+        "  导航/建图/跟随技能: %s\n"
+        "  dog_control 技能:  %s",
+        _configured("NAV_GATEWAY_URL"),   nav_url or "(NAV_GATEWAY_URL 未设置)",
+        _configured("DOG_CONTROL_SERVICE_URL"), dog_url or "(DOG_CONTROL_SERVICE_URL 未设置)",
+        _configured("DOG_SAFETY_SERVICE_URL"),  safe_url or "(DOG_SAFETY_SERVICE_URL 未设置)",
+        "ACTIVE" if nav_url else "INACTIVE — 导航类 skill 会提示用户服务未配置",
+        "ACTIVE" if dog_url else "INACTIVE — dog_control skill 会提示用户服务未配置",
+    )

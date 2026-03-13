@@ -12,6 +12,17 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class SlotSpec:
+    """A single typed slot required by a skill."""
+
+    name: str
+    type: str = "text"       # text | location | referent | datetime | enum
+    prompt: str = ""         # question to ask when this slot is missing
+    optional: bool = False   # if True, missing value does not block execution
+    default: str = ""        # default value to use when slot is optional + absent
+
+
+@dataclass
 class SkillDefinition:
     """Represents a single skill parsed from a SKILL.md file."""
 
@@ -26,6 +37,9 @@ class SkillDefinition:
     conflicts: list[str] = field(default_factory=list)
     safety_level: str = "normal"  # normal | dangerous | critical
     voice_trigger: str | None = None
+    required_prompt: str = ""   # Question to ask if required slot is missing, e.g. "导航去哪里？"
+    confirm_before_execute: bool = False  # True → ConfirmationAgent runs before dispatch
+    required_slots: list["SlotSpec"] = field(default_factory=list)  # typed slot schema
     schedule: str | None = None  # cron expression
     prompt_template: str = ""
     tools_section: str = ""

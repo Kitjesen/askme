@@ -45,6 +45,11 @@ class VoiceLoop:
         self._dispatcher = dispatcher
         self._audio_router = audio_router
 
+        from askme.pipeline.proactive import ProactiveOrchestrator
+        self._proactive = ProactiveOrchestrator.default(
+            pipeline=pipeline, dispatcher=dispatcher
+        )
+
     async def run(self) -> None:
         """Block until Ctrl+C or too many consecutive errors."""
         from askme.brain.intent_router import IntentType
@@ -92,6 +97,8 @@ class VoiceLoop:
 
                 pending_reply = await self._pipeline.handle_pending_tool_response(user_text)
                 if pending_reply is not None:
+                    if idle_task and not idle_task.done():
+                        idle_task.cancel()
                     idle_task = self._pipeline.start_idle_reflection()
                     continue
 
@@ -119,6 +126,25 @@ class VoiceLoop:
                         memory_task = None
                     self._audio.drain_buffers()
                     # acknowledge already fired — no extra chime needed
+                    continue
+
+                # ── Repeat last response — zero LLM, replay TTS ──────────
+                if (
+                    intent.type == IntentType.VOICE_TRIGGER
+                    and intent.skill_name == "repeat_last"
+                ):
+                    if memory_task and not memory_task.done():
+                        memory_task.cancel()
+                        memory_task = None
+                    last = self._pipeline.last_spoken_text
+                    self._audio.drain_buffers()
+                    if last:
+                        self._audio.speak(last)
+                    else:
+                        self._audio.speak("暂时没有内容可以重复。")
+                    self._audio.start_playback()
+                    await asyncio.to_thread(self._audio.wait_speaking_done)
+                    self._audio.stop_playback()
                     continue
 
                 # ── Mute mic — zero latency, no LLM ──────────────────────
@@ -179,13 +205,60 @@ class VoiceLoop:
                     # Try runtime bridge first — edge service may route to arbiter
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
+                        if idle_task and not idle_task.done():
+                            idle_task.cancel()
                         idle_task = self._pipeline.start_idle_reflection()
                         continue
                     # Bridge not configured / failed — local skill dispatch
                     if self._dispatcher:
-                        await self._dispatcher.dispatch(
-                            intent.skill_name or "", user_text, source="voice",
+                        result = await self._proactive.run(
+                            intent.skill_name or "", user_text, self._audio,
+                            source="voice",
                         )
+                        if result.proceed:
+                            await self._dispatcher.dispatch(
+                                intent.skill_name or "", result.enriched_text,
+                                source="voice",
+                            )
+                        elif result.interrupt_payload:
+                            # User bailed out and issued a new intent in the same breath
+                            # e.g. "算了，去仓库B" → reroute immediately without re-listening
+                            logger.info(
+                                "VoiceLoop: rerouting interrupt_payload: %r",
+                                result.interrupt_payload,
+                            )
+                            _reroute_intent = self._router.route(result.interrupt_payload)
+                            if (
+                                _reroute_intent.type == IntentType.VOICE_TRIGGER
+                                and _reroute_intent.skill_name
+                            ):
+                                _rr = await self._proactive.run(
+                                    _reroute_intent.skill_name,
+                                    result.interrupt_payload,
+                                    self._audio,
+                                    source="voice",
+                                )
+                                if _rr.proceed:
+                                    await self._dispatcher.dispatch(
+                                        _reroute_intent.skill_name,
+                                        _rr.enriched_text,
+                                        source="voice",
+                                    )
+                            else:
+                                # Rerouted to a general intent — start fresh memory
+                                # prefetch for the new payload so LLM gets context.
+                                memory_task = self._pipeline.start_memory_prefetch(
+                                    result.interrupt_payload
+                                )
+                                await self._dispatcher.handle_general(
+                                    result.interrupt_payload,
+                                    source="voice",
+                                    memory_task=memory_task,
+                                )
+                                memory_task = None  # handle_general took ownership
+                                if idle_task and not idle_task.done():
+                                    idle_task.cancel()
+                                idle_task = self._pipeline.start_idle_reflection()
                     else:
                         await self._pipeline.execute_skill(
                             intent.skill_name or "", user_text,
@@ -202,6 +275,8 @@ class VoiceLoop:
                 if intent.type == IntentType.GENERAL:
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
+                        if idle_task and not idle_task.done():
+                            idle_task.cancel()
                         idle_task = self._pipeline.start_idle_reflection()
                         continue
 
@@ -218,6 +293,8 @@ class VoiceLoop:
                 # suppresses speaker echo while allowing user barge-in.
 
                 # Restart idle reflection timer
+                if idle_task and not idle_task.done():
+                    idle_task.cancel()
                 idle_task = self._pipeline.start_idle_reflection()
 
             except KeyboardInterrupt:
@@ -285,6 +362,11 @@ class VoiceLoop:
                         pass
 
         logger.info("Bye!")
+
+    def _slot_present(self, skill: "SkillDefinition", user_text: str) -> bool:  # type: ignore[name-defined]
+        """Proxy to slot_utils.slot_present — kept for backward compatibility with tests."""
+        from askme.pipeline.proactive.slot_utils import slot_present
+        return slot_present(skill, user_text, self._pipeline)
 
     async def _maybe_handle_runtime_bridge(self, user_text: str) -> bool:
         """Try the runtime bridge first and fall back locally on bridge failures."""

@@ -7,6 +7,7 @@ import logging
 import queue
 import threading
 import time
+from enum import Enum
 from typing import Any
 
 import numpy as np
@@ -33,6 +34,38 @@ _PRE_ROLL_CHUNKS = 5
 # Maximum continuous speech duration before forcing an ASR endpoint.
 # Prevents VAD deadlock from persistent background noise.
 _MAX_SPEECH_DURATION = 30.0
+
+# Minimum continuous speech duration (seconds) required to confirm a barge-in
+# during TTS playback.  Shorter bursts (coughs, noise) are ignored and TTS
+# continues.  Only applies when TTS is actively playing; when idle the first
+# VAD frame triggers immediately as before.
+_BARGE_IN_HOLD_S = 0.15
+
+# ASR results that are clearly noise or feedback sounds, not commands.
+# When matched, we speak a clarification prompt and re-listen.
+_NOISE_UTTERANCES: frozenset[str] = frozenset([
+    "嗯", "哦", "啊", "呢", "哈", "噢", "哇", "呀",
+    "嗯嗯", "哦哦", "啊啊", "嗯？", "哦？", "啊？",
+    "的", "了", "吧", "嘛",
+])
+
+
+class AgentState(Enum):
+    """Observable lifecycle state of the audio agent.
+
+    Transitions:
+        IDLE → LISTENING (VAD triggers speech detection)
+        LISTENING → PROCESSING (ASR endpoint detected, returning text)
+        PROCESSING → SPEAKING (TTS playback starts)
+        SPEAKING → IDLE (TTS finishes or barge-in)
+        Any → MUTED (mute() called)
+        MUTED → IDLE (unmute() called)
+    """
+    IDLE = "idle"              # Waiting for wake word / user input
+    LISTENING = "listening"    # VAD active, collecting speech (speech_active=True)
+    PROCESSING = "processing"  # ASR done, text returned, LLM/skill running
+    SPEAKING = "speaking"      # TTS is playing back audio
+    MUTED = "muted"            # Microphone muted by user
 
 
 class AudioAgent:
@@ -74,6 +107,7 @@ class AudioAgent:
         self.stop_event = threading.Event()
         self.woken_up: bool = False
         self._muted: bool = False  # software mute — still listens, VoiceLoop filters results
+        self._agent_state: AgentState = AgentState.IDLE
 
         # -- Input engines (only in voice mode) --
         self._asr_timeout: float = voice_cfg.get("asr", {}).get(
@@ -135,11 +169,13 @@ class AudioAgent:
         self._refresh_voice_metrics()
 
     def start_playback(self) -> None:
+        self._agent_state = AgentState.SPEAKING
         self.tts.start_playback()
         self._refresh_voice_metrics()
 
     def stop_playback(self) -> None:
         self.tts.stop_playback()
+        self._agent_state = AgentState.IDLE
         self._refresh_voice_metrics()
 
     def wait_speaking_done(self) -> None:
@@ -191,17 +227,24 @@ class AudioAgent:
         meeting/demo is happening; unmute with "开麦".
         """
         self._muted = True
+        self._agent_state = AgentState.MUTED
         self._refresh_voice_metrics()
 
     def unmute(self) -> None:
         """Resume normal voice processing after a mute()."""
         self._muted = False
+        self._agent_state = AgentState.IDLE
         self._refresh_voice_metrics()
 
     @property
     def is_muted(self) -> bool:
         """Whether the voice assistant is software-muted."""
         return self._muted
+
+    @property
+    def state(self) -> AgentState:
+        """Current observable state of the audio agent."""
+        return self._agent_state
 
     def acknowledge(self) -> None:
         """Play a brief confirmation tone: 'heard you, thinking'.
@@ -278,7 +321,17 @@ class AudioAgent:
                     maxlen=_PRE_ROLL_CHUNKS
                 )
 
+                # Barge-in hold state: tracks a candidate barge-in while TTS
+                # is playing.  Reset when confirmed or dismissed.
+                barge_in_pending: bool = False
+                barge_in_start: float = 0.0
+                barge_in_buffer: list[np.ndarray] = []
+
                 while not self.stop_event.is_set():
+                    # Mark IDLE at the top of each iteration (waiting for input)
+                    if self._agent_state not in (AgentState.MUTED, AgentState.LISTENING):
+                        self._agent_state = AgentState.IDLE
+
                     # Timeout check
                     if time.monotonic() > deadline:
                         logger.info(
@@ -292,6 +345,9 @@ class AudioAgent:
                             self.tts.speak("没听清楚，请再说一遍。")
                         else:
                             self.tts.speak("还在听呢，有什么需要帮忙的？")
+                        self.start_playback()
+                        self.wait_speaking_done()
+                        self.stop_playback()
                         return None
 
                     samples, _ = mic.read(samples_per_read)
@@ -363,9 +419,51 @@ class AudioAgent:
                             # only gate the speech_active transition.
                             if self._noise_gate_peak > 0 and peak < self._noise_gate_peak:
                                 pre_roll.append(samples.copy())
+                            elif self.tts.is_active() and not barge_in_pending:
+                                # TTS is playing: start barge-in hold.
+                                # Don't interrupt TTS yet — wait _BARGE_IN_HOLD_S
+                                # to confirm this is real speech, not a cough or
+                                # noise burst.
+                                barge_in_pending = True
+                                barge_in_start = time.monotonic()
+                                barge_in_buffer = list(pre_roll) + [samples.copy()]
+                                logger.info(
+                                    "VAD: barge-in candidate (peak=%d), "
+                                    "holding %.0fms",
+                                    peak, _BARGE_IN_HOLD_S * 1000,
+                                )
+                            elif barge_in_pending:
+                                # Still within hold window — accumulate
+                                barge_in_buffer.append(samples.copy())
+                                if (time.monotonic() - barge_in_start) >= _BARGE_IN_HOLD_S:
+                                    # Confirmed real barge-in
+                                    speech_active = True
+                                    speech_start_time = barge_in_start
+                                    barge_in_pending = False
+                                    self._agent_state = AgentState.LISTENING
+                                    logger.info(
+                                        "VAD: barge-in confirmed (peak=%d)", peak
+                                    )
+                                    self.tts.drain_buffers()
+                                    self.tts.stop_immediately()
+                                    self._refresh_voice_metrics()
+                                    for buffered in barge_in_buffer:
+                                        try:
+                                            self.asr_stream.accept_waveform(
+                                                sample_rate, buffered
+                                            )
+                                        except Exception as e:
+                                            logger.error(
+                                                "ASR accept_waveform (barge-in) error: %s", e
+                                            )
+                                            break
+                                    barge_in_buffer.clear()
+                                    pre_roll.clear()
                             else:
+                                # No TTS playing — immediate activation (original behaviour)
                                 speech_active = True
                                 speech_start_time = time.monotonic()
+                                self._agent_state = AgentState.LISTENING
                                 logger.info("VAD: speech start (peak=%d)", peak)
                                 self.tts.drain_buffers()
                                 self.tts.stop_immediately()
@@ -421,6 +519,7 @@ class AudioAgent:
                                     logger.info("Recognized (forced): %s", text)
                                     self.audio_queue.put(text)
                                     self._metrics.mark_voice_input(text)
+                                    self._agent_state = AgentState.PROCESSING
                                     self._refresh_voice_metrics()
                                     return text
                                 else:
@@ -430,6 +529,15 @@ class AudioAgent:
                     else:
                         # Buffer recent silence chunks for pre-roll
                         pre_roll.append(samples.copy())
+                        # False barge-in: VAD dropped during hold window.
+                        # TTS continues undisturbed.
+                        if barge_in_pending:
+                            elapsed = time.monotonic() - barge_in_start
+                            logger.info(
+                                "VAD: false barge-in dismissed (only %.0fms)", elapsed * 1000
+                            )
+                            barge_in_pending = False
+                            barge_in_buffer.clear()
                         if speech_active:
                             # Speech just ended -- feed remaining and check
                             logger.info("VAD: speech end")
@@ -454,12 +562,30 @@ class AudioAgent:
                     if is_endpoint and text:
                         text = text.strip()
                         if len(text) > 0:
+                            # Noise / feedback sound filter: single syllables
+                            # or known feedback sounds ("嗯", "哦", etc.) are
+                            # ignored and we re-listen without exiting.
+                            if text in _NOISE_UTTERANCES or (len(text) == 1 and text not in ("停", "走", "站")):
+                                logger.info(
+                                    "ASR noise utterance filtered: '%s' — re-listening", text
+                                )
+                                self.asr.reset(self.asr_stream)
+                                self.asr_stream = self.asr.create_stream()
+                                speech_active = False
+                                speech_start_time = 0.0
+                                self.tts.speak("没有收到有效指令，请说完整的话。")
+                                self.start_playback()
+                                self.wait_speaking_done()
+                                self.stop_playback()
+                                deadline = time.monotonic() + self._asr_timeout
+                                continue
                             # Add punctuation to raw ASR output
                             if self.punct.available:
                                 text = self.punct.restore(text)
                             logger.info("Recognized: %s", text)
                             self.audio_queue.put(text)
                             self._metrics.mark_voice_input(text)
+                            self._agent_state = AgentState.PROCESSING
                             self._refresh_voice_metrics()
                             self.asr.reset(self.asr_stream)
                             self.asr_stream = self.asr.create_stream()
@@ -547,14 +673,14 @@ class AudioAgent:
                         import subprocess
                         proc = subprocess.Popen(chime_cmd, stdin=subprocess.PIPE)
                         proc.communicate(input=pcm_bytes)
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("chime subprocess failed: %s", _e)
 
                 threading.Thread(target=_run, daemon=True).start()
             else:
                 sd.play(audio, self._SR, blocking=False)
-        except Exception:
-            pass  # non-critical audio feedback
+        except Exception as _e:
+            logger.debug("chime failed: %s", _e)
 
     # -- Individual chime generators --
 

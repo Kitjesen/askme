@@ -117,8 +117,44 @@ class IntentRouter:
     # (e.g. "去" matching "进去", "出去", "回去")
     MIN_TRIGGER_LENGTH = 2
 
+    # Chinese negation words that immediately precede a trigger phrase.
+    # Ordered longest-first so "不要" matches before "不".
+    _NEGATION_PREFIXES: tuple[str, ...] = (
+        "不要", "不用", "不能", "不想", "不让", "没有", "别再",
+        "不", "别", "没",
+    )
+
+    # Chinese question-ending particles. When any of these appear at the end
+    # of the utterance (within 2 characters of the end), or immediately after
+    # the trigger phrase, the input is treated as a question, not a command.
+    _QUESTION_SUFFIXES: tuple[str, ...] = ("吗", "么", "呢", "嘛")
+
+    def _is_negated(self, text: str, trigger_pos: int) -> bool:
+        """Return True if the trigger at trigger_pos is preceded by a negation word."""
+        prefix = text[max(0, trigger_pos - 4) : trigger_pos]
+        return any(prefix.endswith(neg) for neg in self._NEGATION_PREFIXES)
+
+    def _is_question_context(self, text: str) -> bool:
+        """Return True if the utterance is a question, not a command.
+
+        Checks:
+        1. Text ends with a Chinese question particle (吗, 么, 呢, 嘛).
+        2. Text ends with a Chinese/ASCII question mark (？ ?).
+
+        Deliberately conservative: only triggers on unambiguous question
+        endings, not on internal question words which might be in commands.
+        """
+        stripped = text.rstrip()
+        if not stripped:
+            return False
+        # Ends with ASCII/fullwidth question mark
+        if stripped.endswith("?") or stripped.endswith("？"):
+            return True
+        # Ends with question particle
+        return any(stripped.endswith(q) for q in self._QUESTION_SUFFIXES)
+
     def _match_voice_trigger(self, text: str) -> str | None:
-        """Find the best matching voice trigger in the text.
+        """Find the best matching voice trigger, skipping negated and question occurrences.
 
         Uses substring matching: if any trigger phrase appears in the text,
         it's considered a match. Longer triggers are checked first to avoid
@@ -126,6 +162,15 @@ class IntentRouter:
 
         Triggers shorter than MIN_TRIGGER_LENGTH are skipped to prevent
         single-character Chinese triggers from matching common suffixes.
+
+        A trigger is skipped if it is immediately preceded by a Chinese
+        negation word (不, 别, 不要, etc.) to prevent "不要停" from firing
+        the stop_speaking skill.
+
+        A trigger is also skipped if the whole utterance ends with a question
+        particle (吗, 么, 呢, 嘛) or a question mark (? ？), because the user
+        is asking about the feature rather than invoking it — e.g. "导航会失
+        败吗" should not fire the navigate skill.
         """
         if not self._voice_triggers:
             return None
@@ -135,7 +180,8 @@ class IntentRouter:
         for trigger_phrase, skill_name in self._sorted_triggers:
             if len(trigger_phrase) < self.MIN_TRIGGER_LENGTH:
                 continue
-            if trigger_phrase.lower() in text_lower:
+            pos = text_lower.find(trigger_phrase.lower())
+            if pos >= 0 and not self._is_negated(text_lower, pos) and not self._is_question_context(text_lower):
                 return skill_name
 
         return None

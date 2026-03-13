@@ -53,6 +53,12 @@ class TTSEngine:
         output_device: int|str - sounddevice output device
     """
 
+    # MiniMax consecutive failure threshold before temporarily disabling it.
+    # After _MINIMAX_FAIL_THRESHOLD consecutive failures, the backend is
+    # bypassed for _MINIMAX_BACKOFF_SECONDS seconds to avoid per-call timeout.
+    _MINIMAX_FAIL_THRESHOLD = 3
+    _MINIMAX_BACKOFF_SECONDS = 300.0  # 5 minutes
+
     # Regex patterns for cleaning text before TTS
     _RE_EMOJI = re.compile(r'[\U00010000-\U0010ffff]')
     _RE_BOLD = re.compile(r'\*\*(.+?)\*\*')
@@ -91,6 +97,10 @@ class TTSEngine:
         # Emotion: "" (auto), happy, sad, angry, fearful, disgusted, surprised, calm
         self._minimax_emotion: str = config.get("minimax_emotion", "")
 
+        # Consecutive failure tracking for MiniMax auto-disable
+        self._minimax_fail_count: int = 0
+        self._minimax_disabled_until: float = 0.0  # monotonic time
+
         # Volume multiplier applied to all PCM output (0.0–1.0)
         self._volume: float = float(config.get("volume", 1.0))
 
@@ -107,6 +117,7 @@ class TTSEngine:
         self._playback_thread: threading.Thread | None = None
         # aplay subprocess (Linux only); non-None while a chunk is being played
         self._aplay_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        self._aplay_lock = threading.Lock()  # guards _aplay_proc r/w across threads
         self._aplay_bin: str | None = shutil.which("aplay")
         # Immediate stop flag: checked by _playback_loop to abort mid-chunk
         self._stop_requested = threading.Event()
@@ -460,13 +471,50 @@ class TTSEngine:
         if self._backend == "local":
             self._generate_local(text, generation)
         elif self._backend == "minimax":
-            if not self._run_async(self._generate_minimax(text, generation)):
-                # MiniMax failed — auto-fallback to local or edge
-                logger.warning("TTS minimax failed, falling back")
-                if self._local_tts is not None:
-                    self._generate_local(text, generation)
+            # If MiniMax is temporarily disabled due to consecutive failures,
+            # skip directly to fallback without attempting the API call.
+            if time.monotonic() < self._minimax_disabled_until:
+                remaining = self._minimax_disabled_until - time.monotonic()
+                logger.info(
+                    "TTS: MiniMax temporarily disabled (%.0fs remaining), using fallback",
+                    remaining,
+                )
+                self._use_minimax_fallback(text, generation)
+            elif not self._run_async(self._generate_minimax(text, generation)):
+                # MiniMax failed — track and possibly disable temporarily
+                self._minimax_fail_count += 1
+                if self._minimax_fail_count >= self._MINIMAX_FAIL_THRESHOLD:
+                    self._minimax_disabled_until = (
+                        time.monotonic() + self._MINIMAX_BACKOFF_SECONDS
+                    )
+                    logger.warning(
+                        "TTS: MiniMax failed %d consecutive times — "
+                        "disabling for %.0f seconds",
+                        self._minimax_fail_count,
+                        self._MINIMAX_BACKOFF_SECONDS,
+                    )
                 else:
-                    self._run_async(self._generate_edge(text, generation))
+                    logger.warning(
+                        "TTS: MiniMax failed (%d/%d), falling back",
+                        self._minimax_fail_count,
+                        self._MINIMAX_FAIL_THRESHOLD,
+                    )
+                self._use_minimax_fallback(text, generation)
+            else:
+                # Success — reset failure counter
+                if self._minimax_fail_count > 0:
+                    logger.info(
+                        "TTS: MiniMax recovered after %d failure(s)",
+                        self._minimax_fail_count,
+                    )
+                    self._minimax_fail_count = 0
+        else:
+            self._run_async(self._generate_edge(text, generation))
+
+    def _use_minimax_fallback(self, text: str, generation: int) -> None:
+        """Use local or edge TTS as a fallback when MiniMax is unavailable."""
+        if self._local_tts is not None:
+            self._generate_local(text, generation)
         else:
             self._run_async(self._generate_edge(text, generation))
 
@@ -654,7 +702,9 @@ class TTSEngine:
 
     def _kill_aplay(self) -> None:
         """Terminate any running aplay subprocess (immediate interruption)."""
-        proc = self._aplay_proc
+        with self._aplay_lock:
+            proc = self._aplay_proc
+            self._aplay_proc = None
         if proc is not None:
             try:
                 proc.terminate()
@@ -713,33 +763,39 @@ class TTSEngine:
                         ]
                         if self._output_device is not None:
                             cmd += ["-D", str(self._output_device)]
-                        # Pre-roll: 18 Hz subsonic tone at -24 dBFS for 400 ms.
-                        # Why subsonic?  18 Hz is below the audible threshold for
-                        # humans and most small speakers; it forces the USB DAC's
-                        # analog output stage to fully unmute before real audio
-                        # starts.  USB DACs with pop-suppression circuits need a
-                        # signal amplitude well above their ~-70 dBFS detection
-                        # threshold — the previous ±1 (-90 dBFS) was too quiet.
+                        # Pre-roll: 80 Hz tone at -24 dBFS for 400 ms.
+                        # Why 80 Hz?  USB DAC pop-suppression circuits use a
+                        # bandpass/high-pass detector internally — 18 Hz is
+                        # subsonic and gets filtered *before* the unmute trigger
+                        # sees it, so the DAC stays muted through the pre-roll and
+                        # starts ramping up only when real speech (>100 Hz) arrives,
+                        # causing the first ~150 ms to be quiet.  80 Hz is still
+                        # inaudible through small robot speakers (typical cutoff
+                        # ~120 Hz) but is firmly within the detection passband.
                         # The last 30 ms fade to zero avoids a click at the
                         # pre-roll → speech transition.
                         _n = int(self._sample_rate * 0.40)
                         _t = np.arange(_n, dtype=np.float32) / self._sample_rate
-                        preroll = (np.sin(2 * np.pi * 18.0 * _t) * 2000.0).astype(np.int16)
+                        preroll = (np.sin(2 * np.pi * 80.0 * _t) * 2000.0).astype(np.int16)
                         _fade = int(self._sample_rate * 0.03)
                         preroll[-_fade:] = (
                             preroll[-_fade:].astype(np.float32)
                             * np.linspace(1.0, 0.0, _fade, dtype=np.float32)
                         ).astype(np.int16)
                         payload = preroll.tobytes() + pcm.tobytes()
-                        self._aplay_proc = subprocess.Popen(
-                            cmd, stdin=subprocess.PIPE
-                        )
-                        if self._audio_router is not None:
-                            with self._audio_router.output_session():
+                        with self._aplay_lock:
+                            self._aplay_proc = subprocess.Popen(
+                                cmd, stdin=subprocess.PIPE
+                            )
+                        try:
+                            if self._audio_router is not None:
+                                with self._audio_router.output_session():
+                                    self._aplay_proc.communicate(input=payload)
+                            else:
                                 self._aplay_proc.communicate(input=payload)
-                        else:
-                            self._aplay_proc.communicate(input=payload)
-                        self._aplay_proc = None
+                        finally:
+                            with self._aplay_lock:
+                                self._aplay_proc = None
                         logger.info("aplay: done")
                     else:
                         if self._audio_router is not None:
@@ -754,7 +810,8 @@ class TTSEngine:
         except Exception as e:
             logger.error("Playback error: %s", e)
         finally:
-            self._aplay_proc = None
+            with self._aplay_lock:
+                self._aplay_proc = None
             # Always clear _is_playing on exit — prevents start_playback() from
             # getting permanently blocked and wait_done() from deadlocking when
             # the audio device is unavailable or throws.

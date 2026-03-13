@@ -12,11 +12,17 @@ BrainPipeline.  It provides:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import json
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, TYPE_CHECKING
+
+from askme.config import project_root
 
 if TYPE_CHECKING:
     from askme.pipeline.brain_pipeline import BrainPipeline
@@ -27,6 +33,17 @@ logger = logging.getLogger(__name__)
 
 
 # ── Mission Context ───────────────────────────────────────────────
+
+
+class MissionState(Enum):
+    """Explicit lifecycle state for a mission.
+
+    Transitions: RUNNING → SUCCEEDED | FAILED | CANCELED
+    """
+    RUNNING = "running"      # Active — steps are being dispatched
+    SUCCEEDED = "succeeded"  # complete_mission() was called normally
+    FAILED = "failed"        # A step raised an unrecoverable error
+    CANCELED = "canceled"    # Explicitly canceled by user or system
 
 
 @dataclass
@@ -52,6 +69,7 @@ class MissionContext:
     steps: list[MissionStep] = field(default_factory=list)
     shared_context: dict[str, str] = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
+    state: MissionState = MissionState.RUNNING
 
     @property
     def step_count(self) -> int:
@@ -69,7 +87,7 @@ class MissionContext:
         names = [s.skill_name for s in self.steps]
         elapsed = time.time() - self.started_at
         return (
-            f"mission={self.mission_id} source={self.source} "
+            f"mission={self.mission_id} source={self.source} state={self.state.value} "
             f"steps={names} elapsed={elapsed:.1f}s"
         )
 
@@ -112,6 +130,8 @@ class SkillDispatcher:
         self._current_mission: MissionContext | None = None
         # Captured lazily on first async dispatch — used by execute_skill_sync
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Per-thread dispatch depth — guards against LLM-driven infinite recursion
+        self._dispatch_depth = threading.local()
 
     # ── Public API (called by loops) ──────────────────────────────
 
@@ -145,8 +165,12 @@ class SkillDispatcher:
         else:
             # Continuing an existing multi-step mission — let the user know
             step_num = self._current_mission.step_count + 1
-            self._audio.speak(f"继续执行第{step_num}步：{skill_name}")
+            _step_def = self._skill_manager.get(skill_name)
+            step_label = (_step_def.description if _step_def and _step_def.description else skill_name)
+            self._audio.speak(f"继续执行第{step_num}步：{step_label}")
             self._audio.start_playback()
+            await asyncio.to_thread(self._audio.wait_speaking_done)
+            self._audio.stop_playback()
 
         # Build combined context: prior mission steps + caller-supplied context
         mission_history = self._current_mission.history_for_context()
@@ -172,9 +196,11 @@ class SkillDispatcher:
         except asyncio.TimeoutError:
             logger.error("Skill '%s' timed out after %.0fs", skill_name, step_timeout)
             result = f"[超时] 技能 {skill_name} 执行超过 {int(step_timeout)} 秒，已跳过。"
+            self._current_mission.state = MissionState.FAILED
 
-        # Track step
+        # Track step and persist to disk
         self._current_mission.add_step(skill_name, user_text, result)
+        self._persist_mission()
         logger.info(
             "Mission step %d: %s → %s",
             self._current_mission.step_count,
@@ -200,15 +226,28 @@ class SkillDispatcher:
             user_text, memory_task=memory_task, source=source,
         )
 
+    def get_skill(self, skill_name: str):
+        """Return the SkillDefinition for a skill name, or None if not found."""
+        return self._skill_manager.get(skill_name)
+
     def complete_mission(self) -> MissionContext | None:
         """End the current mission and return it for logging."""
         mission = self._current_mission
         if mission and mission.steps:
             logger.info("Mission completed: %s", mission.summary())
             if len(mission.steps) > 1:
-                names = "、".join(s.skill_name for s in mission.steps)
+                names = "、".join(
+                    (self._skill_manager.get(s.skill_name).description
+                     if self._skill_manager.get(s.skill_name) and self._skill_manager.get(s.skill_name).description
+                     else s.skill_name)
+                    for s in mission.steps
+                )
                 self._audio.speak(f"多步任务完成：{names}")
                 self._audio.start_playback()
+        if mission:
+            if mission.state == MissionState.RUNNING:
+                mission.state = MissionState.SUCCEEDED
+        self._persist_mission()
         self._current_mission = None
         return mission
 
@@ -231,6 +270,15 @@ class SkillDispatcher:
         correct cross-thread bridge; the loop reference is captured lazily
         on the first async ``dispatch`` call.
         """
+        # Recursion guard: LLM can call dispatch_skill inside execute_skill,
+        # which calls process(), which can call dispatch_skill again.
+        # Limit nesting to 3 levels to prevent runaway chains.
+        _MAX_DEPTH = 3
+        depth = getattr(self._dispatch_depth, "value", 0)
+        if depth >= _MAX_DEPTH:
+            logger.warning("dispatch_skill depth=%d >= max=%d, rejecting '%s'", depth, _MAX_DEPTH, skill_name)
+            return f"[Error] 技能调用嵌套过深（最大{_MAX_DEPTH}层），已拒绝: {skill_name}"
+
         skill = self._skill_manager.get(skill_name)
         if not skill:
             available = self._skill_manager.get_skill_catalog()
@@ -245,6 +293,7 @@ class SkillDispatcher:
         if loop is None or not loop.is_running():
             return "[Error] 事件循环未就绪，无法执行技能"
 
+        self._dispatch_depth.value = depth + 1
         try:
             future = asyncio.run_coroutine_threadsafe(
                 self.dispatch(skill_name, user_text, source="llm"),
@@ -255,6 +304,25 @@ class SkillDispatcher:
         except Exception as exc:
             logger.error("dispatch_skill tool error: %s", exc)
             return f"[Error] 技能执行失败: {exc}"
+        finally:
+            self._dispatch_depth.value = depth
+
+    def _persist_mission(self) -> None:
+        """Serialize current mission to disk for auditability and crash recovery.
+
+        Silently no-ops on any error — persistence is best-effort, not critical path.
+        """
+        if self._current_mission is None:
+            return
+        try:
+            missions_dir = project_root() / "data" / "missions"
+            missions_dir.mkdir(parents=True, exist_ok=True)
+            path = missions_dir / f"{self._current_mission.mission_id}.json"
+            d = dataclasses.asdict(self._current_mission)
+            d["state"] = self._current_mission.state.value
+            path.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            logger.warning("Mission persist failed: %s", exc)
 
     def get_skill_catalog_for_prompt(self) -> str:
         """Return skill catalog formatted for system prompt injection."""

@@ -265,6 +265,8 @@ class AskmeApp:
             "enabled" if self.voice_runtime_bridge.enabled else "disabled",
             "configured" if dog_safety_url else "not configured",
         )
+        from askme.runtime_health import log_startup_service_status
+        log_startup_service_status()
 
     # ── Lifecycle ────────────────────────────────────────────
 

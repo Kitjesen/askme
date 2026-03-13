@@ -10,6 +10,16 @@ depends: []
 conflicts: [robot_estop]
 safety_level: dangerous
 voice_trigger: 抓住,抓取,拿起来,放下,松开
+required_prompt: 抓取什么物体？
+confirm_before_execute: true
+required_slots:
+  - name: object
+    type: referent
+    prompt: 抓取什么物体？
+  - name: place_target
+    type: location
+    prompt: 放到哪里？
+    optional: true
 ---
 
 ## Tools

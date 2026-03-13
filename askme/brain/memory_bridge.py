@@ -45,6 +45,7 @@ class MemoryBridge:
         # Lazily initialised MemoryService instance
         self._service: Any | None = None
         self._init_attempted: bool = False
+        self._init_lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -67,9 +68,17 @@ class MemoryBridge:
         if self._service is not None:
             return True
         if self._init_attempted:
-            return False
+            return self._service is not None
 
-        self._init_attempted = True
+        # Lazy-create lock inside an async context (Lock must be created in the loop)
+        if self._init_lock is None:
+            self._init_lock = asyncio.Lock()
+
+        async with self._init_lock:
+            # Double-check inside lock — concurrent callers wait here
+            if self._init_attempted:
+                return self._service is not None
+            self._init_attempted = True
 
         if not self._enabled:
             logger.info("[Memory] Memory disabled in config.")
@@ -180,6 +189,30 @@ class MemoryBridge:
         except Exception as exc:
             logger.warning("[Memory] Retrieval error: %s", exc)
             return ""
+
+    async def save(self, user_text: str, assistant_text: str) -> None:
+        """Persist a conversation exchange to the L4 vector store.
+
+        Silently no-ops when the embedding server is unavailable.
+        """
+        if self._init_attempted and self._service is None:
+            return
+        if not await self._ensure_service():
+            return
+        content = f"用户: {user_text}\n助手: {assistant_text[:200]}"
+        try:
+            await asyncio.wait_for(
+                self._service.create_memory_item(
+                    memory_type="event",
+                    memory_content=content,
+                    memory_categories=[],
+                    user={"user_id": self._user_id},
+                ),
+                timeout=5.0,
+            )
+            logger.debug("[Memory] Saved conversation turn.")
+        except Exception as exc:
+            logger.warning("[Memory] Save failed: %s", exc)
 
     @property
     def available(self) -> bool:

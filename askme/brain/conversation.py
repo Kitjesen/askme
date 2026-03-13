@@ -70,6 +70,7 @@ class ConversationManager:
         self._metrics = metrics
         self.history: list[dict[str, Any]] = []
         self._compress_backoff_until: float = 0.0  # back off after compression failure
+        self._save_scheduled: bool = False  # debounce: coalesce per-turn saves
         self._load()
 
     # ------------------------------------------------------------------
@@ -232,7 +233,26 @@ class ConversationManager:
         self.history = clean
 
     def _save(self) -> None:
-        """Persist current history to disk."""
+        """Schedule a deferred disk write (debounced).
+
+        Two calls within the same event-loop turn (e.g. add_user + add_assistant)
+        collapse into one write, reducing SD-card I/O on sunrise by ~50%.
+        Falls back to synchronous write when no event loop is running (tests).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._save_sync()
+            return
+        if not self._save_scheduled:
+            self._save_scheduled = True
+            def _done(_: object) -> None:
+                self._save_scheduled = False
+            t = loop.create_task(asyncio.to_thread(self._save_sync))
+            t.add_done_callback(_done)
+
+    def _save_sync(self) -> None:
+        """Persist current history to disk (synchronous, runs in thread)."""
         try:
             os.makedirs(self._history_file.parent, exist_ok=True)
             with open(self._history_file, "w", encoding="utf-8") as fh:
