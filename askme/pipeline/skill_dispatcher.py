@@ -302,7 +302,8 @@ class SkillDispatcher:
         mission = self._current_mission
         if mission and mission.steps:
             logger.info("Mission completed: %s", mission.summary())
-            if len(mission.steps) > 1:
+            if len(mission.steps) > 1 and mission.state == MissionState.RUNNING:
+                # Only announce success; failure path already spoke before breaking
                 names = "、".join(
                     (self._skill_manager.get(s.skill_name).description
                      if self._skill_manager.get(s.skill_name) and self._skill_manager.get(s.skill_name).description

@@ -445,3 +445,24 @@ class TestBindRuntimeMission:
         assert len(files) == 1
         data = json.loads(files[0].read_text(encoding="utf-8"))
         assert data["runtime_mission_id"] == "rt-persist-test"
+
+
+class TestCompleteMissionFailedState:
+    async def test_failed_mission_no_success_audio(self):
+        """complete_mission() must NOT speak 多步任务完成 when state is FAILED."""
+        from askme.pipeline.skill_dispatcher import MissionState
+        skill = _make_skill()
+        dispatcher, _, _, mock_audio = _make_dispatcher(skill=skill)
+
+        await dispatcher.dispatch("navigate", "去仓库")
+        await dispatcher.dispatch("navigate", "去B点")
+        # Manually mark mission as failed (simulates a timeout step)
+        dispatcher._current_mission.state = MissionState.FAILED
+        mock_audio.speak.reset_mock()
+
+        dispatcher.complete_mission()
+
+        # Must not say "多步任务完成"
+        for call in mock_audio.speak.call_args_list:
+            text = call[0][0]
+            assert "多步任务完成" not in text, f"Should not announce success for failed mission: {text!r}"
