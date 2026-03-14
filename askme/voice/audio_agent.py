@@ -119,10 +119,19 @@ class AudioAgent:
         # Set 0 to disable (fall back to wait-until-done behaviour).
         self._echo_gate_peak: int = int(voice_cfg.get("echo_gate_peak", 800))
 
-        # Microphone input device index (None = system default).
-        # On sunrise: device 0 = MCP01 USB Audio (hw:1,0).
+        # Microphone input device: int index or ALSA device string (e.g. "hw:1,0").
+        # None = system default.
         _raw_input = voice_cfg.get("input_device", None)
-        self._input_device: int | None = int(_raw_input) if _raw_input is not None else None
+        if _raw_input is None:
+            self._input_device: int | str | None = None
+        elif isinstance(_raw_input, int):
+            self._input_device = _raw_input
+        else:
+            # Try int first, fall back to string (ALSA device name)
+            try:
+                self._input_device = int(_raw_input)
+            except (ValueError, TypeError):
+                self._input_device = str(_raw_input)
 
         # Noise gate: skip VAD entirely when peak is below this threshold.
         # Prevents USB mic noise floor from continuously triggering Silero VAD.
@@ -343,11 +352,10 @@ class AudioAgent:
                         self._refresh_voice_metrics()
                         if speech_active:
                             self.tts.speak("没听清楚，请再说一遍。")
-                        else:
-                            self.tts.speak("还在听呢，有什么需要帮忙的？")
-                        self.start_playback()
-                        self.wait_speaking_done()
-                        self.stop_playback()
+                            self.start_playback()
+                            self.wait_speaking_done()
+                            self.stop_playback()
+                        # Silent timeout (no speech at all) — just re-listen quietly
                         return None
 
                     samples, _ = mic.read(samples_per_read)

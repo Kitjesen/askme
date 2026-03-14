@@ -729,11 +729,74 @@ class TTSEngine:
                 self._sample_rate,
                 self._aplay_bin is not None,
             )
+
+            # --- aplay persistent-process setup (computed once) ---
+            _aplay_cmd: list[str] | None = None
+            _preroll_bytes: bytes = b""
+            if self._aplay_bin:
+                _aplay_cmd = [
+                    self._aplay_bin,
+                    "-r", str(self._sample_rate),
+                    "-f", "S16_LE",
+                    "-c", "1",
+                    "-q",
+                ]
+                if self._output_device is not None:
+                    _aplay_cmd += ["-D", str(self._output_device)]
+                # Pre-roll: 80 Hz tone at -24 dBFS for 400 ms.
+                # USB DAC pop-suppression needs a signal in the detection
+                # passband (>50 Hz) before it unmutes.  80 Hz is inaudible
+                # through small robot speakers (cutoff ~120 Hz).
+                _n = int(self._sample_rate * 0.40)
+                _t = np.arange(_n, dtype=np.float32) / self._sample_rate
+                _pr = (np.sin(2 * np.pi * 80.0 * _t) * 2000.0).astype(np.int16)
+                _fade = int(self._sample_rate * 0.03)
+                _pr[-_fade:] = (
+                    _pr[-_fade:].astype(np.float32)
+                    * np.linspace(1.0, 0.0, _fade, dtype=np.float32)
+                ).astype(np.int16)
+                _preroll_bytes = _pr.tobytes()
+
+            # Persistent aplay process state — one process per utterance,
+            # all chunks piped into its stdin without restart.
+            _proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+            _need_preroll = True
+            _empty_polls = 0
+            _MAX_EMPTY_POLLS = 50  # 50 × 20 ms = 1 s drain window (SSE gaps can be 200-500 ms)
+            _router_ctx = None  # saved output_session() context manager
+
+            def _close_aplay() -> None:
+                """Cleanly close the persistent aplay process."""
+                nonlocal _proc, _need_preroll, _empty_polls, _router_ctx
+                if _proc is None:
+                    return
+                try:
+                    _proc.stdin.close()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+                try:
+                    _proc.wait(timeout=5)
+                except Exception:
+                    _proc.kill()
+                with self._aplay_lock:
+                    self._aplay_proc = None
+                _proc = None
+                _need_preroll = True
+                _empty_polls = 0
+                if _router_ctx is not None:
+                    try:
+                        _router_ctx.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                    _router_ctx = None
+                logger.info("aplay: done")
+
             while self._is_playing:
                 # Check and clear stop request from barge-in
                 if self._stop_requested.is_set():
                     self._stop_requested.clear()
                     self._clear_audio_buffer()
+                    _close_aplay()
                     logger.info("TTS playback: stop_requested, skipping queued audio")
                     continue
 
@@ -743,60 +806,49 @@ class TTSEngine:
                         chunk = self.tts_buffer.popleft()
 
                 if chunk is not None and len(chunk) > 0:
+                    _empty_polls = 0
                     # Apply volume
                     if self._volume != 1.0:
                         chunk = chunk * self._volume
                         np.clip(chunk, -1.0, 1.0, out=chunk)
 
-                    if self._aplay_bin:
+                    if _aplay_cmd is not None:
                         pcm = (chunk * 32767).clip(-32768, 32767).astype(np.int16)
                         dur = len(chunk) / self._sample_rate
                         logger.info(
                             "aplay: %d samples = %.3fs", len(chunk), dur
                         )
-                        cmd = [
-                            self._aplay_bin,
-                            "-r", str(self._sample_rate),
-                            "-f", "S16_LE",
-                            "-c", "1",
-                            "-q",
-                        ]
-                        if self._output_device is not None:
-                            cmd += ["-D", str(self._output_device)]
-                        # Pre-roll: 80 Hz tone at -24 dBFS for 400 ms.
-                        # Why 80 Hz?  USB DAC pop-suppression circuits use a
-                        # bandpass/high-pass detector internally — 18 Hz is
-                        # subsonic and gets filtered *before* the unmute trigger
-                        # sees it, so the DAC stays muted through the pre-roll and
-                        # starts ramping up only when real speech (>100 Hz) arrives,
-                        # causing the first ~150 ms to be quiet.  80 Hz is still
-                        # inaudible through small robot speakers (typical cutoff
-                        # ~120 Hz) but is firmly within the detection passband.
-                        # The last 30 ms fade to zero avoids a click at the
-                        # pre-roll → speech transition.
-                        _n = int(self._sample_rate * 0.40)
-                        _t = np.arange(_n, dtype=np.float32) / self._sample_rate
-                        preroll = (np.sin(2 * np.pi * 80.0 * _t) * 2000.0).astype(np.int16)
-                        _fade = int(self._sample_rate * 0.03)
-                        preroll[-_fade:] = (
-                            preroll[-_fade:].astype(np.float32)
-                            * np.linspace(1.0, 0.0, _fade, dtype=np.float32)
-                        ).astype(np.int16)
-                        payload = preroll.tobytes() + pcm.tobytes()
-                        with self._aplay_lock:
-                            self._aplay_proc = subprocess.Popen(
-                                cmd, stdin=subprocess.PIPE
-                            )
                         try:
-                            if self._audio_router is not None:
-                                with self._audio_router.output_session():
-                                    self._aplay_proc.communicate(input=payload)
-                            else:
-                                self._aplay_proc.communicate(input=payload)
-                        finally:
+                            # Start persistent aplay on first chunk
+                            if _proc is None:
+                                if self._audio_router is not None:
+                                    _router_ctx = self._audio_router.output_session()
+                                    _router_ctx.__enter__()
+                                _proc = subprocess.Popen(
+                                    _aplay_cmd, stdin=subprocess.PIPE
+                                )
+                                with self._aplay_lock:
+                                    self._aplay_proc = _proc
+
+                            # Pre-roll only on first chunk after process start
+                            if _need_preroll:
+                                _proc.stdin.write(_preroll_bytes)  # type: ignore[union-attr]
+                                _need_preroll = False
+
+                            _proc.stdin.write(pcm.tobytes())  # type: ignore[union-attr]
+                            _proc.stdin.flush()  # type: ignore[union-attr]
+                        except (BrokenPipeError, OSError):
+                            # aplay killed externally (barge-in)
                             with self._aplay_lock:
                                 self._aplay_proc = None
-                        logger.info("aplay: done")
+                            _proc = None
+                            _need_preroll = True
+                            if _router_ctx is not None:
+                                try:
+                                    _router_ctx.__exit__(None, None, None)
+                                except Exception:
+                                    pass
+                                _router_ctx = None
                     else:
                         if self._audio_router is not None:
                             with self._audio_router.output_session():
@@ -806,10 +858,17 @@ class TTSEngine:
                             sd.play(chunk, samplerate=self._sample_rate, device=self._output_device)
                             sd.wait()
                 else:
+                    if _proc is not None:
+                        _empty_polls += 1
+                        if _empty_polls >= _MAX_EMPTY_POLLS:
+                            _close_aplay()
                     time.sleep(0.02)
         except Exception as e:
             logger.error("Playback error: %s", e)
         finally:
+            # Clean up persistent aplay if still running
+            if _aplay_cmd is not None:
+                _close_aplay()
             with self._aplay_lock:
                 self._aplay_proc = None
             # Always clear _is_playing on exit — prevents start_playback() from
