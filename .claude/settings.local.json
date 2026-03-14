@@ -4,7 +4,14 @@
       "WebSearch",
       "WebFetch(domain:qwenlm.github.io)",
       "WebFetch(domain:arxiv.org)",
-      "WebFetch(domain:cursor.scihub.edu.kg)"
+      "WebFetch(domain:cursor.scihub.edu.kg)",
+      "Bash(python:*)",
+      "WebFetch(domain:k2-fsa.github.io)",
+      "WebFetch(domain:platform.minimax.io)",
+      "WebFetch(domain:127.0.0.1)",
+      "mcp__plugin_oh-my-claudecode_t__state_read",
+      "mcp__plugin_oh-my-claudecode_t__state_clear",
+      "mcp__plugin_oh-my-claudecode_t__state_list_active"
     ]
   }
 }

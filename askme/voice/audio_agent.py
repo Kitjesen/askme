@@ -796,6 +796,7 @@ class AudioAgent:
             "muted": self._muted,
             "tts_backend": self.tts.backend,
             "tts_busy": self.is_busy,
+            "agent_state": self._agent_state.value,
         }
         snapshot.update(overrides)
         self._metrics.update_voice_state(**snapshot)

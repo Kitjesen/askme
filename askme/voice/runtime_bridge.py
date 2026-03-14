@@ -38,7 +38,11 @@ class VoiceRuntimeBridge:
         self._circuit_open_until = 0.0
 
         if (self.enabled or self.text_enabled) and not self._base_url:
-            logger.warning("VoiceRuntimeBridge enabled but base_url is empty; disabling bridge")
+            logger.warning(
+                "VoiceRuntimeBridge: enabled=true but base_url is empty "
+                "(ASKME_EDGE_SERVICE_URL not set in .env?); bridge is disabled. "
+                "Set runtime.voice_bridge.base_url or ASKME_EDGE_SERVICE_URL to activate."
+            )
             self.enabled = False
             self.text_enabled = False
 
@@ -47,11 +51,16 @@ class VoiceRuntimeBridge:
         if (self.enabled or self.text_enabled) and self._base_url:
             try:
                 requests.get(f"{self._base_url}{AskmeEdgeVoiceContract.HEALTH.path()}", timeout=0.5)
-            except requests.RequestException:
                 logger.info(
-                    "Voice runtime bridge: upstream %s unreachable at startup; "
-                    "disabling bridge (no retries)",
+                    "Voice runtime bridge: upstream %s reachable at startup.",
                     self._base_url,
+                )
+            except requests.RequestException as _startup_exc:
+                logger.warning(
+                    "Voice runtime bridge: upstream %s unreachable at startup (%s); "
+                    "disabling bridge. Ensure askme-edge-service is running on port 5100.",
+                    self._base_url,
+                    _startup_exc,
                 )
                 self.enabled = False
                 self.text_enabled = False

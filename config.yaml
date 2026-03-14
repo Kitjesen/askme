@@ -47,6 +47,10 @@ brain:
   user_prefix: "[工业巡检模式：中文口语，80字以内，简洁汇报式，不用markdown，不说英文]"
   # Max characters to speak in voice mode (0 = unlimited, text mode always unlimited)
   max_response_chars: 200
+  # ThunderAgentShell: model for agentic task loops (default: claude-haiku-4-5-20251001)
+  # agent_model: claude-sonnet-4-5-20250929
+  # ThunderAgentShell: max seconds for a single agent_task (default: 120)
+  agent_timeout: 120
 
 # ----------------------------------------------------------
 # Memory: MemU / Embedding

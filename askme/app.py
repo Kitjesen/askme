@@ -46,6 +46,11 @@ from askme.pipeline.voice_loop import VoiceLoop
 from askme.skills.skill_executor import SkillExecutor
 from askme.skills.skill_manager import SkillManager
 from askme.tools.builtin_tools import DispatchSkillTool, register_builtin_tools
+from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
+from askme.led_controller import HttpLedController, NullLedController
+from askme.pipeline.state_led_bridge import StateLedBridge
+from askme.tools.robot_api_tool import RobotApiTool
+from askme.tools.builtin_tools import SpeakProgressTool
 from askme.tools.skill_tools import register_skill_tools
 from askme.tools.tool_registry import ToolRegistry
 from askme.tools.voice_tools import register_voice_tools
@@ -87,6 +92,8 @@ class AskmeApp:
         self.tools = ToolRegistry()
         _production_mode = bool(self.cfg.get("tools", {}).get("production_mode", False))
         register_builtin_tools(self.tools, production_mode=_production_mode)
+        # Register RobotApiTool (unified runtime API)
+        self.tools.register(RobotApiTool())
 
         # Robot (optional)
         self.arm_controller = None
@@ -131,6 +138,7 @@ class AskmeApp:
             audio_router=self.audio_router,
         )
         register_voice_tools(self.tools, self.audio)
+        self.tools.register(SpeakProgressTool(self.audio))
         self.voice_runtime_bridge = VoiceRuntimeBridge(
             self.cfg.get("runtime", {}).get("voice_bridge", {})
         )
@@ -199,6 +207,19 @@ class AskmeApp:
             planner=_planner,
         )
 
+        # ── ThunderAgentShell (agentic task execution) ───────────────
+        _agent_model = brain_cfg.get("agent_model")
+        self.agent_shell = ThunderAgentShell(
+            llm_client=self.llm,
+            tool_registry=self.tools,
+            audio=self.audio,
+            model=_agent_model,
+        )
+        # Allow config override for agent task timeout (default 120s)
+        self.agent_shell._default_timeout = float(brain_cfg.get("agent_timeout", 120.0))
+        # Wire agent_shell into the pipeline
+        self._pipeline._agent_shell = self.agent_shell
+
         # Register dispatch_skill meta-tool (LLM can invoke skills)
         dispatch_tool = DispatchSkillTool()
         dispatch_tool.set_dispatcher(self.dispatcher)
@@ -246,6 +267,30 @@ class AskmeApp:
             snapshot_provider=self.health_snapshot,
         )
 
+        # ── LED state bridge ─────────────────────────────────────────────
+        # Drives the status LED from AgentState + agent_task + ESTOP.
+        # Configure dog-control-service URL to enable HTTP LED control:
+        #   led:
+        #     base_url: http://localhost:5080
+        # Omit (or leave blank) to use NullLedController (silent no-op).
+        led_cfg = self.cfg.get("led", {})
+        led_base_url = led_cfg.get("base_url", "").strip()
+        _led_ctrl = (
+            HttpLedController(led_base_url)
+            if led_base_url
+            else NullLedController()
+        )
+        self._led_bridge = StateLedBridge(
+            audio=self.audio,
+            dispatcher=self.dispatcher,
+            safety=getattr(self._pipeline, "_dog_safety", None),
+            led=_led_ctrl,
+        )
+        logger.info(
+            "[LED] controller=%s",
+            "http(%s)" % led_base_url if led_base_url else "null",
+        )
+
         # ── Config validation (warnings only — never crash) ─────────────
         cfg_warnings = validate_config(self.cfg)
         for w in cfg_warnings:
@@ -285,10 +330,12 @@ class AskmeApp:
         stop_event = asyncio.Event()
         warmup_task: asyncio.Task[None] | None = None
         proactive_task: asyncio.Task[None] | None = None
+        led_task: asyncio.Task[None] | None = None
         try:
             await self.health_server.start()
             warmup_task = asyncio.create_task(self.memory.warmup())
             proactive_task = asyncio.create_task(self._proactive.run(stop_event))
+            led_task = asyncio.create_task(self._led_bridge.run())
             if self.voice_mode:
                 await self._voice_loop.run()
             else:
@@ -296,7 +343,7 @@ class AskmeApp:
         finally:
             stop_event.set()
             pending_tasks = [
-                task for task in (warmup_task, proactive_task)
+                task for task in (warmup_task, proactive_task, led_task)
                 if task is not None
             ]
             for task in pending_tasks:

@@ -58,13 +58,17 @@ class CreateSkillTool(BaseTool):
     description = (
         "动态创建新技能并立即热加载生效——当用户需求超出现有技能范围时使用。"
         "新技能写入 data/skills/ 并实时激活，无需重启。"
-        "\n\n可在 tools_section 中列出以下工具让技能真实调用服务："
-        "\n- http_request：向任意 REST API 发请求（GET/POST），需 URL 在白名单中"
-        "\n- nav_status：查询机器人当前导航状态"
+        "\n\n可在 tools_section 中列出以下工具（每行一个）："
+        "\n- bash：执行 shell 命令（工作区内）"
+        "\n- write_file：创建/写入文件（工作区内）"
+        "\n- web_search：搜索互联网"
+        "\n- web_fetch：抓取网页内容"
+        "\n- http_request：调用任意 REST API"
+        "\n- robot_api：调用 Thunder runtime 服务"
         "\n- get_current_time：获取当前时间"
         "\n- read_file：读取 data/ 目录下的文件"
-        "\n示例：要让技能控制机器人站立，tools_section 填 'http_request'，"
-        "prompt 里写明调用 dog-control-service 的 URL 和请求体。"
+        "\n示例：要让技能每次查询天气，tools_section 填 'web_search'，"
+        "prompt 里写明搜索什么关键词、如何解读结果、说什么给用户。"
     )
     parameters: dict[str, Any] = {
         "type": "object",

@@ -119,6 +119,10 @@ class ReadFileTool(BaseTool):
     def execute(self, *, path: str = "", **kwargs: Any) -> str:
         if not path:
             return "[Error] No path provided."
+        # Resolve relative paths against agent_workspace (agent convenience:
+        # after write_file returns absolute path, agent may still pass filename only)
+        if not Path(path).is_absolute():
+            path = str(project_root() / "data" / "agent_workspace" / path)
         if not _is_path_allowed(path):
             return (
                 "[Error] 路径不在允许的读取范围内。"
@@ -162,11 +166,24 @@ class ListDirectoryTool(BaseTool):
 
 
 def _http_allowlist() -> list[str]:
-    """Load allowed URL prefixes from config tools.http_allowlist."""
+    """Load allowed URL prefixes from config; auto-append runtime service URLs."""
     try:
-        return get_section("tools").get("http_allowlist", [])
+        cfg = list(get_section("tools").get("http_allowlist", []))
     except Exception:
-        return []
+        cfg = []
+    # Auto-append runtime service base_urls (dog_safety, dog_control, voice_bridge)
+    try:
+        runtime_cfg = get_section("runtime")
+        for svc in ("dog_safety", "dog_control", "voice_bridge"):
+            url = runtime_cfg.get(svc, {}).get("base_url", "")
+            if url:
+                cfg.append(url.rstrip("/"))
+    except Exception:
+        pass
+    # Auto-include standard runtime service ports on localhost
+    for port in (5050, 5060, 5070, 5080, 5090, 5100, 5110):
+        cfg.append(f"http://localhost:{port}")
+    return cfg
 
 
 def _is_url_allowed(url: str, allowlist: list[str]) -> bool:
@@ -520,6 +537,467 @@ class DispatchSkillTool(BaseTool):
         return self._dispatcher.execute_skill_sync(skill_name, reason)
 
 
+class SandboxedBashTool(BaseTool):
+    """Execute bash commands sandboxed to data/agent_workspace/."""
+
+    name = "bash"
+    description = (
+        "在机器人本地执行 bash/shell 命令（限沙箱 workspace 目录）。"
+        "适合运行脚本、查看文件、执行 Python 代码等操作。"
+        "工作区路径：data/agent_workspace/"
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "要执行的 shell 命令",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "工作目录（相对于 agent_workspace/），可选",
+            },
+        },
+        "required": ["command"],
+    }
+    safety_level = "dangerous"
+    dev_only = False  # production-safe: sandboxed
+
+    _WORKSPACE = project_root() / "data" / "agent_workspace"
+    _MAX_OUTPUT = 4000
+    _TIMEOUT = 30
+
+    def execute(self, *, command: str = "", cwd: str = "", **kwargs: Any) -> str:
+        if not command:
+            return "[Error] No command provided."
+
+        workspace = self._WORKSPACE
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        # Resolve working directory — must stay inside workspace
+        if cwd:
+            candidate = (workspace / cwd).resolve()
+        else:
+            candidate = workspace.resolve()
+
+        try:
+            workspace_resolved = workspace.resolve()
+        except Exception as exc:
+            return f"[Error] Cannot resolve workspace: {exc}"
+
+        if candidate != workspace_resolved and workspace_resolved not in candidate.parents:
+            return (
+                f"[Error] 路径逃逸被拒绝。cwd '{cwd}' 解析到 '{candidate}'，"
+                f"不在允许的工作区 '{workspace_resolved}' 内。"
+            )
+
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=str(candidate),
+                capture_output=True,
+                text=True,
+                timeout=self._TIMEOUT,
+            )
+            output = ""
+            if result.stdout:
+                output += result.stdout
+            if result.stderr:
+                output += result.stderr
+            if not output:
+                output = f"(exit code {result.returncode}, no output)"
+            if len(output) > self._MAX_OUTPUT:
+                output = output[: self._MAX_OUTPUT] + "\n...[输出已截断]"
+            return output
+        except subprocess.TimeoutExpired:
+            return f"[Timeout] 命令执行超过 {self._TIMEOUT}s，已终止。"
+        except Exception as exc:
+            return f"[Error] {exc}"
+
+
+class WriteFileTool(BaseTool):
+    """Write or create a file inside data/agent_workspace/."""
+
+    name = "write_file"
+    description = (
+        "在 agent workspace 创建或覆写文件。"
+        "路径相对于 data/agent_workspace/，不能逃逸到工作区外。"
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "文件路径（相对于 agent_workspace/），如 'output.txt' 或 'scripts/hello.py'",
+            },
+            "content": {
+                "type": "string",
+                "description": "文件内容",
+            },
+        },
+        "required": ["path", "content"],
+    }
+    safety_level = "normal"
+
+    _ALLOWED_ROOT = project_root() / "data" / "agent_workspace"
+
+    def execute(self, *, path: str = "", content: str = "", **kwargs: Any) -> str:
+        if not path:
+            return "[Error] No path provided."
+
+        allowed_root = self._ALLOWED_ROOT
+        allowed_root.mkdir(parents=True, exist_ok=True)
+
+        try:
+            allowed_resolved = allowed_root.resolve()
+            target = (allowed_root / path).resolve()
+        except Exception as exc:
+            return f"[Error] 路径解析失败: {exc}"
+
+        if target != allowed_resolved and allowed_resolved not in target.parents:
+            return (
+                f"[Error] 路径逃逸被拒绝。'{path}' 解析到 '{target}'，"
+                f"不在允许的工作区 '{allowed_resolved}' 内。"
+            )
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            return f"已写入 {target}（{len(content)} 字符）"
+        except Exception as exc:
+            return f"[Error] 写入文件失败: {exc}"
+
+
+class SpeakProgressTool(BaseTool):
+    """Non-blocking TTS progress announcements during long agent tasks."""
+
+    name = "speak_progress"
+    description = (
+        "向用户实时播报执行进度（非阻塞，继续执行下一步）。"
+        "在长任务中定期汇报，防止用户以为系统卡住。"
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": "要播报的进度文本，如'正在分析数据，请稍候...'",
+            },
+        },
+        "required": ["text"],
+    }
+    safety_level = "normal"
+
+    def __init__(self, audio_agent: Any = None) -> None:
+        self._audio = audio_agent
+
+    def execute(self, *, text: str = "", **kwargs: Any) -> str:
+        if not text:
+            return "[Error] No text provided."
+        if self._audio is not None:
+            try:
+                self._audio.speak(text)
+            except Exception:
+                pass  # best-effort; never crash the agent task
+        return "已播报"
+
+
+class WebFetchTool(BaseTool):
+    """Fetch a web page and return cleaned text content."""
+
+    name = "web_fetch"
+    description = (
+        "抓取网页内容并返回清洁后的文本（去除 HTML 标签）。"
+        "用于访问文档、GitHub、新闻页面等。最多返回 6000 字符。"
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "要抓取的 URL，如 https://docs.python.org/3/library/asyncio.html",
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "返回最大字符数，默认 6000",
+            },
+        },
+        "required": ["url"],
+    }
+    safety_level = "normal"
+    _TIMEOUT = 15
+    _DEFAULT_MAX = 6000
+
+    # Headers to mimic a real browser (avoid bot blocks)
+    _HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+
+    def execute(self, *, url: str = "", max_chars: int = 0, **kwargs: Any) -> str:
+        import re as _re
+        import html as _html
+
+        if not url:
+            return "[Error] URL 不能为空。"
+        if not url.startswith(("http://", "https://")):
+            return "[Error] URL 必须以 http:// 或 https:// 开头。"
+
+        limit = max_chars if max_chars and max_chars > 0 else self._DEFAULT_MAX
+
+        req = urllib.request.Request(url, headers=self._HEADERS)
+        try:
+            with urllib.request.urlopen(req, timeout=self._TIMEOUT) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if "json" in content_type:
+                    raw = resp.read(limit * 2).decode("utf-8", errors="replace")
+                    try:
+                        import json as _json
+                        parsed = _json.loads(raw)
+                        text = _json.dumps(parsed, ensure_ascii=False, indent=2)
+                    except Exception:
+                        text = raw
+                else:
+                    raw = resp.read(limit * 4).decode("utf-8", errors="replace")
+                    # Strip script/style blocks first
+                    text = _re.sub(r"<(script|style)[^>]*>[\s\S]*?</\1>", "", raw, flags=_re.IGNORECASE)
+                    # Strip HTML tags
+                    text = _re.sub(r"<[^>]+>", " ", text)
+                    # Decode HTML entities
+                    text = _html.unescape(text)
+                    # Collapse whitespace
+                    text = _re.sub(r"\s{3,}", "\n\n", text)
+                    text = text.strip()
+
+                if len(text) > limit:
+                    text = text[:limit] + "\n...[已截断]"
+                return text or "(页面为空)"
+        except urllib.error.HTTPError as exc:
+            return f"[Error] HTTP {exc.code}: {exc.reason} — {url}"
+        except urllib.error.URLError as exc:
+            return f"[Error] 无法访问 {url}: {exc.reason}"
+        except (TimeoutError, OSError):
+            return f"[Error] 请求超时 ({self._TIMEOUT}s): {url}"
+        except Exception as exc:
+            return f"[Error] {exc}"
+
+
+class WebSearchTool(BaseTool):
+    """Search the web using DuckDuckGo Instant Answer API (no API key needed)."""
+
+    name = "web_search"
+    description = (
+        "搜索互联网获取最新信息（使用 DuckDuckGo，无需 API key）。"
+        "返回摘要和相关链接。适合查询最新资讯、技术文档、定义等。"
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "搜索关键词，如 'Python asyncio best practices 2024'",
+            },
+        },
+        "required": ["query"],
+    }
+    safety_level = "normal"
+    _TIMEOUT = 10
+
+    def execute(self, *, query: str = "", **kwargs: Any) -> str:
+        import json as _json
+
+        if not query:
+            return "[Error] 搜索关键词不能为空。"
+
+        # DuckDuckGo Instant Answer API (free, no key)
+        encoded = urllib.parse.quote_plus(query)
+        # kl=cn-zh: China region for better Chinese results; no_redirect avoids 302 surprises
+        url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1&kl=cn-zh"
+
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Thunder-Robot/1.0 (askme search client)",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._TIMEOUT) as resp:
+                raw = resp.read(16384).decode("utf-8", errors="replace")
+                data = _json.loads(raw)
+
+            results: list[str] = []
+
+            # Abstract (direct answer)
+            abstract = data.get("AbstractText", "").strip()
+            abstract_url = data.get("AbstractURL", "")
+            if abstract:
+                results.append(f"摘要：{abstract}")
+                if abstract_url:
+                    results.append(f"来源：{abstract_url}")
+
+            # Answer (very short fact)
+            answer = data.get("Answer", "").strip()
+            if answer:
+                results.append(f"直接答案：{answer}")
+
+            # Related topics
+            topics = data.get("RelatedTopics", [])[:5]
+            if topics:
+                results.append("\n相关结果：")
+                for t in topics:
+                    if isinstance(t, dict) and t.get("Text"):
+                        text = t.get("Text", "")[:120]
+                        link = t.get("FirstURL", "")
+                        if link:
+                            results.append(f"• {text}\n  {link}")
+                        else:
+                            results.append(f"• {text}")
+
+            if not results:
+                # Instant Answer API returned nothing — fall back to HTML results
+                return self._html_fallback(query)
+
+            return "\n".join(results)
+
+        except urllib.error.URLError as exc:
+            return f"[Error] 搜索服务不可达: {exc.reason}"
+        except (TimeoutError, OSError):
+            return f"[Error] 搜索超时 ({self._TIMEOUT}s)。"
+        except Exception as exc:
+            return f"[Error] {exc}"
+
+    def _html_fallback(self, query: str) -> str:
+        """Scrape DuckDuckGo HTML results page when Instant Answer API returns empty.
+
+        Uses html.duckduckgo.com — the no-JS lite version designed for crawlers.
+        """
+        import html as _html
+        import re as _re
+
+        encoded = urllib.parse.quote_plus(query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded}&kl=cn-zh"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                ),
+                "Accept": "text/html,*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._TIMEOUT) as resp:
+                raw = resp.read(65536).decode("utf-8", errors="replace")
+
+            results: list[str] = []
+
+            # Extract real URLs from DDG redirect hrefs (result__a title links).
+            # DDG encodes the destination as ?uddg=URL_PERCENT_ENCODED in /l/ redirects.
+            # Using result__url (display text) gives "docs.python.org" — unusable for web_fetch.
+            title_hrefs = _re.findall(
+                r'<a\b(?=[^>]*\bclass="result__a")[^>]*\bhref="([^"]+)"', raw
+            )
+            snippets = _re.findall(
+                r'class="result__snippet"[^>]*>(.*?)</a>', raw, _re.DOTALL
+            )
+
+            for i, snippet in enumerate(snippets[:5]):
+                href = title_hrefs[i] if i < len(title_hrefs) else ""
+                # Decode DDG redirect: /l/?uddg=https%3A%2F%2Fdocs.python.org%2F...
+                real_url = ""
+                if href and "uddg=" in href:
+                    try:
+                        qs = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                        uddg = qs.get("uddg", [])
+                        if uddg:
+                            real_url = uddg[0]
+                    except Exception:
+                        pass
+                elif href.startswith("http"):
+                    real_url = href
+                clean = _html.unescape(_re.sub(r"<[^>]+>", "", snippet)).strip()
+                if clean:
+                    results.append(f"• {clean[:160]}")
+                    if real_url:
+                        results.append(f"  {real_url}")
+
+            if results:
+                return f"搜索结果（{query}）：\n" + "\n".join(results)
+
+        except Exception:
+            pass  # silent fallback failure — try Bing
+
+        return self._bing_fallback(query)
+
+    def _bing_fallback(self, query: str) -> str:
+        """Third-tier fallback: Bing HTML search (better coverage than DDG for technical/Chinese queries)."""
+        import html as _html
+        import re as _re
+
+        encoded = urllib.parse.quote_plus(query)
+        url = f"https://www.bing.com/search?q={encoded}&setlang=zh-hans"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._TIMEOUT) as resp:
+                raw = resp.read(65536).decode("utf-8", errors="replace")
+
+            results: list[str] = []
+
+            # Extract result blocks (Bing uses <li class="b_algo">)
+            blocks = _re.findall(r'<li[^>]+class="b_algo"[^>]*>(.*?)</li>', raw, _re.DOTALL)
+            for block in blocks[:5]:
+                # URL from <cite>
+                cite_m = _re.search(r"<cite[^>]*>(.*?)</cite>", block, _re.DOTALL)
+                # Snippet from <p class="b_lineclamp..."> or plain <p>
+                snip_m = _re.search(
+                    r'<p[^>]*class="b_lineclamp[^"]*"[^>]*>(.*?)</p>', block, _re.DOTALL
+                ) or _re.search(r"<p>(.*?)</p>", block, _re.DOTALL)
+
+                cite = (
+                    _html.unescape(_re.sub(r"<[^>]+>", "", cite_m.group(1))).strip()
+                    if cite_m else ""
+                )
+                snip = (
+                    _html.unescape(_re.sub(r"<[^>]+>", "", snip_m.group(1))).strip()
+                    if snip_m else ""
+                )
+
+                if snip:
+                    results.append(f"• {snip[:160]}")
+                    if cite:
+                        results.append(f"  {cite}")
+
+            if results:
+                return f"搜索结果（{query}）：\n" + "\n".join(results)
+
+        except Exception:
+            pass
+
+        return (
+            f"[搜索] 未找到 '{query}' 的相关结果。\n"
+            "建议：尝试更具体的关键词，或用 web_fetch 直接访问目标页面。"
+        )
+
+
 # ── Convenience registration ────────────────────────────────────
 
 _BUILTIN_TOOLS: list[type[BaseTool]] = [
@@ -531,6 +1009,10 @@ _BUILTIN_TOOLS: list[type[BaseTool]] = [
     NavStatusTool,
     NavDispatchTool,
     DogControlDispatchTool,
+    SandboxedBashTool,
+    WriteFileTool,
+    WebFetchTool,
+    WebSearchTool,
 ]
 
 

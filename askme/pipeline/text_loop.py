@@ -206,6 +206,11 @@ class TextLoop:
                 if intent.type == IntentType.GENERAL:
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
+                        # Cancel the memory prefetch we started earlier — the bridge
+                        # handled the turn so the prefetched context is no longer needed.
+                        if memory_task and not memory_task.done():
+                            memory_task.cancel()
+                        memory_task = None
                         if idle_task and not idle_task.done():
                             idle_task.cancel()
                         idle_task = self._pipeline.start_idle_reflection()
@@ -284,7 +289,12 @@ class TextLoop:
         action_type = turn.get("action_type")
         skill_name = turn.get("skill_name")
 
-        if action_type == "skill" and isinstance(skill_name, str) and skill_name:
+        # Dispatch to local skill executor when the edge service resolved a skill.
+        # Covers both action_type=="skill" (SKILL) and action_type=="general" with a
+        # populated skill_name field (SKILL_SUGGESTED status from the edge planner).
+        if isinstance(skill_name, str) and skill_name and (
+            action_type == "skill" or action_type == "general"
+        ):
             if self._dispatcher:
                 await self._dispatcher.dispatch(
                     skill_name, user_text, source="runtime",
@@ -306,6 +316,8 @@ class TextLoop:
 
         logger.warning(
             "Text runtime bridge marked the turn handled but returned no usable "
-            "reply; falling back to local pipeline.",
+            "reply (action_type=%r skill_name=%r); falling back to local pipeline.",
+            action_type,
+            skill_name,
         )
         return False

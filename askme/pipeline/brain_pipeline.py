@@ -9,6 +9,7 @@ import re
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
     from askme.brain.conversation import ConversationManager
     from askme.brain.episodic_memory import EpisodicMemory
     from askme.brain.llm_client import LLMClient
@@ -122,6 +123,7 @@ class BrainPipeline:
         voice_model: str | None = None,
         general_tool_max_safety_level: str = "normal",
         max_response_chars: int = 0,
+        agent_shell: ThunderAgentShell | None = None,
     ) -> None:
         self._llm = llm
         self._conversation = conversation
@@ -146,6 +148,7 @@ class BrainPipeline:
             max_response_chars if max_response_chars > 0
             else self._DEFAULT_MAX_RESPONSE_CHARS
         )
+        self._agent_shell = agent_shell
         # Last spoken text — for "repeat last" voice command
         self._last_spoken_text: str = ""
         self._think_filter = _ThinkFilter()
@@ -369,6 +372,39 @@ class BrainPipeline:
                     )
 
         logger.info("Executing skill: %s", skill_name)
+
+        # Route agent_task to ThunderAgentShell for autonomous execution
+        if skill_name == "agent_task" and self._agent_shell is not None:
+            logger.info("[AgentShell] Routing agent_task to ThunderAgentShell")
+            self._audio.drain_buffers()
+            self._audio.start_playback()
+            try:
+                _now = __import__("datetime").datetime.now()
+                _agent_timeout = getattr(self._agent_shell, "_default_timeout", 120.0)
+                result = await self._agent_shell.run_task(
+                    user_text,
+                    context={
+                        "current_time": _now.strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                    timeout=_agent_timeout,
+                )
+                result = strip_think_blocks(result)
+                spoken, stored = self._prepare_agent_result(result)
+                self._audio.speak(spoken)
+                self._last_spoken_text = spoken
+                self._conversation.add_user_message(user_text)
+                self._conversation.add_assistant_message(stored)
+                if self._episodic:
+                    self._episodic.log("outcome", f"agent_task完成: {result[:100]}")
+                await asyncio.to_thread(self._audio.wait_speaking_done)
+                return result
+            except Exception as exc:
+                logger.error("[AgentShell] agent_task failed: %s", exc)
+                self._audio.speak(f"任务执行出错：{exc}")
+                return f"[AgentShell Error] {exc}"
+            finally:
+                self._audio.stop_playback()
+
         self._audio.drain_buffers()
         if self._episodic:
             self._episodic.log("action", f"执行技能: {skill_name}")
@@ -436,7 +472,8 @@ class BrainPipeline:
                 pass  # no filler — let the result speak for itself
 
             raw_result = await self._skill_executor.execute(
-                skill, context, on_tool_call=_on_tool_call,
+                skill, context, prompt_seed=self._prompt_seed or None,
+                on_tool_call=_on_tool_call,
             )
             if thinking_task is not None:
                 thinking_task.cancel()
@@ -859,6 +896,38 @@ class BrainPipeline:
         if "connect" in str(exc).lower() or "network" in str(exc).lower():
             return f"网络异常，{skill_name}执行失败。"
         return f"{skill_name}执行失败，请重试。"
+
+    def _prepare_agent_result(self, result: str) -> tuple[str, str]:
+        """Prepare agent result for TTS + conversation storage.
+
+        If result exceeds max_response_chars (voice mode), truncate at a sentence
+        boundary for TTS and save the full result to the workspace for later reference.
+
+        Returns (spoken_text, stored_text).
+        """
+        _AGENT_TTS_LIMIT = self._max_response_chars or 200
+        if len(result) <= _AGENT_TTS_LIMIT:
+            return result, result
+
+        # Find last sentence end (。！？) within limit
+        boundary = _AGENT_TTS_LIMIT
+        for ch in "。！？!?":
+            idx = result.rfind(ch, 0, _AGENT_TTS_LIMIT)
+            if idx > 0 and idx < boundary:
+                boundary = idx + 1
+
+        spoken = result[:boundary].rstrip() + " 完整结果已保存到工作区。"
+
+        # Persist full result so user can retrieve later
+        try:
+            workspace = self._agent_shell._workspace if self._agent_shell else None
+            if workspace:
+                workspace.mkdir(parents=True, exist_ok=True)
+                (workspace / "last_result.txt").write_text(result, encoding="utf-8")
+        except Exception:
+            pass  # best-effort — don't let file I/O block voice response
+
+        return spoken, result
 
     def _build_l0_runtime_block(self) -> str:
         """Return a compact L0 runtime truth block from authoritative services.

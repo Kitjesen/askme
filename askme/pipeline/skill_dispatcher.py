@@ -15,6 +15,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -137,10 +138,13 @@ class SkillDispatcher:
         self._audio = audio
         self._planner = planner
         self._current_mission: MissionContext | None = None
+        self._last_mission: MissionContext | None = None  # preserved after complete_mission()
         # Captured lazily on first async dispatch — used by execute_skill_sync
         self._loop: asyncio.AbstractEventLoop | None = None
         # Per-thread dispatch depth — guards against LLM-driven infinite recursion
         self._dispatch_depth = threading.local()
+        # Background agent task (agent_task skill runs here so VoiceLoop stays responsive)
+        self._active_agent_task: asyncio.Task[None] | None = None
 
     # ── Public API (called by loops) ──────────────────────────────
 
@@ -197,6 +201,48 @@ class SkillDispatcher:
         step_timeout = (
             float(skill_def.timeout) + 10.0 if skill_def else self._STEP_TIMEOUT
         )
+
+        # ── Background execution for agent_task ───────────────────────────────
+        # agent_task routes to ThunderAgentShell and can run for up to 120 s.
+        # Running it as a background asyncio.Task keeps VoiceLoop responsive so
+        # the user can issue ESTOP or "停下" at any point during execution.
+        if skill_name == "agent_task":
+            _mission = self._current_mission
+
+            async def _run_agent() -> None:
+                try:
+                    res = await asyncio.wait_for(
+                        self._pipeline.execute_skill(skill_name, user_text, combined_context),
+                        timeout=step_timeout,
+                    )
+                    _mission.add_step(skill_name, user_text, res)
+                    _mission.shared_context[skill_name] = res[:500]
+                    if self._current_mission is _mission:
+                        self.complete_mission()
+                    logger.info("Background agent_task completed: %s", res[:60])
+                except asyncio.CancelledError:
+                    logger.info("agent_task cancelled")
+                    _mission.state = MissionState.CANCELED
+                    if self._current_mission is _mission:
+                        self._current_mission = None
+                    raise
+                except asyncio.TimeoutError:
+                    logger.warning("agent_task timed out after %.0fs", step_timeout)
+                    _mission.state = MissionState.FAILED
+                    if self._current_mission is _mission:
+                        self._current_mission = None
+                    self._audio.speak("任务超时，已中止。")
+                    self._audio.start_playback()
+                except Exception as exc:
+                    logger.error("Background agent_task failed: %s", exc)
+                    _mission.state = MissionState.FAILED
+                    if self._current_mission is _mission:
+                        self._current_mission = None
+
+            self._active_agent_task = asyncio.create_task(_run_agent())
+            logger.info("agent_task started as background task (mission=%s)", _mission.mission_id)
+            return "好的，我开始处理，会边做边播报进度。"
+
         try:
             result = await asyncio.wait_for(
                 self._pipeline.execute_skill(skill_name, user_text, combined_context),
@@ -204,8 +250,24 @@ class SkillDispatcher:
             )
         except asyncio.TimeoutError:
             logger.error("Skill '%s' timed out after %.0fs", skill_name, step_timeout)
-            result = f"[超时] 技能 {skill_name} 执行超过 {int(step_timeout)} 秒，已跳过。"
+            result = f"[超时] 技能 {skill_name} 执行超过 {int(step_timeout)} 秒，已中止。"
             self._current_mission.state = MissionState.FAILED
+            # Record the failed step before cleanup so the mission log is complete
+            self._current_mission.add_step(skill_name, user_text, result)
+            self._current_mission.shared_context[skill_name] = result[:500]
+            logger.info(
+                "Mission step (timeout): %s → %s",
+                skill_name,
+                result[:60],
+            )
+            # Speak the timeout error so the user is not left in silence
+            self._audio.speak(result)
+            self._audio.start_playback()
+            await asyncio.to_thread(self._audio.wait_speaking_done)
+            self._audio.stop_playback()
+            # Clean up the mission — a timed-out mission cannot be continued
+            self.complete_mission()
+            return result
 
         # Track step, store result in shared_context for cross-step data passing
         self._current_mission.add_step(skill_name, user_text, result)
@@ -291,7 +353,21 @@ class SkillDispatcher:
                         await asyncio.to_thread(self._audio.wait_speaking_done)
                         self._audio.stop_playback()
                         break
-                self.complete_mission()
+                _done_mission = self.complete_mission()
+                # Announce plan success and await TTS so it isn't eaten by the
+                # next turn's drain_buffers(). Only announce if all steps ran.
+                if _done_mission and len(_done_mission.steps) > 1:
+                    _names = "、".join(
+                        (self._skill_manager.get(s.skill_name).description
+                         if self._skill_manager.get(s.skill_name)
+                         and self._skill_manager.get(s.skill_name).description
+                         else s.skill_name)
+                        for s in _done_mission.steps
+                    )
+                    self._audio.speak(f"多步任务完成：{_names}")
+                    self._audio.start_playback()
+                    await asyncio.to_thread(self._audio.wait_speaking_done)
+                    self._audio.stop_playback()
                 return "\n".join(results)
 
         # Single-step or conversational: delegate to LLM pipeline
@@ -304,20 +380,19 @@ class SkillDispatcher:
         return self._skill_manager.get(skill_name)
 
     def complete_mission(self) -> MissionContext | None:
-        """End the current mission and return it for logging."""
+        """End the current mission and return it for logging.
+
+        TTS announcement is intentionally NOT done here because this method is
+        synchronous and cannot await TTS completion.  Callers that need to
+        announce success (e.g. the plan loop in handle_general) must do so
+        after this returns, using asyncio.to_thread(wait_speaking_done).
+        This prevents the announcement from being eaten by the next turn's
+        drain_buffers() call.
+        """
         mission = self._current_mission
         if mission and mission.steps:
             logger.info("Mission completed: %s", mission.summary())
             if len(mission.steps) > 1 and mission.state == MissionState.RUNNING:
-                # Only announce success; failure path already spoke before breaking
-                names = "、".join(
-                    (self._skill_manager.get(s.skill_name).description
-                     if self._skill_manager.get(s.skill_name) and self._skill_manager.get(s.skill_name).description
-                     else s.skill_name)
-                    for s in mission.steps
-                )
-                self._audio.speak(f"多步任务完成：{names}")
-                self._audio.start_playback()
                 # Record in episodic memory so future turns can recall this mission
                 _episodic = getattr(self._pipeline, "_episodic", None)
                 if _episodic is not None:
@@ -326,12 +401,41 @@ class SkillDispatcher:
             if mission.state == MissionState.RUNNING:
                 mission.state = MissionState.SUCCEEDED
         self._persist_mission()
+        self._last_mission = mission  # preserve for post-completion inspection
         self._current_mission = None
         return mission
 
     @property
+    def last_mission(self) -> MissionContext | None:
+        """The most recently completed or failed mission. None if no mission has run."""
+        return self._last_mission
+
+    @property
     def has_active_mission(self) -> bool:
         return self._current_mission is not None
+
+    @property
+    def has_active_agent_task(self) -> bool:
+        """True while a background agent_task is still executing."""
+        return (
+            self._active_agent_task is not None
+            and not self._active_agent_task.done()
+        )
+
+    def cancel_active_agent_task(self) -> bool:
+        """Cancel the running background agent task.
+
+        Returns True if a task was cancelled, False if nothing was running.
+        Safe to call when no task is active.
+        """
+        task = self._active_agent_task
+        if task and not task.done():
+            task.cancel()
+            self._active_agent_task = None
+            logger.info("Background agent task cancelled by request")
+            return True
+        self._active_agent_task = None
+        return False
 
     @property
     def current_mission(self) -> MissionContext | None:
@@ -369,8 +473,8 @@ class SkillDispatcher:
         """
         # Recursion guard: LLM can call dispatch_skill inside execute_skill,
         # which calls process(), which can call dispatch_skill again.
-        # Limit nesting to 3 levels to prevent runaway chains.
-        _MAX_DEPTH = 3
+        # Limit nesting depth — override via ASKME_DISPATCH_MAX_DEPTH env var.
+        _MAX_DEPTH = int(os.environ.get("ASKME_DISPATCH_MAX_DEPTH", "3"))
         depth = getattr(self._dispatch_depth, "value", 0)
         if depth >= _MAX_DEPTH:
             logger.warning("dispatch_skill depth=%d >= max=%d, rejecting '%s'", depth, _MAX_DEPTH, skill_name)

@@ -208,8 +208,12 @@ class TestDispatchAudioFeedback:
 
 class TestCompleteMissionAudio:
 
-    async def test_complete_multistep_mission_triggers_audio(self):
-        """≥2 steps → speak("多步任务完成:...") + start_playback()."""
+    async def test_complete_multistep_mission_returns_mission_for_caller_to_announce(self):
+        """≥2 steps → complete_mission() is audio-silent but returns the mission.
+
+        TTS announcement is the caller's responsibility (plan loop in handle_general
+        uses asyncio.to_thread(wait_speaking_done) to avoid being eaten by drain_buffers).
+        """
         skill = _make_skill()
         dispatcher, _, _, mock_audio = _make_dispatcher(skill=skill)
 
@@ -218,12 +222,14 @@ class TestCompleteMissionAudio:
         mock_audio.speak.reset_mock()
         mock_audio.start_playback.reset_mock()
 
-        dispatcher.complete_mission()
+        mission = dispatcher.complete_mission()
 
-        mock_audio.speak.assert_called_once()
-        spoken = mock_audio.speak.call_args[0][0]
-        assert "多步" in spoken or "完成" in spoken, f"Unexpected message: {spoken!r}"
-        mock_audio.start_playback.assert_called_once()
+        # complete_mission() must NOT trigger audio — caller does it asynchronously
+        mock_audio.speak.assert_not_called()
+        mock_audio.start_playback.assert_not_called()
+        # But it must return the completed mission so the caller can build the announcement
+        assert mission is not None
+        assert len(mission.steps) == 2
 
     async def test_complete_single_step_mission_no_audio(self):
         """1-step mission → complete silently."""
@@ -287,8 +293,9 @@ class TestDispatchTimeoutActual:
         ):
             await dispatcher.dispatch("navigate", "去仓库")
 
-        assert dispatcher.current_mission.step_count == 1
-        step_result = dispatcher.current_mission.steps[0].result
+        assert dispatcher.last_mission is not None
+        assert dispatcher.last_mission.step_count == 1
+        step_result = dispatcher.last_mission.steps[0].result
         assert "[超时]" in step_result, (
             f"Step result must contain '[超时]', got: {step_result!r}"
         )
@@ -496,3 +503,112 @@ class TestHandleGeneralPlanOriginalContext:
             assert original_text in extra_context, (
                 f"original user_text not found in extra_context: {extra_context!r}"
             )
+
+
+# ── TestAgentTaskBackground ─────────────────────────────────────────────────
+
+
+class TestAgentTaskBackground:
+    """agent_task is fired as a background asyncio.Task — VoiceLoop stays responsive."""
+
+    def _make_dispatcher_with_agent_task(
+        self, *, execute_delay: float = 0.0, execute_result: str = "完成",
+    ) -> tuple[SkillDispatcher, MagicMock]:
+        skill = _make_skill(name="agent_task", timeout=120)
+        mock_pipeline = MagicMock()
+        mock_pipeline.process = AsyncMock(return_value="LLM回复")
+
+        async def _slow_execute(name, text, ctx=""):
+            if execute_delay:
+                await asyncio.sleep(execute_delay)
+            return execute_result
+
+        mock_pipeline.execute_skill = AsyncMock(side_effect=_slow_execute)
+
+        mock_skill_manager = MagicMock()
+        mock_skill_manager.get.return_value = skill
+        mock_skill_manager.get_skill_catalog.return_value = "agent_task"
+        mock_skill_manager.get_enabled.return_value = [skill]
+
+        mock_audio = MagicMock()
+        mock_audio.wait_speaking_done = MagicMock()
+
+        dispatcher = SkillDispatcher(
+            pipeline=mock_pipeline,
+            skill_manager=mock_skill_manager,
+            audio=mock_audio,
+        )
+        # Prime the event loop reference
+        dispatcher._loop = asyncio.get_event_loop()
+        return dispatcher, mock_pipeline
+
+    async def test_dispatch_agent_task_returns_immediately(self):
+        """dispatch('agent_task') returns before execute_skill finishes."""
+        dispatcher, mock_pipeline = self._make_dispatcher_with_agent_task(execute_delay=0.05)
+
+        result = await dispatcher.dispatch("agent_task", "帮我研究一下")
+
+        assert "处理" in result or "进度" in result
+        # The background task may not be done yet
+        if dispatcher._active_agent_task:
+            dispatcher._active_agent_task.cancel()
+
+    async def test_has_active_agent_task_true_while_running(self):
+        """has_active_agent_task is True while the background task is running."""
+        dispatcher, _ = self._make_dispatcher_with_agent_task(execute_delay=0.1)
+
+        await dispatcher.dispatch("agent_task", "任务")
+        assert dispatcher.has_active_agent_task is True
+
+        if dispatcher._active_agent_task:
+            dispatcher._active_agent_task.cancel()
+
+    async def test_has_active_agent_task_false_initially(self):
+        """has_active_agent_task is False before any agent_task dispatch."""
+        dispatcher, _ = self._make_dispatcher_with_agent_task()
+        assert dispatcher.has_active_agent_task is False
+
+    async def test_cancel_active_agent_task_returns_true(self):
+        """cancel_active_agent_task() cancels the task and returns True."""
+        dispatcher, _ = self._make_dispatcher_with_agent_task(execute_delay=0.5)
+
+        await dispatcher.dispatch("agent_task", "长任务")
+        assert dispatcher.has_active_agent_task is True
+
+        cancelled = dispatcher.cancel_active_agent_task()
+        assert cancelled is True
+        assert dispatcher.has_active_agent_task is False
+
+    async def test_cancel_active_agent_task_when_none_returns_false(self):
+        """cancel_active_agent_task() returns False when no task is running."""
+        dispatcher, _ = self._make_dispatcher_with_agent_task()
+        assert dispatcher.cancel_active_agent_task() is False
+
+    async def test_agent_task_mission_completed_after_background_finishes(self):
+        """Mission is completed after the background task finishes."""
+        dispatcher, _ = self._make_dispatcher_with_agent_task(
+            execute_delay=0.01, execute_result="分析完成"
+        )
+
+        await dispatcher.dispatch("agent_task", "分析传感器数据")
+        task = dispatcher._active_agent_task
+        assert task is not None
+        await asyncio.wait_for(task, timeout=1.0)
+
+        assert dispatcher.has_active_agent_task is False
+        # Mission should have been completed
+        assert dispatcher._current_mission is None
+
+    async def test_normal_skills_not_affected_by_agent_task_path(self):
+        """Regular skills (non-agent_task) still run synchronously."""
+        skill = _make_skill(name="navigate", timeout=30)
+        dispatcher, mock_pipeline, _, _ = _make_dispatcher(
+            skill=skill, execute_skill_result="导航完成"
+        )
+        dispatcher._loop = asyncio.get_event_loop()
+
+        result = await dispatcher.dispatch("navigate", "去仓库A")
+
+        assert result == "导航完成"
+        # No background task for normal skills
+        assert not dispatcher.has_active_agent_task

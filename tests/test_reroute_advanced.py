@@ -85,6 +85,7 @@ def _make_voice_loop(
     mock_dispatcher = MagicMock()
     mock_dispatcher.dispatch = AsyncMock()
     mock_dispatcher.handle_general = AsyncMock()
+    mock_dispatcher.has_active_agent_task = False
 
     loop = VoiceLoop(
         router=mock_router,

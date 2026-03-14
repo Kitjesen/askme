@@ -173,8 +173,10 @@ class TestDispatcherPipelineFailure:
             pipeline=failed_pipeline, skill_manager=ok_skill_mgr, audio=MagicMock()
         )
         await dispatcher.dispatch("navigate", "去仓库")
-        assert dispatcher.has_active_mission
-        assert dispatcher.current_mission.step_count == 1
+        # After timeout, complete_mission() clears current_mission.
+        # last_mission preserves the completed/failed mission for audit.
+        assert dispatcher.last_mission is not None
+        assert dispatcher.last_mission.step_count == 1
 
     async def test_second_dispatch_works_after_timeout(self, ok_skill_mgr):
         """After one timeout, the next dispatch must not be poisoned."""

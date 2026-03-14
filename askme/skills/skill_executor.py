@@ -46,6 +46,7 @@ class SkillExecutor:
         skill: SkillDefinition,
         context: dict[str, str] | None = None,
         *,
+        prompt_seed: list[dict[str, Any]] | None = None,
         on_tool_call: Any | None = None,
     ) -> str:
         """Execute a skill end-to-end.
@@ -100,6 +101,12 @@ class SkillExecutor:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": prompt},
         ]
+
+        # Inject fake-turn seed to establish robot identity.
+        # The relay service overrides the system message with its own developer
+        # prompt — fake turns are the only way to force Chinese-only output.
+        if prompt_seed:
+            messages.extend(prompt_seed)
 
         # If context has a user_input, add it as a user message
         if context and "user_input" in context:
@@ -195,12 +202,15 @@ class SkillExecutor:
                     )
                     if on_tool_call:
                         on_tool_call(tool_name)
-                    result = await asyncio.to_thread(
-                        self._tools.execute,
-                        tool_name,
-                        tool_args,
-                        allowed_names=allowed_tool_names,
-                        max_safety_level=max_safety_level,
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._tools.execute,
+                            tool_name,
+                            tool_args,
+                            allowed_names=allowed_tool_names,
+                            max_safety_level=max_safety_level,
+                        ),
+                        timeout=35.0,  # matches ThunderAgentShell per-tool limit
                     )
                     messages.append({
                         "role": "tool",

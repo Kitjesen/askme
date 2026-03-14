@@ -80,7 +80,7 @@ class VoiceLoop:
                         self._audio.acknowledge()
                         self._audio.speak("好的，重新开启。")
                         self._audio.start_playback()
-                        self._audio.wait_speaking_done()
+                        await asyncio.to_thread(self._audio.wait_speaking_done)
                         self._audio.stop_playback()
                     elif _muted_intent.type == IntentType.COMMAND:
                         pass  # fall through to COMMAND handler below
@@ -108,15 +108,18 @@ class VoiceLoop:
                 intent = self._router.route(user_text)
 
                 if intent.type == IntentType.ESTOP:
+                    # Cancel any background agent task before hard stop
+                    if self._dispatcher:
+                        self._dispatcher.cancel_active_agent_task()
                     self._pipeline.handle_estop()
                     self._audio.drain_buffers()  # stop any ongoing TTS immediately
                     self._audio.speak("已紧急停止。")
                     self._audio.start_playback()
-                    self._audio.wait_speaking_done()
+                    await asyncio.to_thread(self._audio.wait_speaking_done)
                     self._audio.stop_playback()
                     continue
 
-                # ── Stop speaking — zero latency, no LLM ─────────────────
+                # ── Stop speaking — also cancels any active agent task ────────
                 if (
                     intent.type == IntentType.VOICE_TRIGGER
                     and intent.skill_name == "stop_speaking"
@@ -124,7 +127,14 @@ class VoiceLoop:
                     if memory_task and not memory_task.done():
                         memory_task.cancel()
                         memory_task = None
-                    self._audio.drain_buffers()
+                    if self._dispatcher and self._dispatcher.cancel_active_agent_task():
+                        self._audio.drain_buffers()
+                        self._audio.speak("已取消任务。")
+                        self._audio.start_playback()
+                        await asyncio.to_thread(self._audio.wait_speaking_done)
+                        self._audio.stop_playback()
+                    else:
+                        self._audio.drain_buffers()
                     # acknowledge already fired — no extra chime needed
                     continue
 
@@ -159,7 +169,7 @@ class VoiceLoop:
                     self._audio.mute()
                     self._audio.speak('好的，已关闭麦克风。说"开麦"来重新打开。')
                     self._audio.start_playback()
-                    self._audio.wait_speaking_done()
+                    await asyncio.to_thread(self._audio.wait_speaking_done)
                     self._audio.stop_playback()
                     continue
 
@@ -193,8 +203,28 @@ class VoiceLoop:
                         msg = "好的，已恢复默认语速。"
                     self._audio.speak(msg)
                     self._audio.start_playback()
-                    self._audio.wait_speaking_done()
+                    await asyncio.to_thread(self._audio.wait_speaking_done)
                     self._audio.stop_playback()
+                    continue
+
+                # ── Agent-busy gate ───────────────────────────────────────────
+                # While a background agent_task is running, block new skill
+                # dispatches and LLM turns to prevent audio conflicts.
+                # ESTOP and stop_speaking are handled above and always pass through.
+                if (
+                    self._dispatcher
+                    and self._dispatcher.has_active_agent_task
+                ):
+                    if memory_task and not memory_task.done():
+                        memory_task.cancel()
+                        memory_task = None
+                    self._audio.speak("正在处理中，说停下可取消。")
+                    self._audio.start_playback()
+                    await asyncio.to_thread(self._audio.wait_speaking_done)
+                    self._audio.stop_playback()
+                    if idle_task and not idle_task.done():
+                        idle_task.cancel()
+                    idle_task = self._pipeline.start_idle_reflection()
                     continue
 
                 if intent.type == IntentType.VOICE_TRIGGER:
@@ -275,6 +305,11 @@ class VoiceLoop:
                 if intent.type == IntentType.GENERAL:
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
+                        # Cancel the memory prefetch we started earlier — the bridge
+                        # handled the turn so the prefetched context is no longer needed.
+                        if memory_task and not memory_task.done():
+                            memory_task.cancel()
+                        memory_task = None
                         if idle_task and not idle_task.done():
                             idle_task.cancel()
                         idle_task = self._pipeline.start_idle_reflection()
@@ -399,7 +434,12 @@ class VoiceLoop:
         action_type = turn.get("action_type")
         skill_name = turn.get("skill_name")
 
-        if action_type == "skill" and isinstance(skill_name, str) and skill_name:
+        # Dispatch to local skill executor when the edge service resolved a skill.
+        # Covers both action_type=="skill" (SKILL) and action_type=="general" with a
+        # populated skill_name field (SKILL_SUGGESTED status from the edge planner).
+        if isinstance(skill_name, str) and skill_name and (
+            action_type == "skill" or action_type == "general"
+        ):
             if self._dispatcher:
                 await self._dispatcher.dispatch(
                     skill_name, user_text, source="runtime",
@@ -424,6 +464,8 @@ class VoiceLoop:
 
         logger.warning(
             "Voice runtime bridge marked the turn handled but returned no usable "
-            "reply; falling back to local pipeline.",
+            "reply (action_type=%r skill_name=%r); falling back to local pipeline.",
+            action_type,
+            skill_name,
         )
         return False
