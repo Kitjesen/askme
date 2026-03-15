@@ -21,6 +21,7 @@ from .kws import KWSEngine
 from .punctuation import PunctuationRestorer
 from .tts import TTSEngine
 from .audio_filter import AudioFilter
+from .cloud_asr import CloudASR
 from .noise_reduction import NoiseGateCalibrator, SpectralSubtractor
 from .vad import VADEngine
 
@@ -182,6 +183,11 @@ class AudioAgent:
 
         # Audio input filter (DC removal + high-pass, removes motor hum)
         self._audio_filter = audio_filter
+
+        # Cloud ASR (Paraformer) — if available, used instead of local sherpa-onnx
+        _cloud_cfg = voice_cfg.get("cloud_asr", {})
+        self._cloud_asr = CloudASR(_cloud_cfg)
+        self._cloud_session_active: bool = False
 
         if voice_mode:
             self.asr = ASREngine(voice_cfg.get("asr", {}))
@@ -549,6 +555,9 @@ class AudioAgent:
                                     )
                                     self.tts.drain_buffers()
                                     self.tts.stop_immediately()
+                                    # Start cloud ASR session if available
+                                    if self._cloud_asr.available:
+                                        self._cloud_session_active = self._cloud_asr.start_session()
                                     self._refresh_voice_metrics()
                                     for buffered in barge_in_buffer:
                                         try:
@@ -568,6 +577,9 @@ class AudioAgent:
                                 speech_start_time = time.monotonic()
                                 self._agent_state = AgentState.LISTENING
                                 logger.info("VAD: speech start (peak=%d)", peak)
+                                # Start cloud ASR session if available
+                                if self._cloud_asr.available:
+                                    self._cloud_session_active = self._cloud_asr.start_session()
                                 self.tts.drain_buffers()
                                 self.tts.stop_immediately()
                                 self._refresh_voice_metrics()
@@ -582,6 +594,11 @@ class AudioAgent:
                                         break
                                 pre_roll.clear()
                         if speech_active:
+                            # Feed cloud ASR (parallel to local)
+                            if self._cloud_session_active:
+                                pcm_bytes = samples_int16.tobytes()
+                                self._cloud_asr.feed(pcm_bytes)
+
                             try:
                                 self.asr_stream.accept_waveform(sample_rate, samples)
                             except Exception as e:
@@ -647,6 +664,23 @@ class AudioAgent:
                             logger.info("VAD: speech end")
                             speech_active = False
                             speech_start_time = 0.0
+                            # Finish cloud ASR session and get result
+                            if self._cloud_session_active:
+                                self._cloud_session_active = False
+                                cloud_text = self._cloud_asr.finish_session(timeout=3.0)
+                                if cloud_text:
+                                    cloud_text = cloud_text.strip()
+                                    if self.punct.available:
+                                        cloud_text = self.punct.restore(cloud_text)
+                                    logger.info("CloudASR result: %s", cloud_text)
+                                    self.audio_queue.put(cloud_text)
+                                    self._metrics.mark_voice_input(cloud_text)
+                                    self._agent_state = AgentState.PROCESSING
+                                    self._last_interaction_time = time.monotonic()
+                                    self._refresh_voice_metrics()
+                                    self.asr.reset(self.asr_stream)
+                                    self.asr_stream = self.asr.create_stream()
+                                    return cloud_text
                             try:
                                 self.asr_stream.accept_waveform(sample_rate, samples)
                                 while self.asr.is_ready(self.asr_stream):

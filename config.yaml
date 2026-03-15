@@ -131,6 +131,16 @@ voice:
   # Speaker echo ~50-500, user speech ~800+. Set 0 to disable.
   echo_gate_peak: 800
 
+  # Cloud ASR: Alibaba DashScope Paraformer real-time.
+  # Much higher accuracy than local sherpa-onnx (CER 1.68% vs ~15%).
+  # Falls back to local ASR when API key not set or network fails.
+  cloud_asr:
+    enabled: false
+    api_key: ${DASHSCOPE_API_KEY}
+    model: paraformer-realtime-v2
+    sample_rate: 16000
+    language_hints: ["zh", "en"]
+
   # Address detection: filter out bystander chat (not talking to robot).
   # When enabled, casual speech like "走走走吃饭去" is silently ignored.
   # Safe default: uncertain → respond (never miss a real command).
