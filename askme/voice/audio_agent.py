@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import collections
 import logging
 import queue
 import threading
@@ -16,14 +15,17 @@ import sounddevice as sd
 from askme.ota_bridge import OTABridgeMetrics, get_ota_runtime_metrics
 
 from .asr import ASREngine
+from .asr_manager import ASRManager
+from .audio_filter import AudioFilter
+from .audio_processor import AudioProcessor
 from .audio_router import AudioRouter
 from .kws import KWSEngine
+from .mic_input import MicInput
+from .noise_reduction import SpectralSubtractor
 from .punctuation import PunctuationRestorer
 from .tts import TTSEngine
-from .audio_filter import AudioFilter
-from .cloud_asr import CloudASR
-from .noise_reduction import NoiseGateCalibrator, SpectralSubtractor
 from .vad import VADEngine
+from .vad_controller import VADController, VADEvent
 
 logger = logging.getLogger(__name__)
 
@@ -134,9 +136,7 @@ class AudioAgent:
         self.woken_up: bool = False
         self._muted: bool = False  # software mute — still listens, VoiceLoop filters results
         self._agent_state: AgentState = AgentState.IDLE
-        # When True, confirmation words ("好的", "是的", "不", etc.) bypass
-        # the noise filter. Set by VoiceLoop when a pending tool approval or
-        # proactive confirmation is active.
+        # When True, confirmation words bypass the noise filter.
         self.awaiting_confirmation: bool = False
 
         # Wake timeout: after wake word detection + successful interaction,
@@ -150,44 +150,28 @@ class AudioAgent:
             "asr_timeout", _DEFAULT_ASR_TIMEOUT
         )
 
-        # Echo gate: suppress mic input during TTS playback when peak is low.
-        # Speaker echo is typically peak 50-500; direct speech is peak 800+.
-        # Set 0 to disable (fall back to wait-until-done behaviour).
+        # Backward-compat attributes (tested by test_audio_agent.py)
         self._echo_gate_peak: int = int(voice_cfg.get("echo_gate_peak", 800))
-
-        # Microphone input device: int index or ALSA device string (e.g. "hw:1,0").
-        # None = system default.
         _raw_input = voice_cfg.get("input_device", None)
         if _raw_input is None:
             self._input_device: int | str | None = None
         elif isinstance(_raw_input, int):
             self._input_device = _raw_input
         else:
-            # Try int first, fall back to string (ALSA device name)
             try:
                 self._input_device = int(_raw_input)
             except (ValueError, TypeError):
                 self._input_device = str(_raw_input)
-
-        # Noise gate: skip VAD entirely when peak is below this threshold.
-        # Prevents USB mic noise floor from continuously triggering Silero VAD.
-        # Set 0 to disable. Typical values: 300-600 for noisy USB mics.
-        # Set "auto" to calibrate from ambient noise at startup.
         _raw_gate = voice_cfg.get("noise_gate_peak", 0)
-        self._auto_calibrate_gate = str(_raw_gate).lower() == "auto"
-        self._noise_gate_peak: int = 0 if self._auto_calibrate_gate else int(_raw_gate)
-        self._noise_calibrator: NoiseGateCalibrator | None = None
+        self._noise_gate_peak: int = (
+            0 if str(_raw_gate).lower() == "auto" else int(_raw_gate)
+        )
 
-        # Spectral subtraction noise reduction (optional)
-        self._noise_reduction = noise_reduction
-
-        # Audio input filter (DC removal + high-pass, removes motor hum)
-        self._audio_filter = audio_filter
-
-        # Cloud ASR (Paraformer) — if available, used instead of local sherpa-onnx
-        _cloud_cfg = voice_cfg.get("cloud_asr", {})
-        self._cloud_asr = CloudASR(_cloud_cfg)
-        self._cloud_session_active: bool = False
+        # -- New modular components --
+        self._mic = MicInput.from_config(config, audio_router=audio_router)
+        self._audio_proc = AudioProcessor(voice_cfg)
+        self._vad_ctrl = VADController(voice_cfg)
+        self._asr_mgr = ASRManager(voice_cfg)
 
         if voice_mode:
             self.asr = ASREngine(voice_cfg.get("asr", {}))
@@ -337,43 +321,26 @@ class AudioAgent:
     # ------------------------------------------------------------------
 
     def listen_loop(self) -> str | None:
-        """Listen from microphone with optional wake word detection and VAD-gated ASR.
+        """Listen with VAD-gated ASR using modular pipeline.
 
-        Flow:
-            1. If KWS is available, wait for wake word first
-            2. Play acknowledgment tone
-            3. Listen for speech with VAD-gated ASR (timeout: self._asr_timeout)
-            4. Return recognized text, or None on timeout/stop
+        Flow: MicInput -> AudioProcessor -> VADController -> ASRManager -> text
 
-        Returns None if ``stop_event`` is set or ASR times out.
+        Returns recognized text, or None on timeout/stop.
         """
         if self.asr is None or self.vad is None:
             raise RuntimeError("listen_loop requires voice_mode=True")
 
-        sample_rate: int = self.asr.sample_rate
-        samples_per_read: int = int(0.1 * sample_rate)  # 100ms chunks
-
         self._metrics.mark_voice_listen_started()
         self._refresh_voice_metrics()
 
-        # Wait for TTS output to release the device before opening the mic.
-        # On half-duplex ALSA hardware (sunrise) aplay and sd.InputStream share
-        # the same physical device; opening the mic while aplay is running
-        # causes an XRUN cascade on the next listen iteration.
-        if self._audio_router is not None:
-            self._audio_router.wait_for_input_ready(timeout=10.0)
+        mic = self._mic
+        proc = self._audio_proc
+        vad = self._vad_ctrl
+        asr = self._asr_mgr
 
         try:
-            with sd.InputStream(
-                device=self._input_device,
-                channels=1,
-                dtype="float32",
-                samplerate=sample_rate,
-            ) as mic:
-                # Phase 1: Wait for wake word (if KWS available)
-                # Skip KWS if we're within the wake timeout window (continuous
-                # conversation mode — user doesn't need to say the wake word
-                # again within _wake_timeout seconds of the last interaction).
+            with mic.open() as mic_ctx:
+                # Phase 1: Wake word detection (if KWS available)
                 if self.kws and self.kws.available and self.kws_stream:
                     _within_wake_window = (
                         self._wake_timeout > 0
@@ -381,368 +348,122 @@ class AudioAgent:
                         and (time.monotonic() - self._last_interaction_time) < self._wake_timeout
                     )
                     if _within_wake_window:
-                        logger.info("Wake timeout active (%.0fs left), skipping KWS",
-                                    self._wake_timeout - (time.monotonic() - self._last_interaction_time))
+                        logger.info(
+                            "Wake timeout active (%.0fs left), skipping KWS",
+                            self._wake_timeout - (time.monotonic() - self._last_interaction_time),
+                        )
                     else:
                         self.woken_up = False
                         self._refresh_voice_metrics()
-                        if not self._wait_for_wake_word(mic, sample_rate, samples_per_read):
-                            return None  # stop_event was set
-                        self._play_chime("wake")  # bright chime = "I'm listening"
+                        if not self._wait_for_wake_word_mic(mic_ctx):
+                            return None
+                        self._play_chime("wake")
 
-                # Phase 2: VAD-gated ASR with timeout
+                # Phase 2: VAD-gated ASR
                 logger.info("Listening for speech...")
-
-                # Start noise gate auto-calibration if configured
-                if self._auto_calibrate_gate and self._noise_gate_peak == 0:
-                    self._noise_calibrator = NoiseGateCalibrator()
-                    logger.info("Noise gate: auto-calibrating from ambient noise...")
-
-                speech_active = False
-                speech_start_time: float = 0.0  # monotonic time when speech started
                 deadline = time.monotonic() + self._asr_timeout
-                _vol_log_interval = 0.5  # log volume every 0.5s
+                vad.reset()
+                _vol_log_interval = 0.5
                 _vol_log_next = time.monotonic() + _vol_log_interval
 
-                # Pre-roll buffer: keep recent chunks so VAD latency
-                # doesn't lose the beginning of speech.
-                pre_roll: collections.deque[np.ndarray] = collections.deque(
-                    maxlen=_PRE_ROLL_CHUNKS
-                )
-
-                # Barge-in hold state: tracks a candidate barge-in while TTS
-                # is playing.  Reset when confirmed or dismissed.
-                barge_in_pending: bool = False
-                barge_in_start: float = 0.0
-                barge_in_buffer: list[np.ndarray] = []
-
                 while not self.stop_event.is_set():
-                    # Mark IDLE at the top of each iteration (waiting for input)
                     if self._agent_state not in (AgentState.MUTED, AgentState.LISTENING):
                         self._agent_state = AgentState.IDLE
 
-                    # Timeout check
                     if time.monotonic() > deadline:
-                        logger.info(
-                            "ASR timeout: no speech detected within %.0fs.",
-                            self._asr_timeout,
-                        )
-                        self.asr.reset(self.asr_stream)
-                        self.asr_stream = self.asr.create_stream()
+                        logger.info("ASR timeout: no speech detected within %.0fs.", self._asr_timeout)
+                        asr.reset()
                         self._refresh_voice_metrics()
-                        # Silent timeout — re-listen quietly regardless of
-                        # whether VAD triggered (background noise can trigger
-                        # speech_active without producing valid ASR text).
                         return None
 
-                    samples, _ = mic.read(samples_per_read)
-                    samples = samples.reshape(-1)
-
-                    # Feed VAD with int16 samples
-                    # Apply input filter (DC removal + HPF) before peak/VAD
-                    if self._audio_filter is not None:
-                        samples = self._audio_filter.process(samples)
-
-                    samples_int16 = (samples * 32768).astype(np.int16)
-                    peak = int(np.max(np.abs(samples_int16)))
-
-                    # Auto-calibrate noise gate from ambient noise
-                    if self._noise_calibrator is not None and not speech_active:
-                        gate_result = self._noise_calibrator.feed(samples_int16)
-                        if gate_result is not None:
-                            self._noise_gate_peak = gate_result
-                            self._noise_calibrator = None
-                            logger.info("Noise gate auto-calibrated: %d", gate_result)
-
-                    # Feed spectral subtractor calibration during silence
-                    if (
-                        self._noise_reduction is not None
-                        and not self._noise_reduction.calibrated
-                        and not speech_active
-                    ):
-                        self._noise_reduction.feed_calibration(samples)
-
-                    # Apply spectral subtraction if calibrated
-                    if self._noise_reduction is not None and self._noise_reduction.calibrated:
-                        samples_int16 = self._noise_reduction.process(samples_int16)
-
-                    # Echo gate: during TTS playback, suppress low-energy mic
-                    # input to prevent speaker echo from triggering VAD.
-                    # High-energy input (user barge-in) still passes through.
-                    # Do NOT gate once speech_active=True — the user is already
-                    # speaking (barge-in), so we must keep feeding VAD+ASR even
-                    # if volume drops, or the utterance will be silently truncated.
+                    raw = mic_ctx.read_chunk()
                     tts_active = self.tts.is_active()
-                    if tts_active and self._echo_gate_peak > 0 and peak < self._echo_gate_peak and not speech_active:
-                        pre_roll.append(samples.copy())
-                        # Still log periodically
-                        now = time.monotonic()
-                        if now >= _vol_log_next:
-                            logger.info(
-                                "MIC peak=%5d VAD=gated (TTS playing)", peak,
-                            )
-                            _vol_log_next = now + _vol_log_interval
-                        continue
+                    result = proc.process(raw, tts_active=tts_active, speech_active=vad.speech_active)
+                    samples_f32, samples_i16, peak, echo_gated = result
 
-                    try:
-                        self.vad.accept_waveform(samples_int16)
-                    except Exception as e:
-                        logger.error("VAD accept_waveform error: %s", e)
-                        break
-
-                    # Periodically log audio level for diagnostics
+                    # Periodic volume logging
                     now = time.monotonic()
                     if now >= _vol_log_next:
-                        try:
-                            vad_on = self.vad.is_speech_detected()
-                        except Exception as e:
-                            logger.error("VAD is_speech_detected error: %s", e)
-                            break
-                        bar_len = min(peak // 500, 30)
-                        bar = "#" * bar_len
-                        logger.info(
-                            "MIC peak=%5d VAD=%s %s",
-                            peak, "SPEECH" if vad_on else "silent", bar,
-                        )
+                        if echo_gated:
+                            logger.info("MIC peak=%5d VAD=gated (TTS playing)", peak)
+                        else:
+                            vad_label = "SPEECH" if vad.speech_active else "silent"
+                            bar = "#" * min(peak // 500, 30)
+                            logger.info("MIC peak=%5d VAD=%s %s", peak, vad_label, bar)
                         _vol_log_next = now + _vol_log_interval
 
-                    # Only feed ASR when VAD detects speech
-                    try:
-                        vad_speech = self.vad.is_speech_detected()
-                    except Exception as e:
-                        logger.error("VAD is_speech_detected error: %s", e)
-                        break
+                    if echo_gated:
+                        mic_ctx.buffer_pre_roll(raw)
+                        continue
 
-                    if vad_speech:
-                        # Reset deadline on every frame with detected speech,
-                        # so the timeout is always relative to the last voice
-                        # activity, not the start of listening.
+                    event = vad.feed(samples_i16, peak, tts_active=tts_active)
+
+                    if event == VADEvent.SILENCE:
+                        mic_ctx.buffer_pre_roll(raw)
+
+                    elif event == VADEvent.SPEECH_START:
                         deadline = time.monotonic() + self._asr_timeout
+                        self._agent_state = AgentState.LISTENING
+                        self._refresh_voice_metrics()
+                        asr.start_session()
+                        for buf in mic_ctx.flush_pre_roll():
+                            asr.feed_audio(buf, MicInput.to_int16(buf), mic_ctx.sample_rate)
+                        asr.feed_audio(samples_f32, samples_i16, mic_ctx.sample_rate)
 
-                        if not speech_active:
-                            # Noise gate: require amplitude above threshold to
-                            # start speech capture. This prevents USB mic noise
-                            # floor (peak ~100-200) from triggering ASR even
-                            # when Silero VAD classifies it as speech.
-                            # Always feed VAD (above) for correct state tracking;
-                            # only gate the speech_active transition.
-                            if self._noise_gate_peak > 0 and peak < self._noise_gate_peak:
-                                pre_roll.append(samples.copy())
-                            elif self.tts.is_active() and not barge_in_pending:
-                                # TTS is playing: start barge-in hold.
-                                # Don't interrupt TTS yet — wait _BARGE_IN_HOLD_S
-                                # to confirm this is real speech, not a cough or
-                                # noise burst.
-                                barge_in_pending = True
-                                barge_in_start = time.monotonic()
-                                barge_in_buffer = list(pre_roll) + [samples.copy()]
-                                logger.info(
-                                    "VAD: barge-in candidate (peak=%d), "
-                                    "holding %.0fms",
-                                    peak, _BARGE_IN_HOLD_S * 1000,
-                                )
-                            elif barge_in_pending:
-                                # Still within hold window — accumulate
-                                barge_in_buffer.append(samples.copy())
-                                if (time.monotonic() - barge_in_start) >= _BARGE_IN_HOLD_S:
-                                    # Confirmed real barge-in
-                                    speech_active = True
-                                    speech_start_time = barge_in_start
-                                    barge_in_pending = False
-                                    self._agent_state = AgentState.LISTENING
-                                    logger.info(
-                                        "VAD: barge-in confirmed (peak=%d)", peak
-                                    )
-                                    self.tts.drain_buffers()
-                                    self.tts.stop_immediately()
-                                    # Start cloud ASR session if available
-                                    if self._cloud_asr.available:
-                                        self._cloud_session_active = self._cloud_asr.start_session()
-                                    self._refresh_voice_metrics()
-                                    for buffered in barge_in_buffer:
-                                        try:
-                                            self.asr_stream.accept_waveform(
-                                                sample_rate, buffered
-                                            )
-                                        except Exception as e:
-                                            logger.error(
-                                                "ASR accept_waveform (barge-in) error: %s", e
-                                            )
-                                            break
-                                    barge_in_buffer.clear()
-                                    pre_roll.clear()
-                            else:
-                                # No TTS playing — immediate activation (original behaviour)
-                                speech_active = True
-                                speech_start_time = time.monotonic()
-                                self._agent_state = AgentState.LISTENING
-                                logger.info("VAD: speech start (peak=%d)", peak)
-                                # Start cloud ASR session if available
-                                if self._cloud_asr.available:
-                                    self._cloud_session_active = self._cloud_asr.start_session()
-                                self.tts.drain_buffers()
-                                self.tts.stop_immediately()
-                                self._refresh_voice_metrics()
-                                # Flush pre-roll buffer -> catch the speech onset
-                                for buffered in pre_roll:
-                                    try:
-                                        self.asr_stream.accept_waveform(
-                                            sample_rate, buffered
-                                        )
-                                    except Exception as e:
-                                        logger.error("ASR accept_waveform (pre-roll) error: %s", e)
-                                        break
-                                pre_roll.clear()
-                        if speech_active:
-                            # Feed cloud ASR (parallel to local)
-                            if self._cloud_session_active:
-                                pcm_bytes = samples_int16.tobytes()
-                                self._cloud_asr.feed(pcm_bytes)
+                    elif event == VADEvent.SPEECH_CONTINUE:
+                        deadline = time.monotonic() + self._asr_timeout
+                        asr.feed_audio(samples_f32, samples_i16, mic_ctx.sample_rate)
 
-                            try:
-                                self.asr_stream.accept_waveform(sample_rate, samples)
-                            except Exception as e:
-                                logger.error("ASR accept_waveform error: %s", e)
-                                break
+                    elif event == VADEvent.BARGE_IN_CONFIRMED:
+                        self._agent_state = AgentState.LISTENING
+                        self._refresh_voice_metrics()
+                        self.tts.drain_buffers()
+                        self.tts.stop_immediately()
+                        asr.start_session()
+                        for buf in vad.barge_in_buffer:
+                            asr.feed_audio(buf, MicInput.to_int16(buf), mic_ctx.sample_rate)
+                        vad.barge_in_buffer.clear()
+                        mic_ctx.pre_roll.clear()
+                        asr.feed_audio(samples_f32, samples_i16, mic_ctx.sample_rate)
 
-                            try:
-                                while self.asr.is_ready(self.asr_stream):
-                                    self.asr.decode_stream(self.asr_stream)
-                            except Exception as e:
-                                logger.error("ASR decode error: %s", e)
-                                break
+                    elif event == VADEvent.BARGE_IN_DISMISSED:
+                        mic_ctx.buffer_pre_roll(raw)
 
-                            # Max speech duration guard: continuous speech > 30s
-                            # means VAD is stuck (background noise). Force an
-                            # ASR endpoint to avoid infinite listen_loop.
-                            if (time.monotonic() - speech_start_time) > _MAX_SPEECH_DURATION:
-                                logger.warning(
-                                    "VAD: max speech duration (%.0fs) exceeded, forcing endpoint",
-                                    _MAX_SPEECH_DURATION,
-                                )
-                                try:
-                                    while self.asr.is_ready(self.asr_stream):
-                                        self.asr.decode_stream(self.asr_stream)
-                                    text = self.asr.get_result(self.asr_stream)
-                                except Exception as e:
-                                    logger.error("ASR forced-endpoint error: %s", e)
-                                    text = ""
-                                self.asr.reset(self.asr_stream)
-                                self.asr_stream = self.asr.create_stream()
-                                speech_active = False
-                                speech_start_time = 0.0
-                                # Result is likely noise -- only return if non-trivial
-                                if text and len(text.strip()) > 1:
-                                    text = text.strip()
-                                    if self.punct.available:
-                                        text = self.punct.restore(text)
-                                    logger.info("Recognized (forced): %s", text)
-                                    self.audio_queue.put(text)
-                                    self._metrics.mark_voice_input(text)
-                                    self._agent_state = AgentState.PROCESSING
-                                    self._last_interaction_time = time.monotonic()
-                                    self._refresh_voice_metrics()
-                                    return text
-                                else:
-                                    logger.info("VAD: forced endpoint yielded noise, discarding")
-                                    deadline = time.monotonic() + self._asr_timeout
-                                    continue
-                    else:
-                        # Buffer recent silence chunks for pre-roll
-                        pre_roll.append(samples.copy())
-                        # False barge-in: VAD dropped during hold window.
-                        # TTS continues undisturbed.
-                        if barge_in_pending:
-                            elapsed = time.monotonic() - barge_in_start
-                            logger.info(
-                                "VAD: false barge-in dismissed (only %.0fms)", elapsed * 1000
-                            )
-                            barge_in_pending = False
-                            barge_in_buffer.clear()
-                        if speech_active:
-                            # Speech just ended -- feed remaining and check
-                            logger.info("VAD: speech end")
-                            speech_active = False
-                            speech_start_time = 0.0
-                            # Finish cloud ASR session and get result
-                            if self._cloud_session_active:
-                                self._cloud_session_active = False
-                                cloud_text = self._cloud_asr.finish_session(timeout=3.0)
-                                if cloud_text:
-                                    cloud_text = cloud_text.strip()
-                                    if self.punct.available:
-                                        cloud_text = self.punct.restore(cloud_text)
-                                    logger.info("CloudASR result: %s", cloud_text)
-                                    self.audio_queue.put(cloud_text)
-                                    self._metrics.mark_voice_input(cloud_text)
-                                    self._agent_state = AgentState.PROCESSING
-                                    self._last_interaction_time = time.monotonic()
-                                    self._refresh_voice_metrics()
-                                    self.asr.reset(self.asr_stream)
-                                    self.asr_stream = self.asr.create_stream()
-                                    return cloud_text
-                            try:
-                                self.asr_stream.accept_waveform(sample_rate, samples)
-                                while self.asr.is_ready(self.asr_stream):
-                                    self.asr.decode_stream(self.asr_stream)
-                            except Exception as e:
-                                logger.error("ASR error at speech end: %s", e)
-                                break
+                    elif event == VADEvent.SPEECH_END:
+                        logger.info("VAD: speech end")
+                        cloud_result = asr.finish_and_get_result(self.awaiting_confirmation)
+                        if cloud_result and not cloud_result.is_noise:
+                            return self._accept_result(cloud_result.text)
+                        if cloud_result and cloud_result.is_noise:
+                            logger.info("ASR noise filtered: '%s'", cloud_result.text)
+                            asr.reset()
+                            deadline = time.monotonic() + self._asr_timeout
+                            vad.reset()
+                            continue
 
-                    # Check for endpoint
-                    try:
-                        is_endpoint = self.asr.is_endpoint(self.asr_stream)
-                        text = self.asr.get_result(self.asr_stream)
-                    except Exception as e:
-                        logger.error("ASR endpoint/result error: %s", e)
-                        break
+                    elif event == VADEvent.MAX_DURATION_EXCEEDED:
+                        logger.warning("VAD: max speech duration exceeded, forcing endpoint")
+                        forced = asr.force_endpoint()
+                        if forced and not forced.is_noise:
+                            return self._accept_result(forced.text)
+                        deadline = time.monotonic() + self._asr_timeout
+                        continue
 
-                    if is_endpoint and text:
-                        text = text.strip()
-                        if len(text) > 0:
-                            # Noise / feedback sound filter: known noise
-                            # utterances, single chars (except commands), and
-                            # short texts are silently discarded — no TTS
-                            # response to avoid reacting to non-speech sounds.
-                            #
-                            # Context-aware: when awaiting_confirmation is set,
-                            # confirmation words ("好的", "是的", "不" etc.)
-                            # bypass the filter so the user can confirm/reject.
-                            is_confirmation_word = (
-                                self.awaiting_confirmation
-                                and text in _CONFIRMATION_WORDS
-                            )
-                            is_noise = (
-                                not is_confirmation_word
-                                and (
-                                    text in _NOISE_UTTERANCES
-                                    or text in _CONFIRMATION_WORDS
-                                    or (len(text) == 1 and text not in _SINGLE_CHAR_COMMANDS)
-                                    or (len(text) < _MIN_VALID_TEXT_LEN and text not in _SINGLE_CHAR_COMMANDS)
-                                )
-                            )
-                            if is_noise:
-                                logger.info(
-                                    "ASR noise filtered (silent): '%s'", text
-                                )
-                                self.asr.reset(self.asr_stream)
-                                self.asr_stream = self.asr.create_stream()
-                                speech_active = False
-                                speech_start_time = 0.0
-                                deadline = time.monotonic() + self._asr_timeout
-                                continue
-                            # Add punctuation to raw ASR output
-                            if self.punct.available:
-                                text = self.punct.restore(text)
-                            logger.info("Recognized: %s", text)
-                            self.audio_queue.put(text)
-                            self._metrics.mark_voice_input(text)
-                            self._agent_state = AgentState.PROCESSING
-                            self._last_interaction_time = time.monotonic()
-                            self._refresh_voice_metrics()
-                            self.asr.reset(self.asr_stream)
-                            self.asr_stream = self.asr.create_stream()
-                            return text
+                    # Check local ASR endpoint (runs every iteration during speech)
+                    ep_result = asr.check_endpoint()
+                    if ep_result:
+                        # Apply noise filter from ASRManager
+                        is_noise = self._asr_mgr._filter_noise(
+                            ep_result.text, self.awaiting_confirmation
+                        )
+                        if not is_noise:
+                            return self._accept_result(ep_result.text)
+                        else:
+                            logger.info("ASR noise filtered: '%s'", ep_result.text)
+                            asr.reset()
+                            vad.reset()
+                            deadline = time.monotonic() + self._asr_timeout
+
         except Exception as exc:
             self._metrics.mark_voice_error(str(exc))
             self._refresh_voice_metrics(pipeline_ok=False)
@@ -750,12 +471,23 @@ class AudioAgent:
 
         return None
 
+    def _accept_result(self, text: str) -> str:
+        """Accept a recognized text result: log, queue, update state."""
+        logger.info("Recognized: %s", text)
+        self.audio_queue.put(text)
+        self._metrics.mark_voice_input(text)
+        self._agent_state = AgentState.PROCESSING
+        self._last_interaction_time = time.monotonic()
+        self._refresh_voice_metrics()
+        self._asr_mgr.reset()
+        return text
+
     # ------------------------------------------------------------------
     # Wake word detection
     # ------------------------------------------------------------------
 
     def _wait_for_wake_word(self, mic: Any, sample_rate: int, samples_per_read: int) -> bool:
-        """Block until wake word is detected via KWS.
+        """Block until wake word is detected via KWS (legacy API).
 
         Returns True when wake word is detected, False if stop_event is set.
         """
@@ -778,7 +510,36 @@ class AudioAgent:
             if result:
                 logger.info("Wake word detected: %s", result.strip())
                 self.woken_up = True
-                # Reset stream for next detection cycle
+                self.kws_stream = self.kws.create_stream()
+                self._refresh_voice_metrics()
+                return True
+
+        return False
+
+    def _wait_for_wake_word_mic(self, mic_ctx: MicInput) -> bool:
+        """Block until wake word is detected via KWS (MicInput API).
+
+        Returns True when wake word is detected, False if stop_event is set.
+        """
+        logger.info("Waiting for wake word...")
+        sample_rate = mic_ctx.sample_rate
+        while not self.stop_event.is_set():
+            samples = mic_ctx.read_chunk()
+
+            try:
+                self.kws_stream.accept_waveform(sample_rate, samples)
+
+                while self.kws.spotter.is_ready(self.kws_stream):
+                    self.kws.spotter.decode_stream(self.kws_stream)
+
+                result = self.kws.spotter.get_result(self.kws_stream)
+            except Exception as e:
+                logger.error("KWS error: %s", e)
+                return False
+
+            if result:
+                logger.info("Wake word detected: %s", result.strip())
+                self.woken_up = True
                 self.kws_stream = self.kws.create_stream()
                 self._refresh_voice_metrics()
                 return True
