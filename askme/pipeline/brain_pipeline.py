@@ -97,6 +97,8 @@ class BrainPipeline:
     _DEFAULT_MAX_RESPONSE_CHARS = 200
     # Seconds to wait before playing thinking indicator
     _THINKING_DELAY = 1.2
+    # Marker LLM returns when it determines the user is not talking to the robot
+    _SILENT_MARKER = "[SILENT]"
     # Maximum time (seconds) to wait for a single tool execution.
     # dispatch_skill has its own inner timeout; this is a safety net for
     # other tools (get_time, http_request, etc.) that may hang.
@@ -286,6 +288,18 @@ class BrainPipeline:
                     messages, system_prompt, model=self._voice_model,
                     source=source,
                 )
+            # [SILENT] detection: LLM judged this was not addressed to the robot
+            if self._SILENT_MARKER in full_response:
+                logger.info("[SILENT] Not addressed to robot, suppressing output")
+                self._audio.drain_buffers()
+                # Remove the user message we just added to keep history clean
+                if (
+                    self._conversation.history
+                    and self._conversation.history[-1].get("role") == "user"
+                ):
+                    self._conversation.history.pop()
+                return ""
+
             self._conversation.add_assistant_message(full_response)
             self._last_spoken_text = full_response
 

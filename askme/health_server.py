@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 import uvicorn
 
@@ -151,11 +151,16 @@ def build_health_snapshot(
     return snapshot
 
 
+ChatHandler = Callable[[str], Any]  # async def handler(text: str) -> str
+
+
 def create_health_app(
     provider: HealthProvider | None = None,
     *,
     health_provider: HealthProvider | None = None,
     metrics_provider: MetricsProvider | None = None,
+    chat_handler: ChatHandler | None = None,
+    conversation_provider: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> FastAPI:
     """Create the HTTP app used for readiness and telemetry probes."""
     resolved_health_provider = health_provider or provider
@@ -231,6 +236,74 @@ def create_health_app(
                 headers={"Cache-Control": "no-store"},
             )
 
+    @app.post("/api/chat", tags=["Monitor"])
+    async def chat(request: Request) -> JSONResponse:
+        """Send text to the brain pipeline and return the response."""
+        if chat_handler is None:
+            return JSONResponse(
+                {"error": "chat not available"},
+                status_code=503,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+        try:
+            body = await request.json()
+            text = body.get("text", "").strip()
+            if not text:
+                return JSONResponse(
+                    {"error": "empty text"},
+                    status_code=400,
+                    headers={"Access-Control-Allow-Origin": "*"},
+                )
+            reply = await chat_handler(text)
+            return JSONResponse(
+                {"reply": reply, "text": text},
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Chat endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/dashboard", tags=["Monitor"])
+    async def dashboard() -> Response:
+        """Serve a simple web dashboard for testing and monitoring."""
+        return Response(content=_DASHBOARD_HTML, media_type="text/html")
+
+    @app.options("/api/chat", include_in_schema=False)
+    async def chat_cors() -> Response:
+        return Response(
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            },
+        )
+
+    @app.get("/api/live", tags=["Monitor"])
+    async def live() -> JSONResponse:
+        """Return in-memory conversation history (voice + web chat combined)."""
+        if conversation_provider is None:
+            return JSONResponse(
+                {"messages": [], "count": 0},
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        try:
+            messages = conversation_provider()
+            return JSONResponse(
+                {"messages": messages, "count": len(messages)},
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            return JSONResponse(
+                {"messages": [], "count": 0, "error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
     @app.get("/api/conversations", tags=["Monitor"])
     async def conversations() -> JSONResponse:
         """Return conversation history for the monitor UI."""
@@ -288,15 +361,39 @@ class AskmeHealthServer:
         self._startup_timeout_s = max(0.1, float(cfg.get("startup_timeout", 5.0)))
         self._shutdown_timeout_s = max(0.1, float(cfg.get("shutdown_timeout", 5.0)))
 
+        self._chat_handler: ChatHandler | None = None
+
         resolved_health_provider = health_provider or snapshot_provider or provider
         if resolved_health_provider is None:
             raise ValueError("health_provider is required")
         resolved_metrics_provider = metrics_provider or resolved_health_provider
 
+        self._conversation_provider: Callable[[], list[dict[str, Any]]] | None = None
+
         self._app = create_health_app(
             health_provider=resolved_health_provider,
             metrics_provider=resolved_metrics_provider,
+            chat_handler=self._dispatch_chat,
+            conversation_provider=self._get_conversation,
         )
+
+    def _get_conversation(self) -> list[dict[str, Any]]:
+        if self._conversation_provider is None:
+            return []
+        return self._conversation_provider()
+
+    async def _dispatch_chat(self, text: str) -> str:
+        if self._chat_handler is None:
+            return "[chat handler not configured]"
+        return await self._chat_handler(text)
+
+    def set_chat_handler(self, handler: ChatHandler) -> None:
+        """Wire the chat handler after construction (avoids circular deps)."""
+        self._chat_handler = handler
+
+    def set_conversation_provider(self, provider: Callable[[], list[dict[str, Any]]]) -> None:
+        """Wire conversation history provider for /api/live endpoint."""
+        self._conversation_provider = provider
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task[None] | None = None
         self._started_event = asyncio.Event()
@@ -690,6 +787,150 @@ def _disabled_ota_status() -> dict[str, Any]:
         "product": "",
     }
 
+
+_DASHBOARD_HTML = """\
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Askme Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#0d1117;color:#c9d1d9;padding:16px}
+h1{font-size:18px;color:#58a6ff;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px}
+.card h3{font-size:13px;color:#8b949e;margin-bottom:8px}
+.ok{color:#3fb950}.err{color:#f85149}.warn{color:#d29922}
+.stat{font-size:20px;font-weight:bold}
+#chat-box{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;height:320px;overflow-y:auto;margin-bottom:8px}
+.msg{margin:6px 0;padding:6px 10px;border-radius:6px;max-width:85%;word-wrap:break-word;font-size:14px}
+.user{background:#1f6feb;margin-left:auto;text-align:right}
+.bot{background:#21262d}
+.sys{color:#8b949e;font-size:12px;text-align:center}
+#input-row{display:flex;gap:8px}
+#chat-input{flex:1;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px}
+#chat-input:focus{outline:none;border-color:#58a6ff}
+button{background:#238636;color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:14px}
+button:hover{background:#2ea043}
+button:disabled{opacity:0.5}
+.traces{font-family:monospace;font-size:12px;color:#8b949e}
+.traces div{padding:2px 0}
+</style>
+</head>
+<body>
+<h1>Askme Dashboard</h1>
+<div class="grid">
+ <div class="card"><h3>System</h3><div id="sys-status">loading...</div></div>
+ <div class="card"><h3>Voice Pipeline</h3><div id="voice-status">loading...</div></div>
+ <div class="card"><h3>Latency</h3><div id="latency">loading...</div></div>
+ <div class="card"><h3>Recent Traces</h3><div id="traces" class="traces">loading...</div></div>
+</div>
+<div style="display:flex;gap:8px;margin-bottom:4px">
+ <span style="font-size:13px;color:#8b949e">对话记录（语音+文字）</span>
+ <span id="msg-count" style="font-size:12px;color:#58a6ff"></span>
+</div>
+<div id="chat-box"></div>
+<div id="input-row">
+ <input id="chat-input" placeholder="输入消息..." autocomplete="off">
+ <button id="send-btn" onclick="sendChat()">发送</button>
+</div>
+<script>
+const BASE = location.origin;
+const chatBox = document.getElementById('chat-box');
+const input = document.getElementById('chat-input');
+const btn = document.getElementById('send-btn');
+
+function addMsg(text, cls) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  chatBox.appendChild(d);
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+async function sendChat() {
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  addMsg(text, 'user');
+  btn.disabled = true;
+  try {
+    const t0 = Date.now();
+    const r = await fetch(BASE + '/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text})
+    });
+    const d = await r.json();
+    const ms = Date.now() - t0;
+    if (d.reply) addMsg(d.reply, 'bot');
+    else if (d.error) addMsg('Error: ' + d.error, 'sys');
+    addMsg(ms + 'ms', 'sys');
+  } catch(e) { addMsg('Network error: ' + e.message, 'sys'); }
+  btn.disabled = false;
+  input.focus();
+  poll();
+}
+
+input.addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+
+async function poll() {
+  try {
+    const [h, t] = await Promise.all([
+      fetch(BASE + '/health').then(r => r.json()),
+      fetch(BASE + '/trace').then(r => r.json())
+    ]);
+    const v = h.voice_pipeline_status || {};
+    document.getElementById('sys-status').innerHTML =
+      `<div class="stat ${h.status==='ok'?'ok':'err'}">${h.status.toUpperCase()}</div>
+       <div>uptime: ${Math.round(h.uptime_seconds)}s | turns: ${h.total_conversations}</div>
+       <div>model: ${h.model_name}</div>`;
+    document.getElementById('voice-status').innerHTML =
+      `<div>pipeline: <span class="${v.pipeline_ok?'ok':'err'}">${v.pipeline_ok?'OK':'FAIL'}</span></div>
+       <div>state: ${v.agent_state} | tts: ${v.tts_backend}</div>
+       <div>ASR: ${v.asr_available?'OK':'NO'} | VAD: ${v.vad_available?'OK':'NO'} | muted: ${v.muted}</div>`;
+    const s = t.summary || {};
+    document.getElementById('latency').innerHTML = s.count > 0
+      ? `<div class="stat">${s.avg_total_ms||0}ms avg</div>
+         <div>p50: ${s.p50_total_ms||0}ms | p95: ${s.p95_total_ms||0}ms</div>
+         <div>${JSON.stringify(s.stage_avg_ms||{})}</div>`
+      : '<div class="stat">no data</div>';
+    const traces = (t.recent || []).slice(0, 5);
+    document.getElementById('traces').innerHTML = traces.length
+      ? traces.map(tr => `<div>${tr.summary}</div>`).join('')
+      : '<div>no traces yet</div>';
+  } catch(e) { console.error('poll error', e); }
+}
+
+let lastMsgCount = 0;
+async function pollLive() {
+  try {
+    const r = await fetch(BASE + '/api/live');
+    const d = await r.json();
+    const msgs = d.messages || [];
+    document.getElementById('msg-count').textContent = msgs.length + ' messages';
+    if (msgs.length !== lastMsgCount) {
+      lastMsgCount = msgs.length;
+      chatBox.innerHTML = '';
+      for (const m of msgs) {
+        if (m.role === 'user') addMsg(m.content, 'user');
+        else if (m.role === 'assistant') addMsg(m.content, 'bot');
+      }
+    }
+  } catch(e) { console.error('live poll error', e); }
+}
+
+poll();
+pollLive();
+setInterval(poll, 5000);
+setInterval(pollLive, 2000);
+input.focus();
+</script>
+</body>
+</html>
+"""
 
 build_health_app = create_health_app
 HealthServer = AskmeHealthServer

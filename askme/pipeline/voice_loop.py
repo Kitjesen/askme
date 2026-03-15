@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from askme.pipeline.external_turns import record_external_turn
 from askme.pipeline.trace import get_tracer
+from askme.voice.address_detector import AddressDetector
 from askme.voice.audio_router import AudioErrorKind, AudioRouter
 
 if TYPE_CHECKING:
@@ -58,6 +59,11 @@ class VoiceLoop:
         self._proactive = ProactiveOrchestrator.default(
             pipeline=pipeline, dispatcher=dispatcher
         )
+        self._address_detector = AddressDetector()  # default disabled; app.py wires the real one
+
+    def set_address_detector(self, detector: AddressDetector) -> None:
+        """Wire the address detector after construction."""
+        self._address_detector = detector
 
     async def run(self) -> None:
         """Block until Ctrl+C or too many consecutive errors."""
@@ -112,6 +118,11 @@ class VoiceLoop:
                         pass  # fall through to COMMAND handler below
                     else:
                         continue
+
+                # Address detection: skip if not talking to the robot
+                if not self._address_detector.is_addressed(user_text):
+                    logger.info("Address filter: '%s' not for robot, ignoring", user_text[:30])
+                    continue
 
                 # Immediate audio feedback — user knows we heard them
                 # Fires before LLM call to fill the latency gap

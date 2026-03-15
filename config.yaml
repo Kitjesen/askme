@@ -36,13 +36,13 @@ brain:
   # Character definition file (overrides prompt_seed when present)
   soul_file: SOUL.md
   # System prompt template (relay may override, SOUL.md compensates via seed)
-  system_prompt: "工业巡检机器人Thunder。中文口语，简洁汇报，80字以内。"
+  system_prompt: "工业巡检机器人Thunder。中文口语，简洁汇报，80字以内。重要规则：如果判断这句话不是在跟你说话（旁人闲聊、背景对话、跟别人说的话），只回复[SILENT]，不说任何其他内容。只有明确跟你对话、下指令、问问题时才正常回答。没有真实传感器数据时绝不编造巡检结果，如实告知。"
   # Prompt seed: fallback when SOUL.md is absent
   prompt_seed:
     - role: user
-      content: "你是Thunder，穹沛科技的工业巡检机器人，用中文简洁回答"
+      content: "你是Thunder，穹沛科技的工业巡检机器人，用中文简洁回答。如果听到的话不是在跟你说话（旁人闲聊），只回复[SILENT]。没有真实数据时不编造。"
     - role: assistant
-      content: "收到。我是Thunder，穹沛的巡检机器人。等待指令。"
+      content: "收到。我是Thunder，穹沛的巡检机器人。不是跟我说话我就保持沉默，没有数据不编造。等待指令。"
   # Format tag prepended to each user message for TTS output control
   user_prefix: "[工业巡检模式：中文口语，80字以内，简洁汇报式，不用markdown，不说英文]"
   # Max characters to speak in voice mode (0 = unlimited, text mode always unlimited)
@@ -109,8 +109,9 @@ voice:
 
   vad:
     model_path: models/vad/silero_vad.onnx
-    # Noise gate (noise_gate_peak: 400) handles the USB mic noise floor,
-    # so VAD threshold can stay at default 0.5 for good speech detection.
+    # 0.5: default Silero threshold. Higher values (0.6-0.7) miss speech on this MIC.
+    # The MIC's low SNR means VAD must be sensitive. Noise triggers are handled by
+    # the _NOISE_UTTERANCES filter + address_detector instead.
     threshold: 0.5
     min_silence_duration: 0.3
     # Raised from 0.25 to filter out noise blips
@@ -121,12 +122,20 @@ voice:
   # Noise gate: skip VAD when mic peak is below threshold (not in active speech).
   # Prevents USB mic noise floor from triggering Silero VAD continuously.
   # On sunrise MCP01: noise floor ~100-200, speech ~1000+. Set 0 to disable.
-  noise_gate_peak: 400
+  # Disabled: sunrise MIC speech peak (270-340) is too close to noise floor (250).
+  # Peak-based gating can't separate them. VAD=0.6 alone handles speech detection.
+  noise_gate_peak: 0
 
   # Echo gate: suppress mic during TTS playback when peak < threshold
   # Enables barge-in (user can interrupt) while blocking speaker echo
   # Speaker echo ~50-500, user speech ~800+. Set 0 to disable.
   echo_gate_peak: 800
+
+  # Address detection: filter out bystander chat (not talking to robot).
+  # When enabled, casual speech like "走走走吃饭去" is silently ignored.
+  # Safe default: uncertain → respond (never miss a real command).
+  address_detection:
+    enabled: true
 
   # Audio input filter: DC removal + high-pass before VAD/ASR.
   # Removes low-frequency noise (motor hum, HVAC, ground loop).
@@ -141,7 +150,7 @@ voice:
   # Calibrates from ambient silence at startup. Off by default.
   # For industrial environments, upgrade to RNNoise/Krisp (Phase 4).
   noise_reduction:
-    enabled: false
+    enabled: true
     # Subtraction strength (higher = more aggressive, risk of artifacts)
     alpha: 2.0
     # Spectral floor (prevents musical noise artifacts)

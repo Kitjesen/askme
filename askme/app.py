@@ -54,6 +54,7 @@ from askme.tools.builtin_tools import SpeakProgressTool
 from askme.tools.skill_tools import register_skill_tools
 from askme.tools.tool_registry import ToolRegistry
 from askme.tools.voice_tools import register_voice_tools
+from askme.voice.address_detector import AddressDetector
 from askme.voice.audio_agent import AudioAgent
 from askme.voice.audio_filter import AudioFilter
 from askme.voice.noise_reduction import SpectralSubtractor
@@ -265,6 +266,11 @@ class AskmeApp:
             audio_router=self.audio_router,
         )
 
+        # Address detector: filter out bystander chat (not talking to robot)
+        _ad_cfg = self.cfg.get("voice", {}).get("address_detection", {})
+        self._address_detector = AddressDetector(_ad_cfg)
+        self._voice_loop.set_address_detector(self._address_detector)
+
         self._proactive = ProactiveAgent(
             vision=self.vision,
             audio=self.audio,
@@ -277,6 +283,53 @@ class AskmeApp:
         self.health_server = AskmeHealthServer(
             self.cfg.get("health_server", {}),
             snapshot_provider=self.health_snapshot,
+        )
+
+        # Wire chat handler for /api/chat and /dashboard web UI.
+        # Returns text immediately + fires TTS asynchronously (non-blocking).
+        async def _chat_handler(text: str) -> str:
+            import time as _t
+            from askme.pipeline.brain_pipeline import strip_think_blocks
+
+            self._pipeline._conversation.add_user_message(text)
+
+            system_prompt = self._pipeline._build_system_prompt(
+                None, user_text=text,
+            )
+            messages = self._pipeline._prepare_messages(
+                self._pipeline._conversation.get_messages(system_prompt)
+            )
+
+            # Stream LLM — no tools, measure TTFT
+            full = ""
+            model = self._pipeline._voice_model
+            t0 = _t.perf_counter()
+            ttft_logged = False
+            async for chunk in self._pipeline._llm.chat_stream(
+                messages, model=model, tools=None, tool_choice=None,
+            ):
+                if not ttft_logged and chunk.choices[0].delta.content:
+                    ttft_logged = True
+                    logger.info("[WebChat] TTFT: %.2fs model=%s", _t.perf_counter() - t0, model)
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    full += delta.content
+
+            full = strip_think_blocks(full).strip()
+            total = _t.perf_counter() - t0
+            logger.info("[WebChat] Total: %.2fs chars=%d", total, len(full))
+            self._pipeline._conversation.add_assistant_message(full)
+            self._pipeline._last_spoken_text = full
+
+            # Fire-and-forget: speak on robot speaker (non-blocking)
+            if full:
+                self.audio.speak(full)
+                self.audio.start_playback()
+            return full
+
+        self.health_server.set_chat_handler(_chat_handler)
+        self.health_server.set_conversation_provider(
+            lambda: list(self.conversation.history)
         )
 
         # ── LED state bridge ─────────────────────────────────────────────
