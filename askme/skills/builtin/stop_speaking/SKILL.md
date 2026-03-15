@@ -9,7 +9,7 @@ tags: [voice, control, tts]
 depends: []
 conflicts: []
 safety_level: normal
-voice_trigger: 静音,别说了,不说了,停止说话,停止播放,不要说了
+voice_trigger: 静音,别说了,不说了,停止说话,停止播放,不要说了,够了
 ---
 
 ## Prompt

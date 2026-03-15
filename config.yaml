@@ -101,7 +101,8 @@ voice:
     num_threads: 2
     # Endpoint detection silence thresholds (seconds)
     # rule1: long silence after short utterance, rule2: normal speech
-    rule1_min_trailing_silence: 1.6
+    # Lowered from 1.6 to 0.6 — industrial commands are short, 1.6s delay is unacceptable
+    rule1_min_trailing_silence: 0.6
     rule2_min_trailing_silence: 0.4
     # Timeout (seconds) for ASR after wake word detection
     asr_timeout: 10.0
@@ -126,6 +127,27 @@ voice:
   # Enables barge-in (user can interrupt) while blocking speaker echo
   # Speaker echo ~50-500, user speech ~800+. Set 0 to disable.
   echo_gate_peak: 800
+
+  # Audio input filter: DC removal + high-pass before VAD/ASR.
+  # Removes low-frequency noise (motor hum, HVAC, ground loop).
+  audio_filter:
+    enabled: true
+    # High-pass cutoff — removes everything below this frequency
+    highpass_freq: 80
+    # Mode: "highpass" (default, gentle) or "bandpass" (aggressive, 300-3400Hz speech only)
+    mode: highpass
+
+  # Noise reduction: spectral subtraction for steady-state noise removal.
+  # Calibrates from ambient silence at startup. Off by default.
+  # For industrial environments, upgrade to RNNoise/Krisp (Phase 4).
+  noise_reduction:
+    enabled: false
+    # Subtraction strength (higher = more aggressive, risk of artifacts)
+    alpha: 2.0
+    # Spectral floor (prevents musical noise artifacts)
+    beta: 0.02
+    # Number of silence frames for noise profile estimation
+    calibration_frames: 20
 
   punctuation:
     # CT-Transformer: adds punctuation to raw ASR output for better TTS

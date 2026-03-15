@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import FastAPI
@@ -208,6 +210,53 @@ def create_health_app(
             media_type=_PROMETHEUS_CONTENT_TYPE,
             headers={"Cache-Control": "no-store"},
         )
+
+    @app.get("/trace", tags=["System"])
+    async def trace() -> JSONResponse:
+        """Return recent pipeline timing traces for diagnostics."""
+        try:
+            from askme.pipeline.trace import get_tracer
+            tracer = get_tracer()
+            return JSONResponse(
+                {
+                    "summary": tracer.get_summary(),
+                    "recent": tracer.get_history(limit=10),
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception as exc:
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Cache-Control": "no-store"},
+            )
+
+    @app.get("/api/conversations", tags=["Monitor"])
+    async def conversations() -> JSONResponse:
+        """Return conversation history for the monitor UI."""
+        try:
+            from askme.config import get_config, project_root
+            cfg = get_config().get("conversation", {})
+            raw_path = cfg.get("history_file", "data/conversation_history.json")
+            history_file = Path(raw_path)
+            if not history_file.is_absolute():
+                history_file = project_root() / history_file
+            if history_file.exists():
+                with open(history_file, "r", encoding="utf-8") as fh:
+                    history = json.load(fh)
+            else:
+                history = []
+            return JSONResponse(
+                {"messages": history, "count": len(history)},
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Conversations endpoint failed: %s", exc)
+            return JSONResponse(
+                {"messages": [], "count": 0, "error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
 
     return app
 

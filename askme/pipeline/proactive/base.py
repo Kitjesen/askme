@@ -85,7 +85,13 @@ async def ask_and_listen(question: str, audio: Any) -> str | None:
         logger.warning("ask_and_listen: TTS/playback failed: %s", exc)
 
     try:
-        return await asyncio.to_thread(audio.listen_loop)
+        # Enable confirmation word pass-through so "好的"/"确认" etc.
+        # are not silently eaten by the noise utterance filter.
+        audio.awaiting_confirmation = True
+        try:
+            return await asyncio.to_thread(audio.listen_loop)
+        finally:
+            audio.awaiting_confirmation = False
     except Exception as exc:  # noqa: BLE001
         logger.warning("ask_and_listen: listen_loop failed: %s", exc)
         return None

@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from askme.pipeline.external_turns import record_external_turn
+from askme.pipeline.trace import get_tracer
 from askme.voice.audio_router import AudioErrorKind, AudioRouter
 
 if TYPE_CHECKING:
@@ -17,6 +18,14 @@ if TYPE_CHECKING:
     from askme.voice.runtime_bridge import VoiceRuntimeBridge
 
 logger = logging.getLogger(__name__)
+
+# Skills that can execute even while an agent_task is running in background.
+# These are stateless/zero-cost and cannot conflict with the agent's work.
+_AGENT_BYPASS_SKILLS: frozenset[str] = frozenset([
+    "get_time", "volume_up", "volume_down", "volume_reset",
+    "speed_up", "speed_down", "speed_reset",
+    "repeat_last", "mute_mic", "unmute_mic",
+])
 
 
 class VoiceLoop:
@@ -58,14 +67,31 @@ class VoiceLoop:
 
         consecutive_errors = 0
         idle_task = self._pipeline.start_idle_reflection()
+        _tracer = get_tracer()
         while True:
             memory_task: asyncio.Task[str] | None = None
+            _trace = None
             try:
+                # Tell the noise filter whether we're waiting for a
+                # confirmation so that words like "好的"/"不" pass through.
+                # Also detect when the last assistant message was a question
+                # (ended with ？or ?) — the user's short reply is likely an answer.
+                _last = self._pipeline.last_spoken_text or ""
+                _ends_with_question = _last.rstrip().endswith(("？", "?"))
+                self._audio.awaiting_confirmation = (
+                    self._pipeline.has_pending_tool_approval()
+                    or _ends_with_question
+                )
+
                 user_text = await asyncio.to_thread(self._audio.listen_loop)
                 if not user_text:
                     continue
 
                 consecutive_errors = 0
+
+                # Start pipeline trace for this turn
+                _trace = _tracer.start_trace("voice_turn")
+                _trace.metadata["user_text"] = user_text[:60]
 
                 # ── Muted state gate ──────────────────────────────────────
                 # When muted, only the unmute_mic voice trigger and COMMAND
@@ -105,7 +131,8 @@ class VoiceLoop:
                 # Start memory prefetch ASAP (overlaps with routing)
                 memory_task = self._pipeline.start_memory_prefetch(user_text)
 
-                intent = self._router.route(user_text)
+                with _tracer.span("intent_route"):
+                    intent = self._router.route(user_text)
 
                 if intent.type == IntentType.ESTOP:
                     # Cancel any background agent task before hard stop
@@ -211,21 +238,27 @@ class VoiceLoop:
                 # While a background agent_task is running, block new skill
                 # dispatches and LLM turns to prevent audio conflicts.
                 # ESTOP and stop_speaking are handled above and always pass through.
+                # Lightweight skills (get_time, volume, etc.) bypass the gate.
                 if (
                     self._dispatcher
                     and self._dispatcher.has_active_agent_task
                 ):
-                    if memory_task and not memory_task.done():
-                        memory_task.cancel()
-                        memory_task = None
-                    self._audio.speak("正在处理中，说停下可取消。")
-                    self._audio.start_playback()
-                    await asyncio.to_thread(self._audio.wait_speaking_done)
-                    self._audio.stop_playback()
-                    if idle_task and not idle_task.done():
-                        idle_task.cancel()
-                    idle_task = self._pipeline.start_idle_reflection()
-                    continue
+                    _bypass = (
+                        intent.type == IntentType.VOICE_TRIGGER
+                        and intent.skill_name in _AGENT_BYPASS_SKILLS
+                    )
+                    if not _bypass:
+                        if memory_task and not memory_task.done():
+                            memory_task.cancel()
+                            memory_task = None
+                        self._audio.speak("正在处理中，说够了可取消。")
+                        self._audio.start_playback()
+                        await asyncio.to_thread(self._audio.wait_speaking_done)
+                        self._audio.stop_playback()
+                        if idle_task and not idle_task.done():
+                            idle_task.cancel()
+                        idle_task = self._pipeline.start_idle_reflection()
+                        continue
 
                 if intent.type == IntentType.VOICE_TRIGGER:
                     # Cancel memory prefetch — skill path never uses the result
@@ -316,12 +349,13 @@ class VoiceLoop:
                         continue
 
                 # General → LLM (pass pre-fetched memory)
-                if self._dispatcher:
-                    await self._dispatcher.handle_general(
-                        user_text, source="voice", memory_task=memory_task,
-                    )
-                else:
-                    await self._pipeline.process(user_text, memory_task=memory_task)
+                with _tracer.span("llm_pipeline"):
+                    if self._dispatcher:
+                        await self._dispatcher.handle_general(
+                            user_text, source="voice", memory_task=memory_task,
+                        )
+                    else:
+                        await self._pipeline.process(user_text, memory_task=memory_task)
                 memory_task = None  # pipeline took ownership
 
                 # Don't block on wait_speaking_done — echo gate in listen_loop
@@ -386,6 +420,9 @@ class VoiceLoop:
                     consecutive_errors = 0
                 await asyncio.sleep(1)
             finally:
+                # Finish pipeline trace for this turn
+                if _trace is not None:
+                    _tracer.finish_trace()
                 # Always clean up dangling memory task.
                 # Await after cancel to suppress "Task exception was never
                 # retrieved" GC warnings that mask real errors in log output.

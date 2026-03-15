@@ -121,6 +121,10 @@ class TTSEngine:
         self._aplay_bin: str | None = shutil.which("aplay")
         # Immediate stop flag: checked by _playback_loop to abort mid-chunk
         self._stop_requested = threading.Event()
+        # Pre-roll warm state: skip 400ms pre-roll when DAC was recently active
+        self._last_aplay_close: float = 0.0  # monotonic time of last aplay close
+        _PREROLL_WARM_WINDOW = 5.0  # seconds — DAC stays warm after close
+        self._preroll_warm_window = _PREROLL_WARM_WINDOW
 
         # AudioRouter for device ownership coordination (optional)
         self._audio_router: AudioRouter | None = audio_router
@@ -762,7 +766,7 @@ class TTSEngine:
             _proc: subprocess.Popen | None = None  # type: ignore[type-arg]
             _need_preroll = True
             _empty_polls = 0
-            _MAX_EMPTY_POLLS = 50  # 50 × 20 ms = 1 s drain window (SSE gaps can be 200-500 ms)
+            _MAX_EMPTY_POLLS = 250  # 250 × 20 ms = 5 s — keeps aplay warm between conversational turns, avoids re-paying 400ms pre-roll
             _router_ctx = None  # saved output_session() context manager
 
             def _close_aplay() -> None:
@@ -783,6 +787,7 @@ class TTSEngine:
                 _proc = None
                 _need_preroll = True
                 _empty_polls = 0
+                self._last_aplay_close = time.monotonic()  # track warm state
                 if _router_ctx is not None:
                     try:
                         _router_ctx.__exit__(None, None, None)
@@ -830,9 +835,17 @@ class TTSEngine:
                                 with self._aplay_lock:
                                     self._aplay_proc = _proc
 
-                            # Pre-roll only on first chunk after process start
+                            # Pre-roll only on first chunk after process start,
+                            # AND only when DAC is cold (>5s since last playback).
                             if _need_preroll:
-                                _proc.stdin.write(_preroll_bytes)  # type: ignore[union-attr]
+                                _dac_warm = (
+                                    self._last_aplay_close > 0
+                                    and (time.monotonic() - self._last_aplay_close) < self._preroll_warm_window
+                                )
+                                if not _dac_warm:
+                                    _proc.stdin.write(_preroll_bytes)  # type: ignore[union-attr]
+                                else:
+                                    logger.debug("aplay: skipping pre-roll (DAC warm)")
                                 _need_preroll = False
 
                             _proc.stdin.write(pcm.tobytes())  # type: ignore[union-attr]

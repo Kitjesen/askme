@@ -8,6 +8,8 @@ import logging
 import re
 from typing import Any, TYPE_CHECKING
 
+from askme.pipeline.trace import get_tracer
+
 if TYPE_CHECKING:
     from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
     from askme.brain.conversation import ConversationManager
@@ -224,19 +226,27 @@ class BrainPipeline:
                 name="estop_refresh",
             )
 
-        # 0c. Sliding window compression (non-blocking, best-effort)
-        try:
-            await self._conversation.maybe_compress(self._llm)
-        except Exception as _e:
-            logger.warning("Conversation compression failed (non-critical): %s", _e)
+        # 0c. Sliding window compression — fire-and-forget so it never blocks
+        # the user's turn. The compressed history is only needed for future turns.
+        async def _compress_bg() -> None:
+            try:
+                await self._conversation.maybe_compress(self._llm)
+            except Exception as _e:
+                logger.warning("Conversation compression failed (non-critical): %s", _e)
+
+        _ct = asyncio.create_task(_compress_bg(), name="conv_compress")
+        self._pending_tasks.add(_ct)
+        _ct.add_done_callback(self._pending_tasks.discard)
 
         # 1. Retrieve memory + vision scene concurrently
         if not memory_task:
             memory_task = asyncio.create_task(self._memory.retrieve(user_text))
         vision_task = self._start_vision_capture()
 
+        _tracer = get_tracer()
         try:
-            context_str = await memory_task
+            with _tracer.span("memory_retrieve"):
+                context_str = await memory_task
         except Exception:
             context_str = ""
 
@@ -461,10 +471,10 @@ class BrainPipeline:
         thinking_task: asyncio.Task[None] | None = None
         try:
             # Thinking indicator: if skill execution takes > _THINKING_DELAY,
-            # speak "嗯..." so the user knows we're working on it.
+            # play a tone so the user knows we're working on it.
             async def _thinking_indicator() -> None:
                 await asyncio.sleep(self._THINKING_DELAY)
-                self._audio.speak("嗯...")
+                self._audio.play_thinking()
 
             thinking_task = asyncio.create_task(_thinking_indicator())
 
@@ -649,13 +659,25 @@ class BrainPipeline:
         truncated = False
         char_limit = self._max_response_chars if is_voice else 0  # 0 = unlimited
 
-        # Thinking indicator: play "嗯..." if TTFT > 1.2s
+        # Thinking indicator: play a synthesized tone if TTFT > 1.2s.
+        # Uses play_thinking() (direct PCM → aplay) instead of speak("嗯...")
+        # to bypass the TTS network, cutting indicator latency from ~2.2s to ~1.25s.
         thinking_task: asyncio.Task[None] | None = None
+        slow_network_task: asyncio.Task[None] | None = None
         if is_voice:
             async def _thinking_indicator() -> None:
                 await asyncio.sleep(self._THINKING_DELAY)
-                self._audio.speak("嗯...")
+                self._audio.play_thinking()
+
+            async def _slow_network_indicator() -> None:
+                await asyncio.sleep(5.0)
+                # Use play_thinking (direct PCM, no network) instead of speak()
+                # because the network that triggered this indicator is the same
+                # network that speak() would try to use for TTS synthesis.
+                self._audio.play_thinking()
+
             thinking_task = asyncio.create_task(_thinking_indicator())
+            slow_network_task = asyncio.create_task(_slow_network_indicator())
 
         try:
             async for chunk in self._llm.chat_stream(
@@ -665,10 +687,14 @@ class BrainPipeline:
                     ttft_logged = True
                     elapsed = _time.perf_counter() - t_start
                     logger.info("TTFT: %.2fs", elapsed)
-                    # Cancel thinking indicator once first token arrives
+                    get_tracer().record_span("ttft", elapsed * 1000, model=model or "default")
+                    # Cancel thinking/slow-network indicators once first token arrives
                     if thinking_task is not None:
                         thinking_task.cancel()
                         thinking_task = None
+                    if slow_network_task is not None:
+                        slow_network_task.cancel()
+                        slow_network_task = None
                 delta = chunk.choices[0].delta
 
                 # Accumulate tool call fragments
@@ -730,9 +756,11 @@ class BrainPipeline:
                     self._audio.speak(remainder)
                     spoke_any = True
         finally:
-            # Ensure thinking indicator is cancelled even on error
+            # Ensure thinking/network indicators are cancelled even on error
             if thinking_task is not None:
                 thinking_task.cancel()
+            if slow_network_task is not None:
+                slow_network_task.cancel()
 
         # If tool calls detected, drain leftover TTS and do follow-up
         if tool_calls_acc:
