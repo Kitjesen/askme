@@ -1,0 +1,88 @@
+{
+  "project": "askme-modular-refactor",
+  "stories": [
+    {
+      "id": "US-000",
+      "title": "Save baseline — confirm old code works on sunrise",
+      "priority": 0,
+      "passes": true,
+      "acceptanceCriteria": [
+        "ALSA MIC gain=111 documented ✅",
+        "sunrise askme running, Recognized: appears in logs ✅"
+      ]
+    },
+    {
+      "id": "US-001",
+      "title": "Extract MicInput module from audio_agent.py",
+      "priority": 1,
+      "passes": true,
+      "acceptanceCriteria": [
+        "askme/voice/mic_input.py exists ✅",
+        "14 tests pass ✅",
+        "audio_agent.py uses MicInput ✅",
+        "All existing tests pass ✅"
+      ]
+    },
+    {
+      "id": "US-002",
+      "title": "Extract AudioProcessor module",
+      "priority": 2,
+      "passes": true,
+      "acceptanceCriteria": [
+        "askme/voice/audio_processor.py exists ✅",
+        "21 tests pass ✅",
+        "Each feature independently configurable ✅",
+        "All existing tests pass ✅"
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "Extract VADController module",
+      "priority": 3,
+      "passes": true,
+      "acceptanceCriteria": [
+        "askme/voice/vad_controller.py exists ✅",
+        "20 tests pass ✅",
+        "Barge-in + noise_gate + max_duration inside ✅",
+        "All existing tests pass ✅"
+      ]
+    },
+    {
+      "id": "US-004",
+      "title": "Extract ASRManager module",
+      "priority": 4,
+      "passes": true,
+      "acceptanceCriteria": [
+        "askme/voice/asr_manager.py exists ✅",
+        "21 tests pass ✅",
+        "Noise filter + cloud fallback inside ✅",
+        "All existing tests pass ✅"
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "Rewrite listen_loop as thin coordinator",
+      "priority": 5,
+      "passes": true,
+      "acceptanceCriteria": [
+        "listen_loop ~150 lines (down from 400) ✅",
+        "Delegates to 4 modules ✅",
+        "1163 tests pass ✅",
+        "Deployed to sunrise, health: ok ✅"
+      ]
+    },
+    {
+      "id": "US-006",
+      "title": "Re-integrate new features on modular codebase",
+      "priority": 6,
+      "passes": false,
+      "acceptanceCriteria": [
+        "Pipeline trace /trace endpoint returns timing data",
+        "Address detection filters casual chat (18/18 test cases pass)",
+        "LLM routes qwen-turbo models to DashScope client",
+        "Dashboard /dashboard shows live conversation",
+        "All tests pass locally"
+      ]
+    }
+  ]
+}
