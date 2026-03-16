@@ -29,7 +29,9 @@ if TYPE_CHECKING:
     from askme.brain.episodic_memory import EpisodicMemory
     from askme.brain.llm_client import LLMClient
     from askme.brain.memory_bridge import MemoryBridge
+    from askme.brain.procedural_memory import ProceduralMemory
     from askme.brain.session_memory import SessionMemory
+    from askme.brain.site_knowledge import SiteKnowledge
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +50,16 @@ class MemorySystem:
         session_memory: SessionMemory | None,
         episodic: EpisodicMemory | None,
         vector_memory: MemoryBridge | None,
+        site_knowledge: SiteKnowledge | None = None,
+        procedural: ProceduralMemory | None = None,
     ) -> None:
         self._llm = llm
         self._conversation = conversation
         self._session = session_memory
         self._episodic = episodic
         self._vector = vector_memory
+        self._site = site_knowledge
+        self._procedural = procedural
 
     # -- Record --
 
@@ -144,3 +150,13 @@ class MemorySystem:
     def has_episodic(self) -> bool:
         """Whether episodic memory is available."""
         return self._episodic is not None
+
+    @property
+    def site_knowledge(self) -> SiteKnowledge | None:
+        """Spatial memory (may be None)."""
+        return self._site
+
+    @property
+    def procedural(self) -> ProceduralMemory | None:
+        """Procedural memory (may be None)."""
+        return self._procedural
