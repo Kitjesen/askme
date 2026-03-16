@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from askme.brain.episodic_memory import EpisodicMemory
     from askme.brain.llm_client import LLMClient
     from askme.brain.memory_bridge import MemoryBridge
+    from askme.brain.memory_system import MemorySystem
     from askme.brain.session_memory import SessionMemory
     from askme.brain.vision_bridge import VisionBridge
     from askme.dog_control_client import DogControlClient
@@ -129,10 +130,12 @@ class BrainPipeline:
         general_tool_max_safety_level: str = "normal",
         max_response_chars: int = 0,
         agent_shell: ThunderAgentShell | None = None,
+        memory_system: MemorySystem | None = None,
     ) -> None:
         self._llm = llm
         self._conversation = conversation
         self._memory = memory
+        self._mem = memory_system  # unified facade (preferred over individual components)
         self._tools = tools
         self._skill_manager = skill_manager
         self._skill_executor = skill_executor
@@ -162,6 +165,13 @@ class BrainPipeline:
         # concurrently — they share the same API quota.  Reflection always
         # runs with try_acquire (non-blocking) so it never blocks the user.
         self._llm_semaphore: asyncio.Semaphore | None = None  # lazy-init in async context
+
+    def _log_episode(self, kind: str, text: str) -> None:
+        """Log to episodic memory via unified facade or direct fallback."""
+        if self._mem is not None:
+            self._mem.log_event(kind, text)
+        elif self._episodic:
+            self._episodic.log(kind, text)
 
     # ── Public API ───────────────────────────────────────────
 
@@ -278,8 +288,7 @@ class BrainPipeline:
         )
 
         # 4. Log episode (episodic memory)
-        if self._episodic:
-            self._episodic.log("command", f"用户说: {user_text}")
+        self._log_episode("command", f"用户说: {user_text}")
 
         # 5. Stream LLM → TTS: start playback, wait for TTS to finish
         self._audio.start_playback()
@@ -314,33 +323,34 @@ class BrainPipeline:
             await asyncio.to_thread(self._audio.wait_speaking_done)
 
             # Log response as episode
-            if self._episodic:
-                self._episodic.log("action", f"回复: {full_response[:100]}")
-                # Defer reflection to avoid 429 rate-limit collision with
-                # the next user query.  A 5-second delay lets the relay
-                # quota window reset.
-                if self._episodic.should_reflect():
+            self._log_episode("action", f"回复: {full_response[:100]}")
+            # Defer reflection to avoid 429 rate-limit collision with
+            # the next user query.  A 5-second delay lets the relay
+            # quota window reset.
+            _should = (
+                self._mem.should_reflect() if self._mem is not None
+                else (self._episodic.should_reflect() if self._episodic else False)
+            )
+            if _should:
 
-                    async def _delayed_reflect() -> None:
-                        await asyncio.sleep(5)
-                        # Re-check after sleep — multiple turns may have fired
-                        # should_reflect() before any task ran, creating duplicates.
-                        if not self._episodic.should_reflect():
-                            return
+                async def _delayed_reflect() -> None:
+                    await asyncio.sleep(5)
+                    if self._mem is not None:
+                        await self._mem.reflect()
+                    elif self._episodic and self._episodic.should_reflect():
                         try:
                             await self._episodic.reflect()
                         except Exception as e:
                             logger.error("[Episodic] Reflection failed: %s", e)
 
-                    t = asyncio.create_task(_delayed_reflect())
-                    self._pending_tasks.add(t)
-                    t.add_done_callback(self._pending_tasks.discard)
+                t = asyncio.create_task(_delayed_reflect())
+                self._pending_tasks.add(t)
+                t.add_done_callback(self._pending_tasks.discard)
 
             return full_response
         except Exception as exc:
             logger.error("LLM pipeline error: %s", exc)
-            if self._episodic:
-                self._episodic.log("error", f"LLM错误: {exc}")
+            self._log_episode("error", f"LLM错误: {exc}")
             self._audio.speak(self._classify_error_message(exc))
             # Store only the exception type — not the full message — to prevent
             # raw stack text from being compressed into long-term memory context.
@@ -419,8 +429,7 @@ class BrainPipeline:
                 self._last_spoken_text = spoken
                 self._conversation.add_user_message(user_text)
                 self._conversation.add_assistant_message(stored)
-                if self._episodic:
-                    self._episodic.log("outcome", f"agent_task完成: {result[:100]}")
+                self._log_episode("outcome", f"agent_task完成: {result[:100]}")
                 await asyncio.to_thread(self._audio.wait_speaking_done)
                 return result
             except Exception as exc:
@@ -431,8 +440,7 @@ class BrainPipeline:
                 self._audio.stop_playback()
 
         self._audio.drain_buffers()
-        if self._episodic:
-            self._episodic.log("action", f"执行技能: {skill_name}")
+        self._log_episode("action", f"执行技能: {skill_name}")
 
         _now = datetime.datetime.now()
         context: dict[str, str] = {

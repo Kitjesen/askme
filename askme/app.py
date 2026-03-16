@@ -25,6 +25,7 @@ from askme.dog_control_client import DogControlClient
 from askme.dog_safety_client import DogSafetyClient
 from askme.brain.episodic_memory import EpisodicMemory
 from askme.brain.intent_router import IntentRouter
+from askme.brain.memory_system import MemorySystem
 from askme.brain.llm_client import LLMClient
 from askme.brain.memory_bridge import MemoryBridge
 from askme.brain.session_memory import SessionMemory
@@ -89,6 +90,13 @@ class AskmeApp:
         )
         self.memory = MemoryBridge()
         self.episodic = EpisodicMemory(llm=self.llm)
+        self.memory_system = MemorySystem(
+            llm=self.llm,
+            conversation=self.conversation,
+            session_memory=self.session_memory,
+            episodic=self.episodic,
+            vector_memory=self.memory,
+        )
         self.vision = VisionBridge()
         self.tools = ToolRegistry()
         _production_mode = bool(self.cfg.get("tools", {}).get("production_mode", False))
@@ -178,6 +186,7 @@ class AskmeApp:
             vision=self.vision,
             session_memory=self.session_memory,
             episodic_memory=self.episodic,
+            memory_system=self.memory_system,
             system_prompt=brain_cfg.get(
                 "system_prompt",
                 "你是一个有用的AI语音助手。用中文简洁口语化回答。",
