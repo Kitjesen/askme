@@ -547,6 +547,23 @@ class TTSEngine:
                 loop.close()
 
     # ------------------------------------------------------------------
+    # Resampling
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resample(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+        """Resample audio via linear interpolation.
+
+        Returns *samples* unchanged when rates match or input is too short.
+        """
+        if source_rate == target_rate or len(samples) <= 1:
+            return samples
+        ratio = target_rate / source_rate
+        new_len = max(1, int(len(samples) * ratio))
+        indices = np.linspace(0, len(samples) - 1, new_len)
+        return np.interp(indices, np.arange(len(samples)), samples).astype(np.float32)
+
+    # ------------------------------------------------------------------
     # Local backend (sherpa-onnx)
     # ------------------------------------------------------------------
 
@@ -562,11 +579,7 @@ class TTSEngine:
         samples = np.array(audio.samples, dtype=np.float32)
 
         # Resample if model rate differs from playback rate
-        if self._local_sample_rate != self._sample_rate and len(samples) > 0:
-            ratio = self._sample_rate / self._local_sample_rate
-            new_len = int(len(samples) * ratio)
-            indices = np.linspace(0, len(samples) - 1, new_len)
-            samples = np.interp(indices, np.arange(len(samples)), samples)
+        samples = self._resample(samples, self._local_sample_rate, self._sample_rate)
 
         if self._is_generation_current(generation) and len(samples) > 0:
             with self._buffer_lock:
@@ -676,11 +689,10 @@ class TTSEngine:
                             continue
                         pcm_bytes = bytes.fromhex(hex_audio)
                         samples = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
-                        if need_resample and len(samples) > 1:
-                            ratio = self._sample_rate / self._minimax_sample_rate
-                            new_len = max(1, int(len(samples) * ratio))
-                            indices = np.linspace(0, len(samples) - 1, new_len)
-                            samples = np.interp(indices, np.arange(len(samples)), samples)
+                        if need_resample:
+                            samples = self._resample(
+                                samples, self._minimax_sample_rate, self._sample_rate,
+                            )
                         if len(samples) > 0:
                             pending.append(samples)
                             pending_len += len(samples)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import re
@@ -403,7 +404,7 @@ class BrainPipeline:
             self._audio.drain_buffers()
             self._audio.start_playback()
             try:
-                _now = __import__("datetime").datetime.now()
+                _now = datetime.datetime.now()
                 _agent_timeout = getattr(self._agent_shell, "_default_timeout", 120.0)
                 result = await self._agent_shell.run_task(
                     user_text,
@@ -433,7 +434,7 @@ class BrainPipeline:
         if self._episodic:
             self._episodic.log("action", f"执行技能: {skill_name}")
 
-        _now = __import__("datetime").datetime.now()
+        _now = datetime.datetime.now()
         context: dict[str, str] = {
             "user_input": user_text,
             "current_time": _now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -486,11 +487,7 @@ class BrainPipeline:
         try:
             # Thinking indicator: if skill execution takes > _THINKING_DELAY,
             # play a tone so the user knows we're working on it.
-            async def _thinking_indicator() -> None:
-                await asyncio.sleep(self._THINKING_DELAY)
-                self._audio.play_thinking()
-
-            thinking_task = asyncio.create_task(_thinking_indicator())
+            thinking_task, _ = self._create_thinking_task()
 
             def _on_tool_call(tool_name: str) -> None:
                 pass  # no filler — let the result speak for itself
@@ -647,6 +644,112 @@ class BrainPipeline:
             return None
         return asyncio.create_task(self._vision.describe_scene())
 
+    def _create_thinking_task(
+        self, include_slow_network: bool = False,
+    ) -> tuple[asyncio.Task[None], asyncio.Task[None] | None]:
+        """Create background tasks for thinking and optional slow-network indicators.
+
+        Returns (thinking_task, slow_network_task).  slow_network_task is None
+        when *include_slow_network* is False.
+        """
+        async def _thinking_indicator() -> None:
+            await asyncio.sleep(self._THINKING_DELAY)
+            self._audio.play_thinking()
+
+        thinking_task = asyncio.create_task(_thinking_indicator())
+
+        slow_network_task: asyncio.Task[None] | None = None
+        if include_slow_network:
+            async def _slow_network_indicator() -> None:
+                await asyncio.sleep(5.0)
+                self._audio.play_thinking()
+
+            slow_network_task = asyncio.create_task(_slow_network_indicator())
+
+        return thinking_task, slow_network_task
+
+    async def _consume_llm_stream(
+        self,
+        stream,  # async iterator of chunks
+        source: str = "voice",
+    ) -> tuple[str, dict[int, dict[str, str]]]:
+        """Consume LLM stream: apply think filter, feed splitter -> TTS, enforce truncation.
+
+        Returns (full_text, tool_calls_acc).
+        """
+        full_response = ""
+        tool_calls_acc: dict[int, dict[str, str]] = {}
+        spoke_any = False
+
+        is_voice = source == "voice"
+        chars_spoken = 0
+        truncated = False
+        char_limit = self._max_response_chars if is_voice else 0
+
+        async for chunk in stream:
+            delta = chunk.choices[0].delta
+
+            # Accumulate tool call fragments
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc.id:
+                        tool_calls_acc[idx]["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            tool_calls_acc[idx]["name"] = tc.function.name
+                        if tc.function.arguments:
+                            tool_calls_acc[idx]["arguments"] += tc.function.arguments
+
+                # Tool calls detected -- drain any sentences already sent to TTS
+                if spoke_any:
+                    self._audio.drain_buffers()
+                    spoke_any = False
+
+            # Text content -- strip <think> blocks, then speak
+            if delta.content:
+                clean = self._think_filter.feed(delta.content)
+                if clean:
+                    full_response += clean
+                    if not truncated:
+                        for sentence in self._splitter.feed(clean):
+                            if char_limit and chars_spoken + len(sentence) > char_limit:
+                                self._audio.speak(sentence)
+                                spoke_any = True
+                                truncated = True
+                                logger.info(
+                                    "Voice truncation at %d chars (limit %d)",
+                                    chars_spoken + len(sentence), char_limit,
+                                )
+                                break
+                            self._audio.speak(sentence)
+                            chars_spoken += len(sentence)
+                            spoke_any = True
+
+        # Flush think filter and splitter tail
+        think_tail = self._think_filter.flush()
+        if think_tail:
+            full_response += think_tail
+            if not truncated:
+                for sentence in self._splitter.feed(think_tail):
+                    if char_limit and chars_spoken + len(sentence) > char_limit:
+                        self._audio.speak(sentence)
+                        spoke_any = True
+                        truncated = True
+                        break
+                    self._audio.speak(sentence)
+                    chars_spoken += len(sentence)
+                    spoke_any = True
+        if not truncated:
+            remainder = self._splitter.flush()
+            if remainder:
+                self._audio.speak(remainder)
+                spoke_any = True
+
+        return full_response, tool_calls_acc
+
     async def _stream_with_tools(
         self, messages: list[dict[str, Any]], system_prompt: str,
         model: str | None = None, source: str = "voice",
@@ -659,116 +762,46 @@ class BrainPipeline:
         )
         tool_names = [td.get("function", {}).get("name") for td in tool_definitions]
         logger.info("LLM tools available (%d): %s", len(tool_definitions), tool_names)
-        full_response = ""
-        tool_calls_acc: dict[int, dict[str, str]] = {}
-        spoke_any = False
         ttft_logged = False
         t_start = _time.perf_counter()
         self._splitter.reset()
         self._think_filter.reset()
 
-        # Voice mode: char budget for TTS output (full text is still captured)
         is_voice = source == "voice"
-        chars_spoken = 0
-        truncated = False
-        char_limit = self._max_response_chars if is_voice else 0  # 0 = unlimited
 
         # Thinking indicator: play a synthesized tone if TTFT > 1.2s.
-        # Uses play_thinking() (direct PCM → aplay) instead of speak("嗯...")
+        # Uses play_thinking() (direct PCM -> aplay) instead of speak("嗯...")
         # to bypass the TTS network, cutting indicator latency from ~2.2s to ~1.25s.
         thinking_task: asyncio.Task[None] | None = None
         slow_network_task: asyncio.Task[None] | None = None
         if is_voice:
-            async def _thinking_indicator() -> None:
-                await asyncio.sleep(self._THINKING_DELAY)
-                self._audio.play_thinking()
-
-            async def _slow_network_indicator() -> None:
-                await asyncio.sleep(5.0)
-                # Use play_thinking (direct PCM, no network) instead of speak()
-                # because the network that triggered this indicator is the same
-                # network that speak() would try to use for TTS synthesis.
-                self._audio.play_thinking()
-
-            thinking_task = asyncio.create_task(_thinking_indicator())
-            slow_network_task = asyncio.create_task(_slow_network_indicator())
+            thinking_task, slow_network_task = self._create_thinking_task(
+                include_slow_network=True,
+            )
 
         try:
-            async for chunk in self._llm.chat_stream(
-                messages, tools=tool_definitions, tool_choice="auto", model=model
-            ):
-                if not ttft_logged:
-                    ttft_logged = True
-                    elapsed = _time.perf_counter() - t_start
-                    logger.info("TTFT: %.2fs", elapsed)
-                    get_tracer().record_span("ttft", elapsed * 1000, model=model or "default")
-                    # Cancel thinking/slow-network indicators once first token arrives
-                    if thinking_task is not None:
-                        thinking_task.cancel()
-                        thinking_task = None
-                    if slow_network_task is not None:
-                        slow_network_task.cancel()
-                        slow_network_task = None
-                delta = chunk.choices[0].delta
+            async def _ttft_stream():
+                """Wrap chat_stream to record TTFT and cancel thinking indicators."""
+                nonlocal ttft_logged, thinking_task, slow_network_task
+                async for chunk in self._llm.chat_stream(
+                    messages, tools=tool_definitions, tool_choice="auto", model=model
+                ):
+                    if not ttft_logged:
+                        ttft_logged = True
+                        elapsed = _time.perf_counter() - t_start
+                        logger.info("TTFT: %.2fs", elapsed)
+                        get_tracer().record_span("ttft", elapsed * 1000, model=model or "default")
+                        if thinking_task is not None:
+                            thinking_task.cancel()
+                            thinking_task = None
+                        if slow_network_task is not None:
+                            slow_network_task.cancel()
+                            slow_network_task = None
+                    yield chunk
 
-                # Accumulate tool call fragments
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        idx = tc.index
-                        if idx not in tool_calls_acc:
-                            tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
-                        if tc.id:
-                            tool_calls_acc[idx]["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                tool_calls_acc[idx]["name"] = tc.function.name
-                            if tc.function.arguments:
-                                tool_calls_acc[idx]["arguments"] += tc.function.arguments
-
-                    # Tool calls detected — drain any sentences already sent to TTS
-                    if spoke_any:
-                        self._audio.drain_buffers()
-                        spoke_any = False
-
-                # Text content — strip <think> blocks, then speak
-                if delta.content:
-                    clean = self._think_filter.feed(delta.content)
-                    if clean:
-                        full_response += clean
-                        if not truncated:
-                            for sentence in self._splitter.feed(clean):
-                                if char_limit and chars_spoken + len(sentence) > char_limit:
-                                    # Over budget — speak this last sentence then stop TTS
-                                    self._audio.speak(sentence)
-                                    spoke_any = True
-                                    truncated = True
-                                    logger.info(
-                                        "Voice truncation at %d chars (limit %d)",
-                                        chars_spoken + len(sentence), char_limit,
-                                    )
-                                    break
-                                self._audio.speak(sentence)
-                                chars_spoken += len(sentence)
-                                spoke_any = True
-
-            think_tail = self._think_filter.flush()
-            if think_tail:
-                full_response += think_tail
-                if not truncated:
-                    for sentence in self._splitter.feed(think_tail):
-                        if char_limit and chars_spoken + len(sentence) > char_limit:
-                            self._audio.speak(sentence)
-                            spoke_any = True
-                            truncated = True
-                            break
-                        self._audio.speak(sentence)
-                        chars_spoken += len(sentence)
-                        spoke_any = True
-            if not truncated:
-                remainder = self._splitter.flush()
-                if remainder:
-                    self._audio.speak(remainder)
-                    spoke_any = True
+            full_response, tool_calls_acc = await self._consume_llm_stream(
+                _ttft_stream(), source=source,
+            )
         finally:
             # Ensure thinking/network indicators are cancelled even on error
             if thinking_task is not None:
@@ -778,8 +811,7 @@ class BrainPipeline:
 
         # If tool calls detected, drain leftover TTS and do follow-up
         if tool_calls_acc:
-            if spoke_any:
-                self._audio.drain_buffers()
+            self._audio.drain_buffers()
             full_response = await self._execute_tools(
                 tool_calls_acc, system_prompt, model=model, source=source,
             )
@@ -852,50 +884,11 @@ class BrainPipeline:
         source: str = "voice",
     ) -> str:
         """Stream a follow-up LLM response and pipe to TTS."""
-        full_response = ""
         self._splitter.reset()
         self._think_filter.reset()
-
-        is_voice = source == "voice"
-        chars_spoken = 0
-        truncated = False
-        char_limit = self._max_response_chars if is_voice else 0
-
-        async for chunk in self._llm.chat_stream(messages, model=model):
-            delta = chunk.choices[0].delta
-            if delta.content:
-                clean = self._think_filter.feed(delta.content)
-                if clean:
-                    full_response += clean
-                    if not truncated:
-                        for sentence in self._splitter.feed(clean):
-                            if char_limit and chars_spoken + len(sentence) > char_limit:
-                                self._audio.speak(sentence)
-                                truncated = True
-                                logger.info(
-                                    "Voice truncation (follow-up) at %d chars",
-                                    chars_spoken + len(sentence),
-                                )
-                                break
-                            self._audio.speak(sentence)
-                            chars_spoken += len(sentence)
-
-        think_tail = self._think_filter.flush()
-        if think_tail:
-            full_response += think_tail
-            if not truncated:
-                for sentence in self._splitter.feed(think_tail):
-                    if char_limit and chars_spoken + len(sentence) > char_limit:
-                        self._audio.speak(sentence)
-                        truncated = True
-                        break
-                    self._audio.speak(sentence)
-                    chars_spoken += len(sentence)
-        if not truncated:
-            remainder = self._splitter.flush()
-            if remainder:
-                self._audio.speak(remainder)
-
+        full_response, _ = await self._consume_llm_stream(
+            self._llm.chat_stream(messages, model=model), source=source,
+        )
         return full_response
 
     def extract_semantic_target(self, user_text: str) -> str:
@@ -979,7 +972,6 @@ class BrainPipeline:
         """
         if not (self._dog_safety and self._dog_safety.is_configured()):
             return ""
-        import datetime
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         estop = self._dog_safety.is_estop_active()
         estop_str = "⚠️ 已激活 — 禁止运动指令" if estop else "正常"

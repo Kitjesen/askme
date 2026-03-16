@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Askme Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#0d1117;color:#c9d1d9;padding:16px}
+h1{font-size:18px;color:#58a6ff;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px}
+.card h3{font-size:13px;color:#8b949e;margin-bottom:8px}
+.ok{color:#3fb950}.err{color:#f85149}.warn{color:#d29922}
+.stat{font-size:20px;font-weight:bold}
+#chat-box{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;height:320px;overflow-y:auto;margin-bottom:8px}
+.msg{margin:6px 0;padding:6px 10px;border-radius:6px;max-width:85%;word-wrap:break-word;font-size:14px}
+.user{background:#1f6feb;margin-left:auto;text-align:right}
+.bot{background:#21262d}
+.sys{color:#8b949e;font-size:12px;text-align:center}
+#input-row{display:flex;gap:8px}
+#chat-input{flex:1;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px}
+#chat-input:focus{outline:none;border-color:#58a6ff}
+button{background:#238636;color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:14px}
+button:hover{background:#2ea043}
+button:disabled{opacity:0.5}
+.traces{font-family:monospace;font-size:12px;color:#8b949e}
+.traces div{padding:2px 0}
+</style>
+</head>
+<body>
+<h1>Askme Dashboard</h1>
+<div class="grid">
+ <div class="card"><h3>System</h3><div id="sys-status">loading...</div></div>
+ <div class="card"><h3>Voice Pipeline</h3><div id="voice-status">loading...</div></div>
+ <div class="card"><h3>Latency</h3><div id="latency">loading...</div></div>
+ <div class="card"><h3>Recent Traces</h3><div id="traces" class="traces">loading...</div></div>
+</div>
+<div style="display:flex;gap:8px;margin-bottom:4px">
+ <span style="font-size:13px;color:#8b949e">对话记录（语音+文字）</span>
+ <span id="msg-count" style="font-size:12px;color:#58a6ff"></span>
+</div>
+<div id="chat-box"></div>
+<div id="input-row">
+ <input id="chat-input" placeholder="输入消息..." autocomplete="off">
+ <button id="send-btn" onclick="sendChat()">发送</button>
+</div>
+<script>
+const BASE = location.origin;
+const chatBox = document.getElementById('chat-box');
+const input = document.getElementById('chat-input');
+const btn = document.getElementById('send-btn');
+
+function addMsg(text, cls) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  chatBox.appendChild(d);
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+async function sendChat() {
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  addMsg(text, 'user');
+  btn.disabled = true;
+  try {
+    const t0 = Date.now();
+    const r = await fetch(BASE + '/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text})
+    });
+    const d = await r.json();
+    const ms = Date.now() - t0;
+    if (d.reply) addMsg(d.reply, 'bot');
+    else if (d.error) addMsg('Error: ' + d.error, 'sys');
+    addMsg(ms + 'ms', 'sys');
+  } catch(e) { addMsg('Network error: ' + e.message, 'sys'); }
+  btn.disabled = false;
+  input.focus();
+  poll();
+}
+
+input.addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+
+async function poll() {
+  try {
+    const [h, t] = await Promise.all([
+      fetch(BASE + '/health').then(r => r.json()),
+      fetch(BASE + '/trace').then(r => r.json())
+    ]);
+    const v = h.voice_pipeline_status || {};
+    document.getElementById('sys-status').innerHTML =
+      `<div class="stat ${h.status==='ok'?'ok':'err'}">${h.status.toUpperCase()}</div>
+       <div>uptime: ${Math.round(h.uptime_seconds)}s | turns: ${h.total_conversations}</div>
+       <div>model: ${h.model_name}</div>`;
+    document.getElementById('voice-status').innerHTML =
+      `<div>pipeline: <span class="${v.pipeline_ok?'ok':'err'}">${v.pipeline_ok?'OK':'FAIL'}</span></div>
+       <div>state: ${v.agent_state} | tts: ${v.tts_backend}</div>
+       <div>ASR: ${v.asr_available?'OK':'NO'} | VAD: ${v.vad_available?'OK':'NO'} | muted: ${v.muted}</div>`;
+    const s = t.summary || {};
+    document.getElementById('latency').innerHTML = s.count > 0
+      ? `<div class="stat">${s.avg_total_ms||0}ms avg</div>
+         <div>p50: ${s.p50_total_ms||0}ms | p95: ${s.p95_total_ms||0}ms</div>
+         <div>${JSON.stringify(s.stage_avg_ms||{})}</div>`
+      : '<div class="stat">no data</div>';
+    const traces = (t.recent || []).slice(0, 5);
+    document.getElementById('traces').innerHTML = traces.length
+      ? traces.map(tr => `<div>${tr.summary}</div>`).join('')
+      : '<div>no traces yet</div>';
+  } catch(e) { console.error('poll error', e); }
+}
+
+let lastMsgCount = 0;
+async function pollLive() {
+  try {
+    const r = await fetch(BASE + '/api/live');
+    const d = await r.json();
+    const msgs = d.messages || [];
+    document.getElementById('msg-count').textContent = msgs.length + ' messages';
+    if (msgs.length !== lastMsgCount) {
+      lastMsgCount = msgs.length;
+      chatBox.innerHTML = '';
+      for (const m of msgs) {
+        if (m.role === 'user') addMsg(m.content, 'user');
+        else if (m.role === 'assistant') addMsg(m.content, 'bot');
+      }
+    }
+  } catch(e) { console.error('live poll error', e); }
+}
+
+poll();
+pollLive();
+setInterval(poll, 5000);
+setInterval(pollLive, 2000);
+input.focus();
+</script>
+</body>
+</html>
