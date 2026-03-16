@@ -312,3 +312,68 @@ class TestCheckEndpoint:
         result = mgr.check_endpoint()
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Session guard tests
+# ---------------------------------------------------------------------------
+
+
+class TestSessionGuards:
+    """Verify methods are safe to call before start_session."""
+
+    def test_feed_audio_before_start_session_is_noop(self):
+        mgr = _make_manager()
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+        assert mgr._recognition_active is False
+        # Should not crash, should silently return
+        mgr.feed_audio(
+            np.zeros(160, dtype=np.float32),
+            np.zeros(160, dtype=np.int16),
+            16000,
+        )
+        mocks["stream"].accept_waveform.assert_not_called()
+
+    def test_finish_before_start_returns_none(self):
+        mgr = _make_manager()
+        assert mgr._recognition_active is False
+        result = mgr.finish_and_get_result()
+        assert result is None
+
+    def test_force_endpoint_before_start_returns_none(self):
+        mgr = _make_manager()
+        assert mgr._recognition_active is False
+        result = mgr.force_endpoint()
+        assert result is None
+
+    def test_check_endpoint_before_start_returns_none(self):
+        mgr = _make_manager()
+        assert mgr._recognition_active is False
+        result = mgr.check_endpoint()
+        assert result is None
+
+    def test_feed_audio_feeds_local_and_cloud(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+        mgr.start_session()
+
+        f32 = np.zeros(160, dtype=np.float32)
+        i16 = np.zeros(160, dtype=np.int16)
+        mgr.feed_audio(f32, i16, 16000)
+
+        mocks["stream"].accept_waveform.assert_called_once_with(16000, f32)
+        mocks["cloud"].feed.assert_called_once()
+
+    def test_cloud_start_failure_falls_back(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+        # Cloud reports available but start_session fails
+        mocks["cloud"].start_session.return_value = False
+        mgr.start_session()
+        assert mgr._cloud_active is False
+
+        # Feed audio — should only go to local, not cloud
+        f32 = np.zeros(160, dtype=np.float32)
+        i16 = np.zeros(160, dtype=np.int16)
+        mgr.feed_audio(f32, i16, 16000)
+        mocks["cloud"].feed.assert_not_called()
