@@ -659,6 +659,7 @@ class TTSEngine:
         _MIN_SAMPLES = 2400
         pending: list[np.ndarray] = []
         pending_len = 0
+        _first_flush = True  # trim leading silence from MiniMax's first chunk
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
@@ -699,6 +700,16 @@ class TTSEngine:
                             # Flush to playback buffer once we have enough samples
                             if pending_len >= _MIN_SAMPLES:
                                 chunk = np.concatenate(pending) if len(pending) > 1 else pending[0]
+                                # Trim leading silence from first chunk —
+                                # MiniMax TTS prepends ~120ms of zeros that
+                                # cause the first word to be inaudible.
+                                if _first_flush:
+                                    _first_flush = False
+                                    nonzero = np.where(np.abs(chunk) > 0.002)[0]
+                                    if len(nonzero) > 0 and nonzero[0] > 100:
+                                        trim = max(0, nonzero[0] - 50)  # keep 50 samples before speech
+                                        chunk = chunk[trim:]
+                                        logger.debug("TTS: trimmed %d leading silence samples", trim)
                                 with self._buffer_lock:
                                     self.tts_buffer.append(chunk)
                                 pending.clear()
@@ -759,19 +770,13 @@ class TTSEngine:
                 ]
                 if self._output_device is not None:
                     _aplay_cmd += ["-D", str(self._output_device)]
-                # Pre-roll: 80 Hz tone at -24 dBFS for 400 ms.
-                # USB DAC pop-suppression needs a signal in the detection
-                # passband (>50 Hz) before it unmutes.  80 Hz is inaudible
-                # through small robot speakers (cutoff ~120 Hz).
-                _n = int(self._sample_rate * 0.40)
-                _t = np.arange(_n, dtype=np.float32) / self._sample_rate
-                _pr = (np.sin(2 * np.pi * 80.0 * _t) * 2000.0).astype(np.int16)
-                _fade = int(self._sample_rate * 0.03)
-                _pr[-_fade:] = (
-                    _pr[-_fade:].astype(np.float32)
-                    * np.linspace(1.0, 0.0, _fade, dtype=np.float32)
-                ).astype(np.int16)
-                _preroll_bytes = _pr.tobytes()
+                # Pre-roll: 1.5s low-volume white noise to wake USB DAC/amplifier.
+                # The hardware has a ~1.5s soft-start that eats audio.
+                # Low noise (~-40 dBFS) is inaudible but keeps the amp active.
+                # Verified on sunrise MCP01: without this, first 3 characters lost.
+                _preroll_n = int(self._sample_rate * 1.5)
+                _rng = np.random.RandomState(42)  # deterministic for consistency
+                _preroll_bytes = (_rng.randn(_preroll_n) * 200).astype(np.int16).tobytes()
 
             # Persistent aplay process state — one process per utterance,
             # all chunks piped into its stdin without restart.
@@ -780,6 +785,25 @@ class TTSEngine:
             _empty_polls = 0
             _MAX_EMPTY_POLLS = 250  # 250 × 20 ms = 5 s — keeps aplay warm between conversational turns, avoids re-paying 400ms pre-roll
             _router_ctx = None  # saved output_session() context manager
+
+            # Pre-start aplay immediately so it's warm when first audio arrives.
+            # This eliminates the "first words cut off" problem caused by aplay
+            # startup latency overlapping with the first audio chunk.
+            if _aplay_cmd is not None:
+                try:
+                    if self._audio_router is not None:
+                        _router_ctx = self._audio_router.output_session()
+                        _router_ctx.__enter__()
+                    _proc = subprocess.Popen(_aplay_cmd, stdin=subprocess.PIPE)
+                    with self._aplay_lock:
+                        self._aplay_proc = _proc
+                    # Feed pre-roll (silence) to warm up the DAC
+                    if _preroll_bytes:
+                        _proc.stdin.write(_preroll_bytes)  # type: ignore[union-attr]
+                    _need_preroll = False
+                    logger.info("aplay: pre-started for zero-latency first chunk")
+                except Exception as _e:
+                    logger.warning("aplay: pre-start failed: %s", _e)
 
             def _close_aplay() -> None:
                 """Cleanly close the persistent aplay process."""
