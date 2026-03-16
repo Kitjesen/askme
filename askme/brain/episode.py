@@ -151,6 +151,20 @@ class Episode:
         return episode
 
 
+def decay_importance(importance: float, age_hours: float, half_life_hours: float = 72.0) -> float:
+    """Apply Ebbinghaus forgetting curve to importance score.
+
+    importance decays exponentially: effective = importance * 2^(-age/half_life)
+    Default half-life: 72 hours (3 days). After 3 days, importance halves.
+    Reinforced memories (accessed again) reset their timestamp.
+
+    Reference: Ebbinghaus (1885); A-MEM (Xu et al., NeurIPS 2025)
+    """
+    if age_hours <= 0:
+        return importance
+    return importance * math.pow(2, -age_hours / half_life_hours)
+
+
 def score_importance(event_type: str, description: str, context: dict[str, Any] | None = None) -> float:
     """Rule-based importance scoring for a robot episode.
 
