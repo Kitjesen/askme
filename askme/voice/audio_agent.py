@@ -14,66 +14,29 @@ import sounddevice as sd
 
 from askme.ota_bridge import OTABridgeMetrics, get_ota_runtime_metrics
 
-from .asr import ASREngine
-from .asr_manager import ASRManager
-from .audio_filter import AudioFilter
+from .asr_manager import (
+    ASRManager,
+    _CONFIRMATION_WORDS,
+    _MIN_VALID_TEXT_LEN,
+    _NOISE_UTTERANCES,
+    _SINGLE_CHAR_COMMANDS,
+)
 from .audio_processor import AudioProcessor
 from .audio_router import AudioRouter
 from .kws import KWSEngine
 from .mic_input import MicInput
-from .noise_reduction import SpectralSubtractor
-from .punctuation import PunctuationRestorer
 from .tts import TTSEngine
-from .vad import VADEngine
-from .vad_controller import VADController, VADEvent
+from .vad_controller import (
+    VADController,
+    VADEvent,
+    _BARGE_IN_HOLD_S,
+    _MAX_SPEECH_DURATION,
+)
 
 logger = logging.getLogger(__name__)
 
 # Default ASR timeout (overridden by config voice.asr.asr_timeout)
 _DEFAULT_ASR_TIMEOUT = 10.0
-
-# Number of audio chunks to buffer before VAD triggers (pre-roll).
-# Each chunk is ~100ms, so 5 chunks = ~500ms lookback.
-_PRE_ROLL_CHUNKS = 5
-
-# Maximum continuous speech duration before forcing an ASR endpoint.
-# Prevents VAD deadlock from persistent background noise.
-_MAX_SPEECH_DURATION = 30.0
-
-# Minimum continuous speech duration (seconds) required to confirm a barge-in
-# during TTS playback.  Shorter bursts (coughs, noise) are ignored and TTS
-# continues.  Only applies when TTS is actively playing; when idle the first
-# VAD frame triggers immediately as before.
-_BARGE_IN_HOLD_S = 0.15
-
-# ASR results that are clearly noise or feedback sounds, not commands.
-# When matched, silently discard and re-listen (no TTS response).
-_NOISE_UTTERANCES: frozenset[str] = frozenset([
-    "嗯", "哦", "啊", "呢", "哈", "噢", "哇", "呀", "嗨",
-    "嗯嗯", "哦哦", "啊啊", "嗯？", "哦？", "啊？",
-    "的", "了", "吧", "嘛", "那", "这", "就",
-    "那个", "这个", "就是", "然后", "所以", "但是",
-])
-
-# Words that are normally noise BUT become valid when the system is
-# awaiting user confirmation (e.g. "要执行巡检吗？" → "好的").
-# These are only passed through when awaiting_confirmation is True.
-_CONFIRMATION_WORDS: frozenset[str] = frozenset([
-    "对", "好", "行", "是", "不", "没", "有",
-    "对对", "好好", "是的", "好的", "没有", "不是",
-    "确认", "取消", "可以", "不行", "算了", "执行",
-    "对的", "没错", "好吧", "不要", "别", "拒绝",
-    "同意", "批准", "继续", "放弃", "ok", "yes", "no",
-])
-
-# Minimum text length (in characters) to consider as valid speech.
-# Shorter results are silently discarded unless they match known commands.
-_MIN_VALID_TEXT_LEN = 2
-
-# Single-char words that ARE valid commands (bypass length filter).
-_SINGLE_CHAR_COMMANDS: frozenset[str] = frozenset([
-    "停", "走", "站", "来", "去", "开", "关", "起", "坐", "退",
-])
 
 
 class AgentState(Enum):
@@ -122,8 +85,6 @@ class AudioAgent:
         *,
         metrics: OTABridgeMetrics | None = None,
         audio_router: AudioRouter | None = None,
-        noise_reduction: SpectralSubtractor | None = None,
-        audio_filter: AudioFilter | None = None,
     ) -> None:
         voice_cfg = config.get("voice", {})
         self.voice_mode = voice_mode
@@ -174,11 +135,12 @@ class AudioAgent:
         self._asr_mgr = ASRManager(voice_cfg)
 
         if voice_mode:
-            self.asr = ASREngine(voice_cfg.get("asr", {}))
-            self.vad = VADEngine(voice_cfg.get("vad", {}))
+            # Share engines from modules — avoid constructing duplicates
+            self.asr = self._asr_mgr._asr
+            self.vad = self._vad_ctrl._vad
+            self.asr_stream = self._asr_mgr._stream
+            self.punct = self._asr_mgr._punct
             self.kws = KWSEngine(voice_cfg.get("kws", {}))
-            self.punct = PunctuationRestorer(voice_cfg.get("punctuation", {}))
-            self.asr_stream = self.asr.create_stream()
 
             if self.kws.available:
                 self.kws_stream = self.kws.create_stream()
@@ -189,7 +151,7 @@ class AudioAgent:
             self.asr = None  # type: ignore[assignment]
             self.vad = None  # type: ignore[assignment]
             self.kws = None  # type: ignore[assignment]
-            self.punct = PunctuationRestorer({})
+            self.punct = self._asr_mgr._punct
             self.asr_stream = None
             self.kws_stream = None
             self.woken_up = True
@@ -453,7 +415,7 @@ class AudioAgent:
                     ep_result = asr.check_endpoint()
                     if ep_result:
                         # Apply noise filter from ASRManager
-                        is_noise = self._asr_mgr._filter_noise(
+                        is_noise = self._asr_mgr.is_noise(
                             ep_result.text, self.awaiting_confirmation
                         )
                         if not is_noise:
@@ -485,36 +447,6 @@ class AudioAgent:
     # ------------------------------------------------------------------
     # Wake word detection
     # ------------------------------------------------------------------
-
-    def _wait_for_wake_word(self, mic: Any, sample_rate: int, samples_per_read: int) -> bool:
-        """Block until wake word is detected via KWS (legacy API).
-
-        Returns True when wake word is detected, False if stop_event is set.
-        """
-        logger.info("Waiting for wake word...")
-        while not self.stop_event.is_set():
-            samples, _ = mic.read(samples_per_read)
-            samples = samples.reshape(-1)
-
-            try:
-                self.kws_stream.accept_waveform(sample_rate, samples)
-
-                while self.kws.spotter.is_ready(self.kws_stream):
-                    self.kws.spotter.decode_stream(self.kws_stream)
-
-                result = self.kws.spotter.get_result(self.kws_stream)
-            except Exception as e:
-                logger.error("KWS error: %s", e)
-                return False
-
-            if result:
-                logger.info("Wake word detected: %s", result.strip())
-                self.woken_up = True
-                self.kws_stream = self.kws.create_stream()
-                self._refresh_voice_metrics()
-                return True
-
-        return False
 
     def _wait_for_wake_word_mic(self, mic_ctx: MicInput) -> bool:
         """Block until wake word is detected via KWS (MicInput API).

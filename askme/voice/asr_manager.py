@@ -135,7 +135,10 @@ class ASRManager:
         # Feed cloud ASR
         if self._cloud_active:
             pcm_bytes = samples_int16.tobytes()
-            self._cloud.feed(pcm_bytes)
+            try:
+                self._cloud.feed(pcm_bytes)
+            except Exception as exc:
+                logger.warning("Cloud ASR feed error: %s", exc)
 
     def check_endpoint(self) -> ASRResult | None:
         """Check if local ASR has detected an endpoint with text.
@@ -179,7 +182,11 @@ class ASRManager:
         # Finish cloud session
         if self._cloud_active:
             self._cloud_active = False
-            cloud_text = self._cloud.finish_session(timeout=3.0).strip()
+            try:
+                cloud_text = self._cloud.finish_session(timeout=3.0).strip()
+            except Exception as exc:
+                logger.warning("Cloud ASR finish failed, using local: %s", exc)
+                cloud_text = ""
 
         # Get local ASR result
         while self._asr.is_ready(self._stream):
@@ -248,6 +255,17 @@ class ASRManager:
         self._start_time = 0.0
         self._asr.reset(self._stream)
         self._stream = self._asr.create_stream()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def is_noise(self, text: str, awaiting_confirmation: bool = False) -> bool:
+        """Check if *text* is noise/feedback that should be discarded.
+
+        Public wrapper around :meth:`_filter_noise`.
+        """
+        return self._filter_noise(text, awaiting_confirmation)
 
     # ------------------------------------------------------------------
     # Internal helpers

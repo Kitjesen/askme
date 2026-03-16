@@ -9,12 +9,19 @@ Pure state machine -- no audio device access, no ASR, no TTS.
 
 from __future__ import annotations
 
+import logging
 import time
 from enum import Enum
 
 import numpy as np
 
 from .vad import VADEngine
+
+logger = logging.getLogger(__name__)
+
+# Default values exposed for backward-compat imports (e.g. tests).
+_BARGE_IN_HOLD_S: float = 0.15
+_MAX_SPEECH_DURATION: float = 30.0
 
 
 class VADEvent(Enum):
@@ -123,6 +130,7 @@ class VADController:
                         self._speech_active = True
                         self._speech_start_time = self._barge_in_start
                         self._barge_in_pending = False
+                        logger.debug("VAD: BARGE_IN_CONFIRMED (hold=%.3fs)", now - self._barge_in_start)
                         return VADEvent.BARGE_IN_CONFIRMED
                     # Still within hold window -- keep accumulating.
                     # Return SILENCE so caller knows no transition yet.
@@ -131,6 +139,7 @@ class VADController:
                 # (d) No TTS -- immediate activation
                 self._speech_active = True
                 self._speech_start_time = now
+                logger.debug("VAD: SPEECH_START (peak=%d)", peak)
                 return VADEvent.SPEECH_START
 
             # (e) Already speaking
@@ -138,6 +147,7 @@ class VADController:
             if (now - self._speech_start_time) > self._max_speech_duration:
                 self._speech_active = False
                 self._speech_start_time = 0.0
+                logger.debug("VAD: MAX_DURATION_EXCEEDED (%.1fs)", self._max_speech_duration)
                 return VADEvent.MAX_DURATION_EXCEEDED
 
             return VADEvent.SPEECH_CONTINUE
@@ -154,6 +164,7 @@ class VADController:
             if self._speech_active:
                 self._speech_active = False
                 self._speech_start_time = 0.0
+                logger.debug("VAD: SPEECH_END")
                 return VADEvent.SPEECH_END
 
             # (c) Plain silence

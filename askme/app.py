@@ -56,8 +56,6 @@ from askme.tools.tool_registry import ToolRegistry
 from askme.tools.voice_tools import register_voice_tools
 from askme.voice.address_detector import AddressDetector
 from askme.voice.audio_agent import AudioAgent
-from askme.voice.audio_filter import AudioFilter
-from askme.voice.noise_reduction import SpectralSubtractor
 from askme.voice.runtime_bridge import VoiceRuntimeBridge
 from askme.voice.stream_splitter import StreamSplitter
 
@@ -133,22 +131,12 @@ class AskmeApp:
         from askme.voice.audio_router import AudioRouter
         self.audio_router: AudioRouter | None = AudioRouter() if voice_mode else None
 
-        # Audio input filter (DC removal + high-pass, removes motor hum)
-        _af_cfg = self.cfg.get("voice", {}).get("audio_filter", {})
-        self._audio_filter = AudioFilter(_af_cfg)
-
-        # Noise reduction (spectral subtraction, optional)
-        _nr_cfg = self.cfg.get("voice", {}).get("noise_reduction", {})
-        self._noise_reduction = SpectralSubtractor(_nr_cfg)
-
         # Audio / voice
         self.audio = AudioAgent(
             self.cfg,
             voice_mode=voice_mode,
             metrics=self.ota_metrics,
             audio_router=self.audio_router,
-            noise_reduction=self._noise_reduction if self._noise_reduction.enabled else None,
-            audio_filter=self._audio_filter if self._audio_filter.enabled else None,
         )
         register_voice_tools(self.tools, self.audio)
         self.tools.register(SpeakProgressTool(self.audio))
@@ -321,10 +309,14 @@ class AskmeApp:
             self._pipeline._conversation.add_assistant_message(full)
             self._pipeline._last_spoken_text = full
 
-            # Fire-and-forget: speak on robot speaker (non-blocking)
+            # Fire-and-forget: speak on robot speaker, then stop playback
             if full:
-                self.audio.speak(full)
-                self.audio.start_playback()
+                async def _speak_and_stop():
+                    self.audio.speak(full)
+                    self.audio.start_playback()
+                    await asyncio.to_thread(self.audio.wait_speaking_done)
+                    self.audio.stop_playback()
+                asyncio.create_task(_speak_and_stop())
             return full
 
         self.health_server.set_chat_handler(_chat_handler)

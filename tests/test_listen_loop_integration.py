@@ -10,7 +10,7 @@ import threading
 import time
 from contextlib import contextmanager
 from typing import Any, Generator
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -37,10 +37,7 @@ def _make_agent() -> AudioAgent:
     so no real models or devices are loaded.
     """
     patches = {
-        "asr_engine": patch("askme.voice.audio_agent.ASREngine"),
-        "vad_engine": patch("askme.voice.audio_agent.VADEngine"),
         "kws_engine": patch("askme.voice.audio_agent.KWSEngine"),
-        "punct": patch("askme.voice.audio_agent.PunctuationRestorer"),
         "tts_engine": patch("askme.voice.audio_agent.TTSEngine"),
         "mic_cls": patch("askme.voice.audio_agent.MicInput"),
         "audio_proc_cls": patch("askme.voice.audio_agent.AudioProcessor"),
@@ -55,10 +52,6 @@ def _make_agent() -> AudioAgent:
     mock_kws_inst = started["kws_engine"].return_value
     mock_kws_inst.available = False
 
-    # ASR engine mock (voice_mode=True path)
-    mock_asr_inst = started["asr_engine"].return_value
-    mock_asr_inst.create_stream.return_value = MagicMock()
-
     # TTS mock
     mock_tts = started["tts_engine"].return_value
     mock_tts._is_playing = False
@@ -68,10 +61,6 @@ def _make_agent() -> AudioAgent:
     mock_tts.backend = "mock"
     mock_tts.volume = 1.0
     mock_tts.speed = 1.0
-
-    # Punctuation mock
-    mock_punct = started["punct"].return_value
-    type(mock_punct).available = PropertyMock(return_value=False)
 
     # Metrics mock
     mock_metrics = MagicMock()
@@ -437,8 +426,8 @@ class TestListenLoopIntegration:
                 return None
 
             asr.check_endpoint.side_effect = check_ep_side_effect
-            # _filter_noise returns False for valid text
-            asr._filter_noise.return_value = False
+            # is_noise returns False for valid text
+            asr.is_noise.return_value = False
 
             result = agent.listen_loop()
 
