@@ -97,6 +97,35 @@ class AskmeApp:
             episodic=self.episodic,
             vector_memory=self.memory,
         )
+        # ── qp_memory (shared spatial/procedural/markdown memory) ────────
+        self.qp_memory = None
+        try:
+            _shared_src = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "..", "..", "shared", "python", "src",
+            )
+            _shared_src = os.path.normpath(_shared_src)
+            if _shared_src not in sys.path:
+                sys.path.insert(0, _shared_src)
+            from qp_memory import Memory as QpMemory
+
+            _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            self.qp_memory = QpMemory(
+                data_dir=os.path.join(_project_root, "data", "qp_memory"),
+                site_id="default",
+                robot_id="thunder_01",
+            )
+            # Sync LingTu map if available
+            _topo_dir = os.path.join(_project_root, "maps", "semantic")
+            if os.path.isdir(_topo_dir):
+                n = self.qp_memory.sync_map(_topo_dir)
+                logger.info("qp_memory: synced %d locations from LingTu map", n)
+            logger.info("qp_memory initialized (data_dir=%s)", os.path.join(_project_root, "data", "qp_memory"))
+        except ImportError:
+            logger.info("qp_memory not available (shared package not installed)")
+        except Exception as _e:
+            logger.warning("qp_memory init failed: %s", _e)
+
         self.vision = VisionBridge()
         self.tools = ToolRegistry()
         _production_mode = bool(self.cfg.get("tools", {}).get("production_mode", False))
@@ -199,6 +228,7 @@ class AskmeApp:
                 "normal",
             ),
             max_response_chars=int(brain_cfg.get("max_response_chars", 0)),
+            qp_memory=self.qp_memory,
         )
 
         # ── Skill dispatcher (unified orchestration) ────────────
@@ -318,6 +348,16 @@ class AskmeApp:
             self._pipeline._conversation.add_assistant_message(full)
             self._pipeline._last_spoken_text = full
 
+            # Record to qp_memory (same path as voice pipeline)
+            if self.qp_memory is not None:
+                try:
+                    self.qp_memory.record_observation("webchat", text)
+                    self._pipeline._qp_turn_count += 1
+                    if self._pipeline._qp_turn_count % 10 == 0:
+                        self.qp_memory.save()
+                except Exception:
+                    pass
+
             # Fire-and-forget: speak on robot speaker, then stop playback
             if full:
                 async def _speak_and_stop():
@@ -425,6 +465,12 @@ class AskmeApp:
         self.audio.shutdown()
         if self.arm_controller:
             self.arm_controller.close()
+        if self.qp_memory is not None:
+            try:
+                self.qp_memory.save()
+                logger.info("qp_memory saved on shutdown")
+            except Exception as _e:
+                logger.warning("qp_memory save failed on shutdown: %s", _e)
 
     # ── Private ──────────────────────────────────────────────
 

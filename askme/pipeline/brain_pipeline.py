@@ -131,6 +131,7 @@ class BrainPipeline:
         max_response_chars: int = 0,
         agent_shell: ThunderAgentShell | None = None,
         memory_system: MemorySystem | None = None,
+        qp_memory: Any = None,
     ) -> None:
         self._llm = llm
         self._conversation = conversation
@@ -157,6 +158,8 @@ class BrainPipeline:
             else self._DEFAULT_MAX_RESPONSE_CHARS
         )
         self._agent_shell = agent_shell
+        self._qp_memory = qp_memory  # qp_memory.Memory instance (optional)
+        self._qp_turn_count = 0  # counter for periodic qp_memory saves
         # Last spoken text — for "repeat last" voice command
         self._last_spoken_text: str = ""
         self._think_filter = _ThinkFilter()
@@ -324,6 +327,17 @@ class BrainPipeline:
 
             # Log response as episode
             self._log_episode("action", f"回复: {full_response[:100]}")
+
+            # qp_memory: record voice command as observation + periodic save
+            if self._qp_memory is not None:
+                try:
+                    self._qp_memory.record_observation("voice", user_text)
+                    self._qp_turn_count += 1
+                    if self._qp_turn_count % 10 == 0:
+                        self._qp_memory.save()
+                except Exception as _e:
+                    logger.debug("qp_memory record failed: %s", _e)
+
             # Defer reflection to avoid 429 rate-limit collision with
             # the next user query.  A 5-second delay lets the relay
             # quota window reset.
@@ -1012,6 +1026,15 @@ class BrainPipeline:
             session_ctx = self._session_memory.get_recent_summaries()
             if session_ctx:
                 prompt += f"\n{session_ctx}"
+
+        # qp_memory: spatial/procedural/markdown context (optional, additive)
+        if self._qp_memory is not None:
+            try:
+                qp_ctx = self._qp_memory.get_context(query=user_text)
+                if qp_ctx:
+                    prompt += f"\n[站点记忆]\n{qp_ctx}"
+            except Exception as _e:
+                logger.debug("qp_memory context retrieval failed: %s", _e)
 
         if context_str:
             prompt += f"\nRelevant memory:\n{context_str}"

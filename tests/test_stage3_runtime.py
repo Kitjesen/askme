@@ -122,6 +122,7 @@ def _make_pipeline(dog_safety=None):
     pipeline._skill_manager = MagicMock()
     pipeline._skill_manager.get_skill_catalog.return_value = "none"
     pipeline._general_tool_max_safety_level = "normal"
+    pipeline._qp_memory = None
     return pipeline
 
 
