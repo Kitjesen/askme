@@ -100,16 +100,16 @@ class AskmeApp:
         # ── qp_memory (shared spatial/procedural/markdown memory) ────────
         self.qp_memory = None
         try:
-            _shared_src = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "..", "..", "shared", "python", "src",
-            )
-            _shared_src = os.path.normpath(_shared_src)
-            if _shared_src not in sys.path:
-                sys.path.insert(0, _shared_src)
+            # Try multiple paths: shared/python/src (dev), ./qp_memory/.. (deploy)
+            _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            for _try_path in [
+                os.path.normpath(os.path.join(_project_root, "..", "..", "shared", "python", "src")),
+                _project_root,  # qp_memory/ next to askme/
+            ]:
+                if _try_path not in sys.path:
+                    sys.path.insert(0, _try_path)
             from qp_memory import Memory as QpMemory
 
-            _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             self.qp_memory = QpMemory(
                 data_dir=os.path.join(_project_root, "data", "qp_memory"),
                 site_id="default",
@@ -318,7 +318,18 @@ class AskmeApp:
             import time as _t
             from askme.pipeline.brain_pipeline import strip_think_blocks
 
-            self._pipeline._conversation.add_user_message(text)
+            # Inject qp_memory context directly into the user message
+            # so LLM sees it regardless of prompt_seed overrides.
+            enriched_text = text
+            if self.qp_memory is not None:
+                try:
+                    qp_ctx = self.qp_memory.get_context(text, max_chars=1200)
+                    if qp_ctx:
+                        enriched_text = f"[站点记忆]\n{qp_ctx}\n\n[用户问题] {text}"
+                except Exception:
+                    pass
+
+            self._pipeline._conversation.add_user_message(enriched_text)
 
             system_prompt = self._pipeline._build_system_prompt(
                 None, user_text=text,
