@@ -230,12 +230,16 @@ class CloudASR:
                         self._last_ttft = (time.monotonic() - self._session_start) * 1000
 
                     if is_final and text:
-                        self._result_text = text
+                        # Append — Paraformer splits long audio into multiple
+                        # sentences, each with sentence_end=true. Concatenate
+                        # all final sentences to get the complete transcription.
+                        self._result_text += text
                         logger.debug("CloudASR: final sentence: '%s'", text[:50])
 
                     elif text:
-                        # Interim — keep updating
-                        self._result_text = text
+                        # Interim — show latest partial for this sentence only
+                        # (don't append, it will be replaced by the final)
+                        self._interim_text = text
                         logger.debug("CloudASR: interim: '%s'", text[:50])
 
                 elif event == "task-finished":
