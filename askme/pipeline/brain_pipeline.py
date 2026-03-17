@@ -1030,7 +1030,7 @@ class BrainPipeline:
         # qp_memory: spatial/procedural/markdown context (optional, additive)
         if self._qp_memory is not None:
             try:
-                qp_ctx = self._qp_memory.get_context(query=user_text)
+                qp_ctx = self._qp_memory.get_context_smart(query=user_text, max_chars=800)
                 if qp_ctx:
                     prompt += f"\n[站点记忆]\n{qp_ctx}"
             except Exception as _e:

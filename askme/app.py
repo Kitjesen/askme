@@ -320,10 +320,11 @@ class AskmeApp:
 
             # Inject qp_memory context directly into the user message
             # so LLM sees it regardless of prompt_seed overrides.
+            # Uses get_context_smart() for intent-based routing (<1ms).
             enriched_text = text
             if self.qp_memory is not None:
                 try:
-                    qp_ctx = self.qp_memory.get_context(text, max_chars=1200)
+                    qp_ctx = self.qp_memory.get_context_smart(text, max_chars=800)
                     if qp_ctx:
                         enriched_text = f"[站点记忆]\n{qp_ctx}\n\n[用户问题] {text}"
                 except Exception:
