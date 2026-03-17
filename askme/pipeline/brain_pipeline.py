@@ -1028,7 +1028,10 @@ class BrainPipeline:
                 prompt += f"\n{session_ctx}"
 
         # qp_memory: spatial/procedural/markdown context (optional, additive)
-        if self._qp_memory is not None:
+        # NOTE: WebChat path injects into user message directly (app.py).
+        # Voice path injects here into system prompt. Both use get_context_smart().
+        # Only inject if not already injected by the caller (avoid double-injection).
+        if self._qp_memory is not None and "[站点记忆]" not in (user_text or ""):
             try:
                 qp_ctx = self._qp_memory.get_context_smart(query=user_text, max_chars=800)
                 if qp_ctx:

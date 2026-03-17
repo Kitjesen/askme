@@ -121,6 +121,15 @@ class AskmeApp:
                 n = self.qp_memory.sync_map(_topo_dir)
                 logger.info("qp_memory: synced %d locations from LingTu map", n)
             logger.info("qp_memory initialized (data_dir=%s)", os.path.join(_project_root, "data", "qp_memory"))
+
+            # Wire LLM auto-extraction: after each turn, extract facts into memory
+            try:
+                from askme.brain.extraction_adapter import ExtractionAdapter
+                _extractor = ExtractionAdapter(self.llm, model="qwen-turbo")
+                self.qp_memory.set_extraction_callback(_extractor)
+                logger.info("qp_memory: LLM auto-extraction enabled")
+            except Exception as _ext_e:
+                logger.debug("qp_memory: auto-extraction not available: %s", _ext_e)
         except ImportError:
             logger.info("qp_memory not available (shared package not installed)")
         except Exception as _e:
@@ -360,10 +369,12 @@ class AskmeApp:
             self._pipeline._conversation.add_assistant_message(full)
             self._pipeline._last_spoken_text = full
 
-            # Record to qp_memory (same path as voice pipeline)
+            # Record to qp_memory + auto-extract facts from this turn
             if self.qp_memory is not None:
                 try:
                     self.qp_memory.record_observation("webchat", text)
+                    # LLM auto-extraction: extract facts from conversation
+                    self.qp_memory.process_turn(text, full)
                     self._pipeline._qp_turn_count += 1
                     if self._pipeline._qp_turn_count % 10 == 0:
                         self.qp_memory.save()
