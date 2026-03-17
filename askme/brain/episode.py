@@ -151,18 +151,30 @@ class Episode:
         return episode
 
 
-def decay_importance(importance: float, age_hours: float, half_life_hours: float = 72.0) -> float:
-    """Apply Ebbinghaus forgetting curve to importance score.
+def recency_boost(importance: float, age_hours: float, half_life_hours: float = 72.0) -> float:
+    """Retrieval priority boost for recent events.
 
-    importance decays exponentially: effective = importance * 2^(-age/half_life)
-    Default half-life: 72 hours (3 days). After 3 days, importance halves.
-    Reinforced memories (accessed again) reset their timestamp.
+    Recent events rank higher in retrieval results, but **nothing is forgotten**.
+    All data is permanently retained — this only affects display/retrieval ORDER.
 
-    Reference: Ebbinghaus (1885); A-MEM (Xu et al., NeurIPS 2025)
+    Score = importance * (0.5 + 0.5 * 2^(-age/half_life))
+    - Fresh (0h): 100% of importance
+    - 3 days old: 75% of importance (still very relevant)
+    - 1 week old: 60% of importance (still retrievable)
+    - 1 month old: ~50% of importance (floor — never goes below half)
+
+    Industrial robots must never forget: "3 months ago warehouse A had
+    the same temperature anomaly" is critical diagnostic data.
     """
     if age_hours <= 0:
         return importance
-    return importance * math.pow(2, -age_hours / half_life_hours)
+    decay = math.pow(2, -age_hours / half_life_hours)
+    # Floor at 0.5 — old memories keep at least 50% weight, never forgotten
+    return importance * (0.5 + 0.5 * decay)
+
+
+# Backward compatibility alias
+decay_importance = recency_boost
 
 
 def score_importance(event_type: str, description: str, context: dict[str, Any] | None = None) -> float:

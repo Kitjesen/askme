@@ -21,23 +21,23 @@ def test_decay_negative_age_full_importance():
     assert decay_importance(0.8, age_hours=-5.0) == 0.8
 
 
-def test_decay_3day_halves():
-    """After 3 days (default half-life=72h), importance halves."""
+def test_decay_3day_recency():
+    """After 3 days, importance is 75% (floor at 50%, never forgotten)."""
     result = decay_importance(1.0, age_hours=72.0)
-    assert abs(result - 0.5) < 0.01
+    assert abs(result - 0.75) < 0.01
 
 
-def test_decay_10day_very_low():
-    """After 10 days, importance is very low."""
+def test_decay_10day_floor():
+    """After 10 days, importance floors at ~50% (never forgotten)."""
     result = decay_importance(1.0, age_hours=240.0)
-    # 2^(-240/72) = 2^(-3.33) ~ 0.1
-    assert result < 0.15
+    assert result >= 0.50
+    assert result <= 0.55
 
 
 def test_decay_custom_half_life():
-    """Custom half-life works correctly."""
+    """Custom half-life: 24h age with 24h half-life → 75% (0.5 + 0.5*0.5)."""
     result = decay_importance(1.0, age_hours=24.0, half_life_hours=24.0)
-    assert abs(result - 0.5) < 0.01
+    assert abs(result - 0.75) < 0.01
 
 
 def test_decay_zero_importance():
