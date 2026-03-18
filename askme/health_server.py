@@ -154,6 +154,16 @@ def build_health_snapshot(
 ChatHandler = Callable[[str], Any]  # async def handler(text: str) -> str
 
 
+VisionSnapshotHandler = Callable[[], Any]   # async () -> dict | None
+VisionAnalyzeHandler = Callable[[str], Any]  # async (image_b64: str) -> str
+
+# async (image_bytes, label, description, width, height) -> dict
+ArchiveSnapshotHandler = Callable[[bytes, str, str, int, int], Any]
+ArchiveListHandler = Callable[[], Any]           # async () -> list[dict]
+ArchiveGetHandler = Callable[[str], Any]         # async (capture_id) -> dict | None
+ArchiveDeleteHandler = Callable[[str], Any]      # async (capture_id) -> bool
+
+
 def create_health_app(
     provider: HealthProvider | None = None,
     *,
@@ -161,6 +171,12 @@ def create_health_app(
     metrics_provider: MetricsProvider | None = None,
     chat_handler: ChatHandler | None = None,
     conversation_provider: Callable[[], list[dict[str, Any]]] | None = None,
+    vision_snapshot_handler: VisionSnapshotHandler | None = None,
+    vision_analyze_handler: VisionAnalyzeHandler | None = None,
+    archive_snapshot_handler: ArchiveSnapshotHandler | None = None,
+    archive_list_handler: ArchiveListHandler | None = None,
+    archive_get_handler: ArchiveGetHandler | None = None,
+    archive_delete_handler: ArchiveDeleteHandler | None = None,
 ) -> FastAPI:
     """Create the HTTP app used for readiness and telemetry probes."""
     resolved_health_provider = health_provider or provider
@@ -331,6 +347,146 @@ def create_health_app(
                 headers={"Access-Control-Allow-Origin": "*"},
             )
 
+    # ---- Vision endpoints ----
+
+    _CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
+
+    @app.get("/api/vision/snapshot", tags=["Vision"])
+    async def vision_snapshot() -> JSONResponse:
+        """Capture a frame from the robot camera and return it as base64 JPEG."""
+        if vision_snapshot_handler is None:
+            return JSONResponse({"error": "vision not configured"}, status_code=503,
+                                headers=_CORS_HEADERS)
+        try:
+            result = await vision_snapshot_handler()
+            if result is None:
+                return JSONResponse({"error": "camera not available"}, status_code=503,
+                                    headers=_CORS_HEADERS)
+            # Auto-archive if handler available
+            if archive_snapshot_handler is not None:
+                try:
+                    import base64 as _b64
+                    image_bytes = _b64.b64decode(result.get("image_base64", ""))
+                    if image_bytes:
+                        meta = await archive_snapshot_handler(
+                            image_bytes,
+                            "manual",
+                            "",
+                            result.get("width", 0),
+                            result.get("height", 0),
+                        )
+                        result = dict(result)
+                        result["capture_id"] = meta.get("id")
+                except Exception as _arc_exc:
+                    logger.warning("[Vision] Auto-archive failed: %s", _arc_exc)
+            return JSONResponse(result, headers=_CORS_HEADERS)
+        except Exception as exc:
+            logger.error("Vision snapshot failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+
+    @app.options("/api/vision/snapshot", include_in_schema=False)
+    async def vision_snapshot_cors() -> Response:
+        return Response(status_code=204, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        })
+
+    @app.post("/api/vision/analyze", tags=["Vision"])
+    async def vision_analyze(request: Request) -> JSONResponse:
+        """Analyze an image (base64 JPEG) with the VLM and return a description."""
+        if vision_analyze_handler is None:
+            return JSONResponse({"error": "vision not configured"}, status_code=503,
+                                headers=_CORS_HEADERS)
+        try:
+            body = await request.json()
+            image_b64: str = body.get("image_base64", "")
+            if not image_b64:
+                return JSONResponse({"error": "image_base64 required"}, status_code=400,
+                                    headers=_CORS_HEADERS)
+            description = await vision_analyze_handler(image_b64)
+            return JSONResponse({"description": description}, headers=_CORS_HEADERS)
+        except Exception as exc:
+            logger.error("Vision analyze failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+
+    @app.options("/api/vision/analyze", include_in_schema=False)
+    async def vision_analyze_cors() -> Response:
+        return Response(status_code=204, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        })
+
+    # ---- Image archive endpoints ----
+
+    @app.get("/api/vision/captures", tags=["Vision"])
+    async def vision_captures_list(limit: int = 50, label: str | None = None) -> JSONResponse:
+        """List archived captures (metadata only, no image_base64)."""
+        if archive_list_handler is None:
+            return JSONResponse({"error": "image archive not configured"}, status_code=503,
+                                headers=_CORS_HEADERS)
+        try:
+            captures = await archive_list_handler()
+            # Apply optional label filter and limit in handler or here
+            if label is not None:
+                captures = [c for c in captures if c.get("label") == label]
+            captures = captures[:limit]
+            return JSONResponse({"captures": captures, "count": len(captures)},
+                                headers={"Cache-Control": "no-store", **_CORS_HEADERS})
+        except Exception as exc:
+            logger.error("Captures list failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+
+    @app.options("/api/vision/captures", include_in_schema=False)
+    async def vision_captures_list_cors() -> Response:
+        return Response(status_code=204, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        })
+
+    @app.get("/api/vision/captures/{capture_id}", tags=["Vision"])
+    async def vision_captures_get(capture_id: str) -> JSONResponse:
+        """Return full metadata + image_base64 for a capture."""
+        if archive_get_handler is None:
+            return JSONResponse({"error": "image archive not configured"}, status_code=503,
+                                headers=_CORS_HEADERS)
+        try:
+            data = await archive_get_handler(capture_id)
+            if data is None:
+                return JSONResponse({"error": "capture not found"}, status_code=404,
+                                    headers=_CORS_HEADERS)
+            return JSONResponse(data, headers={"Cache-Control": "no-store", **_CORS_HEADERS})
+        except Exception as exc:
+            logger.error("Captures get failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+
+    @app.options("/api/vision/captures/{capture_id}", include_in_schema=False)
+    async def vision_captures_item_cors(capture_id: str) -> Response:
+        return Response(status_code=204, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        })
+
+    @app.delete("/api/vision/captures/{capture_id}", tags=["Vision"])
+    async def vision_captures_delete(capture_id: str) -> JSONResponse:
+        """Delete a capture (JPEG + JSON sidecar)."""
+        if archive_delete_handler is None:
+            return JSONResponse({"error": "image archive not configured"}, status_code=503,
+                                headers=_CORS_HEADERS)
+        try:
+            deleted = await archive_delete_handler(capture_id)
+            if not deleted:
+                return JSONResponse({"error": "capture not found"}, status_code=404,
+                                    headers=_CORS_HEADERS)
+            return JSONResponse({"deleted": True, "capture_id": capture_id},
+                                headers=_CORS_HEADERS)
+        except Exception as exc:
+            logger.error("Captures delete failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+
     return app
 
 
@@ -362,6 +518,8 @@ class AskmeHealthServer:
         self._shutdown_timeout_s = max(0.1, float(cfg.get("shutdown_timeout", 5.0)))
 
         self._chat_handler: ChatHandler | None = None
+        self._vision_bridge: Any | None = None
+        self._image_archive: Any | None = None
 
         resolved_health_provider = health_provider or snapshot_provider or provider
         if resolved_health_provider is None:
@@ -369,12 +527,22 @@ class AskmeHealthServer:
         resolved_metrics_provider = metrics_provider or resolved_health_provider
 
         self._conversation_provider: Callable[[], list[dict[str, Any]]] | None = None
+        self._server: uvicorn.Server | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._started_event: asyncio.Event = asyncio.Event()
+        self._bound_port: int | None = None
 
         self._app = create_health_app(
             health_provider=resolved_health_provider,
             metrics_provider=resolved_metrics_provider,
             chat_handler=self._dispatch_chat,
             conversation_provider=self._get_conversation,
+            vision_snapshot_handler=self._dispatch_snapshot,
+            vision_analyze_handler=self._dispatch_analyze,
+            archive_snapshot_handler=self._dispatch_archive,
+            archive_list_handler=self._dispatch_archive_list,
+            archive_get_handler=self._dispatch_archive_get,
+            archive_delete_handler=self._dispatch_archive_delete,
         )
 
     def _get_conversation(self) -> list[dict[str, Any]]:
@@ -394,10 +562,94 @@ class AskmeHealthServer:
     def set_conversation_provider(self, provider: Callable[[], list[dict[str, Any]]]) -> None:
         """Wire conversation history provider for /api/live endpoint."""
         self._conversation_provider = provider
-        self._server: uvicorn.Server | None = None
-        self._task: asyncio.Task[None] | None = None
-        self._started_event = asyncio.Event()
-        self._bound_port: int | None = None
+
+    def set_vision_bridge(self, bridge: Any) -> None:
+        """Wire the VisionBridge after construction."""
+        self._vision_bridge = bridge
+
+    def set_image_archive(self, archive: Any) -> None:
+        """Wire the ImageArchive after construction."""
+        self._image_archive = archive
+
+    async def _dispatch_archive(
+        self,
+        image_bytes: bytes,
+        label: str,
+        description: str,
+        width: int,
+        height: int,
+    ) -> dict[str, Any]:
+        """Save image_bytes to the archive. Runs blocking IO in a thread."""
+        archive = self._image_archive
+        if archive is None:
+            return {}
+        return await asyncio.to_thread(
+            archive.save, image_bytes, label, description, width, height
+        )
+
+    async def _dispatch_archive_list(self) -> list[dict[str, Any]]:
+        """Return all captures metadata list. Runs blocking IO in a thread."""
+        archive = self._image_archive
+        if archive is None:
+            return []
+        return await asyncio.to_thread(archive.list_captures)
+
+    async def _dispatch_archive_get(self, capture_id: str) -> dict[str, Any] | None:
+        """Return metadata + image_base64 for capture_id. Runs blocking IO in a thread."""
+        archive = self._image_archive
+        if archive is None:
+            return None
+        return await asyncio.to_thread(archive.get_capture, capture_id)
+
+    async def _dispatch_archive_delete(self, capture_id: str) -> bool:
+        """Delete a capture. Runs blocking IO in a thread."""
+        archive = self._image_archive
+        if archive is None:
+            return False
+        return await asyncio.to_thread(archive.delete_capture, capture_id)
+
+    async def _dispatch_snapshot(self) -> dict[str, Any] | None:
+        """Capture a camera frame and return base64 JPEG payload."""
+        vb = self._vision_bridge
+        if vb is None:
+            return None
+        import asyncio
+        import base64
+        frame = await asyncio.get_event_loop().run_in_executor(None, vb._capture_frame)
+        if frame is None:
+            return None
+        try:
+            import cv2  # type: ignore[import-untyped]
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            b64 = base64.b64encode(buf).decode()
+            h, w = frame.shape[:2]
+            return {
+                "image_base64": b64,
+                "width": w,
+                "height": h,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:
+            logger.warning("[Vision] Encode error: %s", exc)
+            return None
+
+    async def _dispatch_analyze(self, image_b64: str) -> str:
+        """Run VLM on a base64 image and return a Chinese description."""
+        vb = self._vision_bridge
+        if vb is None:
+            return "视觉模块未配置"
+        try:
+            import base64
+            import cv2  # type: ignore[import-untyped]
+            import numpy as np  # type: ignore[import-untyped]
+            img_bytes = base64.b64decode(image_b64)
+            arr = np.frombuffer(img_bytes, dtype=np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            description = await vb._describe_scene_vlm(frame)
+            return description
+        except Exception as exc:
+            logger.warning("[Vision] Analyze error: %s", exc)
+            return f"分析失败: {exc}"
 
     @property
     def url(self) -> str:

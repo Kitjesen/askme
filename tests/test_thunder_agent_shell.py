@@ -269,14 +269,17 @@ def test_robot_api_tool_empty_path() -> None:
     assert "[Error]" in result
 
 
-def test_robot_api_tool_service_unreachable() -> None:
+def test_robot_api_tool_service_unreachable(monkeypatch) -> None:
     """When service is not running, returns descriptive error."""
+    from askme.tools import robot_api_tool
+    # Use a definitely-closed port so we get a connection error regardless of local env
+    monkeypatch.setitem(robot_api_tool._SERVICE_PORTS, "safety", 19998)
     from askme.tools.robot_api_tool import RobotApiTool
     tool = RobotApiTool()
     result = tool.execute(service="safety", method="GET", path="/api/v1/safety/modes/estop")
-    # Service not running in test → connection error
+    # Connection refused → URLError path → always returns [Error]
     assert "[Error]" in result
-    assert "safety" in result.lower() or "5070" in result or "不可达" in result
+    assert "safety" in result.lower() or "19998" in result or "不可达" in result
 
 
 # ── SpawnAgent: sub-agent support ────────────────────────────────────────────

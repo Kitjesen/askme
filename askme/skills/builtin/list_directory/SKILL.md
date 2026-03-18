@@ -9,7 +9,7 @@ tags: [utility, filesystem]
 depends: []
 conflicts: []
 safety_level: normal
-voice_trigger: 看看文件
+voice_trigger: 看看文件,文件列表,查看目录,目录下有什么,列出文件,有哪些文件,文件有哪些,查一下文件,目录文件,看看有什么文件
 ---
 
 ## Tools

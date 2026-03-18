@@ -63,24 +63,24 @@ class LLMClient:
         # Disable SDK internal retry — we handle retry + model fallback ourselves
         # in _stream_with_retry / _completion_with_retry.  SDK retry just wastes
         # time retrying the same model instead of falling back to a faster one.
-        self._client = AsyncOpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout=self._timeout,
-            max_retries=0,
+        from inovxio_llm import LLMClientConfig, create_async_openai_client
+
+        _cfg = LLMClientConfig(
+            api_key=self.api_key, base_url=self.base_url,
+            model=self.model, timeout=self._timeout,
         )
+        self._client = create_async_openai_client(_cfg)
 
         # MiniMax client (optional — enabled when minimax_api_key is set)
         minimax_key = cfg.get("minimax_api_key", "")
         minimax_url = cfg.get("minimax_base_url", "https://api.minimax.chat/v1")
         self._minimax_client: AsyncOpenAI | None = None
         if minimax_key:
-            self._minimax_client = AsyncOpenAI(
-                api_key=minimax_key,
-                base_url=minimax_url,
-                timeout=self._timeout,
-                max_retries=0,
+            _mm_cfg = LLMClientConfig(
+                api_key=minimax_key, base_url=minimax_url,
+                model="MiniMax-M2.5-highspeed", timeout=self._timeout,
             )
+            self._minimax_client = create_async_openai_client(_mm_cfg)
             logger.info("MiniMax LLM client enabled: %s", minimax_url)
 
     # ------------------------------------------------------------------
@@ -245,9 +245,11 @@ class LLMClient:
     # ------------------------------------------------------------------
 
     def _client_for_model(self, model: str) -> AsyncOpenAI:
-        """Return the MiniMax client for MiniMax-* models, default client otherwise."""
-        if self._minimax_client and model.lower().startswith("minimax"):
-            return self._minimax_client
+        """Return the secondary client for MiniMax/Qwen/DashScope models."""
+        if self._minimax_client:
+            _m = model.lower()
+            if _m.startswith("minimax") or _m.startswith("qwen"):
+                return self._minimax_client
         return self._client
 
     def _model_chain(self, override: str | None = None) -> list[str]:

@@ -395,6 +395,9 @@ class AskmeApp:
         self.health_server.set_conversation_provider(
             lambda: list(self.conversation.history)
         )
+        self.health_server.set_vision_bridge(self.vision)
+        from askme.brain.image_archive import ImageArchive
+        self.health_server.set_image_archive(ImageArchive())
 
         # ── LED state bridge ─────────────────────────────────────────────
         # Drives the status LED from AgentState + agent_task + ESTOP.
