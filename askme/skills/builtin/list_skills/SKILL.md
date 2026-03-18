@@ -4,7 +4,7 @@ description: 列出当前已加载的所有语音技能及其触发词
 version: 1.0.0
 trigger: voice
 model: ""
-timeout: 10
+timeout: 30
 tags: [utility, meta]
 depends: []
 conflicts: []

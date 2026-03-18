@@ -42,6 +42,7 @@ _AGENT_ALLOWED_TOOLS = {
     "speak_progress",
     "web_fetch",
     "web_search",
+    "edit_file",     # surgical string replacement in any file
     "create_skill",  # agent can solidify solutions into reusable skills
     "spawn_agent",   # spawn child agent for focused sub-tasks
 }
@@ -58,6 +59,7 @@ _MAX_MESSAGES = 20
 _TOOL_VOICE_LABELS: dict[str, str] = {
     "bash": "运行命令",
     "write_file": "写入文件",
+    "edit_file": "编辑文件",
     "read_file": "读取文件",
     "list_directory": "查看目录",
     "web_search": "搜索网络",
@@ -106,6 +108,7 @@ def _build_agent_system_prompt(workspace: Path) -> str:
         "【工具使用指南】\n"
         "  bash         — shell 命令执行，支持 python/pip/curl 等；超时 30s\n"
         "  write_file   — 写文件到工作区；path 用相对路径（如 result.py）\n"
+        "  edit_file    — 精确替换文件内容（old_string → new_string）；old_string 必须唯一\n"
         "  read_file    — 读取文件；path 为绝对路径\n"
         "  web_search   — 搜索网络获取摘要和链接；技术查询建议加版本号（如 'asyncio Python 3.10'）\n"
         "  web_fetch    — 抓取指定网页完整内容；web_search 找到 URL 后用此工具深读\n"
@@ -349,9 +352,15 @@ class ThunderAgentShell:
             # Always keep messages[0] (the original user task) so the LLM never loses
             # the goal, then keep the most recent (_MAX_MESSAGES - 1) entries.
             if len(messages) > _MAX_MESSAGES:
-                messages = [messages[0]] + messages[-(_MAX_MESSAGES - 1):]
+                tail = messages[-(_MAX_MESSAGES - 1):]
+                # Drop orphaned tool-result messages at the head of the tail.
+                # They refer to tool_call_ids from an assistant message that was
+                # trimmed away; sending them to the LLM causes a 400 Bad Request.
+                while tail and tail[0].get("role") == "tool":
+                    tail = tail[1:]
+                messages = [messages[0]] + tail
                 logger.debug(
-                    "[AgentShell] Messages trimmed to %d (sliding window)", _MAX_MESSAGES
+                    "[AgentShell] Messages trimmed to %d (sliding window)", len(messages)
                 )
 
         else:

@@ -690,6 +690,83 @@ class WriteFileTool(BaseTool):
             return f"[Error] 写入文件失败: {exc}"
 
 
+class EditFileTool(BaseTool):
+    """Surgical string replacement in a file — old_string must match exactly once."""
+
+    name = "edit_file"
+    description = (
+        "在文件中做精确字符串替换（old_string → new_string）。"
+        "old_string 必须在文件中唯一出现，否则返回错误。"
+        "支持绝对路径，或相对于 agent_workspace/ 的相对路径。"
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "文件路径（绝对路径，或相对于 agent_workspace/ 的相对路径）",
+            },
+            "old_string": {
+                "type": "string",
+                "description": "要替换的原始字符串（必须在文件中唯一出现，含缩进/换行）",
+            },
+            "new_string": {
+                "type": "string",
+                "description": "替换后的新字符串",
+            },
+        },
+        "required": ["path", "old_string", "new_string"],
+    }
+    safety_level = "normal"
+
+    _WORKSPACE = project_root() / "data" / "agent_workspace"
+
+    def execute(
+        self, *, path: str = "", old_string: str = "", new_string: str = "", **kwargs: Any
+    ) -> str:
+        if not path:
+            return "[Error] No path provided."
+        if not old_string:
+            return "[Error] old_string cannot be empty."
+
+        target = Path(path)
+        if not target.is_absolute():
+            target = self._WORKSPACE / path
+        try:
+            target = target.resolve()
+        except Exception as exc:
+            return f"[Error] 路径解析失败: {exc}"
+
+        if not target.exists():
+            return f"[Error] 文件不存在: {target}"
+        if not target.is_file():
+            return f"[Error] 不是文件: {target}"
+
+        try:
+            content = target.read_text(encoding="utf-8")
+        except Exception as exc:
+            return f"[Error] 读取文件失败: {exc}"
+
+        count = content.count(old_string)
+        if count == 0:
+            return (
+                "[Error] 未找到目标字符串，编辑失败。"
+                "请检查 old_string 是否与文件内容完全一致（含缩进和换行）。"
+            )
+        if count > 1:
+            return (
+                f"[Error] old_string 在文件中出现了 {count} 次，无法唯一定位。"
+                "请提供更多上下文使其唯一。"
+            )
+
+        new_content = content.replace(old_string, new_string, 1)
+        try:
+            target.write_text(new_content, encoding="utf-8")
+            return f"已编辑 {target}：替换了 1 处（{len(old_string)} → {len(new_string)} 字符）"
+        except Exception as exc:
+            return f"[Error] 写入失败: {exc}"
+
+
 class SpeakProgressTool(BaseTool):
     """Non-blocking TTS progress announcements during long agent tasks."""
 
@@ -1032,6 +1109,7 @@ _BUILTIN_TOOLS: list[type[BaseTool]] = [
     DogControlDispatchTool,
     SandboxedBashTool,
     WriteFileTool,
+    EditFileTool,
     WebFetchTool,
     WebSearchTool,
 ]
