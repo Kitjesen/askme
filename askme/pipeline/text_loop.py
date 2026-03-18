@@ -258,6 +258,66 @@ class TextLoop:
 
         logger.info("Bye!")
 
+    async def process_turn(self, user_text: str) -> str:
+        """Execute a single turn through full intent routing + skill dispatch.
+
+        Used by /api/chat so the HTTP endpoint gets the same routing as the
+        terminal text loop (IntentRouter → ProactiveOrchestrator → SkillDispatcher).
+        Returns the response string (empty string for commands/estop).
+        """
+        from askme.brain.intent_router import IntentType
+
+        memory_task = self._pipeline.start_memory_prefetch(user_text)
+        try:
+            intent = self._router.route(user_text)
+
+            if intent.type == IntentType.ESTOP:
+                self._pipeline.handle_estop()
+                memory_task.cancel()
+                return "急停已触发。"
+
+            if intent.type == IntentType.COMMAND:
+                memory_task.cancel()
+                return ""
+
+            if intent.type == IntentType.VOICE_TRIGGER:
+                memory_task.cancel()
+                memory_task = None
+                if self._dispatcher:
+                    _result = await self._proactive.run(
+                        intent.skill_name or "", user_text, self._text_audio,
+                        source="text",
+                    )
+                    if _result.proceed:
+                        return await self._dispatcher.dispatch(
+                            intent.skill_name or "", _result.enriched_text,
+                            source="text",
+                        )
+                    elif _result.interrupt_payload:
+                        return await self._dispatcher.handle_general(
+                            _result.interrupt_payload, source="text",
+                        )
+                    return ""
+                return await self._pipeline.execute_skill(
+                    intent.skill_name or "", user_text,
+                )
+
+            # GENERAL
+            if self._dispatcher:
+                return await self._dispatcher.handle_general(
+                    user_text, source="text", memory_task=memory_task,
+                )
+            reply = await self._pipeline.process(user_text, memory_task=memory_task)
+            memory_task = None
+            return reply
+        finally:
+            if memory_task is not None and not memory_task.done():
+                memory_task.cancel()
+                try:
+                    await memory_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
     async def _maybe_handle_runtime_bridge(self, user_text: str) -> bool:
         """Try the runtime bridge first and fall back locally on bridge failures."""
         if self._voice_runtime_bridge is None:

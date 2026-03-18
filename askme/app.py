@@ -322,58 +322,19 @@ class AskmeApp:
         )
 
         # Wire chat handler for /api/chat and /dashboard web UI.
-        # Returns text immediately + fires TTS asynchronously (non-blocking).
+        # Routes through full IntentRouter → SkillDispatcher pipeline so skills
+        # (including create_skill, agent_task, navigate, etc.) execute properly.
         async def _chat_handler(text: str) -> str:
             import time as _t
-            from askme.pipeline.brain_pipeline import strip_think_blocks
 
-            # Inject qp_memory context directly into the user message
-            # so LLM sees it regardless of prompt_seed overrides.
-            # Uses get_context_smart() for intent-based routing (<1ms).
-            enriched_text = text
-            if self.qp_memory is not None:
-                try:
-                    qp_ctx = self.qp_memory.get_context_smart(text, max_chars=800)
-                    if qp_ctx:
-                        enriched_text = f"[站点记忆]\n{qp_ctx}\n\n[用户问题] {text}"
-                except Exception:
-                    pass
-
-            self._pipeline._conversation.add_user_message(enriched_text)
-
-            system_prompt = self._pipeline._build_system_prompt(
-                None, user_text=text,
-            )
-            messages = self._pipeline._prepare_messages(
-                self._pipeline._conversation.get_messages(system_prompt)
-            )
-
-            # Stream LLM — no tools, measure TTFT
-            full = ""
-            model = self._pipeline._voice_model
             t0 = _t.perf_counter()
-            ttft_logged = False
-            async for chunk in self._pipeline._llm.chat_stream(
-                messages, model=model, tools=None, tool_choice=None,
-            ):
-                if not ttft_logged and chunk.choices[0].delta.content:
-                    ttft_logged = True
-                    logger.info("[WebChat] TTFT: %.2fs model=%s", _t.perf_counter() - t0, model)
-                delta = chunk.choices[0].delta
-                if delta.content:
-                    full += delta.content
+            full = await self._text_loop.process_turn(text)
+            logger.info("[WebChat] Total: %.2fs chars=%d", _t.perf_counter() - t0, len(full))
 
-            full = strip_think_blocks(full).strip()
-            total = _t.perf_counter() - t0
-            logger.info("[WebChat] Total: %.2fs chars=%d", total, len(full))
-            self._pipeline._conversation.add_assistant_message(full)
-            self._pipeline._last_spoken_text = full
-
-            # Record to qp_memory + auto-extract facts from this turn
-            if self.qp_memory is not None:
+            # Record to qp_memory
+            if full and self.qp_memory is not None:
                 try:
                     self.qp_memory.record_observation("webchat", text)
-                    # LLM auto-extraction: extract facts from conversation
                     self.qp_memory.process_turn(text, full)
                     self._pipeline._qp_turn_count += 1
                     if self._pipeline._qp_turn_count % 10 == 0:
@@ -381,7 +342,7 @@ class AskmeApp:
                 except Exception:
                     pass
 
-            # Fire-and-forget: speak on robot speaker, then stop playback
+            # Fire-and-forget: speak on robot speaker
             if full:
                 async def _speak_and_stop():
                     self.audio.speak(full)
