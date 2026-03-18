@@ -53,7 +53,7 @@ class TestNavDispatchTool:
 
     def test_successful_dispatch_returns_task_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NAV_GATEWAY_URL", "http://localhost:8088")
-        mock_resp = _make_mock_response({"status": "accepted", "task_id": "abc123"})
+        mock_resp = _make_mock_response({"session": {"mission_id": "abc123", "state": "submitted"}})
         with patch("urllib.request.urlopen", return_value=mock_resp):
             result = self.tool.execute(destination="仓库A")
         assert "abc123" in result
@@ -69,7 +69,7 @@ class TestNavDispatchTool:
 
     def test_mapping_task_type_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NAV_GATEWAY_URL", "http://localhost:8088")
-        mock_resp = _make_mock_response({"status": "accepted", "task_id": "map001"})
+        mock_resp = _make_mock_response({"session": {"mission_id": "map001", "state": "submitted"}})
         with patch("urllib.request.urlopen", return_value=mock_resp):
             result = self.tool.execute(destination="全区", task_type="mapping")
         assert "任务已下发" in result

@@ -322,7 +322,7 @@ class NavStatusTool(BaseTool):
         if not url:
             return "[导航状态] 导航服务未配置（NAV_GATEWAY_URL 未设置）"
         try:
-            with urllib.request.urlopen(url + "/api/v1/nav/status", timeout=3) as resp:
+            with urllib.request.urlopen(url + "/api/v1/navigation/status", timeout=3) as resp:
                 data = _json.loads(resp.read())
                 return _json.dumps(data, ensure_ascii=False, indent=2)
         except Exception as exc:
@@ -330,17 +330,25 @@ class NavStatusTool(BaseTool):
 
 
 class NavDispatchTool(BaseTool):
-    """Dispatch a navigation task to nav-gateway → LingTu.
+    """Dispatch a navigation task to cortex_nav service → LingTu.
 
     This is the actual execution tool for the navigate/mapping/follow_person
     skills.  Without this, skills could only confirm — not execute.
 
-    Requires NAV_GATEWAY_URL environment variable.
+    Requires NAV_GATEWAY_URL environment variable pointing to cortex_nav
+    (e.g. http://localhost:5070).
     """
+
+    # capability strings expected by cortex_nav._resolve_navigation_mode()
+    _CAPABILITY_MAP: dict[str, str] = {
+        "navigate":      "nav.semantic.execute",
+        "mapping":       "nav.mapping.start",
+        "follow_person": "nav.follow_person.start",
+    }
 
     name = "nav_dispatch"
     description = (
-        "向 nav-gateway 下发导航任务（语义导航/建图/跟随）。"
+        "向导航服务下发导航任务（语义导航/建图/跟随）。"
         "成功后机器人开始移动，失败时返回错误原因。"
         "需要配置 NAV_GATEWAY_URL 环境变量。"
     )
@@ -365,6 +373,17 @@ class NavDispatchTool(BaseTool):
     }
     safety_level = "dangerous"
 
+    def _build_parameters(
+        self, task_type: str, destination: str, params: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        p = params or {}
+        if task_type == "navigate":
+            return {"semantic_target": destination}
+        if task_type == "mapping":
+            return {"map_name": p.get("map_scope") or destination, "save_on_complete": True}
+        # follow_person: no extra parameters needed
+        return {}
+
     def execute(
         self,
         *,
@@ -381,20 +400,21 @@ class NavDispatchTool(BaseTool):
         if not url:
             return (
                 "[导航] 导航服务未配置。"
-                "请设置 NAV_GATEWAY_URL 环境变量，例如: http://localhost:8088"
+                "请设置 NAV_GATEWAY_URL 环境变量，例如: http://localhost:5070"
             )
         if not destination and task_type != "follow_person":
             return "[Error] 目标位置不能为空"
 
+        capability = self._CAPABILITY_MAP.get(task_type, "nav.semantic.execute")
         body: dict[str, Any] = {
-            "task_id": uuid4().hex[:16],
-            "task_type": task_type,
-            "destination": destination,
-            "params": params or {},
+            "mission_id": uuid4().hex[:16],
+            "mission_type": "voice_command",
+            "requested_capability": capability,
+            "parameters": self._build_parameters(task_type, destination, params),
         }
         data = _json.dumps(body, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
-            url + "/api/v1/nav/tasks",
+            url + "/api/v1/navigation/dispatch",
             data=data,
             headers={
                 "Content-Type": "application/json",
@@ -407,9 +427,10 @@ class NavDispatchTool(BaseTool):
                 raw = resp.read(4096).decode("utf-8", errors="replace")
                 try:
                     result = _json.loads(raw)
-                    status = result.get("status", "unknown")
-                    task_id = result.get("task_id", "")
-                    return f"[导航] 任务已下发 (status={status}, task_id={task_id})"
+                    session = result.get("session", {})
+                    mission_id = session.get("mission_id", body["mission_id"])
+                    state = session.get("state", "submitted")
+                    return f"[导航] 任务已下发 (state={state}, mission_id={mission_id})"
                 except _json.JSONDecodeError:
                     return f"[导航] 任务已下发 (HTTP {resp.status})"
         except urllib.error.HTTPError as exc:
