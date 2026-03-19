@@ -138,7 +138,10 @@ async def test_llm_creates_skill_via_tool_call(tmp_path: Path) -> None:
     from askme.voice.stream_splitter import StreamSplitter
 
     # ── Point generated_skills_dir at a temp directory ───────────────────────
-    # Monkeypatch the property so CreateSkillTool writes to tmp_path
+    # Monkeypatch the property so CreateSkillTool writes to tmp_path.
+    # Save and restore the original descriptor so this mutation doesn't leak
+    # into subsequent tests (plain `del` would remove the property entirely).
+    _orig_prop = SkillManager.__dict__["generated_skills_dir"]
     SkillManager.generated_skills_dir = property(lambda self: tmp_path / "skills")  # type: ignore[assignment]
 
     try:
@@ -211,5 +214,5 @@ async def test_llm_creates_skill_via_tool_call(tmp_path: Path) -> None:
         print("\n✓ All assertions passed — create_skill tool call works end-to-end")
 
     finally:
-        # Restore original property
-        del SkillManager.generated_skills_dir  # type: ignore[misc]
+        # Restore original property descriptor (not del — that would remove it entirely)
+        SkillManager.generated_skills_dir = _orig_prop  # type: ignore[assignment]
