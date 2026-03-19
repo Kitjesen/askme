@@ -32,95 +32,92 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class _ROS2FrameGrabber:
-    """Subscribes to a ROS2 Image topic and keeps the latest frame in memory.
+    """Grabs frames from a ROS2 Image topic via subprocess.
 
-    Thread-safe: the ROS2 spin runs in a daemon thread, ``grab()`` returns
-    the most recent numpy frame (or None if no frame received yet).
+    Uses the system Python (with ROS2 sourced) to subscribe to the topic
+    and write raw frame data to a temp file. This avoids rclpy/venv
+    compatibility issues entirely.
     """
+
+    # Small ROS2 script executed by system Python (outside venv)
+    _GRAB_SCRIPT = '''\
+import sys, time, struct
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+
+rclpy.init()
+node = Node("askme_grab")
+frame = [None]
+def cb(msg):
+    frame[0] = msg
+node.create_subscription(Image, sys.argv[1], cb, 1)
+deadline = time.monotonic() + float(sys.argv[3])
+while frame[0] is None and time.monotonic() < deadline:
+    rclpy.spin_once(node, timeout_sec=0.5)
+node.destroy_node()
+rclpy.shutdown()
+if frame[0] is None:
+    sys.exit(1)
+m = frame[0]
+out = sys.argv[2]
+# Write binary: 4 bytes width + 4 bytes height + raw RGB data
+with open(out, "wb") as f:
+    f.write(struct.pack("II", m.width, m.height))
+    f.write(bytes(m.data))
+'''
 
     def __init__(self, topic: str = "/camera/color/image_raw", timeout: float = 5.0) -> None:
         self._topic = topic
         self._timeout = timeout
-        self._frame: Any = None
-        self._lock = threading.Lock()
-        self._node: Any = None
-        self._spin_thread: threading.Thread | None = None
-        self._initialized = False
-        self._init_failed = False
-
-    def _ensure_init(self) -> bool:
-        if self._initialized:
-            return True
-        if self._init_failed:
-            return False
-        try:
-            import rclpy
-            from rclpy.node import Node
-            from rclpy.executors import SingleThreadedExecutor
-
-            if not rclpy.ok():
-                rclpy.init()
-
-            self._node = Node("askme_vision_grabber")
-            from sensor_msgs.msg import Image  # type: ignore[import-untyped]
-            self._node.create_subscription(Image, self._topic, self._on_frame, 1)
-
-            self._executor = SingleThreadedExecutor()
-            self._executor.add_node(self._node)
-            self._spin_thread = threading.Thread(
-                target=self._spin_loop, daemon=True
-            )
-            self._spin_thread.start()
-            self._initialized = True
-            logger.info("[Vision] ROS2 frame grabber started on topic %s", self._topic)
-            return True
-        except ImportError:
-            logger.warning("[Vision] rclpy not available — ROS2 capture disabled.")
-            self._init_failed = True
-            return False
-        except Exception as exc:
-            logger.warning("[Vision] ROS2 init failed: %s", exc)
-            self._init_failed = True
-            return False
-
-    def _on_frame(self, msg: Any) -> None:
-        import numpy as np
-        try:
-            frame = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 3
-            )
-            with self._lock:
-                self._frame = frame
-        except Exception as exc:
-            logger.debug("[Vision] ROS2 frame decode error: %s", exc)
-
-    def _spin_loop(self) -> None:
-        try:
-            self._executor.spin()
-        except Exception:
-            pass
+        self._tmp_path = "/tmp/askme_ros2_frame.bin"
 
     def grab(self) -> Any:
-        """Return the latest frame as a numpy array (H, W, 3) or None."""
-        if not self._ensure_init():
-            return None
-        # Wait briefly for first frame if just started
-        deadline = time.monotonic() + self._timeout
-        while time.monotonic() < deadline:
-            with self._lock:
-                if self._frame is not None:
-                    return self._frame.copy()
-            time.sleep(0.1)
-        logger.warning("[Vision] ROS2 no frame received within %.1fs", self._timeout)
-        return None
+        """Grab a single frame via subprocess. Returns numpy array (H, W, 3) or None."""
+        import subprocess
+        import struct
+        import numpy as np
 
-    def shutdown(self) -> None:
-        if self._node is not None:
-            try:
-                self._executor.shutdown()
-                self._node.destroy_node()
-            except Exception:
-                pass
+        # Use bash -c to source ROS2 setup, then run grab script with system python
+        cmd = (
+            f'source /opt/ros/humble/setup.bash && '
+            f'python3 -c {_shell_quote(self._GRAB_SCRIPT)} '
+            f'{_shell_quote(self._topic)} '
+            f'{_shell_quote(self._tmp_path)} '
+            f'{self._timeout}'
+        )
+        try:
+            result = subprocess.run(
+                ["bash", "-c", cmd],
+                capture_output=True, timeout=self._timeout + 5,
+            )
+            if result.returncode != 0:
+                stderr = result.stderr.decode(errors="replace")[:200]
+                logger.warning("[Vision] ROS2 grab subprocess failed: %s", stderr)
+                return None
+
+            with open(self._tmp_path, "rb") as f:
+                header = f.read(8)
+                if len(header) < 8:
+                    return None
+                w, h = struct.unpack("II", header)
+                data = f.read(w * h * 3)
+                if len(data) != w * h * 3:
+                    return None
+                return np.frombuffer(data, dtype=np.uint8).reshape(h, w, 3)
+
+        except subprocess.TimeoutExpired:
+            logger.warning("[Vision] ROS2 grab timed out after %.1fs", self._timeout + 5)
+            return None
+        except Exception as exc:
+            logger.warning("[Vision] ROS2 grab error: %s", exc)
+            return None
+
+
+def _shell_quote(s: str) -> str:
+    """Shell-quote a string for bash -c."""
+    import shlex
+    return shlex.quote(s)
 
 
 class VisionBridge:
