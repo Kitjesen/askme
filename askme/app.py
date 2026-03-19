@@ -54,6 +54,7 @@ from askme.tools.robot_api_tool import RobotApiTool
 from askme.tools.builtin_tools import SpeakProgressTool
 from askme.tools.skill_tools import register_skill_tools
 from askme.tools.tool_registry import ToolRegistry
+from askme.tools.vision_tool import register_vision_tools
 from askme.tools.voice_tools import register_voice_tools
 from askme.voice.address_detector import AddressDetector
 from askme.voice.audio_agent import AudioAgent
@@ -141,6 +142,8 @@ class AskmeApp:
         register_builtin_tools(self.tools, production_mode=_production_mode)
         # Register RobotApiTool (unified runtime API)
         self.tools.register(RobotApiTool())
+        # Register vision tools (look_around, find_target)
+        register_vision_tools(self.tools, self.vision)
 
         # Robot (optional)
         self.arm_controller = None

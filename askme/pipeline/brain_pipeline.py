@@ -422,8 +422,9 @@ class BrainPipeline:
 
         logger.info("Executing skill: %s", skill_name)
 
-        # Route agent_task to ThunderAgentShell for autonomous execution
-        if skill_name == "agent_task" and self._agent_shell is not None:
+        # Route agent-shell skills to ThunderAgentShell for autonomous execution
+        _AGENT_SHELL_SKILLS = {"agent_task", "find_object"}
+        if skill_name in _AGENT_SHELL_SKILLS and self._agent_shell is not None:
             logger.info("[AgentShell] Routing agent_task to ThunderAgentShell")
             self._audio.drain_buffers()
             self._audio.start_playback()
@@ -443,11 +444,11 @@ class BrainPipeline:
                 self._last_spoken_text = spoken
                 self._conversation.add_user_message(user_text)
                 self._conversation.add_assistant_message(stored)
-                self._log_episode("outcome", f"agent_task完成: {result[:100]}")
+                self._log_episode("outcome", f"{skill_name}完成: {result[:100]}")
                 await asyncio.to_thread(self._audio.wait_speaking_done)
                 return result
             except Exception as exc:
-                logger.error("[AgentShell] agent_task failed: %s", exc)
+                logger.error("[AgentShell] %s failed: %s", skill_name, exc)
                 self._audio.speak(f"任务执行出错：{exc}")
                 return f"[AgentShell Error] {exc}"
             finally:
