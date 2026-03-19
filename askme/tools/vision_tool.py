@@ -44,15 +44,12 @@ class LookAroundTool(BaseTool):
         if self._vision is None or not self._vision.available:
             return "[视觉不可用] 摄像头未连接或视觉模块未启用。请用其他方式（如导航到可能的位置）继续搜索。"
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    desc = pool.submit(
-                        asyncio.run, self._vision.describe_scene()
-                    ).result(timeout=10)
-            else:
-                desc = asyncio.run(self._vision.describe_scene())
+            desc = asyncio.run(self._vision.describe_scene())
+        except RuntimeError:
+            # Already in an async context — use nest_asyncio or new thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                desc = pool.submit(asyncio.run, self._vision.describe_scene()).result(timeout=15)
         except Exception as exc:
             logger.warning("look_around failed: %s", exc)
             return f"[视觉错误] 拍照失败: {exc}"
@@ -95,15 +92,11 @@ class FindTargetTool(BaseTool):
         if self._vision is None or not self._vision.available:
             return "[视觉不可用] 摄像头未连接。无法视觉搜索，请尝试导航到可能的位置。"
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    result = pool.submit(
-                        asyncio.run, self._vision.find_object(target)
-                    ).result(timeout=10)
-            else:
-                result = asyncio.run(self._vision.find_object(target))
+            result = asyncio.run(self._vision.find_object(target))
+        except RuntimeError:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                result = pool.submit(asyncio.run, self._vision.find_object(target)).result(timeout=15)
         except Exception as exc:
             logger.warning("find_target(%s) failed: %s", target, exc)
             return f"[视觉错误] 搜索失败: {exc}"
