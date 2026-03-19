@@ -1,0 +1,14 @@
+[Unit]
+Description=Orbbec Gemini 335 Camera ROS2 Node
+After=network.target
+
+[Service]
+Type=simple
+User=sunrise
+Environment=ROS_DOMAIN_ID=0
+ExecStart=/bin/bash -c "source /opt/ros/humble/setup.bash && ros2 launch orbbec_camera gemini_330_series.launch.py"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

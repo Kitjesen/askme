@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,102 @@ from typing import Any
 from askme.config import get_config
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# ROS2 frame grabber — persistent subscriber, grabs latest frame on demand
+# ---------------------------------------------------------------------------
+
+class _ROS2FrameGrabber:
+    """Subscribes to a ROS2 Image topic and keeps the latest frame in memory.
+
+    Thread-safe: the ROS2 spin runs in a daemon thread, ``grab()`` returns
+    the most recent numpy frame (or None if no frame received yet).
+    """
+
+    def __init__(self, topic: str = "/camera/color/image_raw", timeout: float = 5.0) -> None:
+        self._topic = topic
+        self._timeout = timeout
+        self._frame: Any = None
+        self._lock = threading.Lock()
+        self._node: Any = None
+        self._spin_thread: threading.Thread | None = None
+        self._initialized = False
+        self._init_failed = False
+
+    def _ensure_init(self) -> bool:
+        if self._initialized:
+            return True
+        if self._init_failed:
+            return False
+        try:
+            import rclpy
+            from rclpy.node import Node
+            from rclpy.executors import SingleThreadedExecutor
+
+            if not rclpy.ok():
+                rclpy.init()
+
+            self._node = Node("askme_vision_grabber")
+            from sensor_msgs.msg import Image  # type: ignore[import-untyped]
+            self._node.create_subscription(Image, self._topic, self._on_frame, 1)
+
+            self._executor = SingleThreadedExecutor()
+            self._executor.add_node(self._node)
+            self._spin_thread = threading.Thread(
+                target=self._spin_loop, daemon=True
+            )
+            self._spin_thread.start()
+            self._initialized = True
+            logger.info("[Vision] ROS2 frame grabber started on topic %s", self._topic)
+            return True
+        except ImportError:
+            logger.warning("[Vision] rclpy not available — ROS2 capture disabled.")
+            self._init_failed = True
+            return False
+        except Exception as exc:
+            logger.warning("[Vision] ROS2 init failed: %s", exc)
+            self._init_failed = True
+            return False
+
+    def _on_frame(self, msg: Any) -> None:
+        import numpy as np
+        try:
+            frame = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 3
+            )
+            with self._lock:
+                self._frame = frame
+        except Exception as exc:
+            logger.debug("[Vision] ROS2 frame decode error: %s", exc)
+
+    def _spin_loop(self) -> None:
+        try:
+            self._executor.spin()
+        except Exception:
+            pass
+
+    def grab(self) -> Any:
+        """Return the latest frame as a numpy array (H, W, 3) or None."""
+        if not self._ensure_init():
+            return None
+        # Wait briefly for first frame if just started
+        deadline = time.monotonic() + self._timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self._frame is not None:
+                    return self._frame.copy()
+            time.sleep(0.1)
+        logger.warning("[Vision] ROS2 no frame received within %.1fs", self._timeout)
+        return None
+
+    def shutdown(self) -> None:
+        if self._node is not None:
+            try:
+                self._executor.shutdown()
+                self._node.destroy_node()
+            except Exception:
+                pass
 
 
 class VisionBridge:
@@ -48,6 +145,10 @@ class VisionBridge:
         self._confidence: float = self._vision_cfg.get("confidence_threshold", 0.40)
         self._device: str = self._vision_cfg.get("device", "")
         self._camera_index: int = self._vision_cfg.get("camera_index", 0)
+        # Capture backend: "auto" tries ros2 first, then cv2
+        self._capture_backend: str = self._vision_cfg.get("capture_backend", "auto")
+        self._ros2_topic: str = self._vision_cfg.get("ros2_topic", "/camera/color/image_raw")
+        self._ros2_grabber: _ROS2FrameGrabber | None = None
 
         # VLM fallback config (uses same OpenAI-compatible relay as brain)
         self._vlm_enabled: bool = self._vision_cfg.get("vlm_enabled", False)
@@ -114,8 +215,16 @@ class VisionBridge:
 
     @property
     def available(self) -> bool:
-        """Whether any vision backend (YOLO or VLM) is usable."""
-        return self._tracker is not None or self._vlm_enabled
+        """Whether any vision backend (YOLO, VLM, or ROS2 capture) is usable."""
+        if self._tracker is not None:
+            return True
+        if self._vlm_enabled:
+            return True
+        # Even without YOLO/VLM, if we can capture frames we're "available"
+        # (VLM fallback or frame-only usage)
+        if self._enabled and self._capture_backend in ("ros2", "auto"):
+            return True
+        return False
 
     async def describe_scene(self, frame: Any = None) -> str:
         """Detect objects in *frame* and return a natural language description.
@@ -224,16 +333,28 @@ class VisionBridge:
 
     @staticmethod
     def _write_frame(frame: Any, label: str, output_dir: str) -> str | None:
-        try:
-            import cv2  # type: ignore[import-untyped]
-        except ImportError:
-            return None
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         safe_label = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)
         filename = f"{ts}_{safe_label}.jpg"
         filepath = os.path.join(output_dir, filename)
-        cv2.imwrite(filepath, frame)
+        try:
+            import cv2  # type: ignore[import-untyped]
+            cv2.imwrite(filepath, frame)
+        except ImportError:
+            try:
+                from PIL import Image as PILImage
+                import numpy as np
+                img = PILImage.fromarray(np.asarray(frame))
+                img.save(filepath, quality=85)
+            except ImportError:
+                # Last resort: save as PPM (no dependencies)
+                import numpy as np
+                arr = np.asarray(frame)
+                filepath = filepath.replace(".jpg", ".ppm")
+                with open(filepath, "wb") as f:
+                    f.write(f"P6\n{arr.shape[1]} {arr.shape[0]}\n255\n".encode())
+                    f.write(arr.tobytes())
         logger.info("[Vision] Snapshot saved: %s", filepath)
         return filepath
 
@@ -302,12 +423,28 @@ class VisionBridge:
             if frame is None:
                 return ""
 
-            # Encode frame as base64 JPEG
+            # Encode frame as base64 JPEG (cv2 → PIL → raw PPM fallback)
             import base64
-            import cv2  # type: ignore[import-untyped]
+            import numpy as np
 
-            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            image_b64 = base64.b64encode(buf).decode("utf-8")
+            image_b64 = ""
+            try:
+                import cv2  # type: ignore[import-untyped]
+                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                image_b64 = base64.b64encode(buf).decode("utf-8")
+            except ImportError:
+                try:
+                    from PIL import Image as PILImage
+                    import io
+                    img = PILImage.fromarray(np.asarray(frame))
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=80)
+                    image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                except ImportError:
+                    logger.warning("[Vision] Neither cv2 nor PIL available for JPEG encoding.")
+                    return ""
+            if not image_b64:
+                return ""
 
             _VLM_TEXT = (
                     "I'm building a YOLO object detection test dataset. "
@@ -416,7 +553,39 @@ class VisionBridge:
     # ------------------------------------------------------------------
 
     def _capture_frame(self) -> Any:
-        """Capture a single frame from the default camera (blocking)."""
+        """Capture a single frame from the camera (blocking).
+
+        Tries backends in order based on ``capture_backend`` config:
+        - ``ros2``: subscribe to ROS2 Image topic (for Orbbec / ROS cameras)
+        - ``cv2``: OpenCV VideoCapture (for USB UVC cameras)
+        - ``auto`` (default): try ros2 first, then cv2
+        """
+        backend = self._capture_backend
+
+        if backend in ("ros2", "auto"):
+            frame = self._capture_ros2()
+            if frame is not None:
+                return frame
+            if backend == "ros2":
+                return None  # don't fall through
+
+        # cv2 fallback
+        return self._capture_cv2()
+
+    def _capture_ros2(self) -> Any:
+        """Grab latest frame from ROS2 topic."""
+        try:
+            if self._ros2_grabber is None:
+                self._ros2_grabber = _ROS2FrameGrabber(
+                    topic=self._ros2_topic, timeout=5.0,
+                )
+            return self._ros2_grabber.grab()
+        except Exception as exc:
+            logger.warning("[Vision] ROS2 capture error: %s", exc)
+            return None
+
+    def _capture_cv2(self) -> Any:
+        """Grab a frame via OpenCV VideoCapture."""
         try:
             import cv2  # type: ignore[import-untyped]
 
@@ -431,10 +600,10 @@ class VisionBridge:
                 return None
             return frame
         except ImportError:
-            logger.warning("[Vision] cv2 not installed -- cannot capture frame.")
+            logger.debug("[Vision] cv2 not installed — skipping cv2 capture.")
             return None
         except Exception as exc:
-            logger.warning("[Vision] Camera capture error: %s", exc)
+            logger.warning("[Vision] cv2 capture error: %s", exc)
             return None
 
     @staticmethod
