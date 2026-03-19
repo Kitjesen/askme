@@ -33,7 +33,7 @@ rsync -avz --delete \
     2>/dev/null || {
     # rsync not available on Windows — fall back to scp
     echo "rsync not available, using scp..."
-    find "$LOCAL_DIR/askme" -name '*.py' -o -name '*.md' -o -name '*.yaml' | while read -r f; do
+    find "$LOCAL_DIR/askme" \( -name '__pycache__' -o -name 'tmp' \) -prune -o \( -name '*.py' -o -name '*.md' -o -name '*.yaml' \) -print | while read -r f; do
         rel="${f#$LOCAL_DIR/}"
         dir="$(dirname "$rel")"
         ssh "$REMOTE" "mkdir -p $REMOTE_DIR/$dir" 2>/dev/null
@@ -41,15 +41,25 @@ rsync -avz --delete \
     done
 }
 
-# Always sync config.yaml and tests
+# Always sync config, requirements, and key root files
 scp -q "$LOCAL_DIR/config.yaml" "$REMOTE:$REMOTE_DIR/config.yaml"
+scp -q "$LOCAL_DIR/pyproject.toml" "$REMOTE:$REMOTE_DIR/pyproject.toml"
+scp -q "$LOCAL_DIR/requirements.txt" "$REMOTE:$REMOTE_DIR/requirements.txt"
+scp -q "$LOCAL_DIR/SOUL.md" "$REMOTE:$REMOTE_DIR/SOUL.md"
+
+# Sync scripts/
+ssh "$REMOTE" "mkdir -p $REMOTE_DIR/scripts"
+find "$LOCAL_DIR/scripts" \( -name '__pycache__' -o -name 'test_data' \) -prune -o \( -name '*.py' -o -name '*.sh' -o -name '*.bat' -o -name '*.service' \) -print | while read -r f; do
+    rel="${f#$LOCAL_DIR/}"
+    scp -q "$f" "$REMOTE:$REMOTE_DIR/$rel"
+done
 rsync -avz --delete \
     --exclude '__pycache__' \
     --exclude '*.pyc' \
     "$LOCAL_DIR/tests/" "$REMOTE:$REMOTE_DIR/tests/" \
     2>/dev/null || {
     echo "Syncing tests via scp..."
-    find "$LOCAL_DIR/tests" -name '*.py' | while read -r f; do
+    find "$LOCAL_DIR/tests" \( -name 'tmp' -o -name '__pycache__' \) -prune -o -name '*.py' -print | while read -r f; do
         rel="${f#$LOCAL_DIR/}"
         scp -q "$f" "$REMOTE:$REMOTE_DIR/$rel"
     done
