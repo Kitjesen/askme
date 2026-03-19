@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Askme 语音演示</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Microsoft YaHei', sans-serif; background: #fafafc; color: #334055; padding: 30px; }
+h1 { color: #111827; margin-bottom: 8px; font-size: 28px; }
+.sub { color: #64748b; margin-bottom: 30px; font-size: 15px; }
+.step { background: #fff; border-radius: 12px; padding: 20px 24px; margin-bottom: 16px;
+        display: flex; align-items: center; gap: 20px; border-left: 4px solid; transition: all 0.2s; }
+.step:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
+.step.blue   { border-color: #2563eb; }
+.step.green  { border-color: #059669; }
+.step.orange { border-color: #ea580c; }
+.step.purple { border-color: #7c3aed; }
+.step.red    { border-color: #dc2626; }
+.step.cyan   { border-color: #06848d; }
+
+.play-btn { width: 56px; height: 56px; border-radius: 50%; border: none; cursor: pointer;
+            color: #fff; font-size: 22px; flex-shrink: 0; transition: transform 0.15s; }
+.play-btn:hover { transform: scale(1.1); }
+.play-btn:active { transform: scale(0.95); }
+.play-btn.blue   { background: #2563eb; }
+.play-btn.green  { background: #059669; }
+.play-btn.orange { background: #ea580c; }
+.play-btn.purple { background: #7c3aed; }
+.play-btn.red    { background: #dc2626; }
+.play-btn.cyan   { background: #06848d; }
+
+.info { flex: 1; }
+.step-title { font-weight: 700; font-size: 16px; color: #111827; }
+.operator { color: #2563eb; font-size: 14px; margin-top: 6px; }
+.response { color: #111827; font-size: 14px; margin-top: 4px; padding: 8px 12px;
+            background: #f0f2f5; border-radius: 8px; }
+.tag { font-size: 11px; color: #94a3b8; margin-top: 4px; }
+
+.speaker-select { margin-bottom: 20px; padding: 8px 16px; font-size: 14px;
+                  border: 1px solid #e2e8f0; border-radius: 8px; }
+.perf { background: #f0f2f5; border-radius: 8px; padding: 12px 20px; margin-top: 20px;
+        font-size: 13px; color: #64748b; text-align: center; }
+</style>
+</head>
+<body>
+<h1>Askme 语音演示播放器</h1>
+<p class="sub">点击 ▶ 播放真实 TTS 音频 · 本地 VITS-Aishell3 离线合成</p>
+
+<label>音色选择：</label>
+<select class="speaker-select" id="speaker" onchange="updateSpeaker()">
+  <option value="speaker_10">Speaker 10 (男声·偏快)</option>
+  <option value="speaker_66">Speaker 66 (男声·中速)</option>
+  <option value="speaker_0">Speaker 0 (女声·偏慢)</option>
+  <option value="speaker_33">Speaker 33 (女声·中速)</option>
+</select>
+
+<div id="steps"></div>
+
+<div class="perf">
+  TTS 性能: 本地 VITS 合成 · RTF=0.2 (1秒音频只需0.2秒生成) · 纯 CPU · 329MB 模型 · 零网络依赖
+</div>
+
+<script>
+const steps = [
+  { id: "01_greeting", title: "① 唤醒+问候", cls: "blue",
+    op: '操作员: "小穹" (唤醒词触发)',
+    resp: "你好，我是Thunder，穹沛的巡检机器人。等待指令。",
+    tag: "KWS → ASR · 3.7s" },
+
+  { id: "02_confirm_task", title: "② 下达巡检任务", cls: "green",
+    op: '操作员: "去三号配电柜巡检"',
+    resp: "收到，正在前往三号配电柜巡检。预计到达时间两分钟。",
+    tag: "Intent → Skill → nav-gateway · 5.4s" },
+
+  { id: "04_safety_confirm", title: "③ 安全审批 (dangerous)", cls: "orange",
+    op: '操作员: "把机械臂移到前面"',
+    resp: '这是高风险操作：移动机械臂到前方位置。请说"确认执行"继续，或"取消"放弃。',
+    tag: "Safety 三级审批 · 6.9s" },
+
+  { id: "05_patrol_report", title: "④ 巡检异常报告", cls: "purple",
+    op: "Thunder: (到达目标，自动检测)",
+    resp: "巡逻报告：三号区域检测到温度异常，柜体表面六十八度，超过阈值。已记录并上报工单。",
+    tag: "Skill → Telemetry · 8.2s" },
+
+  { id: "03_estop", title: "⑤ 紧急停止 ESTOP", cls: "red",
+    op: '操作员: "停！" (Tier-1, 不经 LLM)',
+    resp: "已紧急停机。所有运动已暂停，等待下一步指令。",
+    tag: "ESTOP <100ms 直达 · 4.3s" },
+
+  { id: "06_memory_demo", title: "⑥ 记忆调用", cls: "cyan",
+    op: '操作员: "之前这里有什么异常吗？"',
+    resp: "根据之前的巡检记录，这个区域上周也出现过类似温度异常。建议排查散热系统。",
+    tag: "L3 情景记忆检索 · 6.9s" },
+
+  { id: "07_skill_response", title: "⑦ 技能响应", cls: "green",
+    op: '操作员: "附近哪里可以充电？"',
+    resp: "好的，正在为您搜索附近的充电桩。找到两个可用充电位，最近的在A区，距离约五十米。",
+    tag: "Skill: 搜索 · 7.7s" },
+];
+
+let currentSpeaker = "speaker_10";
+let currentAudio = null;
+
+function updateSpeaker() {
+  currentSpeaker = document.getElementById("speaker").value;
+  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+}
+
+function play(id) {
+  if (currentAudio) { currentAudio.pause(); }
+  const path = `voice_samples/${currentSpeaker}/${id}.wav`;
+  currentAudio = new Audio(path);
+  currentAudio.play().catch(e => alert("无法播放: " + path + "\n确保 voice_samples 文件夹在同目录下"));
+}
+
+function render() {
+  const container = document.getElementById("steps");
+  container.innerHTML = steps.map(s => `
+    <div class="step ${s.cls}">
+      <button class="play-btn ${s.cls}" onclick="play('${s.id}')">▶</button>
+      <div class="info">
+        <div class="step-title">${s.title}</div>
+        <div class="operator">${s.op}</div>
+        <div class="response">${s.resp}</div>
+        <div class="tag">${s.tag}</div>
+      </div>
+    </div>
+  `).join("");
+}
+render();
+</script>
+</body>
+</html>

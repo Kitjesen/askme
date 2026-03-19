@@ -14,11 +14,7 @@ build/
 venv/
 
 # Models (large binary files)
-models/asr/
-models/kws/
-models/tts/
-models/vad/
-models/policy/
+models/
 
 # Data
 data/
@@ -34,3 +30,20 @@ memU/target/
 # OS
 .DS_Store
 Thumbs.db
+
+# Temp / dev artifacts
+.tmp/
+.omc/
+dev-loop-logs/
+dev-loop*.log
+*.log
+.pytest_cache/
+.ruff_cache/
+tests/tmp/
+
+# Claude Code
+.claude/scheduled_tasks.lock
+
+# Generated docs (keep source .md/.py, ignore binaries)
+docs/*.pptx
+docs/voice_samples/
