@@ -95,7 +95,11 @@ class ProactiveAgent:
         pro_cfg = config.get("proactive", {})
 
         self._enabled: bool = pro_cfg.get("enabled", False)
-        self._patrol_interval: float = float(pro_cfg.get("patrol_interval", 60))
+        self._patrol_interval: float = float(pro_cfg.get("patrol_interval", 120))
+        # Adaptive scheduling
+        self._base_interval: float = self._patrol_interval
+        self._last_anomaly_time: float = 0.0
+        self._consecutive_normal: int = 0
         self._alert_cooldown: float = float(pro_cfg.get("alert_cooldown", 30))
         self._judge_model: str = pro_cfg.get(
             "judge_model",
@@ -149,6 +153,42 @@ class ProactiveAgent:
         """Wire the autonomous solve callback (called with anomaly description)."""
         self._solve_callback = callback
 
+    def _adaptive_interval(self) -> float:
+        """Calculate patrol interval based on time-of-day and anomaly history.
+
+        Rules:
+        - Night (22:00-06:00): 5x base interval (less frequent)
+        - Peak hours (09-11, 14-16): 0.5x base (more frequent)
+        - After anomaly: 0.25x base for 5 min, then gradually recover
+        - 10+ consecutive normal scans: 1.5x base (relax)
+        """
+        import datetime
+        hour = datetime.datetime.now().hour
+        base = self._base_interval
+
+        # Time-of-day multiplier
+        if 22 <= hour or hour < 6:
+            multiplier = 5.0  # night: relax
+        elif (9 <= hour < 11) or (14 <= hour < 16):
+            multiplier = 0.5  # peak: vigilant
+        else:
+            multiplier = 1.0  # normal
+
+        # Post-anomaly acceleration
+        if self._last_anomaly_time > 0:
+            since_anomaly = time.monotonic() - self._last_anomaly_time
+            if since_anomaly < 300:  # within 5 min of anomaly
+                multiplier = 0.25  # high alert
+            elif since_anomaly < 600:  # 5-10 min
+                multiplier = min(multiplier, 0.5)
+
+        # Consecutive normal relaxation
+        if self._consecutive_normal >= 10:
+            multiplier = max(multiplier, 1.5)
+
+        interval = base * multiplier
+        return max(30.0, min(600.0, interval))  # clamp 30s-10min
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
@@ -181,9 +221,10 @@ class ProactiveAgent:
                 except Exception as exc:
                     logger.warning("[Proactive] Auto-task error: %s", exc)
 
-                # Sleep until next tick (interruptible)
+                # Sleep until next tick — adaptive interval
+                interval = self._adaptive_interval()
                 try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=self._patrol_interval)
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval)
                     break  # stop_event was set
                 except asyncio.TimeoutError:
                     pass  # normal — time for next tick
@@ -225,7 +266,9 @@ class ProactiveAgent:
         # Anomaly detection (needs at least one prior observation)
         anomaly = await self._detect_anomaly(current_scene)
         if anomaly:
-            logger.warning("[Proactive] ANOMALY: %s", anomaly)
+            self._last_anomaly_time = time.monotonic()
+            self._consecutive_normal = 0
+            logger.warning("[Proactive] ANOMALY: %s (next scan in %.0fs)", anomaly, self._adaptive_interval())
 
             # Capture snapshot of the anomaly scene
             image_path: str | None = None
@@ -251,6 +294,7 @@ class ProactiveAgent:
                 except Exception as exc:
                     logger.warning("[Proactive] Auto-solve failed: %s", exc)
         else:
+            self._consecutive_normal += 1
             # Periodic normal report (every 5 ticks) — also save a baseline snapshot
             if self._tick_count % 5 == 0:
                 if self._vision:
