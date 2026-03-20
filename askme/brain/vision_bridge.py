@@ -646,7 +646,13 @@ class VisionBridge:
         return self._capture_cv2()
 
     def _capture_ros2(self) -> Any:
-        """Grab latest frame from ROS2 topic."""
+        """Grab latest frame — daemon file first (0ms), subprocess fallback (3-5s)."""
+        # Try daemon shared file first (instant)
+        frame = self._read_daemon_frame()
+        if frame is not None:
+            return frame
+
+        # Fallback to subprocess
         try:
             if self._ros2_grabber is None:
                 self._ros2_grabber = _ROS2FrameGrabber(
@@ -655,6 +661,37 @@ class VisionBridge:
             return self._ros2_grabber.grab()
         except Exception as exc:
             logger.warning("[Vision] ROS2 capture error: %s", exc)
+            return None
+
+    @staticmethod
+    def _read_daemon_frame(
+        path: str = "/tmp/askme_frame_color.bin",
+        max_age: float = 2.0,
+    ) -> Any:
+        """Read latest frame from frame_daemon shared file. Returns None if stale/missing."""
+        import struct
+        import numpy as np
+
+        # Check heartbeat freshness
+        try:
+            with open("/tmp/askme_frame_daemon.heartbeat", "r") as f:
+                ts = float(f.read().strip())
+            if time.time() - ts > max_age:
+                return None  # daemon stale
+        except (FileNotFoundError, ValueError):
+            return None  # daemon not running
+
+        try:
+            with open(path, "rb") as f:
+                header = f.read(8)
+                if len(header) < 8:
+                    return None
+                w, h = struct.unpack("II", header)
+                data = f.read(w * h * 3)
+                if len(data) != w * h * 3:
+                    return None
+                return np.frombuffer(data, dtype=np.uint8).reshape(h, w, 3).copy()
+        except (FileNotFoundError, OSError):
             return None
 
     def _capture_cv2(self) -> Any:
