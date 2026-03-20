@@ -907,68 +907,14 @@ class WebSearchTool(BaseTool):
     _TIMEOUT = 10
 
     def execute(self, *, query: str = "", **kwargs: Any) -> str:
-        import json as _json
-
         if not query:
             return "[Error] 搜索关键词不能为空。"
 
-        # DuckDuckGo Instant Answer API (free, no key)
-        encoded = urllib.parse.quote_plus(query)
-        # kl=cn-zh: China region for better Chinese results; no_redirect avoids 302 surprises
-        url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1&kl=cn-zh"
-
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Thunder-Robot/1.0 (askme search client)",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self._TIMEOUT) as resp:
-                raw = resp.read(16384).decode("utf-8", errors="replace")
-                data = _json.loads(raw)
-
-            results: list[str] = []
-
-            # Abstract (direct answer)
-            abstract = data.get("AbstractText", "").strip()
-            abstract_url = data.get("AbstractURL", "")
-            if abstract:
-                results.append(f"摘要：{abstract}")
-                if abstract_url:
-                    results.append(f"来源：{abstract_url}")
-
-            # Answer (very short fact)
-            answer = data.get("Answer", "").strip()
-            if answer:
-                results.append(f"直接答案：{answer}")
-
-            # Related topics
-            topics = data.get("RelatedTopics", [])[:5]
-            if topics:
-                results.append("\n相关结果：")
-                for t in topics:
-                    if isinstance(t, dict) and t.get("Text"):
-                        text = t.get("Text", "")[:120]
-                        link = t.get("FirstURL", "")
-                        if link:
-                            results.append(f"• {text}\n  {link}")
-                        else:
-                            results.append(f"• {text}")
-
-            if not results:
-                # Instant Answer API returned nothing — fall back to HTML results
-                return self._html_fallback(query)
-
-            return "\n".join(results)
-
-        except urllib.error.URLError as exc:
-            return f"[Error] 搜索服务不可达: {exc.reason}"
-        except (TimeoutError, OSError):
-            return f"[Error] 搜索超时 ({self._TIMEOUT}s)。"
-        except Exception as exc:
-            return f"[Error] {exc}"
+        # China-first search order: Bing → Baidu (DDG is blocked in China)
+        result = self._bing_fallback(query)
+        if result and not result.startswith("[Error]"):
+            return result
+        return self._baidu_search(query)
 
     def _html_fallback(self, query: str) -> str:
         """Scrape DuckDuckGo HTML results page when Instant Answer API returns empty.
@@ -1083,6 +1029,59 @@ class WebSearchTool(BaseTool):
                     results.append(f"• {snip[:160]}")
                     if cite:
                         results.append(f"  {cite}")
+
+            if results:
+                return f"搜索结果（{query}）：\n" + "\n".join(results)
+
+        except Exception:
+            pass
+
+        return f"[Error] Bing 搜索失败: {query}"
+
+    def _baidu_search(self, query: str) -> str:
+        """Baidu HTML search — reliable in China when Bing is slow."""
+        import html as _html
+        import re as _re
+
+        encoded = urllib.parse.quote_plus(query)
+        url = f"https://www.baidu.com/s?wd={encoded}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Linux; aarch64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                ),
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._TIMEOUT) as resp:
+                raw = resp.read(65536).decode("utf-8", errors="replace")
+
+            results: list[str] = []
+            # Extract Baidu result blocks: <div class="result c-container ...">
+            # Title in <h3><a>...</a></h3>, snippet in <span class="content-right_...">
+            titles = _re.findall(r'<h3[^>]*>.*?<a[^>]*>(.*?)</a>', raw, _re.DOTALL)
+            snippets = _re.findall(
+                r'<span[^>]*class="[^"]*content-right[^"]*"[^>]*>(.*?)</span>',
+                raw, _re.DOTALL,
+            )
+            if not snippets:
+                # Fallback pattern for mobile/lite Baidu
+                snippets = _re.findall(r'<div[^>]*class="[^"]*c-abstract[^"]*"[^>]*>(.*?)</div>', raw, _re.DOTALL)
+
+            for i, title in enumerate(titles[:5]):
+                clean_title = _re.sub(r"<[^>]+>", "", _html.unescape(title)).strip()
+                if not clean_title or len(clean_title) < 4:
+                    continue
+                snippet = ""
+                if i < len(snippets):
+                    snippet = _re.sub(r"<[^>]+>", "", _html.unescape(snippets[i])).strip()[:120]
+                entry = f"• {clean_title}"
+                if snippet:
+                    entry += f"\n  {snippet}"
+                results.append(entry)
 
             if results:
                 return f"搜索结果（{query}）：\n" + "\n".join(results)
