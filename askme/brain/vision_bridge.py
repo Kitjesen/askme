@@ -147,12 +147,15 @@ class VisionBridge:
         self._ros2_topic: str = self._vision_cfg.get("ros2_topic", "/camera/color/image_raw")
         self._ros2_grabber: _ROS2FrameGrabber | None = None
 
-        # VLM fallback config (uses same OpenAI-compatible relay as brain)
+        # VLM fallback config
         self._vlm_enabled: bool = self._vision_cfg.get("vlm_enabled", False)
         self._vlm_api_key: str = self._vision_cfg.get("vlm_api_key", "")
-        self._vlm_model: str = self._vision_cfg.get("vlm_model", "claude-haiku-4-5-20251001")
-        brain_cfg = cfg.get("brain", {})
-        self._vlm_base_url: str = brain_cfg.get("base_url", "https://cursor.scihub.edu.kg/api/v1")
+        self._vlm_model: str = self._vision_cfg.get("vlm_model", "qwen-vl-max")
+        # VLM base URL: vision-specific first, then brain relay fallback
+        self._vlm_base_url: str = self._vision_cfg.get(
+            "vlm_base_url",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
 
         # Lazily initialised heavy objects
         self._tracker: Any | None = None
@@ -355,7 +358,9 @@ class VisionBridge:
                     return response.choices[0].message.content or ""
 
             raw = await asyncio.to_thread(_call_vlm)
-            return self._clean_vlm_response(raw) if raw else ""
+            # Targeted Q&A: return raw answer directly (no refusal cleaning).
+            # The relay-specific cleaner strips short Chinese answers like "没有。"
+            return raw.strip() if raw else ""
 
         except Exception as exc:
             logger.warning("[Vision] VLM question failed: %s", exc)
