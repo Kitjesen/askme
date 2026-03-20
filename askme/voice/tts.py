@@ -824,6 +824,9 @@ class TTSEngine:
                 _need_preroll = True
                 _empty_polls = 0
                 self._last_aplay_close = time.monotonic()  # track warm state
+                # Give ALSA 200ms to fully release the device before reopening.
+                # Without this, rapid close→open races cause "设备或资源忙".
+                time.sleep(0.2)
                 if _router_ctx is not None:
                     try:
                         _router_ctx.__exit__(None, None, None)
