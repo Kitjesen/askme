@@ -15,6 +15,7 @@ voice_trigger: 开始巡逻,巡逻一圈,自动巡逻,巡一圈,去巡逻,巡检
 ## Tools
 
 look_around
+scan_around
 move_robot
 find_target
 speak_progress
@@ -33,7 +34,7 @@ get_current_time
 3. 对每个位置执行：
    a. `move_robot(action="go_to", target="[位置名]")` 导航
    b. `speak_progress("到达[位置名]，开始扫描")`
-   c. 360° 扫描：4 次 `look_around(question="这里有什么异常？有人吗？设备状态？")` + `move_robot(action="rotate", angle=90)`
+   c. `scan_around(question="这里有什么异常？有人吗？设备状态？")` 快速 360° 扫描
    d. 如果发现异常，用 `look_around(question="[具体问题]")` 深入查看
    e. 记录发现
 4. 巡逻完成后生成总结报告：
