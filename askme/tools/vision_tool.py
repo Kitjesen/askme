@@ -26,11 +26,17 @@ class LookAroundTool(BaseTool):
     name = "look_around"
     description = (
         "观察周围环境——拍照并描述当前视野中的物体、人和场景布局。"
+        "可选传入 question 参数让视觉模型重点关注特定物体（如'有没有方便面'）。"
         "返回自然语言描述。视觉不可用时返回提示信息。"
     )
     parameters: dict[str, Any] = {
         "type": "object",
-        "properties": {},
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": "可选：要重点观察的问题（如'桌上有没有水瓶'、'附近有什么食物'）",
+            },
+        },
     }
     safety_level = "normal"
 
@@ -40,13 +46,17 @@ class LookAroundTool(BaseTool):
     def set_vision(self, vision: VisionBridge) -> None:
         self._vision = vision
 
-    def execute(self, **kwargs: Any) -> str:
+    def execute(self, *, question: str = "", **kwargs: Any) -> str:
         if self._vision is None or not self._vision.available:
             return "[视觉不可用] 摄像头未连接或视觉模块未启用。请用其他方式（如导航到可能的位置）继续搜索。"
+
+        # If question is provided, use VLM with targeted prompt
+        if question:
+            return self._look_with_question(question)
+
         try:
             desc = asyncio.run(self._vision.describe_scene())
         except RuntimeError:
-            # Already in an async context — use nest_asyncio or new thread
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(1) as pool:
                 desc = pool.submit(asyncio.run, self._vision.describe_scene()).result(timeout=15)
@@ -56,6 +66,23 @@ class LookAroundTool(BaseTool):
 
         if not desc:
             return "[视觉] 当前视野中未检测到明显物体。"
+        return desc
+
+    def _look_with_question(self, question: str) -> str:
+        """Capture frame and ask VLM a specific question about it."""
+        try:
+            desc = asyncio.run(self._vision.describe_scene_with_question(question))
+        except RuntimeError:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                desc = pool.submit(
+                    asyncio.run, self._vision.describe_scene_with_question(question)
+                ).result(timeout=20)
+        except Exception as exc:
+            logger.warning("look_around(question=%s) failed: %s", question, exc)
+            return f"[视觉错误] 观察失败: {exc}"
+        if not desc:
+            return f"[视觉] 无法回答问题: {question}"
         return desc
 
 

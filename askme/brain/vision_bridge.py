@@ -290,6 +290,77 @@ class VisionBridge:
             logger.warning("[Vision] find_object error: %s", exc)
             return None
 
+    async def describe_scene_with_question(self, question: str, frame: Any = None) -> str:
+        """Use VLM to answer a specific question about the current camera view.
+
+        Unlike ``describe_scene()`` which lists all objects, this method asks
+        the VLM a targeted question (e.g. "有没有方便面", "桌上有什么食物").
+        Falls back to ``describe_scene()`` if VLM is unavailable.
+        """
+        if not self._ensure_vlm_client():
+            # No VLM — fall back to generic describe
+            return await self.describe_scene(frame)
+
+        try:
+            if frame is None:
+                frame = await asyncio.to_thread(self._capture_frame)
+            if frame is None:
+                return ""
+
+            import base64
+            import numpy as np
+
+            image_b64 = ""
+            try:
+                import cv2  # type: ignore[import-untyped]
+                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                image_b64 = base64.b64encode(buf).decode("utf-8")
+            except ImportError:
+                try:
+                    from PIL import Image as PILImage
+                    import io
+                    img = PILImage.fromarray(np.asarray(frame))
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=80)
+                    image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                except ImportError:
+                    return ""
+            if not image_b64:
+                return ""
+
+            prompt = (
+                f"观察这张图片，回答以下问题：{question}\n"
+                "用简短的中文回答（不超过80字）。如果看到了目标物体，描述它的位置（左/右/前方/桌上等）。"
+                "如果没看到，直接说没看到。"
+            )
+
+            def _call_vlm() -> str:
+                if getattr(self, "_vlm_backend", "openai") == "anthropic":
+                    response = self._vlm_client.messages.create(
+                        model=self._vlm_model, max_tokens=150,
+                        messages=[{"role": "user", "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
+                            {"type": "text", "text": prompt},
+                        ]}],
+                    )
+                    return response.content[0].text if response.content else ""
+                else:
+                    response = self._vlm_client.chat.completions.create(
+                        model=self._vlm_model, max_tokens=150,
+                        messages=[{"role": "user", "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                            {"type": "text", "text": prompt},
+                        ]}],
+                    )
+                    return response.choices[0].message.content or ""
+
+            raw = await asyncio.to_thread(_call_vlm)
+            return self._clean_vlm_response(raw) if raw else ""
+
+        except Exception as exc:
+            logger.warning("[Vision] VLM question failed: %s", exc)
+            return ""
+
     async def get_tracks(self, frame: Any) -> list[Any]:
         """Lower-level: return raw Track objects for robot control use.
 
