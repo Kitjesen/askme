@@ -188,6 +188,9 @@ class ThunderAgentShell:
         logger.info("[AgentShell] Starting task: %s", task[:80])
         self._workspace.mkdir(parents=True, exist_ok=True)
 
+        self._did_stream_tts = False
+        self._streamed_tts_text = ""
+
         # Announce start (only for root agent; child agents are silent)
         if self._audio is not None:
             self._audio.speak("好的，我来处理一下。")
@@ -294,7 +297,11 @@ class ThunderAgentShell:
                 final_response = response_text
 
             if not tool_calls:
-                logger.info("[AgentShell] Task complete after %d iterations", iterations)
+                self._did_stream_tts = bool(self._streamed_tts_text)
+                logger.info(
+                    "[AgentShell] Task complete after %d iterations (streamed_tts=%s)",
+                    iterations, self._did_stream_tts,
+                )
                 break
 
             # Announce the first tool call so user knows what's happening.
@@ -409,6 +416,7 @@ class ThunderAgentShell:
 
             response_text = ""
             tool_calls_acc: dict[int, dict[str, str]] = {}
+            self._streamed_tts_text = ""  # tracks what was already sent to TTS
 
             try:
                 async for chunk in self._llm.chat_stream(
@@ -438,8 +446,26 @@ class ThunderAgentShell:
 
                     if delta.content:
                         response_text += delta.content
+                        # Stream text to TTS in real-time (only final turn,
+                        # when no tool calls are being accumulated).
+                        # Sentence boundaries trigger immediate TTS speak.
+                        if (
+                            self._audio is not None
+                            and not tool_calls_acc
+                            and len(response_text) > 0
+                        ):
+                            last_char = response_text[-1]
+                            if last_char in "。！？\n；，、":
+                                from askme.pipeline.brain_pipeline import strip_think_blocks
+                                clean = strip_think_blocks(response_text).strip()
+                                if clean and clean != self._streamed_tts_text:
+                                    new_part = clean[len(self._streamed_tts_text):]
+                                    if new_part.strip():
+                                        self._audio.speak(new_part.strip())
+                                    self._streamed_tts_text = clean
 
                 tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else []
+
                 return response_text, tool_calls
 
             except asyncio.CancelledError:

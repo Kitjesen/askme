@@ -443,7 +443,9 @@ class BrainPipeline:
                 )
                 result = strip_think_blocks(result)
                 spoken, stored = self._prepare_agent_result(result)
-                self._audio.speak(spoken)
+                # Only speak if agent shell didn't already stream to TTS
+                if not getattr(self._agent_shell, "_did_stream_tts", False):
+                    self._audio.speak(spoken)
                 self._last_spoken_text = spoken
                 self._conversation.add_user_message(user_text)
                 self._conversation.add_assistant_message(stored)
