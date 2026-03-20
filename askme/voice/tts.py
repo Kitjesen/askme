@@ -794,7 +794,10 @@ class TTSEngine:
                     if self._audio_router is not None:
                         _router_ctx = self._audio_router.output_session()
                         _router_ctx.__enter__()
-                    _proc = subprocess.Popen(_aplay_cmd, stdin=subprocess.PIPE)
+                    _proc = subprocess.Popen(
+                        _aplay_cmd, stdin=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                    )
                     with self._aplay_lock:
                         self._aplay_proc = _proc
                     # Feed pre-roll (silence) to warm up the DAC
@@ -863,14 +866,23 @@ class TTSEngine:
                             "aplay: %d samples = %.3fs", len(chunk), dur
                         )
                         try:
-                            # Start persistent aplay on first chunk
+                            # Start persistent aplay on first chunk (with retry on EBUSY)
                             if _proc is None:
                                 if self._audio_router is not None:
                                     _router_ctx = self._audio_router.output_session()
                                     _router_ctx.__enter__()
-                                _proc = subprocess.Popen(
-                                    _aplay_cmd, stdin=subprocess.PIPE
-                                )
+                                for _retry in range(4):
+                                    try:
+                                        _proc = subprocess.Popen(
+                                            _aplay_cmd, stdin=subprocess.PIPE,
+                                            stderr=subprocess.DEVNULL,
+                                        )
+                                        break
+                                    except OSError:
+                                        if _retry < 3:
+                                            time.sleep(0.3)
+                                        else:
+                                            raise
                                 with self._aplay_lock:
                                     self._aplay_proc = _proc
 
