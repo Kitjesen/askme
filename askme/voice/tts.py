@@ -87,7 +87,7 @@ class TTSEngine:
         # MiniMax backend config
         self._minimax_api_key: str = config.get("minimax_api_key", "")
         self._minimax_tts_url: str = config.get("minimax_tts_url", "https://api.minimax.chat/v1")
-        self._minimax_tts_model: str = config.get("minimax_tts_model", "speech-2.8-turbo")
+        self._minimax_tts_model: str = config.get("minimax_tts_model", "speech-2.8-hd")
         self._minimax_voice_id: str = config.get("minimax_voice_id", "male-qn-qingse")
         self._minimax_sample_rate: int = int(config.get("minimax_sample_rate", 24000))
         # Voice tuning: speed (0.5-2.0), vol (0-10), pitch (-12 to 12 semitones)
