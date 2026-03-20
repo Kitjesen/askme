@@ -253,11 +253,20 @@ class LLMClient:
         return self._client
 
     def _model_chain(self, override: str | None = None) -> list[str]:
-        """Build ordered list of models to try: override/primary -> fallbacks."""
+        """Build ordered list of models to try: override/primary -> fallbacks.
+
+        Cross-provider fallback is disabled — MiniMax models only fall back to
+        other MiniMax models, relay models only to relay models.  Prevents
+        wasting 10+ seconds trying a 429-limited relay when primary is MiniMax.
+        """
         primary = override or self.model
         chain = [primary]
+        primary_is_minimax = primary.lower().startswith("minimax")
         for fb in self._fallback_models:
-            if fb != primary:
+            if fb == primary:
+                continue
+            fb_is_minimax = fb.lower().startswith("minimax")
+            if primary_is_minimax == fb_is_minimax:
                 chain.append(fb)
         return chain
 
