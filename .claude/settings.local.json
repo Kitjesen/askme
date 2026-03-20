@@ -11,7 +11,10 @@
       "WebFetch(domain:127.0.0.1)",
       "mcp__plugin_oh-my-claudecode_t__state_read",
       "mcp__plugin_oh-my-claudecode_t__state_clear",
-      "mcp__plugin_oh-my-claudecode_t__state_list_active"
+      "mcp__plugin_oh-my-claudecode_t__state_list_active",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:aihabitat.org)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

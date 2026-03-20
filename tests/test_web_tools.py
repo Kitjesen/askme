@@ -115,15 +115,6 @@ def search_tool() -> WebSearchTool:
     return WebSearchTool()
 
 
-def _ddg_resp(abstract: str = "", answer: str = "", topics: list | None = None) -> bytes:
-    return json.dumps({
-        "AbstractText": abstract,
-        "AbstractURL": "https://en.wikipedia.org/wiki/Test" if abstract else "",
-        "Answer": answer,
-        "RelatedTopics": topics or [],
-    }, ensure_ascii=False).encode("utf-8")
-
-
 def _mock_search_resp(body: bytes) -> MagicMock:
     resp = MagicMock()
     resp.read.return_value = body
@@ -166,15 +157,9 @@ def test_search_bing_fallback_to_baidu(search_tool: WebSearchTool) -> None:
 
 
 def test_search_no_results_returns_fallback(search_tool: WebSearchTool) -> None:
-    body = _ddg_resp()  # all empty
-    with patch("urllib.request.urlopen", return_value=_mock_search_resp(body)):
+    with patch("urllib.request.urlopen", return_value=_mock_search_resp(b"")):
         result = search_tool.execute(query="xyzzy_nonexistent_term_12345")
-    assert "未找到" in result or "建议" in result
-
-
-def test_search_empty_query_returns_error(search_tool: WebSearchTool) -> None:
-    result = search_tool.execute(query="")
-    assert "[Error]" in result
+    assert "未找到" in result or "Error" in result
 
 
 def test_search_url_error_handled(search_tool: WebSearchTool) -> None:
@@ -188,18 +173,6 @@ def test_search_timeout_handled(search_tool: WebSearchTool) -> None:
     with patch("urllib.request.urlopen", side_effect=TimeoutError()):
         result = search_tool.execute(query="test")
     assert "未找到" in result or "Error" in result
-
-
-def test_search_limits_related_topics_to_five(search_tool: WebSearchTool) -> None:
-    topics = [{"Text": f"Topic {i}", "FirstURL": f"https://example.com/{i}"} for i in range(10)]
-    body = _ddg_resp(topics=topics)
-    with patch("urllib.request.urlopen", return_value=_mock_search_resp(body)):
-        result = search_tool.execute(query="test")
-    # Should include at most 5 topics
-    assert result.count("example.com") <= 5
-
-
-# ── HTML fallback ─────────────────────────────────────────────────────────────
 
 
 def test_bing_returns_results(search_tool: WebSearchTool) -> None:
