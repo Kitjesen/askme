@@ -456,13 +456,16 @@ class ThunderAgentShell:
                         ):
                             last_char = response_text[-1]
                             if last_char in "。！？\n；，、":
-                                from askme.pipeline.brain_pipeline import strip_think_blocks
-                                clean = strip_think_blocks(response_text).strip()
-                                if clean and clean != self._streamed_tts_text:
-                                    new_part = clean[len(self._streamed_tts_text):]
-                                    if new_part.strip():
-                                        self._audio.speak(new_part.strip())
-                                    self._streamed_tts_text = clean
+                                # Skip if we're inside a <think> block
+                                in_think = response_text.count("<think>") > response_text.count("</think>")
+                                if not in_think:
+                                    from askme.pipeline.brain_pipeline import strip_think_blocks
+                                    clean = strip_think_blocks(response_text).strip()
+                                    if clean and clean != self._streamed_tts_text:
+                                        new_part = clean[len(self._streamed_tts_text):]
+                                        if new_part.strip():
+                                            self._audio.speak(new_part.strip())
+                                        self._streamed_tts_text = clean
 
                 tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else []
 
