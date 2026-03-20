@@ -175,29 +175,18 @@ class VisionBridge:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def _ensure_bpu(self) -> bool:
-        """Try to init BPU YOLO detector (Horizon J6, ~3ms). Returns True if ready."""
-        if self._bpu_detector is not None:
-            return True
-        if self._bpu_init_attempted:
-            return False
-        self._bpu_init_attempted = True
-        if not self._enabled:
-            return False
+    def _read_daemon_detections(self, max_age: float = 2.0) -> list[dict[str, Any]] | None:
+        """Read latest BPU detections from frame_daemon shared JSON. None if stale/missing."""
+        import json as _json
+        det_path = "/tmp/askme_frame_detections.json"
         try:
-            from askme.brain.bpu_yolo import BPUYoloDetector
-            det = BPUYoloDetector(
-                model_path=self._bpu_model_path,
-                confidence=self._confidence,
-            )
-            if det.available:
-                self._bpu_detector = det
-                logger.info("[Vision] BPU YOLO detector ready (~3ms per frame)")
-                return True
-            return False
-        except Exception as exc:
-            logger.debug("[Vision] BPU init failed: %s", exc)
-            return False
+            with open(det_path, "r") as f:
+                data = _json.load(f)
+            if time.time() - data.get("timestamp", 0) > max_age:
+                return None
+            return data.get("detections", [])
+        except (FileNotFoundError, ValueError, KeyError):
+            return None
 
     def _ensure_detector(self) -> bool:
         """Attempt to create ``YoloSegTracker`` + ``WeightedTargetSelector`` (once).
@@ -264,17 +253,10 @@ class VisionBridge:
         If *frame* is ``None``, attempts to capture from camera.
         Returns an empty string if all vision backends are unavailable.
         """
-        # Try BPU YOLO first (fastest)
-        if self._ensure_bpu():
-            try:
-                if frame is None:
-                    frame = await asyncio.to_thread(self._capture_frame)
-                if frame is not None:
-                    dets = await asyncio.to_thread(self._bpu_detector.detect, frame)
-                    if dets:
-                        return self._detections_to_description(dets)
-            except Exception as exc:
-                logger.warning("[Vision] BPU describe_scene error: %s", exc)
+        # Try daemon BPU detections first (0ms — pre-computed by frame_daemon)
+        dets = self._read_daemon_detections()
+        if dets is not None and dets:
+            return self._detections_to_description(dets)
 
         # Try CPU YOLO (qp-perception)
         if self._ensure_detector():
@@ -301,20 +283,15 @@ class VisionBridge:
         Returns a dict with ``bbox``, ``confidence``, ``center``, ``track_id``,
         or ``None`` if not found. Tries BPU first, then CPU YOLO.
         """
-        # Try BPU first
-        if self._ensure_bpu():
-            try:
-                if frame is None:
-                    frame = await asyncio.to_thread(self._capture_frame)
-                if frame is not None:
-                    dets = await asyncio.to_thread(self._bpu_detector.detect, frame)
-                    target_lower = target.lower()
-                    for d in dets:
-                        if d["class_id"].lower() == target_lower:
-                            return d
-                    return None
-            except Exception as exc:
-                logger.warning("[Vision] BPU find_object error: %s", exc)
+        # Try daemon BPU detections first (0ms)
+        dets = self._read_daemon_detections()
+        if dets is not None:
+            target_lower = target.lower()
+            for d in dets:
+                if d["class_id"].lower() == target_lower:
+                    return d
+            # BPU ran but target not found — don't fall through to slow CPU YOLO
+            return None
 
         if not self._ensure_detector():
             return None
