@@ -255,10 +255,14 @@ class VisionBridge:
         """
         # Try daemon BPU detections first (0ms — pre-computed by frame_daemon)
         dets = self._read_daemon_detections()
-        if dets is not None and dets:
-            return self._detections_to_description(dets)
+        if dets is not None:
+            # BPU ran: return results or fall to VLM (skip slow CPU YOLO)
+            if dets:
+                return self._detections_to_description(dets)
+            # BPU found nothing — skip CPU YOLO, go straight to VLM
+            return await self._describe_scene_vlm(frame)
 
-        # Try CPU YOLO (qp-perception)
+        # Try CPU YOLO (qp-perception) — only when daemon is not running
         if self._ensure_detector():
             try:
                 if frame is None:
