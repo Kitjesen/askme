@@ -47,6 +47,7 @@ _AGENT_ALLOWED_TOOLS = {
     "spawn_agent",   # spawn child agent for focused sub-tasks
     "look_around",   # vision: describe current scene
     "find_target",   # vision: search for specific object by YOLO class
+    "move_robot",    # motion: rotate, forward, go_to, stop
 }
 
 _DEFAULT_AGENT_MODEL = "claude-haiku-4-5-20251001"  # fast + cheap for agentic loops
@@ -73,6 +74,7 @@ _TOOL_VOICE_LABELS: dict[str, str] = {
     "get_current_time": "获取时间",
     "speak_progress": None,  # LLM-driven TTS — don't double-announce
     "look_around": "观察环境",
+    "move_robot": "移动机器人",
     "find_target": "搜索物体",
 }
 
