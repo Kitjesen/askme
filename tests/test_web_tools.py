@@ -148,16 +148,21 @@ def test_search_empty_query(search_tool: WebSearchTool) -> None:
     assert "Error" in result
 
 
-def test_search_returns_related_topics(search_tool: WebSearchTool) -> None:
-    topics = [
-        {"Text": "Python - a high-level language", "FirstURL": "https://en.wikipedia.org/wiki/Python"},
-        {"Text": "Python 3 features", "FirstURL": "https://docs.python.org/3/"},
-    ]
-    body = _ddg_resp(topics=topics)
-    with patch("urllib.request.urlopen", return_value=_mock_search_resp(body)):
+def test_search_bing_fallback_to_baidu(search_tool: WebSearchTool) -> None:
+    """When Bing fails, falls back to Baidu."""
+    call_count = [0]
+    def side_effect(req, **kw):
+        call_count[0] += 1
+        if call_count[0] == 1:  # Bing
+            raise OSError("timeout")
+        # Baidu response
+        return _mock_search_resp(
+            b'<h3><a>Python tutorial</a></h3>'
+            b'<div class="c-abstract">Learn Python basics</div>'
+        )
+    with patch("urllib.request.urlopen", side_effect=side_effect):
         result = search_tool.execute(query="Python")
-    assert "Python" in result
-    assert "wikipedia" in result.lower() or "docs.python" in result.lower()
+    assert call_count[0] >= 2  # tried Bing then Baidu
 
 
 def test_search_no_results_returns_fallback(search_tool: WebSearchTool) -> None:
