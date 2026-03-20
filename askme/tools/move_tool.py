@@ -1,65 +1,72 @@
-"""Robot movement tool — exposes ROS2 cmd_vel / semantic nav to agent shell.
+"""Robot movement tool — dispatches motion commands through runtime services.
 
-Provides low-level motion primitives that the agent can compose:
-- rotate: turn in place (scan surroundings)
-- move_forward: walk straight
-- go_to: semantic navigation ("去厨房")
-- stop: emergency stop
+Routes movement through the proper safety-checked path:
+- go_to: nav-gateway API (semantic navigation with task tracking)
+- rotate/forward/stop: dog-control-service API (capability dispatch)
+
+DOES NOT directly publish to ROS2 topics — all motion goes through
+runtime services that handle collision avoidance, safety checks, and
+state management.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import subprocess
 from typing import Any
 
 from .tool_registry import BaseTool
 
 logger = logging.getLogger(__name__)
 
-# Timeout for ROS2 subprocess calls (short — fail fast if no subscriber)
-_CMD_TIMEOUT = 3.0
 
+def _call_runtime_api(
+    service: str, method: str, path: str, body: dict | None = None
+) -> dict[str, Any]:
+    """Call a runtime service via HTTP. Returns parsed response or error dict."""
+    import os
+    import urllib.request
+    import urllib.error
 
-def _ros2_pub(topic: str, msg_type: str, data: str, rate: float = 0, count: int = 1) -> str:
-    """Publish a ROS2 message via subprocess (system Python with ROS2 sourced)."""
-    if rate > 0:
-        cmd = (
-            f'source /opt/ros/humble/setup.bash && '
-            f'timeout {_CMD_TIMEOUT} ros2 topic pub -r {rate} -t {count} '
-            f'{topic} {msg_type} "{data}"'
-        )
-    else:
-        cmd = (
-            f'source /opt/ros/humble/setup.bash && '
-            f'ros2 topic pub --once {topic} {msg_type} "{data}"'
-        )
+    port_map = {
+        "control": 5080,
+        "nav": 5090,
+        "safety": 5070,
+    }
+    port = port_map.get(service)
+    if not port:
+        return {"error": f"unknown service: {service}"}
+
+    # Check if service URL is configured via env
+    env_key = f"DOG_{'CONTROL' if service == 'control' else service.upper()}_SERVICE_URL"
+    base_url = os.environ.get(env_key, f"http://localhost:{port}")
+
+    url = f"{base_url}{path}"
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Content-Type": "application/json"},
+    )
     try:
-        result = subprocess.run(
-            ["bash", "-c", cmd],
-            capture_output=True, timeout=_CMD_TIMEOUT + 5,
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.decode(errors="replace")[:200]
-            return f"[错误] ROS2 发布失败: {stderr}"
-        return "OK"
-    except subprocess.TimeoutExpired:
-        return "[错误] ROS2 命令超时"
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.URLError as exc:
+        return {"error": f"服务不可达 ({service}:{port}): {exc.reason}"}
     except Exception as exc:
-        return f"[错误] {exc}"
+        return {"error": f"请求失败: {exc}"}
 
 
 class MoveRobotTool(BaseTool):
-    """Control robot movement — rotate, walk forward, go to location, or stop."""
+    """Control robot movement through runtime safety-checked APIs."""
 
     name = "move_robot"
     description = (
-        "控制机器人运动。支持以下动作：\n"
-        "- action='rotate', angle=45 → 原地旋转（正=左转，负=右转，单位度）\n"
+        "控制机器人运动（通过 runtime 安全层）。支持以下动作：\n"
+        "- action='go_to', target='厨房' → 语义导航（通过 nav-gateway，有路径规划和避障）\n"
+        "- action='rotate', angle=90 → 原地旋转（正=左转，负=右转，单位度）\n"
         "- action='forward', distance=1.0 → 前进（单位米，负=后退）\n"
-        "- action='go_to', target='厨房' → 语义导航到指定位置\n"
         "- action='stop' → 立即停止\n"
-        "搜索物体时，先 rotate 扫描四周，再 go_to 导航到可能位置。"
+        "注意：rotate/forward 需要 dog-control-service 支持，服务未配置时会返回错误。"
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -95,85 +102,60 @@ class MoveRobotTool(BaseTool):
         target: str = "",
         **kwargs: Any,
     ) -> str:
-        if action == "rotate":
-            return self._rotate(angle)
-        elif action == "forward":
-            return self._forward(distance)
-        elif action == "go_to":
+        if action == "go_to":
             return self._go_to(target)
+        elif action == "rotate":
+            return self._dispatch_control("rotate", {"angle_deg": angle})
+        elif action == "forward":
+            return self._dispatch_control("walk_forward", {"distance_m": distance})
         elif action == "stop":
-            return self._stop()
+            return self._dispatch_control("stop")
         else:
             return f"[错误] 未知动作: {action}"
 
-    def _rotate(self, angle_deg: float) -> str:
-        """Rotate in place by publishing cmd_vel with angular.z."""
-        if abs(angle_deg) < 1:
-            return "[跳过] 旋转角度太小"
-
-        import math
-        # angular velocity ~0.5 rad/s, calculate duration
-        angular_speed = 0.5  # rad/s
-        angle_rad = math.radians(angle_deg)
-        duration = abs(angle_rad) / angular_speed
-        # Publish at 10Hz for the calculated duration
-        count = max(1, int(duration * 10))
-        sign = 1.0 if angle_deg > 0 else -1.0
-
-        data = (
-            f"{{header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: base_link}}, "
-            f"twist: {{linear: {{x: 0.0, y: 0.0, z: 0.0}}, "
-            f"angular: {{x: 0.0, y: 0.0, z: {sign * angular_speed}}}}}}}"
-        )
-        result = _ros2_pub("/nav/cmd_vel", "geometry_msgs/msg/TwistStamped", data, rate=10, count=count)
-        if result == "OK":
-            # Send stop after rotation
-            self._stop()
-            return f"已旋转约 {abs(angle_deg):.0f} 度{'左转' if angle_deg > 0 else '右转'}"
-        return result
-
-    def _forward(self, distance: float) -> str:
-        """Move forward/backward by publishing cmd_vel with linear.x."""
-        if abs(distance) < 0.05:
-            return "[跳过] 距离太短"
-
-        speed = 0.3  # m/s
-        duration = abs(distance) / speed
-        count = max(1, int(duration * 10))
-        sign = 1.0 if distance > 0 else -1.0
-
-        data = (
-            f"{{header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: base_link}}, "
-            f"twist: {{linear: {{x: {sign * speed}, y: 0.0, z: 0.0}}, "
-            f"angular: {{x: 0.0, y: 0.0, z: 0.0}}}}}}"
-        )
-        result = _ros2_pub("/nav/cmd_vel", "geometry_msgs/msg/TwistStamped", data, rate=10, count=count)
-        if result == "OK":
-            self._stop()
-            direction = "前进" if distance > 0 else "后退"
-            return f"已{direction}约 {abs(distance):.1f} 米"
-        return result
-
     def _go_to(self, target: str) -> str:
-        """Semantic navigation via /nav/semantic/instruction."""
+        """Semantic navigation via nav-gateway API."""
         if not target:
             return "[错误] 请指定目标位置"
 
-        data = f"{{data: '去{target}'}}"
-        result = _ros2_pub("/nav/semantic/instruction", "std_msgs/msg/String", data)
-        if result == "OK":
-            return f"已发送导航指令: 去{target}（导航进行中）"
-        return result
+        from uuid import uuid4
+        result = _call_runtime_api("nav", "POST", "/api/v1/nav/tasks", {
+            "task_type": "SEMANTIC_NAV",
+            "target_name": target,
+            "mission_id": uuid4().hex[:12],
+        })
 
-    def _stop(self) -> str:
-        """Send zero velocity to stop."""
-        data = (
-            "{header: {stamp: {sec: 0, nanosec: 0}, frame_id: base_link}, "
-            "twist: {linear: {x: 0.0, y: 0.0, z: 0.0}, "
-            "angular: {x: 0.0, y: 0.0, z: 0.0}}}"
-        )
-        _ros2_pub("/nav/cmd_vel", "geometry_msgs/msg/TwistStamped", data)
-        return "已停止"
+        if "error" in result:
+            err = result["error"]
+            if "服务不可达" in err:
+                return f"[导航不可用] nav-gateway 未运行。无法导航到 {target}。"
+            return f"[导航错误] {err}"
+
+        task_id = result.get("task_id", result.get("id", ""))
+        return f"导航任务已下发: 前往{target} (task_id={task_id})"
+
+    def _dispatch_control(self, capability: str, params: dict | None = None) -> str:
+        """Dispatch a capability to dog-control-service."""
+        from uuid import uuid4
+        body = {
+            "mission_id": uuid4().hex[:12],
+            "mission_type": "motion_command",
+            "requested_capability": capability,
+            "parameters": params or {},
+        }
+        result = _call_runtime_api("control", "POST", "/api/v1/control/executions", body)
+
+        if "error" in result:
+            err = result["error"]
+            if "服务不可达" in err:
+                return (
+                    f"[控制不可用] dog-control-service 未运行。"
+                    f"无法执行 {capability}。"
+                    f"请确认 runtime 服务已启动。"
+                )
+            return f"[控制错误] {err}"
+
+        return f"已执行: {capability}"
 
 
 def register_move_tools(registry: Any) -> None:

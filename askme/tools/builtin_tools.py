@@ -588,9 +588,57 @@ class SandboxedBashTool(BaseTool):
     _MAX_OUTPUT = 4000
     _TIMEOUT = 30
 
+    # Commands that must NEVER be executed by the agent
+    _BLOCKED_COMMANDS = {
+        "rm -rf /", "rm -rf /*", "mkfs", "dd if=", ":(){ :|:& };:",
+        "reboot", "shutdown", "poweroff", "halt",
+        "passwd", "useradd", "userdel", "visudo",
+    }
+    _BLOCKED_PREFIXES = (
+        "rm -rf /",     # recursive delete from root
+        "apt remove", "apt purge", "apt autoremove",
+        "pip uninstall",
+        "systemctl stop", "systemctl disable",  # stopping services
+        "kill -9", "killall",
+    )
+    # These prefixes are allowed even though they match blocked patterns
+    _SAFE_PREFIXES = (
+        "systemctl status", "systemctl is-active",
+        "journalctl", "df", "free", "top -bn1", "uptime",
+        "cat /var/log", "tail", "head", "grep", "wc",
+        "ls", "pwd", "whoami", "hostname", "date",
+        "ping -c", "curl", "wget -q",
+        "python", "pip list", "pip show",
+        "ros2 topic list", "ros2 node list", "ros2 topic echo",
+    )
+
+    def _is_command_safe(self, command: str) -> str | None:
+        """Return error message if command is blocked, None if safe."""
+        cmd_lower = command.strip().lower()
+
+        # Exact match block
+        for blocked in self._BLOCKED_COMMANDS:
+            if blocked in cmd_lower:
+                return f"[安全拒绝] 命令 '{blocked}' 被禁止执行。"
+
+        # Prefix block (but allow safe overrides)
+        for prefix in self._BLOCKED_PREFIXES:
+            if cmd_lower.startswith(prefix):
+                # Check if it matches a safe prefix
+                is_safe = any(cmd_lower.startswith(s) for s in self._SAFE_PREFIXES)
+                if not is_safe:
+                    return f"[安全拒绝] 以 '{prefix}' 开头的命令被禁止。仅允许诊断类命令。"
+
+        return None
+
     def execute(self, *, command: str = "", cwd: str = "", **kwargs: Any) -> str:
         if not command:
             return "[Error] No command provided."
+
+        # Safety check
+        blocked = self._is_command_safe(command)
+        if blocked:
+            return blocked
 
         workspace = self._WORKSPACE
         workspace.mkdir(parents=True, exist_ok=True)
