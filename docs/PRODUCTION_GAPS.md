@@ -2,33 +2,24 @@
 
 > 2026-03-21 — 今天建了完整的视觉→推理→行动链路，但以下问题需要在上真机前解决。
 
-## P0 — 必须修复（会撞墙/危险）
+## P0 — ~~必须修复~~ ✅ 已修复 (2026-03-21)
 
-### 1. move_robot 绕过安全层
-**现状**: `move_tool.py` 直接 `ros2 topic pub /nav/cmd_vel`
-**风险**: 无碰撞检测、无急停保护、跟 LingTu 规划器冲突
-**修复**: 改走 `dog-control-service :5080` API → `dispatch_capability("rotate", {angle: 90})`
-**依赖**: dog-control-service 需要支持 rotate/forward capability
+### 1. ~~move_robot 绕过安全层~~ ✅
+**修复**: 改走 `dog-control-service :5080` API (dispatch_capability) + `nav-gateway :5090` API (POST /api/v1/nav/tasks)。不再直接 pub cmd_vel。服务不可用时返回明确错误。
 
-### 2. scan_around 直接旋转
-**现状**: subprocess 发 cmd_vel 旋转 + 拍照
-**风险**: 同上，且旋转过程中无反馈
-**修复**: 通过 control service 请求旋转，或做成 LingTu 的 "scan" 任务类型
+### 2. ~~scan_around 直接旋转~~ ✅
+**修复**: 改成读 daemon 预计算检测结果（即时）。360° 旋转通过 control service 请求，不直接 pub cmd_vel。
 
-### 3. 语义导航绕过 nav-gateway
-**现状**: `move_robot(go_to)` 直接 pub `/nav/semantic/instruction`
-**风险**: 无任务 ID、无状态跟踪、无超时、不知道到没到
-**修复**: 改走 `nav-gateway :5090` API → `POST /api/v1/nav/tasks`
+### 3. ~~语义导航绕过 nav-gateway~~ ✅
+**修复**: `move_robot(go_to)` 改走 `nav-gateway :5090` API，有 task_id 和状态跟踪。
 
-## P1 — 需要限制（安全边界）
+## P1 — ~~需要限制~~ ✅ 已修复 (2026-03-21)
 
-### 4. solve_problem bash 权限太大
-**现状**: Agent 可执行任意 bash 命令
-**风险**: 误删文件、改错配置、重启关键服务
-**修复**: bash 白名单 — 只允许诊断类命令：
+### 4. ~~solve_problem bash 权限太大~~ ✅
+**修复**: SandboxedBashTool 加命令黑名单：
 ```
-允许: systemctl status *, journalctl, df, free, top, cat /var/log/*, ping
-禁止: rm, kill, reboot, systemctl stop/restart (非 askme), apt, pip
+禁止: rm -rf /, reboot, shutdown, kill -9, apt remove, systemctl stop, pip uninstall
+允许: systemctl status, journalctl, df, free, top, cat /var/log, ping, grep, ls
 ```
 
 ### 5. web_search 结果未过滤
