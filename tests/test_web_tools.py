@@ -132,19 +132,20 @@ def _mock_search_resp(body: bytes) -> MagicMock:
     return resp
 
 
-def test_search_returns_abstract(search_tool: WebSearchTool) -> None:
-    body = _ddg_resp(abstract="Python is a programming language.", answer="")
-    with patch("urllib.request.urlopen", return_value=_mock_search_resp(body)):
+def test_search_returns_results(search_tool: WebSearchTool) -> None:
+    """Bing-first search returns results from HTML scraping."""
+    bing_html = (
+        b'<li class="b_algo"><h2><a href="https://python.org">Python</a></h2>'
+        b'<div class="b_caption"><p>Python is a programming language.</p></div></li>'
+    )
+    with patch("urllib.request.urlopen", return_value=_mock_search_resp(bing_html)):
         result = search_tool.execute(query="Python programming")
-    assert "Python is a programming language" in result
-    assert "摘要" in result
+    assert "Python" in result
 
 
-def test_search_returns_direct_answer(search_tool: WebSearchTool) -> None:
-    body = _ddg_resp(answer="42")
-    with patch("urllib.request.urlopen", return_value=_mock_search_resp(body)):
-        result = search_tool.execute(query="meaning of life")
-    assert "42" in result
+def test_search_empty_query(search_tool: WebSearchTool) -> None:
+    result = search_tool.execute(query="")
+    assert "Error" in result
 
 
 def test_search_returns_related_topics(search_tool: WebSearchTool) -> None:
