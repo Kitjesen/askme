@@ -666,8 +666,15 @@ class BrainPipeline:
         return result
 
     def _start_vision_capture(self) -> asyncio.Task[str] | None:
-        """Start a background vision scene description, or None if vision is unavailable."""
+        """Start a background vision scene description, or None if vision is unavailable.
+
+        Skipped when ``vision.auto_capture`` is False (default) — vision is
+        only used when explicitly called via tools (look_around, find_target).
+        This avoids ~3-5s VLM overhead on every conversational turn.
+        """
         if not self._vision or not self._vision.available:
+            return None
+        if not self._vision._vision_cfg.get("auto_capture", False):
             return None
         return asyncio.create_task(self._vision.describe_scene())
 
