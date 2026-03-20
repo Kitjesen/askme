@@ -52,7 +52,7 @@ _AGENT_ALLOWED_TOOLS = {
 }
 
 _DEFAULT_AGENT_MODEL = "MiniMax-M2.5-highspeed"  # fast + stable, no relay dependency
-_MAX_ITERATIONS = 20
+_MAX_ITERATIONS = 10
 _DEFAULT_TIMEOUT = 120.0
 _MAX_DEPTH = 1  # max sub-agent nesting depth (0=root, 1=child, children cannot spawn)
 # Keep the original task message + last N to cap prompt size (prevents TTFT blowup

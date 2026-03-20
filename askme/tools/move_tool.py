@@ -17,8 +17,8 @@ from .tool_registry import BaseTool
 
 logger = logging.getLogger(__name__)
 
-# Timeout for ROS2 subprocess calls
-_CMD_TIMEOUT = 10.0
+# Timeout for ROS2 subprocess calls (short — fail fast if no subscriber)
+_CMD_TIMEOUT = 3.0
 
 
 def _ros2_pub(topic: str, msg_type: str, data: str, rate: float = 0, count: int = 1) -> str:
