@@ -131,13 +131,16 @@ class FindTargetTool(BaseTool):
         if result is None:
             return f"[未找到] 当前视野中没有检测到 {target}。"
 
-        return json.dumps({
+        det = {
             "found": True,
-            "object": result.get("class", target),
+            "object": result.get("class_id", result.get("class", target)),
             "confidence": round(result.get("confidence", 0), 2),
             "center": result.get("center"),
             "bbox": result.get("bbox"),
-        }, ensure_ascii=False)
+        }
+        if "distance_m" in result:
+            det["distance_m"] = result["distance_m"]
+        return json.dumps(det, ensure_ascii=False)
 
 
 def register_vision_tools(

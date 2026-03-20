@@ -176,7 +176,11 @@ class VisionBridge:
     # ------------------------------------------------------------------
 
     def _read_daemon_detections(self, max_age: float = 2.0) -> list[dict[str, Any]] | None:
-        """Read latest BPU detections from frame_daemon shared JSON. None if stale/missing."""
+        """Read latest BPU detections from frame_daemon shared JSON.
+
+        Enriches each detection with depth (meters) from the depth frame.
+        Returns None if daemon is stale/missing.
+        """
         import json as _json
         det_path = "/tmp/askme_frame_detections.json"
         try:
@@ -184,7 +188,17 @@ class VisionBridge:
                 data = _json.load(f)
             if time.time() - data.get("timestamp", 0) > max_age:
                 return None
-            return data.get("detections", [])
+            dets = data.get("detections", [])
+            # Enrich with depth
+            for d in dets:
+                bbox = d.get("bbox", [])
+                if len(bbox) == 4:
+                    cx = (bbox[0] + bbox[2]) / 2
+                    cy = (bbox[1] + bbox[3]) / 2
+                    depth_m = self.read_depth_at(int(cx), int(cy))
+                    if depth_m is not None:
+                        d["distance_m"] = round(depth_m, 2)
+            return dets
         except (FileNotFoundError, ValueError, KeyError):
             return None
 
@@ -703,6 +717,15 @@ class VisionBridge:
             return None
 
     @staticmethod
+    def _check_daemon_alive(max_age: float = 2.0) -> bool:
+        try:
+            with open("/tmp/askme_frame_daemon.heartbeat", "r") as f:
+                ts = float(f.read().strip())
+            return time.time() - ts <= max_age
+        except (FileNotFoundError, ValueError):
+            return False
+
+    @staticmethod
     def _read_daemon_frame(
         path: str = "/tmp/askme_frame_color.bin",
         max_age: float = 2.0,
@@ -711,14 +734,8 @@ class VisionBridge:
         import struct
         import numpy as np
 
-        # Check heartbeat freshness
-        try:
-            with open("/tmp/askme_frame_daemon.heartbeat", "r") as f:
-                ts = float(f.read().strip())
-            if time.time() - ts > max_age:
-                return None  # daemon stale
-        except (FileNotFoundError, ValueError):
-            return None  # daemon not running
+        if not VisionBridge._check_daemon_alive(max_age):
+            return None
 
         try:
             with open(path, "rb") as f:
@@ -730,6 +747,65 @@ class VisionBridge:
                 if len(data) != w * h * 3:
                     return None
                 return np.frombuffer(data, dtype=np.uint8).reshape(h, w, 3).copy()
+        except (FileNotFoundError, OSError):
+            return None
+
+    @staticmethod
+    def read_depth_at(x: int, y: int) -> float | None:
+        """Read depth (meters) at pixel (x, y) from daemon depth frame.
+
+        Returns None if depth unavailable or pixel is invalid (0 = no reading).
+        Depth frame is 848x480 uint16 mm from Orbbec Gemini 335.
+        """
+        import struct
+        import numpy as np
+
+        if not VisionBridge._check_daemon_alive():
+            return None
+        try:
+            with open("/tmp/askme_frame_depth.bin", "rb") as f:
+                header = f.read(8)
+                if len(header) < 8:
+                    return None
+                w, h = struct.unpack("II", header)
+                data = f.read(w * h * 2)
+                if len(data) != w * h * 2:
+                    return None
+            depth = np.frombuffer(data, dtype=np.uint16).reshape(h, w)
+            # Scale color pixel (1280x720) to depth pixel (848x480)
+            dx = int(x * w / 1280)
+            dy = int(y * h / 720)
+            dx = max(0, min(w - 1, dx))
+            dy = max(0, min(h - 1, dy))
+            # Sample 5x5 area for robustness (avoid single noisy pixel)
+            y1, y2 = max(0, dy - 2), min(h, dy + 3)
+            x1, x2 = max(0, dx - 2), min(w, dx + 3)
+            patch = depth[y1:y2, x1:x2]
+            valid = patch[patch > 0]
+            if valid.size == 0:
+                return None
+            return float(np.median(valid)) / 1000.0  # mm → meters
+        except (FileNotFoundError, OSError):
+            return None
+
+    @staticmethod
+    def read_depth_map() -> Any:
+        """Read full depth map. Returns (848, 480) uint16 mm array or None."""
+        import struct
+        import numpy as np
+
+        if not VisionBridge._check_daemon_alive():
+            return None
+        try:
+            with open("/tmp/askme_frame_depth.bin", "rb") as f:
+                header = f.read(8)
+                if len(header) < 8:
+                    return None
+                w, h = struct.unpack("II", header)
+                data = f.read(w * h * 2)
+                if len(data) != w * h * 2:
+                    return None
+            return np.frombuffer(data, dtype=np.uint16).reshape(h, w).copy()
         except (FileNotFoundError, OSError):
             return None
 
@@ -757,14 +833,21 @@ class VisionBridge:
 
     @staticmethod
     def _detections_to_description(detections: list[dict[str, Any]]) -> str:
-        """Convert BPU detection list to Chinese description."""
-        from collections import Counter
-        counts: Counter[str] = Counter()
-        for d in detections:
-            counts[d["class_id"]] += 1
-        if not counts:
+        """Convert BPU detection list to Chinese description with distance."""
+        if not detections:
             return ""
-        items = ", ".join(f"{c}个{n}" for n, c in counts.items())
+        parts = []
+        for d in detections:
+            name = d["class_id"]
+            dist = d.get("distance_m")
+            if dist and dist > 0:
+                parts.append(f"{name}({dist:.1f}米)")
+            else:
+                parts.append(name)
+
+        from collections import Counter
+        counts: Counter[str] = Counter(parts)
+        items = ", ".join(f"{c}个{n}" if c > 1 else n for n, c in counts.items())
         return f"我看到了: {items}"
 
     @staticmethod
