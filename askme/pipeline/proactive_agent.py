@@ -99,7 +99,7 @@ class ProactiveAgent:
         self._alert_cooldown: float = float(pro_cfg.get("alert_cooldown", 30))
         self._judge_model: str = pro_cfg.get(
             "judge_model",
-            config.get("brain", {}).get("voice_model", "claude-haiku-4-5-20251001"),
+            config.get("brain", {}).get("voice_model", "MiniMax-M2.7-highspeed"),
         )
         sensitivity_key = pro_cfg.get("sensitivity", "medium")
         self._sensitivity_text: str = _SENSITIVITY.get(sensitivity_key, _SENSITIVITY["medium"])

@@ -45,7 +45,7 @@ class TTSEngine:
         # MiniMax backend
         minimax_api_key: str  - MiniMax API key
         minimax_tts_url: str  - MiniMax TTS base URL
-        minimax_tts_model: str - TTS model name (default "speech-2.8-turbo")
+        minimax_tts_model: str - TTS model name (default "speech-2.8-hd")
         minimax_voice_id: str - Voice ID (default "male-qn-qingse")
         minimax_sample_rate: int - MiniMax output sample rate (default 24000)
         # Common

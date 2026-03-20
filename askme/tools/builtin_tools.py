@@ -916,73 +916,8 @@ class WebSearchTool(BaseTool):
             return result
         return self._baidu_search(query)
 
-    def _html_fallback(self, query: str) -> str:
-        """Scrape DuckDuckGo HTML results page when Instant Answer API returns empty.
-
-        Uses html.duckduckgo.com — the no-JS lite version designed for crawlers.
-        """
-        import html as _html
-        import re as _re
-
-        encoded = urllib.parse.quote_plus(query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded}&kl=cn-zh"
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-                ),
-                "Accept": "text/html,*/*",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self._TIMEOUT) as resp:
-                raw = resp.read(65536).decode("utf-8", errors="replace")
-
-            results: list[str] = []
-
-            # Extract real URLs from DDG redirect hrefs (result__a title links).
-            # DDG encodes the destination as ?uddg=URL_PERCENT_ENCODED in /l/ redirects.
-            # Using result__url (display text) gives "docs.python.org" — unusable for web_fetch.
-            title_hrefs = _re.findall(
-                r'<a\b(?=[^>]*\bclass="result__a")[^>]*\bhref="([^"]+)"', raw
-            )
-            snippets = _re.findall(
-                r'class="result__snippet"[^>]*>(.*?)</a>', raw, _re.DOTALL
-            )
-
-            for i, snippet in enumerate(snippets[:5]):
-                href = title_hrefs[i] if i < len(title_hrefs) else ""
-                # Decode DDG redirect: /l/?uddg=https%3A%2F%2Fdocs.python.org%2F...
-                real_url = ""
-                if href and "uddg=" in href:
-                    try:
-                        qs = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-                        uddg = qs.get("uddg", [])
-                        if uddg:
-                            real_url = uddg[0]
-                    except Exception:
-                        pass
-                elif href.startswith("http"):
-                    real_url = href
-                clean = _html.unescape(_re.sub(r"<[^>]+>", "", snippet)).strip()
-                if clean:
-                    results.append(f"• {clean[:160]}")
-                    if real_url:
-                        results.append(f"  {real_url}")
-
-            if results:
-                return f"搜索结果（{query}）：\n" + "\n".join(results)
-
-        except Exception:
-            pass  # silent fallback failure — try Bing
-
-        return self._bing_fallback(query)
-
     def _bing_fallback(self, query: str) -> str:
-        """Third-tier fallback: Bing HTML search (better coverage than DDG for technical/Chinese queries)."""
+        """Bing HTML search (primary search engine for China)."""
         import html as _html
         import re as _re
 

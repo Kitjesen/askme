@@ -93,7 +93,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     ctx.skill_executor = SkillExecutor(
         ctx.llm_client,
         ctx.tool_registry,
-        default_model=ctx.config.get("brain", {}).get("model", "deepseek-chat"),
+        default_model=ctx.config.get("brain", {}).get("model", "MiniMax-M2.7-highspeed"),
     )
 
     # ── Robot (conditional) ────────────────────────────────────

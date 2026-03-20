@@ -106,7 +106,7 @@ class MemoryBridge:
                     "default": {
                         "api_key": self._brain_cfg.get("api_key", ""),
                         "base_url": self._brain_cfg.get("base_url", ""),
-                        "chat_model": self._brain_cfg.get("model", "deepseek-chat"),
+                        "chat_model": self._brain_cfg.get("model", "MiniMax-M2.7-highspeed"),
                         "client_backend": "sdk",
                     },
                     "embedding": {
