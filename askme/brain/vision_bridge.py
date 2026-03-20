@@ -157,7 +157,14 @@ class VisionBridge:
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
 
-        # Lazily initialised heavy objects
+        # BPU YOLO (fast path, ~3ms on Horizon J6)
+        self._bpu_model_path: str = self._vision_cfg.get(
+            "bpu_model_path", "/home/sunrise/data/models/yolo11s_seg_nashe_640x640_nv12.hbm"
+        )
+        self._bpu_detector: Any | None = None
+        self._bpu_init_attempted: bool = False
+
+        # Lazily initialised heavy objects (ultralytics CPU fallback)
         self._tracker: Any | None = None
         self._selector: Any | None = None
         self._init_attempted: bool = False
@@ -167,6 +174,30 @@ class VisionBridge:
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def _ensure_bpu(self) -> bool:
+        """Try to init BPU YOLO detector (Horizon J6, ~3ms). Returns True if ready."""
+        if self._bpu_detector is not None:
+            return True
+        if self._bpu_init_attempted:
+            return False
+        self._bpu_init_attempted = True
+        if not self._enabled:
+            return False
+        try:
+            from askme.brain.bpu_yolo import BPUYoloDetector
+            det = BPUYoloDetector(
+                model_path=self._bpu_model_path,
+                confidence=self._confidence,
+            )
+            if det.available:
+                self._bpu_detector = det
+                logger.info("[Vision] BPU YOLO detector ready (~3ms per frame)")
+                return True
+            return False
+        except Exception as exc:
+            logger.debug("[Vision] BPU init failed: %s", exc)
+            return False
 
     def _ensure_detector(self) -> bool:
         """Attempt to create ``YoloSegTracker`` + ``WeightedTargetSelector`` (once).
@@ -229,11 +260,23 @@ class VisionBridge:
     async def describe_scene(self, frame: Any = None) -> str:
         """Detect objects in *frame* and return a natural language description.
 
-        Tries YOLO first (fast, structured), then falls back to VLM (rich, slower).
+        Priority: BPU YOLO (~3ms) → CPU YOLO → VLM (rich, slower).
         If *frame* is ``None``, attempts to capture from camera.
         Returns an empty string if all vision backends are unavailable.
         """
-        # Try YOLO first
+        # Try BPU YOLO first (fastest)
+        if self._ensure_bpu():
+            try:
+                if frame is None:
+                    frame = await asyncio.to_thread(self._capture_frame)
+                if frame is not None:
+                    dets = await asyncio.to_thread(self._bpu_detector.detect, frame)
+                    if dets:
+                        return self._detections_to_description(dets)
+            except Exception as exc:
+                logger.warning("[Vision] BPU describe_scene error: %s", exc)
+
+        # Try CPU YOLO (qp-perception)
         if self._ensure_detector():
             try:
                 if frame is None:
@@ -256,8 +299,23 @@ class VisionBridge:
         """Find a specific object class in *frame*.
 
         Returns a dict with ``bbox``, ``confidence``, ``center``, ``track_id``,
-        or ``None`` if not found.
+        or ``None`` if not found. Tries BPU first, then CPU YOLO.
         """
+        # Try BPU first
+        if self._ensure_bpu():
+            try:
+                if frame is None:
+                    frame = await asyncio.to_thread(self._capture_frame)
+                if frame is not None:
+                    dets = await asyncio.to_thread(self._bpu_detector.detect, frame)
+                    target_lower = target.lower()
+                    for d in dets:
+                        if d["class_id"].lower() == target_lower:
+                            return d
+                    return None
+            except Exception as exc:
+                logger.warning("[Vision] BPU find_object error: %s", exc)
+
         if not self._ensure_detector():
             return None
 
@@ -715,6 +773,18 @@ class VisionBridge:
         except Exception as exc:
             logger.warning("[Vision] cv2 capture error: %s", exc)
             return None
+
+    @staticmethod
+    def _detections_to_description(detections: list[dict[str, Any]]) -> str:
+        """Convert BPU detection list to Chinese description."""
+        from collections import Counter
+        counts: Counter[str] = Counter()
+        for d in detections:
+            counts[d["class_id"]] += 1
+        if not counts:
+            return ""
+        items = ", ".join(f"{c}个{n}" for n, c in counts.items())
+        return f"我看到了: {items}"
 
     @staticmethod
     def _tracks_to_description(tracks: list[Any]) -> str:
