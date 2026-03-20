@@ -323,6 +323,10 @@ class AskmeApp:
             llm=self.llm,
             config=self.cfg,
         )
+        # Wire auto-solve: when proactive agent detects anomaly, trigger solve_problem
+        self._proactive.set_solve_callback(
+            lambda anomaly_text: self._pipeline.execute_skill("solve_problem", anomaly_text)
+        )
         # askme 只暴露本地 HTTP 健康/指标端点，不直接连接 OTA Server。
         # Terminal Agent (OTA Agent) 负责拉取此端点并统一上报给 OTA Server。
         self.health_server = AskmeHealthServer(

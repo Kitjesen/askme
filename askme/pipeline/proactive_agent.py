@@ -104,6 +104,10 @@ class ProactiveAgent:
         sensitivity_key = pro_cfg.get("sensitivity", "medium")
         self._sensitivity_text: str = _SENSITIVITY.get(sensitivity_key, _SENSITIVITY["medium"])
         self._history_size: int = int(pro_cfg.get("scene_history_size", 5))
+        self._auto_solve: bool = pro_cfg.get("auto_solve", True)
+        # Callback to trigger autonomous problem-solving on anomaly
+        # Set via set_solve_callback() after construction
+        self._solve_callback: Any = None
 
         self._vision = vision
         self._audio = audio
@@ -140,6 +144,10 @@ class ProactiveAgent:
                 "prompt": task_def.get("prompt", ""),
                 "last_run": 0.0,
             })
+
+    def set_solve_callback(self, callback: Any) -> None:
+        """Wire the autonomous solve callback (called with anomaly description)."""
+        self._solve_callback = callback
 
     # ------------------------------------------------------------------
     # Main loop
@@ -234,6 +242,14 @@ class ProactiveAgent:
                 topic="patrol.anomaly",
                 payload={"anomaly": anomaly, "image_path": image_path},
             )
+
+            # Auto-solve: trigger solve_problem skill on detected anomaly
+            if self._auto_solve and self._solve_callback is not None:
+                logger.info("[Proactive] Auto-solving anomaly: %s", anomaly[:60])
+                try:
+                    await self._solve_callback(f"巡检发现异常：{anomaly}。请分析原因并尝试解决。")
+                except Exception as exc:
+                    logger.warning("[Proactive] Auto-solve failed: %s", exc)
         else:
             # Periodic normal report (every 5 ticks) — also save a baseline snapshot
             if self._tick_count % 5 == 0:
