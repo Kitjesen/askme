@@ -426,6 +426,7 @@ class BrainPipeline:
         _AGENT_SHELL_SKILLS = {
             "agent_task", "find_object", "safety_check",
             "find_person", "check_location", "patrol_scan",
+            "solve_problem",
         }
         if skill_name in _AGENT_SHELL_SKILLS and self._agent_shell is not None:
             logger.info("[AgentShell] Routing agent_task to ThunderAgentShell")
