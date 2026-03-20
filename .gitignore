@@ -47,3 +47,4 @@ tests/tmp/
 # Generated docs (keep source .md/.py, ignore binaries)
 docs/*.pptx
 docs/voice_samples/
+.claude/worktrees/
