@@ -340,16 +340,22 @@ class AskmeApp:
             full = await self._text_loop.process_turn(text)
             logger.info("[WebChat] Total: %.2fs chars=%d", _t.perf_counter() - t0, len(full))
 
-            # Record to qp_memory
+            # Record to qp_memory (fire-and-forget — never block response)
             if full and self.qp_memory is not None:
-                try:
-                    self.qp_memory.record_observation("webchat", text)
-                    self.qp_memory.process_turn(text, full)
-                    self._pipeline._qp_turn_count += 1
-                    if self._pipeline._qp_turn_count % 10 == 0:
-                        self.qp_memory.save()
-                except Exception:
-                    pass
+                _qp = self.qp_memory
+                _cnt = self._pipeline
+
+                async def _qp_bg():
+                    try:
+                        await asyncio.to_thread(_qp.record_observation, "webchat", text)
+                        await asyncio.to_thread(_qp.process_turn, text, full)
+                        _cnt._qp_turn_count += 1
+                        if _cnt._qp_turn_count % 10 == 0:
+                            await asyncio.to_thread(_qp.save)
+                    except Exception:
+                        pass
+
+                asyncio.create_task(_qp_bg())
 
             # Fire-and-forget: speak on robot speaker
             if full:

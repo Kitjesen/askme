@@ -328,15 +328,22 @@ class BrainPipeline:
             # Log response as episode
             self._log_episode("action", f"回复: {full_response[:100]}")
 
-            # qp_memory: record voice command as observation + periodic save
+            # qp_memory: record + extract facts (fire-and-forget, never block voice)
             if self._qp_memory is not None:
-                try:
-                    self._qp_memory.record_observation("voice", user_text)
-                    self._qp_turn_count += 1
-                    if self._qp_turn_count % 10 == 0:
-                        self._qp_memory.save()
-                except Exception as _e:
-                    logger.debug("qp_memory record failed: %s", _e)
+                _qp = self._qp_memory
+                _resp = full_response
+
+                async def _qp_voice_bg():
+                    try:
+                        await asyncio.to_thread(_qp.record_observation, "voice", user_text)
+                        await asyncio.to_thread(_qp.process_turn, user_text, _resp)
+                        self._qp_turn_count += 1
+                        if self._qp_turn_count % 10 == 0:
+                            await asyncio.to_thread(_qp.save)
+                    except Exception:
+                        pass
+
+                asyncio.create_task(_qp_voice_bg())
 
             # Defer reflection to avoid 429 rate-limit collision with
             # the next user query.  A 5-second delay lets the relay
