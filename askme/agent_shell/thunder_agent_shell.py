@@ -51,7 +51,7 @@ _AGENT_ALLOWED_TOOLS = {
     "scan_around",   # fast 360° scan: rotate + capture + batch analyze
 }
 
-_DEFAULT_AGENT_MODEL = "claude-haiku-4-5-20251001"  # fast + cheap for agentic loops
+_DEFAULT_AGENT_MODEL = "MiniMax-M2.5-highspeed"  # fast + stable, no relay dependency
 _MAX_ITERATIONS = 20
 _DEFAULT_TIMEOUT = 120.0
 _MAX_DEPTH = 1  # max sub-agent nesting depth (0=root, 1=child, children cannot spawn)
