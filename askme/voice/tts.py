@@ -786,27 +786,10 @@ class TTSEngine:
             _MAX_EMPTY_POLLS = 250  # 250 × 20 ms = 5 s — keeps aplay warm between conversational turns, avoids re-paying 400ms pre-roll
             _router_ctx = None  # saved output_session() context manager
 
-            # Pre-start aplay immediately so it's warm when first audio arrives.
-            # This eliminates the "first words cut off" problem caused by aplay
-            # startup latency overlapping with the first audio chunk.
-            if _aplay_cmd is not None:
-                try:
-                    if self._audio_router is not None:
-                        _router_ctx = self._audio_router.output_session()
-                        _router_ctx.__enter__()
-                    _proc = subprocess.Popen(
-                        _aplay_cmd, stdin=subprocess.PIPE,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    with self._aplay_lock:
-                        self._aplay_proc = _proc
-                    # Feed pre-roll (silence) to warm up the DAC
-                    if _preroll_bytes:
-                        _proc.stdin.write(_preroll_bytes)  # type: ignore[union-attr]
-                    _need_preroll = False
-                    logger.info("aplay: pre-started for zero-latency first chunk")
-                except Exception as _e:
-                    logger.warning("aplay: pre-start failed: %s", _e)
+            # NOTE: aplay is NOT pre-started here. MCP01 is half-duplex — if
+            # aplay opens the device before the mic, PortAudio sees 0 input
+            # channels and recording fails. aplay starts on first audio chunk
+            # (see _proc is None branch below).
 
             def _close_aplay() -> None:
                 """Cleanly close the persistent aplay process."""
