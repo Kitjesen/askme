@@ -119,10 +119,9 @@ class ReadFileTool(BaseTool):
     def execute(self, *, path: str = "", **kwargs: Any) -> str:
         if not path:
             return "[Error] No path provided."
-        # Resolve relative paths against agent_workspace (agent convenience:
-        # after write_file returns absolute path, agent may still pass filename only)
+        # Resolve relative paths against project root (e.g. "data/qp_memory/...")
         if not Path(path).is_absolute():
-            path = str(project_root() / "data" / "agent_workspace" / path)
+            path = str(project_root() / path)
         if not _is_path_allowed(path):
             return (
                 "[Error] 路径不在允许的读取范围内。"
