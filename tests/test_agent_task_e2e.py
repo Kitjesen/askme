@@ -405,36 +405,36 @@ def test_prepare_agent_result_truncates_at_sentence_boundary(tmp_path) -> None:
 # ── ReadFileTool relative path resolution ──────────────────────────────────────
 
 
-def test_read_file_relative_path_resolved_to_workspace(monkeypatch, tmp_path) -> None:
-    """Relative paths in read_file are resolved against data/agent_workspace/."""
+def test_read_file_relative_path_resolved_to_project_root(monkeypatch, tmp_path) -> None:
+    """Relative paths in read_file are resolved against project_root/."""
     import askme.tools.builtin_tools as bt
 
-    workspace = tmp_path / "data" / "agent_workspace"
-    workspace.mkdir(parents=True)
-    (workspace / "result.txt").write_text("agent result here", encoding="utf-8")
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "result.txt").write_text("agent result here", encoding="utf-8")
 
     monkeypatch.setattr(bt, "project_root", lambda: tmp_path)
     monkeypatch.setattr(bt, "_ALLOWED_READ_ROOTS", (tmp_path / "data",))
 
     tool = bt.ReadFileTool()
-    result = tool.execute(path="result.txt")
+    result = tool.execute(path="data/result.txt")
     assert "agent result here" in result
 
 
-def test_read_file_relative_subpath_resolved_to_workspace(monkeypatch, tmp_path) -> None:
-    """Nested relative paths (scripts/hello.py) resolve inside agent_workspace."""
+def test_read_file_relative_subpath_resolved_to_project_root(monkeypatch, tmp_path) -> None:
+    """Nested relative paths resolve against project_root/."""
     import askme.tools.builtin_tools as bt
 
-    workspace = tmp_path / "data" / "agent_workspace"
-    (workspace / "scripts").mkdir(parents=True)
-    (workspace / "scripts" / "hello.py").write_text("print('hello')", encoding="utf-8")
+    data_dir = tmp_path / "data" / "qp_memory"
+    data_dir.mkdir(parents=True)
+    (data_dir / "info.md").write_text("memory content", encoding="utf-8")
 
     monkeypatch.setattr(bt, "project_root", lambda: tmp_path)
     monkeypatch.setattr(bt, "_ALLOWED_READ_ROOTS", (tmp_path / "data",))
 
     tool = bt.ReadFileTool()
-    result = tool.execute(path="scripts/hello.py")
-    assert "print('hello')" in result
+    result = tool.execute(path="data/qp_memory/info.md")
+    assert "memory content" in result
 
 
 def test_read_file_relative_escape_blocked(monkeypatch, tmp_path) -> None:

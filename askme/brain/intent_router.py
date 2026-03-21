@@ -114,6 +114,7 @@ class IntentRouter:
             )
 
         # 3. Built-in commands
+        if stripped.lower() in self.BUILTIN_COMMANDS:
             return Intent(
                 type=IntentType.COMMAND,
                 command=stripped.lower(),
