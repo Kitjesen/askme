@@ -98,6 +98,7 @@ class SiteKnowledge:
     def __init__(self, data_dir: str = "data/memory/site") -> None:
         self._locations: dict[str, Location] = {}
         self._events: list[SpatialEvent] = []
+        self._max_events: int = 500  # prevent unbounded growth
         self._data_dir = Path(data_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._load()
@@ -120,6 +121,7 @@ class SiteKnowledge:
             description=description or f"Visited {name}",
             timestamp=time.time(), coords=coords,
         ))
+        self._trim_events()
         self._save()
 
     def record_anomaly(self, location_name: str, description: str,
@@ -137,6 +139,7 @@ class SiteKnowledge:
             description=description,
             timestamp=time.time(), coords=coords,
         ))
+        self._trim_events()
         self._save()
 
     def record_observation(self, location_name: str, description: str,
@@ -153,6 +156,7 @@ class SiteKnowledge:
             description=description,
             timestamp=time.time(), coords=coords,
         ))
+        self._trim_events()
         self._save()
 
     def get_location(self, name: str) -> Location | None:
@@ -206,6 +210,11 @@ class SiteKnowledge:
                 parts.append(f"- [{ts}] {ev.location_name}: {ev.description}")
 
         return "\n".join(parts)
+
+    def _trim_events(self) -> None:
+        """Keep only the most recent events to prevent unbounded growth."""
+        if len(self._events) > self._max_events:
+            self._events = self._events[-self._max_events:]
 
     def _save(self) -> None:
         """Persist to JSON files."""

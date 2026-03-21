@@ -225,6 +225,8 @@ class FramePipeline:
         if isinstance(frame, SystemFrame):
             if isinstance(frame, MetricsFrame):
                 self._metrics.append(frame)
+                if len(self._metrics) > 200:
+                    self._metrics = self._metrics[-100:]
             return [frame]
 
         # Normal data flow
