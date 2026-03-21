@@ -281,6 +281,12 @@ class TextLoop:
                 reply = intent.skill_name or ""
                 self._audio.speak(reply)
                 self._audio.start_playback()
+
+                async def _stop_after_play():
+                    await asyncio.to_thread(self._audio.wait_speaking_done)
+                    self._audio.stop_playback()
+
+                asyncio.create_task(_stop_after_play())
                 return reply
 
             if intent.type == IntentType.COMMAND:
