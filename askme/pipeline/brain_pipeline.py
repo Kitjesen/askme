@@ -397,7 +397,8 @@ class BrainPipeline:
             self._audio.stop_playback()
 
     async def execute_skill(
-        self, skill_name: str, user_text: str, extra_context: str = ""
+        self, skill_name: str, user_text: str, extra_context: str = "",
+        source: str = "voice",
     ) -> str:
         """Execute a named skill and speak the result.
 
@@ -459,7 +460,8 @@ class BrainPipeline:
                 self._conversation.add_user_message(user_text)
                 self._conversation.add_assistant_message(stored)
                 self._log_episode("outcome", f"{skill_name}完成: {result[:100]}")
-                await asyncio.to_thread(self._audio.wait_speaking_done)
+                if source == "voice":
+                    await asyncio.to_thread(self._audio.wait_speaking_done)
                 return result
             except Exception as exc:
                 logger.error("[AgentShell] %s failed: %s", skill_name, exc)
@@ -544,7 +546,8 @@ class BrainPipeline:
             self._conversation.add_assistant_message(result)
             if self._episodic:
                 self._episodic.log("outcome", f"直接回复: {result[:100]}")
-            await asyncio.to_thread(self._audio.wait_speaking_done)
+            if source == "voice":
+                await asyncio.to_thread(self._audio.wait_speaking_done)
             return result
         except Exception as exc:
             logger.error("Skill error (%s): %s", skill_name, exc)
@@ -603,8 +606,9 @@ class BrainPipeline:
         if self._episodic:
             self._episodic.log("command", f"用户说: {user_text}")
             self._episodic.log("outcome", f"直接回复: {assistant_text[:100]}")
-        await asyncio.to_thread(self._audio.wait_speaking_done)
-        self._audio.stop_playback()
+        if source == "voice":
+            await asyncio.to_thread(self._audio.wait_speaking_done)
+            self._audio.stop_playback()
         return assistant_text
 
     # ── Internal ─────────────────────────────────────────────

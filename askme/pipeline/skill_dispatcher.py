@@ -212,7 +212,7 @@ class SkillDispatcher:
             async def _run_agent() -> None:
                 try:
                     res = await asyncio.wait_for(
-                        self._pipeline.execute_skill(skill_name, user_text, combined_context),
+                        self._pipeline.execute_skill(skill_name, user_text, combined_context, source=source),
                         timeout=step_timeout,
                     )
                     _mission.add_step(skill_name, user_text, res)
@@ -245,7 +245,7 @@ class SkillDispatcher:
 
         try:
             result = await asyncio.wait_for(
-                self._pipeline.execute_skill(skill_name, user_text, combined_context),
+                self._pipeline.execute_skill(skill_name, user_text, combined_context, source=source),
                 timeout=step_timeout,
             )
         except asyncio.TimeoutError:
