@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from collections import deque
 from typing import Any, TYPE_CHECKING
@@ -112,6 +113,14 @@ class ProactiveAgent:
         # Callback to trigger autonomous problem-solving on anomaly
         # Set via set_solve_callback() after construction
         self._solve_callback: Any = None
+        # ChangeDetector event file (Phase 1 event-driven perception)
+        _cd_cfg = pro_cfg.get("change_detector", {})
+        self._change_event_file: str = _cd_cfg.get("event_file", "/tmp/askme_events.jsonl")
+        self._change_events_enabled: bool = _cd_cfg.get("enabled", False)
+        # When change_detector is active, relax patrol interval
+        self._patrol_interval_with_events: float = float(
+            pro_cfg.get("patrol_interval_with_events", 300)
+        )
 
         self._vision = vision
         self._audio = audio
@@ -186,6 +195,10 @@ class ProactiveAgent:
         if self._consecutive_normal >= 10:
             multiplier = max(multiplier, 1.5)
 
+        # When ChangeDetector is active, relax patrol (events handle real-time)
+        if self._change_events_enabled:
+            base = self._patrol_interval_with_events
+
         interval = base * multiplier
         return max(30.0, min(600.0, interval))  # clamp 30s-10min
 
@@ -205,8 +218,9 @@ class ProactiveAgent:
             "on" if self._telemetry_hub_url else "off",
         )
 
-        # Launch event monitor as a parallel task
+        # Launch parallel tasks
         event_task = asyncio.create_task(self._event_monitor_loop(stop_event))
+        change_task = asyncio.create_task(self._change_event_loop(stop_event))
 
         try:
             while not stop_event.is_set():
@@ -230,10 +244,12 @@ class ProactiveAgent:
                     pass  # normal — time for next tick
         finally:
             event_task.cancel()
-            try:
-                await event_task
-            except asyncio.CancelledError:
-                pass
+            change_task.cancel()
+            for t in (event_task, change_task):
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
 
         logger.info("[Proactive] Stopped.")
 
@@ -366,6 +382,108 @@ class ProactiveAgent:
     # ------------------------------------------------------------------
     # Auto-tasks
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # ChangeDetector event consumer (Phase 1 event-driven perception)
+    # ------------------------------------------------------------------
+
+    async def _change_event_loop(self, stop_event: asyncio.Event) -> None:
+        """Consume events from ChangeDetector's JSONL file. Reacts in ~2s."""
+        if not self._change_events_enabled:
+            logger.info("[Proactive] Change event consumer disabled.")
+            return
+
+        import json as _json
+        from askme.schemas.events import ChangeEvent
+
+        logger.info("[Proactive] Change event consumer started: %s", self._change_event_file)
+
+        # Seek to end — skip historical events from previous runs
+        file_pos = 0
+        try:
+            file_pos = os.path.getsize(self._change_event_file)
+        except FileNotFoundError:
+            pass
+
+        while not stop_event.is_set():
+            try:
+                events = await asyncio.to_thread(
+                    self._read_change_events, file_pos,
+                )
+                if events:
+                    new_pos, parsed = events
+                    file_pos = new_pos
+                    for event in parsed:
+                        await self._handle_change_event(event)
+            except Exception as exc:
+                logger.debug("[Proactive] Change event read error: %s", exc)
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=2.0)
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    def _read_change_events(self, file_pos: int) -> tuple[int, list[Any]] | None:
+        """Read new lines from event JSONL file since file_pos. Blocking."""
+        import json as _json
+        from askme.schemas.events import ChangeEvent
+
+        try:
+            with open(self._change_event_file, "r", encoding="utf-8") as f:
+                f.seek(file_pos)
+                new_lines = f.readlines()
+                new_pos = f.tell()
+        except FileNotFoundError:
+            return None
+
+        if not new_lines:
+            return None
+
+        parsed = []
+        for line in new_lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = _json.loads(line)
+                parsed.append(ChangeEvent.from_dict(data))
+            except Exception:
+                continue
+
+        if not parsed:
+            return None
+        return new_pos, parsed
+
+    async def _handle_change_event(self, event: Any) -> None:
+        """Process a single change event — alert, log, optionally auto-solve."""
+        description = event.description_zh()
+        logger.info("[Proactive] Change event: %s (importance=%.2f)", description, event.importance)
+
+        # Log to episodic memory
+        if self._episodic:
+            self._episodic.log("perception", f"感知事件: {description}")
+
+        # Person events → immediate voice alert
+        if event.is_person_event:
+            await self._speak_alert(
+                description,
+                severity="warning" if event.importance >= 0.7 else "info",
+                topic="change.person",
+                payload={"event": event.to_dict()},
+            )
+
+        # High importance + auto_solve → trigger problem solving
+        if (
+            self._auto_solve
+            and self._solve_callback is not None
+            and event.importance >= 0.7
+        ):
+            logger.info("[Proactive] Auto-solving change event: %s", description)
+            try:
+                await self._solve_callback(f"感知系统检测到变化：{description}。请判断是否需要处理。")
+            except Exception as exc:
+                logger.warning("[Proactive] Auto-solve from change event failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Telemetry event monitor

@@ -441,6 +441,10 @@ class AskmeApp:
             await self.health_server.start()
             warmup_task = asyncio.create_task(self.memory.warmup())
             proactive_task = asyncio.create_task(self._proactive.run(stop_event))
+            # Launch ChangeDetector for event-driven perception
+            from askme.perception.change_detector import ChangeDetector
+            self._change_detector = ChangeDetector(config=self.cfg)
+            change_detector_task = asyncio.create_task(self._change_detector.run(stop_event))
             led_task = asyncio.create_task(self._led_bridge.run())
             if self.voice_mode:
                 await self._voice_loop.run()
@@ -449,7 +453,7 @@ class AskmeApp:
         finally:
             stop_event.set()
             pending_tasks = [
-                task for task in (warmup_task, proactive_task, led_task)
+                task for task in (warmup_task, proactive_task, led_task, change_detector_task)
                 if task is not None
             ]
             for task in pending_tasks:
