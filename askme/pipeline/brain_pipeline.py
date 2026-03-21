@@ -96,7 +96,7 @@ class BrainPipeline:
     """
 
     # Default max response chars for voice mode (0 = unlimited)
-    _DEFAULT_MAX_RESPONSE_CHARS = 200
+    _DEFAULT_MAX_RESPONSE_CHARS = 500
     # Seconds to wait before playing thinking indicator
     _THINKING_DELAY = 1.2
     # Marker LLM returns when it determines the user is not talking to the robot
@@ -766,6 +766,7 @@ class BrainPipeline:
                         for sentence in self._splitter.feed(clean):
                             if char_limit and chars_spoken + len(sentence) > char_limit:
                                 self._audio.speak(sentence)
+                                self._audio.speak("还有更多内容，说继续我就接着说。")
                                 spoke_any = True
                                 truncated = True
                                 logger.info(
