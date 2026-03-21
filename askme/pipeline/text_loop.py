@@ -280,6 +280,7 @@ class TextLoop:
                 memory_task.cancel()
                 reply = intent.skill_name or ""
                 self._audio.speak(reply)
+                self._audio.start_playback()
                 return reply
 
             if intent.type == IntentType.COMMAND:
