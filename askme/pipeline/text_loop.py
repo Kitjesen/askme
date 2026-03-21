@@ -276,6 +276,12 @@ class TextLoop:
                 memory_task.cancel()
                 return "急停已触发。"
 
+            if intent.type == IntentType.QUICK_REPLY:
+                memory_task.cancel()
+                reply = intent.skill_name or ""
+                self._audio.speak(reply)
+                return reply
+
             if intent.type == IntentType.COMMAND:
                 memory_task.cancel()
                 return ""

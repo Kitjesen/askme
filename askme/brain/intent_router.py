@@ -23,7 +23,21 @@ class IntentType(Enum):
     ESTOP = "estop"
     VOICE_TRIGGER = "voice_trigger"
     COMMAND = "command"          # /clear, /quit, /history etc.
+    QUICK_REPLY = "quick_reply"  # simple greetings — skip LLM, instant response
     GENERAL = "general"         # fallback → LLM
+
+# Instant replies for simple greetings — no LLM needed, <0.5s response
+_QUICK_REPLIES: dict[str, str] = {
+    "你好": "你好，有什么需要帮忙的？",
+    "谢谢": "不客气。",
+    "谢谢你": "不客气，随时叫我。",
+    "再见": "再见，有事随时叫我。",
+    "拜拜": "拜拜。",
+    "在吗": "在的，有什么事？",
+    "你在吗": "在的，说吧。",
+    "嗯": "嗯，我在听。",
+    "好的": "好的。",
+}
 
 
 @dataclass
@@ -89,8 +103,17 @@ class IntentRouter:
                 raw_text=stripped,
             )
 
-        # 2. Built-in commands
-        if stripped.lower() in self.BUILTIN_COMMANDS:
+        # 2. Quick replies — simple greetings, skip LLM entirely
+        quick = _QUICK_REPLIES.get(stripped)
+        if quick:
+            logger.info("Quick reply: '%s' → '%s'", stripped, quick)
+            return Intent(
+                type=IntentType.QUICK_REPLY,
+                raw_text=stripped,
+                skill_name=quick,  # reuse skill_name field to carry the reply text
+            )
+
+        # 3. Built-in commands
             return Intent(
                 type=IntentType.COMMAND,
                 command=stripped.lower(),

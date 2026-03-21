@@ -834,7 +834,6 @@ class BrainPipeline:
                 nonlocal ttft_logged, thinking_task, slow_network_task
                 async for chunk in self._llm.chat_stream(
                     messages, tools=tool_definitions, tool_choice="auto", model=model,
-                    thinking=False,
                 ):
                     if not ttft_logged:
                         ttft_logged = True
@@ -937,7 +936,7 @@ class BrainPipeline:
         self._splitter.reset()
         self._think_filter.reset()
         full_response, _ = await self._consume_llm_stream(
-            self._llm.chat_stream(messages, model=model, thinking=False), source=source,
+            self._llm.chat_stream(messages, model=model), source=source,
         )
         return full_response
 
