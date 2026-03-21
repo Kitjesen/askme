@@ -9,6 +9,7 @@ tags: [robot, safety, emergency]
 depends: []
 conflicts: []
 safety_level: critical
+enabled: false  # requires runtime services (dog-control/nav-gateway) not yet deployed
 voice_trigger: 紧急停止,急停,停下来,别动,停止
 ---
 

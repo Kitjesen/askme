@@ -234,7 +234,7 @@ class SkillManager:
             tools_section=tools_section,
             source=source,
             path=str(file_path),
-            enabled=True,
+            enabled=bool(meta.get("enabled", True)),
         )
 
     @staticmethod

@@ -9,6 +9,7 @@ tags: [robot, home, reset]
 depends: []
 conflicts: [robot_estop]
 safety_level: dangerous
+enabled: false  # requires runtime services (dog-control/nav-gateway) not yet deployed
 voice_trigger: 回到原位,回原位,归位,复位,回初始位置
 ---
 

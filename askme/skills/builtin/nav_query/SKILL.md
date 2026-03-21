@@ -9,6 +9,7 @@ tags: [robot, navigation, status]
 depends: []
 conflicts: []
 safety_level: normal
+enabled: false  # requires runtime services (dog-control/nav-gateway) not yet deployed
 voice_trigger: 导航状态,到哪了,还要多久,还有多远,走到哪了,建图进度
 ---
 

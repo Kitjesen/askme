@@ -9,6 +9,7 @@ tags: [robot, navigation, mapping, lingtu]
 depends: []
 conflicts: [robot_estop]
 safety_level: dangerous
+enabled: false  # requires runtime services (dog-control/nav-gateway) not yet deployed
 voice_trigger: 建图,开始建图,扫描地图,创建地图
 required_prompt: 对哪个区域建图？
 required_slots:

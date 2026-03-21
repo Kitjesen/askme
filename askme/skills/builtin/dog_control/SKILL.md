@@ -9,6 +9,7 @@ tags: [robot, thunder, control]
 depends: []
 conflicts: []
 safety_level: dangerous
+enabled: false  # requires runtime services (dog-control/nav-gateway) not yet deployed
 voice_trigger: 站起来,站立,坐下,趴下,卧倒
 ---
 

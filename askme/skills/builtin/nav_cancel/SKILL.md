@@ -9,6 +9,7 @@ tags: [robot, navigation, cancel]
 depends: []
 conflicts: []
 safety_level: normal
+enabled: false  # requires runtime services (dog-control/nav-gateway) not yet deployed
 voice_trigger: 取消导航,停止导航,取消建图,停止建图,取消跟随,停止跟随
 ---
 

@@ -9,6 +9,7 @@ tags: [robot, gripper, grab]
 depends: []
 conflicts: [robot_estop]
 safety_level: dangerous
+enabled: false  # requires runtime services (dog-control/nav-gateway) not yet deployed
 voice_trigger: 抓住,抓取,拿起来,放下,松开
 required_prompt: 抓取什么物体？
 confirm_before_execute: true

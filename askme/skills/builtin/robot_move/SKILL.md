@@ -9,6 +9,7 @@ tags: [robot, movement, arm]
 depends: []
 conflicts: [robot_estop]
 safety_level: dangerous
+enabled: false  # requires runtime services (dog-control/nav-gateway) not yet deployed
 voice_trigger: 移动到,往前走,往后退,往左,往右,走过去,过来
 confirm_before_execute: true
 ---

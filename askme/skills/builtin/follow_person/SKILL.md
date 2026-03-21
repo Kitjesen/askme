@@ -9,6 +9,7 @@ tags: [robot, navigation, follow, lingtu]
 depends: []
 conflicts: [robot_estop]
 safety_level: dangerous
+enabled: false  # requires runtime services (dog-control/nav-gateway) not yet deployed
 voice_trigger: 跟着我,跟随,跟我走,跟着他,跟踪
 ---
 
