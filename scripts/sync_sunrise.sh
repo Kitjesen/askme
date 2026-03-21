@@ -2,8 +2,8 @@
 # Sync askme source code to sunrise robot.
 # Usage: bash scripts/sync_sunrise.sh
 #
-# Prerequisites: SSH key auth configured for sunrise@192.168.66.190
-# (already set up — no password needed)
+# Uses tar-over-ssh for fast, reliable sync on Windows (no rsync needed).
+# One SSH connection, handles new directories automatically, ~5s total.
 
 set -euo pipefail
 
@@ -14,64 +14,54 @@ LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 echo "=== Syncing askme to $REMOTE:$REMOTE_DIR ==="
 echo "Local: $LOCAL_DIR"
 
-# Sync entire askme package + config + tests
-rsync -avz --delete \
-    --exclude '__pycache__' \
-    --exclude '*.pyc' \
-    --exclude '.venv' \
-    --exclude 'data/' \
-    --exclude 'models/' \
-    --exclude 'logs/' \
-    --exclude '.env' \
-    --exclude '.git' \
-    --exclude '.omc' \
-    --exclude '.tmp' \
-    --exclude '.claude' \
-    --exclude 'dev-loop-*.log' \
-    --exclude 'docs/' \
-    "$LOCAL_DIR/askme/" "$REMOTE:$REMOTE_DIR/askme/" \
-    2>/dev/null || {
-    # rsync not available on Windows — fall back to scp
-    echo "rsync not available, using scp..."
-    find "$LOCAL_DIR/askme" \( -name '__pycache__' -o -name 'tmp' \) -prune -o \( -name '*.py' -o -name '*.md' -o -name '*.yaml' \) -print | while read -r f; do
-        rel="${f#$LOCAL_DIR/}"
-        dir="$(dirname "$rel")"
-        ssh "$REMOTE" "mkdir -p $REMOTE_DIR/$dir" 2>/dev/null
-        scp -q "$f" "$REMOTE:$REMOTE_DIR/$rel"
-    done
+# ── Fast sync via tar pipe (one SSH connection) ──────────────────────
+
+sync_dir() {
+    local src="$1" dst="$2" name="$3"
+    echo "  Syncing $name..."
+    # tar from local, extract on remote — handles new dirs, fast, reliable
+    tar -C "$src" \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        --exclude='.pytest_cache' \
+        --exclude='tmp' \
+        -cf - . | ssh "$REMOTE" "mkdir -p $dst && tar -C $dst -xf -"
 }
 
-# Always sync config, requirements, and key root files
-scp -q "$LOCAL_DIR/config.yaml" "$REMOTE:$REMOTE_DIR/config.yaml"
-scp -q "$LOCAL_DIR/pyproject.toml" "$REMOTE:$REMOTE_DIR/pyproject.toml"
-scp -q "$LOCAL_DIR/requirements.txt" "$REMOTE:$REMOTE_DIR/requirements.txt"
-scp -q "$LOCAL_DIR/SOUL.md" "$REMOTE:$REMOTE_DIR/SOUL.md"
+# Core package
+sync_dir "$LOCAL_DIR/askme" "$REMOTE_DIR/askme" "askme/"
 
-# Sync scripts/
+# Tests
+sync_dir "$LOCAL_DIR/tests" "$REMOTE_DIR/tests" "tests/"
+
+# Scripts (selective — only deploy-relevant files)
 ssh "$REMOTE" "mkdir -p $REMOTE_DIR/scripts"
-find "$LOCAL_DIR/scripts" \( -name '__pycache__' -o -name 'test_data' \) -prune -o \( -name '*.py' -o -name '*.sh' -o -name '*.bat' -o -name '*.service' \) -print | while read -r f; do
-    rel="${f#$LOCAL_DIR/}"
-    scp -q "$f" "$REMOTE:$REMOTE_DIR/$rel"
+tar -C "$LOCAL_DIR/scripts" \
+    --exclude='__pycache__' \
+    --exclude='test_data' \
+    --exclude='mock_scene.jpg' \
+    -cf - . | ssh "$REMOTE" "tar -C $REMOTE_DIR/scripts -xf -"
+echo "  Syncing scripts/"
+
+# Root config files (NOT config.yaml — sunrise has its own config)
+for f in pyproject.toml requirements.txt SOUL.md README.md; do
+    if [ -f "$LOCAL_DIR/$f" ]; then
+        scp -q "$LOCAL_DIR/$f" "$REMOTE:$REMOTE_DIR/$f"
+    fi
 done
-rsync -avz --delete \
-    --exclude '__pycache__' \
-    --exclude '*.pyc' \
-    "$LOCAL_DIR/tests/" "$REMOTE:$REMOTE_DIR/tests/" \
-    2>/dev/null || {
-    echo "Syncing tests via scp..."
-    find "$LOCAL_DIR/tests" \( -name 'tmp' -o -name '__pycache__' \) -prune -o -name '*.py' -print | while read -r f; do
-        rel="${f#$LOCAL_DIR/}"
-        scp -q "$f" "$REMOTE:$REMOTE_DIR/$rel"
-    done
-}
+echo "  Syncing root configs (config.yaml excluded — sunrise-specific)"
+
+# Shared python (inovxio_llm, qp_memory)
+if [ -d "$LOCAL_DIR/shared_python" ]; then
+    sync_dir "$LOCAL_DIR/shared_python" "$REMOTE_DIR/shared_python" "shared_python/"
+fi
+
+# ── Verify ───────────────────────────────────────────────────────────
 
 echo ""
 echo "=== Verifying on sunrise ==="
 ssh "$REMOTE" "cd $REMOTE_DIR && source .venv/bin/activate && python -c 'import askme; print(f\"askme imported OK\")'"
 
 echo ""
-echo "=== Done. To run tests: ==="
-echo "  ssh $REMOTE 'cd $REMOTE_DIR && source .venv/bin/activate && python -m pytest tests/ -q'"
-echo ""
-echo "=== To restart service: ==="
-echo "  ssh $REMOTE 'screen -S askme -X quit; screen -S askme -dm bash -c \"cd $REMOTE_DIR && ./scripts/sunrise-voice-service.sh\"'"
+echo "=== Done ==="
+echo "  Restart: ssh $REMOTE 'tmux kill-session -t askme; tmux new-session -d -s askme bash -c \"cd $REMOTE_DIR && source .venv/bin/activate && export \\\$(grep -v ^# .env | xargs) && python -m askme --legacy\"'"
