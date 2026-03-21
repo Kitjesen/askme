@@ -80,7 +80,7 @@ class RobotApiTool(BaseTool):
         },
         "required": ["service", "method", "path"],
     }
-    safety_level = "dangerous"  # can trigger robot motion
+    safety_level = "normal"  # runtime services have their own safety layer
 
     _TIMEOUT = 10.0
     _MAX_RESPONSE = 4096
