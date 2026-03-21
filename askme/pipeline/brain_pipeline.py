@@ -322,8 +322,10 @@ class BrainPipeline:
                 self._pending_tasks.add(_mt)
                 _mt.add_done_callback(self._pending_tasks.discard)
 
-            # Wait for TTS to finish speaking before returning
-            await asyncio.to_thread(self._audio.wait_speaking_done)
+            # Wait for TTS to finish speaking before returning (voice only).
+            # HTTP/text callers should not block on speaker playback.
+            if source == "voice":
+                await asyncio.to_thread(self._audio.wait_speaking_done)
 
             # Log response as episode
             self._log_episode("action", f"回复: {full_response[:100]}")
