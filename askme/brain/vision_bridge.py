@@ -23,6 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from askme.config import get_config
+from askme.constants import (
+    DAEMON_HEARTBEAT_PATH, DAEMON_COLOR_FRAME_PATH,
+    DAEMON_DEPTH_FRAME_PATH, DAEMON_DETECTIONS_PATH,
+    DAEMON_ROS2_FRAME_PATH, DEFAULT_BPU_MODEL_PATH,
+    DAEMON_MAX_STALENESS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +76,7 @@ with open(out, "wb") as f:
     def __init__(self, topic: str = "/camera/color/image_raw", timeout: float = 5.0) -> None:
         self._topic = topic
         self._timeout = timeout
-        self._tmp_path = "/tmp/askme_ros2_frame.bin"
+        self._tmp_path = DAEMON_ROS2_FRAME_PATH
 
     def grab(self) -> Any:
         """Grab a single frame via subprocess. Returns numpy array (H, W, 3) or None."""
@@ -159,7 +165,7 @@ class VisionBridge:
 
         # BPU YOLO (fast path, ~3ms on Horizon J6)
         self._bpu_model_path: str = self._vision_cfg.get(
-            "bpu_model_path", "/home/sunrise/data/models/yolo11s_seg_nashe_640x640_nv12.hbm"
+            "bpu_model_path", DEFAULT_BPU_MODEL_PATH
         )
         self._bpu_detector: Any | None = None
         self._bpu_init_attempted: bool = False
@@ -182,7 +188,7 @@ class VisionBridge:
         Returns None if daemon is stale/missing.
         """
         import json as _json
-        det_path = "/tmp/askme_frame_detections.json"
+        det_path = DAEMON_DETECTIONS_PATH
         try:
             with open(det_path, "r") as f:
                 data = _json.load(f)
@@ -719,7 +725,7 @@ class VisionBridge:
     @staticmethod
     def _check_daemon_alive(max_age: float = 2.0) -> bool:
         try:
-            with open("/tmp/askme_frame_daemon.heartbeat", "r") as f:
+            with open(DAEMON_HEARTBEAT_PATH, "r") as f:
                 ts = float(f.read().strip())
             return time.time() - ts <= max_age
         except (FileNotFoundError, ValueError):
@@ -727,7 +733,7 @@ class VisionBridge:
 
     @staticmethod
     def _read_daemon_frame(
-        path: str = "/tmp/askme_frame_color.bin",
+        path: str = DAEMON_COLOR_FRAME_PATH,
         max_age: float = 2.0,
     ) -> Any:
         """Read latest frame from frame_daemon shared file. Returns None if stale/missing."""
@@ -763,7 +769,7 @@ class VisionBridge:
         if not VisionBridge._check_daemon_alive():
             return None
         try:
-            with open("/tmp/askme_frame_depth.bin", "rb") as f:
+            with open(DAEMON_DEPTH_FRAME_PATH, "rb") as f:
                 header = f.read(8)
                 if len(header) < 8:
                     return None
@@ -797,7 +803,7 @@ class VisionBridge:
         if not VisionBridge._check_daemon_alive():
             return None
         try:
-            with open("/tmp/askme_frame_depth.bin", "rb") as f:
+            with open(DAEMON_DEPTH_FRAME_PATH, "rb") as f:
                 header = f.read(8)
                 if len(header) < 8:
                     return None

@@ -21,14 +21,18 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
+from askme.constants import (
+    DAEMON_HEARTBEAT_PATH, DAEMON_DETECTIONS_PATH,
+    CHANGE_EVENTS_PATH, DAEMON_MAX_STALENESS,
+)
 from askme.schemas.events import ChangeEvent, ChangeEventType
 from askme.schemas.observation import Detection, Observation
 
 logger = logging.getLogger(__name__)
 
-_DETECTIONS_PATH = "/tmp/askme_frame_detections.json"
-_HEARTBEAT_PATH = "/tmp/askme_frame_daemon.heartbeat"
-_DEFAULT_EVENT_FILE = "/tmp/askme_events.jsonl"
+_DETECTIONS_PATH = DAEMON_DETECTIONS_PATH
+_HEARTBEAT_PATH = DAEMON_HEARTBEAT_PATH
+_DEFAULT_EVENT_FILE = CHANGE_EVENTS_PATH
 
 
 @dataclass
