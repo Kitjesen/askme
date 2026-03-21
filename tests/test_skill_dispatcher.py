@@ -116,7 +116,7 @@ class TestSkillDispatcher:
 
     async def test_dispatch_calls_pipeline(self, dispatcher, mock_pipeline):
         await dispatcher.dispatch("navigate", "去仓库")
-        mock_pipeline.execute_skill.assert_called_once_with("navigate", "去仓库", "")
+        mock_pipeline.execute_skill.assert_called_once_with("navigate", "去仓库", "", source="voice")
 
     async def test_handle_general_calls_pipeline(self, dispatcher, mock_pipeline):
         await dispatcher.handle_general("你好", memory_task=None)
