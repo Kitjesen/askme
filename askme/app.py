@@ -361,14 +361,8 @@ class AskmeApp:
 
                 asyncio.create_task(_qp_bg())
 
-            # Fire-and-forget: speak on robot speaker
-            if full:
-                async def _speak_and_stop():
-                    self.audio.speak(full)
-                    self.audio.start_playback()
-                    await asyncio.to_thread(self.audio.wait_speaking_done)
-                    self.audio.stop_playback()
-                asyncio.create_task(_speak_and_stop())
+            # Pipeline already speaks via TTS during streaming — do NOT re-speak here.
+            # The old _speak_and_stop caused every response to play twice.
             return full
 
         self.health_server.set_chat_handler(_chat_handler)
