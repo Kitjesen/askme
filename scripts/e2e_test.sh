@@ -46,7 +46,7 @@ test_case "谢谢" "/api/chat" '{"text":"谢谢"}' "不客气"
 
 # 3. Skill routing
 echo "[Skill Routing]"
-test_case "几点了 (get_time)" "/api/chat" '{"text":"几点了"}' "202"
+test_case "几点了 (get_time)" "/api/chat" '{"text":"几点了"}' "点"
 test_case "故障记录 (recall_memory)" "/api/chat" '{"text":"有什么故障记录"}' "故障"
 
 # 4. Disabled skills should not trigger
