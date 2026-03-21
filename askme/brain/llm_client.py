@@ -49,8 +49,8 @@ class LLMClient:
         cfg = get_config().get("brain", {})
 
         self.api_key: str = api_key or cfg.get("api_key", "")
-        self.base_url: str = base_url or cfg.get("base_url", "https://cursor.scihub.edu.kg/api/v1")
-        self.model: str = model or cfg.get("model", "claude-opus-4-6")
+        self.base_url: str = base_url or cfg.get("base_url", "https://api.minimax.chat/v1")
+        self.model: str = model or cfg.get("model", "MiniMax-M2.7-highspeed")
         self.max_tokens: int = cfg.get("max_tokens", 0)
         self.temperature: float = cfg.get("temperature", 0.7)
 
