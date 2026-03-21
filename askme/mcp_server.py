@@ -166,6 +166,8 @@ import askme.mcp_tools.skill_tools as _st  # noqa: E402, F401
 import askme.mcp_resources.robot_resources as _rr  # noqa: E402, F401
 import askme.mcp_resources.skill_resources as _sr  # noqa: E402, F401
 import askme.mcp_resources.health_resources as _hr  # noqa: E402, F401
+import askme.mcp_tools.vision_tools as _vit  # noqa: E402, F401
+import askme.mcp_resources.perception_resources as _pr  # noqa: E402, F401
 
 
 def main() -> None:
