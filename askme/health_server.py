@@ -283,6 +283,84 @@ def create_health_app(
                 headers={"Access-Control-Allow-Origin": "*"},
             )
 
+    @app.get("/api/status", tags=["Monitor"])
+    async def system_status() -> JSONResponse:
+        """Unified system status — all key metrics in one endpoint."""
+        import time as _time
+
+        status: dict[str, Any] = {"timestamp": _time.time()}
+
+        # Perception
+        perception: dict[str, Any] = {}
+        try:
+            with open("/tmp/askme_frame_daemon.heartbeat", "r") as f:
+                hb = float(f.read().strip())
+            perception["frame_daemon"] = {
+                "alive": _time.time() - hb < 3.0,
+                "age_s": round(_time.time() - hb, 1),
+            }
+        except (FileNotFoundError, ValueError):
+            perception["frame_daemon"] = {"alive": False}
+
+        try:
+            with open("/tmp/askme_frame_detections.json", "r") as f:
+                det = json.load(f)
+            perception["detections"] = {
+                "count": len(det.get("detections", [])),
+                "infer_ms": det.get("infer_ms", 0),
+                "objects": [d["class_id"] for d in det.get("detections", [])],
+            }
+        except (FileNotFoundError, json.JSONDecodeError):
+            perception["detections"] = {"count": 0}
+
+        try:
+            import os
+            event_path = "/tmp/askme_events.jsonl"
+            if os.path.exists(event_path):
+                with open(event_path, "r") as f:
+                    lines = f.readlines()
+                perception["change_events"] = {"total": len(lines)}
+                if lines:
+                    last = json.loads(lines[-1].strip())
+                    perception["change_events"]["last"] = last
+            else:
+                perception["change_events"] = {"total": 0}
+        except Exception:
+            perception["change_events"] = {"total": 0}
+
+        status["perception"] = perception
+
+        # Services
+        try:
+            import subprocess
+            orbbec = subprocess.run(
+                ["systemctl", "is-active", "orbbec-camera"],
+                capture_output=True, timeout=3,
+            )
+            status["orbbec_camera"] = orbbec.stdout.decode().strip() == "active"
+        except Exception:
+            status["orbbec_camera"] = False
+
+        # Memory
+        try:
+            import os
+            knowledge_dir = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "data", "qp_memory", "knowledge",
+            )
+            if os.path.isdir(knowledge_dir):
+                files = [f for f in os.listdir(knowledge_dir) if f.endswith(".md")]
+                status["memory"] = {"knowledge_files": len(files)}
+            else:
+                status["memory"] = {"knowledge_files": 0}
+        except Exception:
+            status["memory"] = {"knowledge_files": 0}
+
+        return JSONResponse(
+            status,
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+        )
+
     @app.get("/dashboard", tags=["Monitor"])
     async def dashboard() -> Response:
         """Serve a simple web dashboard for testing and monitoring."""
