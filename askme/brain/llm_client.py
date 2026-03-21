@@ -95,6 +95,7 @@ class LLMClient:
         tool_choice: str | None = None,
         model: str | None = None,
         temperature: float | None = None,
+        thinking: bool = True,
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Return an async streaming iterator of ``ChatCompletionChunk``.
 
@@ -116,6 +117,9 @@ class LLMClient:
                 kwargs["tools"] = tools
             if tool_choice is not None:
                 kwargs["tool_choice"] = tool_choice
+            # Disable MiniMax thinking for faster TTFT on conversational turns
+            if not thinking:
+                kwargs["extra_body"] = {"thinking": {"enabled": False}}
 
             models_to_try = self._model_chain(model)
 
@@ -184,6 +188,7 @@ class LLMClient:
         tool_choice: str | None = None,
         model: str | None = None,
         temperature: float | None = None,
+        thinking: bool = True,
     ) -> Any:
         """Return the raw non-streaming completion object with retry/fallback."""
         started_at = time.perf_counter()
@@ -202,6 +207,8 @@ class LLMClient:
                 kwargs["tools"] = tools
             if tool_choice is not None:
                 kwargs["tool_choice"] = tool_choice
+            if not thinking:
+                kwargs["extra_body"] = {"thinking": {"enabled": False}}
 
             models_to_try = self._model_chain(model)
 
