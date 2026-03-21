@@ -52,7 +52,7 @@ ssh sunrise@192.168.66.190 'tmux kill-session -t askme; \
 
 | 模块 | 技术 |
 |------|------|
-| LLM | MiniMax M2.7 highspeed (TTFT ~2s) |
+| LLM | MiniMax M2.7 highspeed (TTFT avg 1.2s) |
 | VLM | 千问 VL (DashScope) |
 | ASR | sherpa-onnx + DashScope Paraformer |
 | TTS | MiniMax Speech 2.8 HD |
@@ -69,17 +69,17 @@ ssh sunrise@192.168.66.190 'tmux kill-session -t askme; \
 **信息查询**: get_time, system_status, web_search, list_skills, environment_report
 **快速回复**: 你好/谢谢/再见 → 16ms 直回（不走 LLM）
 
-## 关键性能
+## 关键性能（真实测量，5 次平均）
 
-| 指标 | 数值 |
-|------|------|
-| 快速回复 (你好) | 16ms |
-| LLM TTFT | ~2s |
-| YOLO 检测读取 | 0.2ms |
-| 帧读取 | 1ms |
-| TTS | ~1.6s |
-| find_object 端到端 | ~17s |
-| 记忆查询 | ~8s |
+| 指标 | 平均 | 最快 | 最慢 |
+|------|------|------|------|
+| 快速回复 (你好) | 7ms | 3ms | 12ms |
+| LLM TTFT | 1.16s | 0.64s | 1.92s |
+| get_time 技能 | 2.1s | 2.0s | 2.4s |
+| recall_memory | 5.4s | 4.2s | 7.1s |
+| LLM 对话 | 9.7s | 6.4s | 12.2s |
+| BPU 检测读取 | <0.1ms | — | 0.2ms |
+| 帧读取 | 10ms | 1ms | 176ms |
 
 ## 目录结构
 

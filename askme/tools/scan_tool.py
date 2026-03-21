@@ -24,9 +24,8 @@ class ScanAroundTool(BaseTool):
 
     name = "scan_around"
     description = (
-        "扫描周围环境。两种模式：\n"
-        "- 不传参数：读取当前方向的 BPU 检测结果 + VLM 描述（即时，<1s）\n"
-        "- full=true：请求 360° 旋转扫描（需要 dog-control-service 支持）\n"
+        "扫描当前方向环境。读取 BPU 检测结果 + 可选 VLM 描述（即时，<1s）。\n"
+        "注意：只能看当前摄像头朝向，不能旋转（旋转需要 dog-control-service）。\n"
         "可选 question 参数让 VLM 针对当前视野回答问题。"
     )
     parameters: dict[str, Any] = {
