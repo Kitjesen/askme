@@ -188,6 +188,21 @@ class AudioAgent:
         self.tts.wait_done()
         self._refresh_voice_metrics()
 
+    async def speak_and_wait(self, text: str) -> None:
+        """Speak text and wait for TTS to finish (voice mode convenience).
+
+        Replaces the repeated 4-step pattern:
+            self._audio.speak(text)
+            self._audio.start_playback()
+            await asyncio.to_thread(self._audio.wait_speaking_done)
+            self._audio.stop_playback()
+        """
+        import asyncio
+        self.speak(text)
+        self.start_playback()
+        await asyncio.to_thread(self.wait_speaking_done)
+        self.stop_playback()
+
     def drain_buffers(self) -> None:
         """Clear any leftover TTS text/audio from a previous turn."""
         self.tts.drain_buffers()
