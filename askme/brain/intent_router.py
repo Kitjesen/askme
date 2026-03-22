@@ -26,6 +26,12 @@ class IntentType(Enum):
     QUICK_REPLY = "quick_reply"  # simple greetings — skip LLM, instant response
     GENERAL = "general"         # fallback → LLM
 
+# Hardcoded ESTOP keywords — always active, even without SafetyChecker.
+# Safety-critical: must never depend on an optional runtime service.
+_ESTOP_KEYWORDS: frozenset[str] = frozenset({
+    "紧急停止", "急停", "emergency stop", "estop", "e-stop",
+})
+
 # Instant replies for simple greetings — no LLM needed, <0.5s response
 _QUICK_REPLIES: dict[str, str] = {
     "你好": "你好，有什么需要帮忙的？",
@@ -96,7 +102,12 @@ class IntentRouter:
         stripped = text.strip()
 
         # 1. Emergency stop — HIGHEST PRIORITY, zero delay
-        if self._safety and self._safety.is_estop_command(stripped):
+        # Works even without SafetyChecker via hardcoded fallback keywords.
+        _is_estop = (
+            (self._safety and self._safety.is_estop_command(stripped))
+            or stripped in _ESTOP_KEYWORDS
+        )
+        if _is_estop:
             logger.critical("E-STOP detected in text: %s", stripped)
             return Intent(
                 type=IntentType.ESTOP,

@@ -220,7 +220,7 @@ class TestDispatchCombinedContext:
         skill = _make_skill()
         dispatcher, mock_pipeline, _ = _make_dispatcher(skill=skill)
         await dispatcher.dispatch("navigate", "去仓库")
-        mock_pipeline.execute_skill.assert_called_once_with("navigate", "去仓库", "")
+        mock_pipeline.execute_skill.assert_called_once_with("navigate", "去仓库", "", source="voice")
 
     async def test_extra_context_forwarded_to_pipeline(self):
         skill = _make_skill()

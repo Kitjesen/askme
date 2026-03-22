@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from askme.agent_shell.thunder_agent_shell import ThunderAgentShell, _AGENT_ALLOWED_TOOLS
+from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
 from askme.tools.tool_registry import ToolRegistry
 from askme.tools.builtin_tools import SandboxedBashTool, WriteFileTool, GetTimeTool
 
@@ -297,6 +297,7 @@ async def test_brain_pipeline_routes_agent_task(tmp_path: Path) -> None:
 
     mock_skill = MagicMock()
     mock_skill.depends = []
+    mock_skill.execution = "agent_shell"
     skill_mgr = MagicMock()
     skill_mgr.get.return_value = mock_skill
     skill_mgr.get_enabled.return_value = []

@@ -119,5 +119,5 @@ class TestEditFileRegistration:
         assert "edit_file" in names
 
     def test_in_agent_allowed_tools(self) -> None:
-        from askme.agent_shell.thunder_agent_shell import _AGENT_ALLOWED_TOOLS
-        assert "edit_file" in _AGENT_ALLOWED_TOOLS
+        from askme.tools.builtin_tools import EditFileTool
+        assert EditFileTool.agent_allowed is True

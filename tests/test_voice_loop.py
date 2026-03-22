@@ -15,11 +15,16 @@ class _Router:
 
 
 class _Pipeline:
+    last_spoken_text = ""
+
     def __init__(self) -> None:
         self.process_calls: list[str] = []
         self.skill_calls: list[tuple[str, str]] = []
         self.pending_calls: list[str] = []
         self.pending_reply_map: dict[str, str] = {}
+
+    def has_pending_tool_approval(self) -> bool:
+        return False
 
     def start_idle_reflection(self):
         return None
@@ -41,6 +46,8 @@ class _Pipeline:
 
 
 class _Audio:
+    awaiting_confirmation = False
+
     def __init__(self) -> None:
         self._calls = 0
         self.spoken: list[str] = []
@@ -67,6 +74,9 @@ class _Audio:
 
     def stop_playback(self) -> None:
         return
+
+    async def speak_and_wait(self, text: str) -> None:
+        self.spoken.append(text)
 
     def drain_buffers(self) -> None:
         self._drained += 1

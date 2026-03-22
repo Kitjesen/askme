@@ -110,10 +110,7 @@ class VoiceLoop:
                     ):
                         self._audio.unmute()
                         self._audio.acknowledge()
-                        self._audio.speak("好的，重新开启。")
-                        self._audio.start_playback()
-                        await asyncio.to_thread(self._audio.wait_speaking_done)
-                        self._audio.stop_playback()
+                        await self._audio.speak_and_wait("好的，重新开启。")
                     elif _muted_intent.type == IntentType.COMMAND:
                         pass  # fall through to COMMAND handler below
                     else:
@@ -151,10 +148,7 @@ class VoiceLoop:
                         self._dispatcher.cancel_active_agent_task()
                     self._pipeline.handle_estop()
                     self._audio.drain_buffers()  # stop any ongoing TTS immediately
-                    self._audio.speak("已紧急停止。")
-                    self._audio.start_playback()
-                    await asyncio.to_thread(self._audio.wait_speaking_done)
-                    self._audio.stop_playback()
+                    await self._audio.speak_and_wait("已紧急停止。")
                     continue
 
                 # ── Stop speaking — also cancels any active agent task ────────
@@ -167,10 +161,7 @@ class VoiceLoop:
                         memory_task = None
                     if self._dispatcher and self._dispatcher.cancel_active_agent_task():
                         self._audio.drain_buffers()
-                        self._audio.speak("已取消任务。")
-                        self._audio.start_playback()
-                        await asyncio.to_thread(self._audio.wait_speaking_done)
-                        self._audio.stop_playback()
+                        await self._audio.speak_and_wait("已取消任务。")
                     else:
                         self._audio.drain_buffers()
                     # acknowledge already fired — no extra chime needed
@@ -187,12 +178,9 @@ class VoiceLoop:
                     last = self._pipeline.last_spoken_text
                     self._audio.drain_buffers()
                     if last:
-                        self._audio.speak(last)
+                        await self._audio.speak_and_wait(last)
                     else:
-                        self._audio.speak("暂时没有内容可以重复。")
-                    self._audio.start_playback()
-                    await asyncio.to_thread(self._audio.wait_speaking_done)
-                    self._audio.stop_playback()
+                        await self._audio.speak_and_wait("暂时没有内容可以重复。")
                     continue
 
                 # ── Mute mic — zero latency, no LLM ──────────────────────
@@ -205,10 +193,7 @@ class VoiceLoop:
                         memory_task = None
                     self._audio.drain_buffers()
                     self._audio.mute()
-                    self._audio.speak('好的，已关闭麦克风。说"开麦"来重新打开。')
-                    self._audio.start_playback()
-                    await asyncio.to_thread(self._audio.wait_speaking_done)
-                    self._audio.stop_playback()
+                    await self._audio.speak_and_wait('好的，已关闭麦克风。说"开麦"来重新打开。')
                     continue
 
                 # ── Volume / speed — zero latency, no LLM ────────────────
@@ -239,10 +224,7 @@ class VoiceLoop:
                     else:  # speed_reset
                         self._audio.set_speed(1.0)
                         msg = "好的，已恢复默认语速。"
-                    self._audio.speak(msg)
-                    self._audio.start_playback()
-                    await asyncio.to_thread(self._audio.wait_speaking_done)
-                    self._audio.stop_playback()
+                    await self._audio.speak_and_wait(msg)
                     continue
 
                 # ── Agent-busy gate ───────────────────────────────────────────
@@ -262,10 +244,7 @@ class VoiceLoop:
                         if memory_task and not memory_task.done():
                             memory_task.cancel()
                             memory_task = None
-                        self._audio.speak("正在处理中，说够了可取消。")
-                        self._audio.start_playback()
-                        await asyncio.to_thread(self._audio.wait_speaking_done)
-                        self._audio.stop_playback()
+                        await self._audio.speak_and_wait("正在处理中，说够了可取消。")
                         if idle_task and not idle_task.done():
                             idle_task.cancel()
                         idle_task = self._pipeline.start_idle_reflection()
@@ -504,10 +483,7 @@ class VoiceLoop:
                 spoken_reply.strip(),
                 source="runtime",
             )
-            self._audio.speak(spoken_reply.strip())
-            self._audio.start_playback()
-            await asyncio.to_thread(self._audio.wait_speaking_done)
-            self._audio.stop_playback()
+            await self._audio.speak_and_wait(spoken_reply.strip())
             return True
 
         logger.warning(

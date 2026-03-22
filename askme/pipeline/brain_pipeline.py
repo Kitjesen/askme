@@ -595,7 +595,7 @@ class BrainPipeline:
             return None
         return await self._respond_without_llm(user_text, result)
 
-    async def _respond_without_llm(self, user_text: str, assistant_text: str) -> str:
+    async def _respond_without_llm(self, user_text: str, assistant_text: str, *, source: str = "voice") -> str:
         """Speak and record a direct response that doesn't need another LLM turn."""
         self._audio.drain_buffers()
         self._audio.start_playback()

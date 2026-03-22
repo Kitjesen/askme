@@ -182,7 +182,7 @@ class TestDispatcherPipelineFailure:
         """After one timeout, the next dispatch must not be poisoned."""
         p = MagicMock()
         call_count = [0]
-        async def _execute(name, text, ctx=""):
+        async def _execute(name, text, ctx="", *, source=None):
             call_count[0] += 1
             if call_count[0] == 1:
                 raise asyncio.TimeoutError
