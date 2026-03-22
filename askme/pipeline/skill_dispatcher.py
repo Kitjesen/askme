@@ -258,19 +258,20 @@ class SkillDispatcher:
         except asyncio.TimeoutError:
             logger.error("Skill '%s' timed out after %.0fs", skill_name, step_timeout)
             result = f"[超时] 技能 {skill_name} 执行超过 {int(step_timeout)} 秒，已中止。"
-            self._current_mission.state = MissionState.FAILED
-            # Record the failed step before cleanup so the mission log is complete
-            self._current_mission.add_step(skill_name, user_text, result)
-            self._current_mission.shared_context[skill_name] = result[:500]
-            logger.info(
-                "Mission step (timeout): %s → %s",
-                skill_name,
-                result[:60],
-            )
-            # Speak the timeout error so the user is not left in silence
+            if self._current_mission:
+                self._current_mission.state = MissionState.FAILED
+                self._current_mission.add_step(skill_name, user_text, result)
+                self._current_mission.shared_context[skill_name] = result[:500]
+                self.complete_mission()
             await self._speak_voice(result, source)
-            # Clean up the mission — a timed-out mission cannot be continued
-            self.complete_mission()
+            return result
+        except Exception as exc:
+            logger.error("Skill '%s' failed: %s", skill_name, exc)
+            result = f"[错误] {skill_name}: {exc}"
+            if self._current_mission:
+                self._current_mission.state = MissionState.FAILED
+                self._current_mission.add_step(skill_name, user_text, result)
+                self.complete_mission()
             return result
 
         # Track step, store result in shared_context for cross-step data passing

@@ -267,6 +267,7 @@ class TextLoop:
         """
         from askme.llm.intent_router import IntentType
 
+        self._text_audio.spoken.clear()
         memory_task = self._pipeline.start_memory_prefetch(user_text)
         try:
             intent = self._router.route(user_text)
@@ -283,8 +284,10 @@ class TextLoop:
                 self._audio.start_playback()
 
                 async def _stop_after_play():
-                    await asyncio.to_thread(self._audio.wait_speaking_done)
-                    self._audio.stop_playback()
+                    try:
+                        await asyncio.to_thread(self._audio.wait_speaking_done)
+                    finally:
+                        self._audio.stop_playback()
 
                 asyncio.create_task(_stop_after_play())
                 return reply

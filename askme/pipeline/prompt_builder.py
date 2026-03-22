@@ -175,7 +175,7 @@ class PromptBuilder:
 
             rest = [m for m in messages if m.get("role") != "system"]
         else:
-            result = [messages[0]]  # keep system prompt (no seed to compete)
+            result = [messages[0]] if messages else []
             rest = list(messages[1:])
 
         if self._user_prefix:

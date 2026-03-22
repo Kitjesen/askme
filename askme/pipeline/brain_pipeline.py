@@ -326,13 +326,15 @@ class BrainPipeline:
                     try:
                         await asyncio.to_thread(_qp.record_observation, "voice", user_text)
                         await asyncio.to_thread(_qp.process_turn, user_text, _resp)
-                        self._qp_turn_count += 1
                         if self._qp_turn_count % 10 == 0:
                             await asyncio.to_thread(_qp.save)
                     except Exception:
                         pass
 
-                asyncio.create_task(_qp_voice_bg())
+                self._qp_turn_count += 1
+                _t = asyncio.create_task(_qp_voice_bg())
+                self._pending_tasks.add(_t)
+                _t.add_done_callback(self._pending_tasks.discard)
 
             _should = (
                 self._mem.should_reflect() if self._mem is not None
@@ -863,11 +865,13 @@ class BrainPipeline:
         if len(result) <= _AGENT_TTS_LIMIT:
             return result, result
 
-        boundary = _AGENT_TTS_LIMIT
+        boundary = 0
         for ch in "。！？!?":
             idx = result.rfind(ch, 0, _AGENT_TTS_LIMIT)
-            if idx > 0 and idx < boundary:
+            if idx > boundary:
                 boundary = idx + 1
+        if boundary == 0:
+            boundary = _AGENT_TTS_LIMIT
 
         spoken = result[:boundary].rstrip() + " 完整结果已保存到工作区。"
 

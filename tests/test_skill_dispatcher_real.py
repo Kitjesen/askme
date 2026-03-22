@@ -307,18 +307,18 @@ class TestDispatchTimeoutActual:
 class TestDispatchEdgeCases:
 
     async def test_dispatch_non_timeout_exception_propagates(self):
-        """Non-TimeoutError propagates to caller — only TimeoutError is caught.
+        """Non-TimeoutError is caught, mission marked FAILED, error string returned.
 
         Sets side_effect on the existing AsyncMock instead of replacing it,
         which avoids creating a dangling unawaited coroutine from the old mock.
         """
         skill = _make_skill()
         dispatcher, mock_pipeline, _, _ = _make_dispatcher(skill=skill)
-        # Mutate existing AsyncMock — do NOT assign a new one (avoids dangling coros)
         mock_pipeline.execute_skill.side_effect = ValueError("LLM crashed")
 
-        with pytest.raises(ValueError, match="LLM crashed"):
-            await dispatcher.dispatch("navigate", "去仓库")
+        result = await dispatcher.dispatch("navigate", "去仓库")
+        assert "LLM crashed" in result
+        assert dispatcher.current_mission is None  # mission cleaned up
 
     async def test_history_truncates_long_result_at_200_chars(self):
         """step result >200 chars → history_for_context uses only [:200].
