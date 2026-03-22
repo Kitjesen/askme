@@ -48,7 +48,7 @@ embed = [
 
 [project.scripts]
 askme = "askme.__main__:main"
-askme-mcp = "askme.mcp_server:main"
+askme-mcp = "askme.mcp.server:main"
 
 [tool.setuptools.packages.find]
 include = ["askme*"]

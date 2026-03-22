@@ -22,10 +22,10 @@ import pytest
 def _make_conv(tmp_path, monkeypatch, max_history: int = 40):
     """Construct a ConversationManager backed by tmp_path, no side-effects."""
     monkeypatch.setattr(
-        "askme.brain.conversation.project_root", lambda: tmp_path
+        "askme.llm.conversation.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.conversation.get_config",
+        "askme.llm.conversation.get_config",
         lambda: {
             "conversation": {
                 "history_file": str(tmp_path / "data" / "conv.json"),
@@ -123,10 +123,10 @@ class TestMaybeCompressSkipsOnPendingToolCalls:
     async def test_skips_when_tool_calls_in_history(self, tmp_path, monkeypatch):
         """maybe_compress() must not run while a tool exchange is in flight."""
         monkeypatch.setattr(
-            "askme.brain.conversation.project_root", lambda: tmp_path
+            "askme.llm.conversation.project_root", lambda: tmp_path
         )
         monkeypatch.setattr(
-            "askme.brain.conversation.get_config",
+            "askme.llm.conversation.get_config",
             lambda: {
                 "conversation": {
                     "history_file": str(tmp_path / "data" / "conv.json"),
@@ -135,8 +135,8 @@ class TestMaybeCompressSkipsOnPendingToolCalls:
             },
         )
         # Lower threshold so the history would normally trigger compression
-        monkeypatch.setattr("askme.brain.conversation.COMPRESS_THRESHOLD", 4)
-        monkeypatch.setattr("askme.brain.conversation.KEEP_RECENT", 2)
+        monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", 4)
+        monkeypatch.setattr("askme.llm.conversation.KEEP_RECENT", 2)
 
         from askme.brain.conversation import ConversationManager
 
@@ -162,10 +162,10 @@ class TestMaybeCompressSkipsOnPendingToolCalls:
     async def test_does_not_skip_without_tool_calls(self, tmp_path, monkeypatch):
         """maybe_compress() proceeds normally when there are no pending tool calls."""
         monkeypatch.setattr(
-            "askme.brain.conversation.project_root", lambda: tmp_path
+            "askme.llm.conversation.project_root", lambda: tmp_path
         )
         monkeypatch.setattr(
-            "askme.brain.conversation.get_config",
+            "askme.llm.conversation.get_config",
             lambda: {
                 "conversation": {
                     "history_file": str(tmp_path / "data" / "conv.json"),
@@ -173,8 +173,8 @@ class TestMaybeCompressSkipsOnPendingToolCalls:
                 }
             },
         )
-        monkeypatch.setattr("askme.brain.conversation.COMPRESS_THRESHOLD", 4)
-        monkeypatch.setattr("askme.brain.conversation.KEEP_RECENT", 2)
+        monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", 4)
+        monkeypatch.setattr("askme.llm.conversation.KEEP_RECENT", 2)
 
         from askme.brain.conversation import ConversationManager
 

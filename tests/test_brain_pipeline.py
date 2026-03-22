@@ -15,10 +15,10 @@ def _make_pipeline(
 ):
     """Build a BrainPipeline with mocked dependencies."""
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.project_root", lambda: tmp_path
+        "askme.memory.episodic_memory.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 

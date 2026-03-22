@@ -408,7 +408,7 @@ def _run_terminal_tui(*, robot_mode: bool) -> None:
 
 
 def _run_mcp_server(*, transport: str, host: str, port: int) -> None:
-    from askme.mcp_server import mcp
+    from askme.mcp.server import mcp
 
     if transport == "sse":
         mcp.run(transport="sse", host=host, port=port)

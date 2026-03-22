@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from askme.brain.episodic_memory import EpisodicMemory
     from askme.brain.session_memory import SessionMemory
     from askme.perception.vision_bridge import VisionBridge
-    from askme.dog_safety_client import DogSafetyClient
+    from askme.robot.safety_client import DogSafetyClient
     from askme.skills.skill_manager import SkillManager
     from askme.tools.tool_registry import ToolRegistry
 

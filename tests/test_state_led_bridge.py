@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from askme.led_controller import LedStateKind, NullLedController
-from askme.pipeline.state_led_bridge import StateLedBridge
+from askme.robot.led_controller import LedStateKind, NullLedController
+from askme.robot.state_led_bridge import StateLedBridge
 from askme.voice.audio_agent import AgentState
 
 

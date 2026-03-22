@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import sounddevice as sd
 
-from askme.ota_bridge import OTABridgeMetrics, get_ota_runtime_metrics
+from askme.robot.ota_bridge import OTABridgeMetrics, get_ota_runtime_metrics
 
 from .asr_manager import (
     ASRManager,

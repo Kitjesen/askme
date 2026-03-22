@@ -1,4 +1,4 @@
-"""askme.robot - Robot arm control modules."""
+"""askme.robot - Robot hardware clients and control modules."""
 
 from .arm_controller import ArmController
 from .safety import SafetyChecker

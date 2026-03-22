@@ -12,7 +12,7 @@ from openai import APITimeoutError, APIStatusError
 def _make_client(monkeypatch, **overrides):
     """Create an LLMClient with test defaults."""
     monkeypatch.setattr(
-        "askme.brain.llm_client.get_config",
+        "askme.llm.client.get_config",
         lambda: {"brain": {
             "api_key": "test-key",
             "base_url": "https://test.example.com/v1",
@@ -57,7 +57,7 @@ async def test_chat_retries_on_timeout(monkeypatch):
         ]
     )
 
-    with patch("askme.brain.llm_client._backoff", return_value=0.01):
+    with patch("askme.llm.client._backoff", return_value=0.01):
         result = await client.chat([{"role": "user", "content": "hi"}])
 
     assert result == "ok"
@@ -134,7 +134,7 @@ async def test_chat_retries_on_500(monkeypatch):
         ]
     )
 
-    with patch("askme.brain.llm_client._backoff", return_value=0.01):
+    with patch("askme.llm.client._backoff", return_value=0.01):
         result = await client.chat([{"role": "user", "content": "hi"}])
 
     assert result == "recovered"

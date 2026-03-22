@@ -22,8 +22,8 @@ if TYPE_CHECKING:
     from askme.brain.memory_system import MemorySystem
     from askme.brain.session_memory import SessionMemory
     from askme.perception.vision_bridge import VisionBridge
-    from askme.dog_control_client import DogControlClient
-    from askme.dog_safety_client import DogSafetyClient
+    from askme.robot.control_client import DogControlClient
+    from askme.robot.safety_client import DogSafetyClient
     from askme.robot.arm_controller import ArmController
     from askme.skills.skill_executor import SkillExecutor
     from askme.skills.skill_manager import SkillManager

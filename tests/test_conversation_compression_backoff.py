@@ -11,17 +11,17 @@ import pytest
 def _make_conv(tmp_path, monkeypatch, *, max_history=100, threshold=20, keep_recent=6):
     """Create a ConversationManager with lower thresholds suitable for testing."""
     monkeypatch.setattr(
-        "askme.brain.conversation.project_root", lambda: tmp_path
+        "askme.llm.conversation.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.conversation.get_config",
+        "askme.llm.conversation.get_config",
         lambda: {"conversation": {
             "history_file": str(tmp_path / "data" / "conv.json"),
             "max_history": max_history,
         }},
     )
-    monkeypatch.setattr("askme.brain.conversation.COMPRESS_THRESHOLD", threshold)
-    monkeypatch.setattr("askme.brain.conversation.KEEP_RECENT", keep_recent)
+    monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", threshold)
+    monkeypatch.setattr("askme.llm.conversation.KEEP_RECENT", keep_recent)
 
     from askme.brain.conversation import ConversationManager
 

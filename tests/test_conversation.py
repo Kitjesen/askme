@@ -10,10 +10,10 @@ import pytest
 def _make_conv(tmp_path, monkeypatch, max_history=40):
     """Create a ConversationManager with paths in tmp_path."""
     monkeypatch.setattr(
-        "askme.brain.conversation.project_root", lambda: tmp_path
+        "askme.llm.conversation.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.conversation.get_config",
+        "askme.llm.conversation.get_config",
         lambda: {"conversation": {
             "history_file": str(tmp_path / "data" / "conv.json"),
             "max_history": max_history,
@@ -66,18 +66,18 @@ async def test_maybe_compress_below_threshold(tmp_path, monkeypatch):
 async def test_maybe_compress_triggers(tmp_path, monkeypatch):
     """Compression triggers when history exceeds threshold."""
     monkeypatch.setattr(
-        "askme.brain.conversation.project_root", lambda: tmp_path
+        "askme.llm.conversation.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.conversation.get_config",
+        "askme.llm.conversation.get_config",
         lambda: {"conversation": {
             "history_file": str(tmp_path / "data" / "conv.json"),
             "max_history": 100,
         }},
     )
     # Lower threshold for testing
-    monkeypatch.setattr("askme.brain.conversation.COMPRESS_THRESHOLD", 20)
-    monkeypatch.setattr("askme.brain.conversation.KEEP_RECENT", 6)
+    monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", 20)
+    monkeypatch.setattr("askme.llm.conversation.KEEP_RECENT", 6)
 
     from askme.brain.conversation import ConversationManager, SUMMARY_TAG
 
@@ -106,17 +106,17 @@ async def test_maybe_compress_triggers(tmp_path, monkeypatch):
 async def test_maybe_compress_preserves_existing_summary(tmp_path, monkeypatch):
     """Second compression includes the previous summary in the prompt."""
     monkeypatch.setattr(
-        "askme.brain.conversation.project_root", lambda: tmp_path
+        "askme.llm.conversation.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.conversation.get_config",
+        "askme.llm.conversation.get_config",
         lambda: {"conversation": {
             "history_file": str(tmp_path / "data" / "conv.json"),
             "max_history": 100,
         }},
     )
-    monkeypatch.setattr("askme.brain.conversation.COMPRESS_THRESHOLD", 10)
-    monkeypatch.setattr("askme.brain.conversation.KEEP_RECENT", 4)
+    monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", 10)
+    monkeypatch.setattr("askme.llm.conversation.KEEP_RECENT", 4)
 
     from askme.brain.conversation import ConversationManager, SUMMARY_TAG
 
@@ -144,16 +144,16 @@ async def test_maybe_compress_preserves_existing_summary(tmp_path, monkeypatch):
 async def test_maybe_compress_failure_safe(tmp_path, monkeypatch):
     """Compression failure doesn't corrupt history."""
     monkeypatch.setattr(
-        "askme.brain.conversation.project_root", lambda: tmp_path
+        "askme.llm.conversation.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.conversation.get_config",
+        "askme.llm.conversation.get_config",
         lambda: {"conversation": {
             "history_file": str(tmp_path / "data" / "conv.json"),
             "max_history": 100,
         }},
     )
-    monkeypatch.setattr("askme.brain.conversation.COMPRESS_THRESHOLD", 10)
+    monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", 10)
 
     from askme.brain.conversation import ConversationManager
 

@@ -18,15 +18,15 @@ import pytest
 def _make_memory_with_llm(tmp_path, monkeypatch, reflection_response=None):
     """Create an EpisodicMemory with mock LLM and paths in tmp_path."""
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.project_root", lambda: tmp_path
+        "askme.memory.episodic_memory.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
-    monkeypatch.setattr("askme.brain.episodic_memory.REFLECT_MIN_EVENTS", 5)
-    monkeypatch.setattr("askme.brain.episodic_memory.REFLECT_COOLDOWN_S", 0)
-    monkeypatch.setattr("askme.brain.episodic_memory.IMPORTANCE_THRESHOLD", 1.0)
+    monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_MIN_EVENTS", 5)
+    monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_COOLDOWN_S", 0)
+    monkeypatch.setattr("askme.memory.episodic_memory.IMPORTANCE_THRESHOLD", 1.0)
 
     from askme.brain.episodic_memory import EpisodicMemory
 
@@ -121,15 +121,15 @@ async def test_full_patrol_scenario(tmp_path, monkeypatch):
 async def test_importance_based_reflection_trigger(tmp_path, monkeypatch):
     """Reflection triggers based on cumulative importance, not just count."""
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.project_root", lambda: tmp_path
+        "askme.memory.episodic_memory.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
-    monkeypatch.setattr("askme.brain.episodic_memory.REFLECT_COOLDOWN_S", 0)
-    monkeypatch.setattr("askme.brain.episodic_memory.IMPORTANCE_THRESHOLD", 3.0)
-    monkeypatch.setattr("askme.brain.episodic_memory.REFLECT_MIN_EVENTS", 100)
+    monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_COOLDOWN_S", 0)
+    monkeypatch.setattr("askme.memory.episodic_memory.IMPORTANCE_THRESHOLD", 3.0)
+    monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_MIN_EVENTS", 100)
 
     from askme.brain.episodic_memory import EpisodicMemory
 
@@ -149,14 +149,14 @@ async def test_importance_based_reflection_trigger(tmp_path, monkeypatch):
 async def test_knowledge_accumulates_across_reflections(tmp_path, monkeypatch):
     """Multiple reflection cycles build up categorized world knowledge."""
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.project_root", lambda: tmp_path
+        "askme.memory.episodic_memory.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
-    monkeypatch.setattr("askme.brain.episodic_memory.REFLECT_MIN_EVENTS", 3)
-    monkeypatch.setattr("askme.brain.episodic_memory.REFLECT_COOLDOWN_S", 0)
+    monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_MIN_EVENTS", 3)
+    monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_COOLDOWN_S", 0)
 
     from askme.brain.episodic_memory import EpisodicMemory
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import queue
 
-from askme.ota_bridge import OTABridgeMetrics
+from askme.robot.ota_bridge import OTABridgeMetrics
 from askme.voice.audio_agent import AudioAgent
 
 

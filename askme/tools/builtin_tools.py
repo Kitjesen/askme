@@ -498,7 +498,7 @@ class DogControlDispatchTool(BaseTool):
             return "[Error] 未指定能力名称"
 
         # Import lazily to avoid circular imports at module load time
-        from askme.dog_control_client import DogControlClient
+        from askme.robot.control_client import DogControlClient
 
         client = DogControlClient()
         if not client.is_configured():

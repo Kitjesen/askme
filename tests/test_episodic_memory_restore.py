@@ -19,9 +19,9 @@ from unittest.mock import patch
 
 
 def _make_memory(tmp_path, monkeypatch):
-    monkeypatch.setattr("askme.brain.episodic_memory.project_root", lambda: tmp_path)
+    monkeypatch.setattr("askme.memory.episodic_memory.project_root", lambda: tmp_path)
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {
             "app": {"data_dir": str(tmp_path / "data")},
             "memory": {"episodic": {"reflect_min_events": 5}},

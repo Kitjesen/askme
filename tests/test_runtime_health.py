@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from askme.runtime_health import RuntimeHealthSnapshot
+from askme.robot.runtime_health import RuntimeHealthSnapshot
 
 
 def _snapshot(*, voice_pipeline_ok: bool = True, ota_state: str = "connected") -> RuntimeHealthSnapshot:

@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 import requests
 
-from askme.ota_bridge import OTABridge, OTABridgeMetrics
+from askme.robot.ota_bridge import OTABridge, OTABridgeMetrics
 
 
 def _state_path(project_root: Path) -> Path:
@@ -65,7 +65,7 @@ class _Session:
 @pytest.mark.asyncio
 async def test_ota_bridge_registers_and_reports_runtime_metrics(project_root, monkeypatch) -> None:
     calls: list[dict] = []
-    monkeypatch.setattr("askme.ota_bridge.requests.Session", lambda: _Session(calls))
+    monkeypatch.setattr("askme.robot.ota_bridge.requests.Session", lambda: _Session(calls))
 
     metrics = OTABridgeMetrics()
     metrics.record_conversation_turn()
@@ -143,7 +143,7 @@ async def test_ota_bridge_registers_and_reports_runtime_metrics(project_root, mo
 @pytest.mark.asyncio
 async def test_ota_bridge_reloads_persisted_credentials(project_root, monkeypatch) -> None:
     calls: list[dict] = []
-    monkeypatch.setattr("askme.ota_bridge.requests.Session", lambda: _Session(calls))
+    monkeypatch.setattr("askme.robot.ota_bridge.requests.Session", lambda: _Session(calls))
 
     state_path = _state_path(project_root)
     state_path.write_text(
@@ -177,7 +177,7 @@ async def test_ota_bridge_reloads_persisted_credentials(project_root, monkeypatc
 
 
 def test_ota_bridge_status_snapshot_reports_registration_state(project_root, monkeypatch) -> None:
-    monkeypatch.setattr("askme.ota_bridge.requests.Session", lambda: _Session([]))
+    monkeypatch.setattr("askme.robot.ota_bridge.requests.Session", lambda: _Session([]))
 
     bridge = OTABridge(
         {

@@ -6,10 +6,10 @@ from __future__ import annotations
 def test_save_and_load_summary(tmp_path, monkeypatch):
     """Session summaries are saved as .md files and loaded back."""
     monkeypatch.setattr(
-        "askme.brain.session_memory.project_root", lambda: tmp_path
+        "askme.memory.session.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.session_memory.get_config",
+        "askme.memory.session.get_config",
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 
@@ -26,10 +26,10 @@ def test_save_and_load_summary(tmp_path, monkeypatch):
 def test_empty_summaries(tmp_path, monkeypatch):
     """No session files -> empty string."""
     monkeypatch.setattr(
-        "askme.brain.session_memory.project_root", lambda: tmp_path
+        "askme.memory.session.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.session_memory.get_config",
+        "askme.memory.session.get_config",
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 
@@ -42,10 +42,10 @@ def test_empty_summaries(tmp_path, monkeypatch):
 def test_max_sessions_limit(tmp_path, monkeypatch):
     """Only the most recent N sessions are included."""
     monkeypatch.setattr(
-        "askme.brain.session_memory.project_root", lambda: tmp_path
+        "askme.memory.session.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.session_memory.get_config",
+        "askme.memory.session.get_config",
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 

@@ -15,7 +15,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError
 def _make_client(monkeypatch, **overrides):
     """Create an LLMClient with test defaults."""
     monkeypatch.setattr(
-        "askme.brain.llm_client.get_config",
+        "askme.llm.client.get_config",
         lambda: {"brain": {
             "api_key": "test-key",
             "base_url": "https://test.example.com/v1",
@@ -57,7 +57,7 @@ async def test_stream_retries_on_timeout(monkeypatch):
 
     client._client.chat.completions.create = create_side_effect
 
-    with patch("askme.brain.llm_client._backoff", return_value=0.001):
+    with patch("askme.llm.client._backoff", return_value=0.001):
         chunks = []
         async for c in client.chat_stream([{"role": "user", "content": "hi"}]):
             chunks.append(c)
@@ -94,7 +94,7 @@ async def test_stream_retries_on_503(monkeypatch):
 
     client._client.chat.completions.create = create_side_effect
 
-    with patch("askme.brain.llm_client._backoff", return_value=0.001):
+    with patch("askme.llm.client._backoff", return_value=0.001):
         chunks = []
         async for c in client.chat_stream([{"role": "user", "content": "hi"}]):
             chunks.append(c)
@@ -206,7 +206,7 @@ async def test_chat_retries_on_connection_error(monkeypatch):
         ]
     )
 
-    with patch("askme.brain.llm_client._backoff", return_value=0.001):
+    with patch("askme.llm.client._backoff", return_value=0.001):
         result = await client.chat([{"role": "user", "content": "hi"}])
 
     assert result == "recovered"
@@ -232,7 +232,7 @@ async def test_stream_retries_on_connection_error(monkeypatch):
 
     client._client.chat.completions.create = create_side_effect
 
-    with patch("askme.brain.llm_client._backoff", return_value=0.001):
+    with patch("askme.llm.client._backoff", return_value=0.001):
         chunks = []
         async for c in client.chat_stream([{"role": "user", "content": "hi"}]):
             chunks.append(c)
@@ -247,7 +247,7 @@ async def test_stream_retries_on_connection_error(monkeypatch):
 
 async def test_chat_records_metrics_on_success(monkeypatch):
     """Metrics are recorded after successful chat()."""
-    from askme.ota_bridge import OTABridgeMetrics
+    from askme.robot.ota_bridge import OTABridgeMetrics
     metrics = OTABridgeMetrics()
 
     client = _make_client(monkeypatch)
@@ -268,7 +268,7 @@ async def test_chat_records_metrics_on_success(monkeypatch):
 
 async def test_chat_records_metrics_on_failure(monkeypatch):
     """Metrics are recorded even after chat() failure."""
-    from askme.ota_bridge import OTABridgeMetrics
+    from askme.robot.ota_bridge import OTABridgeMetrics
     metrics = OTABridgeMetrics()
 
     client = _make_client(monkeypatch, max_retries=0, fallback_models=[])
@@ -288,7 +288,7 @@ async def test_chat_records_metrics_on_failure(monkeypatch):
 
 async def test_stream_records_metrics(monkeypatch):
     """Metrics recorded for streaming calls."""
-    from askme.ota_bridge import OTABridgeMetrics
+    from askme.robot.ota_bridge import OTABridgeMetrics
     metrics = OTABridgeMetrics()
 
     client = _make_client(monkeypatch)

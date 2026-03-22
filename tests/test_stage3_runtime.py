@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from askme.dog_safety_client import DogSafetyClient, _ESTOP_STATE_TTL
+from askme.robot.safety_client import DogSafetyClient, _ESTOP_STATE_TTL
 
 
 # ── DogSafetyClient ──────────────────────────────────────────────────────────

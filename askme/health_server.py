@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 import uvicorn
 
-from askme.runtime_health import RuntimeHealthSnapshot, merge_voice_pipeline_status
+from askme.robot.runtime_health import RuntimeHealthSnapshot, merge_voice_pipeline_status
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ def build_health_snapshot(
 
     # Runtime service connectivity (nav-gateway, dog-control, dog-safety)
     try:
-        from askme.runtime_health import get_service_summary
+        from askme.robot.runtime_health import get_service_summary
         snapshot["services"] = get_service_summary()
     except Exception:
         pass

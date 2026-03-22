@@ -1,8 +1,8 @@
-"""Brain module -- LLM reasoning, conversation history, memory retrieval, and intent routing."""
+"""Brain module -- backward-compat re-exports after split into askme.llm / askme.memory."""
 
-from askme.brain.llm_client import LLMClient
-from askme.brain.conversation import ConversationManager
-from askme.brain.memory_bridge import MemoryBridge
-from askme.brain.intent_router import IntentRouter
+from askme.llm.client import LLMClient
+from askme.llm.conversation import ConversationManager
+from askme.memory.bridge import MemoryBridge
+from askme.llm.intent_router import IntentRouter
 
 __all__ = ["LLMClient", "ConversationManager", "MemoryBridge", "IntentRouter"]

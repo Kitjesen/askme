@@ -98,7 +98,7 @@ class TestDogControlDispatchTool:
     def test_successful_dispatch_stand(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DOG_CONTROL_SERVICE_URL", "http://localhost:5080")
         with patch(
-            "askme.dog_control_client.DogControlClient.dispatch_capability",
+            "askme.robot.control_client.DogControlClient.dispatch_capability",
             return_value={"status": "ok", "execution_id": "xyz"},
         ):
             result = self.tool.execute(capability="stand")
@@ -107,7 +107,7 @@ class TestDogControlDispatchTool:
     def test_service_returns_error_propagated(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DOG_CONTROL_SERVICE_URL", "http://localhost:5080")
         with patch(
-            "askme.dog_control_client.DogControlClient.dispatch_capability",
+            "askme.robot.control_client.DogControlClient.dispatch_capability",
             return_value={"error": "service down"},
         ):
             result = self.tool.execute(capability="stand")
@@ -116,7 +116,7 @@ class TestDogControlDispatchTool:
     def test_sit_capability_dispatched(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DOG_CONTROL_SERVICE_URL", "http://localhost:5080")
         with patch(
-            "askme.dog_control_client.DogControlClient.dispatch_capability",
+            "askme.robot.control_client.DogControlClient.dispatch_capability",
             return_value={"status": "ok", "execution_id": "sit-001"},
         ) as mock_dispatch:
             result = self.tool.execute(capability="sit")

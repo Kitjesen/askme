@@ -22,22 +22,22 @@ from askme.brain.memory_system import MemorySystem
 from askme.brain.session_memory import SessionMemory
 from askme.perception.vision_bridge import VisionBridge
 from askme.config import validate_config
-from askme.dog_control_client import DogControlClient
-from askme.dog_safety_client import DogSafetyClient
+from askme.robot.control_client import DogControlClient
+from askme.robot.safety_client import DogSafetyClient
 from askme.health_server import AskmeHealthServer, build_health_snapshot
-from askme.led_controller import HttpLedController, NullLedController
-from askme.ota_bridge import OTABridgeMetrics
+from askme.robot.led_controller import HttpLedController, NullLedController
+from askme.robot.ota_bridge import OTABridgeMetrics
 from askme.pipeline.brain_pipeline import BrainPipeline
 from askme.pipeline.commands import CommandHandler
 from askme.pipeline.planner_agent import PlannerAgent
 from askme.pipeline.proactive_agent import ProactiveAgent
 from askme.pipeline.skill_dispatcher import SkillDispatcher
-from askme.pipeline.state_led_bridge import StateLedBridge
+from askme.robot.state_led_bridge import StateLedBridge
 from askme.pipeline.text_loop import TextLoop
 from askme.pipeline.voice_loop import VoiceLoop
 from askme.runtime.components import CallableComponent, RuntimeComponent
 from askme.runtime.profiles import RuntimeProfile
-from askme.runtime_health import log_startup_service_status, merge_voice_pipeline_status
+from askme.robot.runtime_health import log_startup_service_status, merge_voice_pipeline_status
 from askme.skills.skill_executor import SkillExecutor
 from askme.skills.skill_manager import SkillManager
 from askme.tools.builtin_tools import DispatchSkillTool, SpeakProgressTool, register_builtin_tools

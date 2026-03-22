@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from askme.dog_safety_client import DogSafetyClient, _ESTOP_PATH
+from askme.robot.safety_client import DogSafetyClient, _ESTOP_PATH
 
 
 class TestDogSafetyClientConfiguration:

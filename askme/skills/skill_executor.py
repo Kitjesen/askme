@@ -12,7 +12,7 @@ import json
 import logging
 from typing import Any
 
-from askme.ota_bridge import OTABridgeMetrics
+from askme.robot.ota_bridge import OTABridgeMetrics
 
 from .skill_model import SkillDefinition
 from ..tools.tool_registry import ToolRegistry

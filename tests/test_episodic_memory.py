@@ -11,10 +11,10 @@ from unittest.mock import AsyncMock
 def _make_memory(tmp_path, monkeypatch):
     """Helper: create an EpisodicMemory with paths redirected to tmp_path."""
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.project_root", lambda: tmp_path
+        "askme.memory.episodic_memory.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {
             "app": {"data_dir": str(tmp_path / "data")},
             "memory": {"episodic": {"reflect_min_events": 5}},
@@ -299,16 +299,16 @@ def test_episode_to_dict():
 def test_flush_to_disk(tmp_path, monkeypatch):
     """Buffer is flushed to JSONL on disk when threshold reached."""
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.project_root", lambda: tmp_path
+        "askme.memory.episodic_memory.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {
             "app": {"data_dir": str(tmp_path / "data")},
             "memory": {"episodic": {"reflect_min_events": 5}},
         },
     )
-    monkeypatch.setattr("askme.brain.episodic_memory.FLUSH_THRESHOLD", 3)
+    monkeypatch.setattr("askme.memory.episodic_memory.FLUSH_THRESHOLD", 3)
 
     from askme.brain.episodic_memory import EpisodicMemory
 
@@ -330,14 +330,14 @@ def test_flush_to_disk(tmp_path, monkeypatch):
 def test_should_reflect_importance_trigger(tmp_path, monkeypatch):
     """should_reflect triggers on cumulative importance."""
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.project_root", lambda: tmp_path
+        "askme.memory.episodic_memory.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
-    monkeypatch.setattr("askme.brain.episodic_memory.IMPORTANCE_THRESHOLD", 2.0)
-    monkeypatch.setattr("askme.brain.episodic_memory.REFLECT_MIN_EVENTS", 100)
+    monkeypatch.setattr("askme.memory.episodic_memory.IMPORTANCE_THRESHOLD", 2.0)
+    monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_MIN_EVENTS", 100)
 
     from askme.brain.episodic_memory import EpisodicMemory
 
@@ -353,13 +353,13 @@ def test_should_reflect_importance_trigger(tmp_path, monkeypatch):
 def test_should_reflect_cooldown(tmp_path, monkeypatch):
     """should_reflect respects cooldown period."""
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.project_root", lambda: tmp_path
+        "askme.memory.episodic_memory.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
-    monkeypatch.setattr("askme.brain.episodic_memory.REFLECT_MIN_EVENTS", 2)
+    monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_MIN_EVENTS", 2)
 
     from askme.brain.episodic_memory import EpisodicMemory
 
@@ -391,10 +391,10 @@ async def test_reflect_no_llm(tmp_path, monkeypatch):
 async def test_reflect_resets_cumulative_importance(tmp_path, monkeypatch):
     """After reflection, cumulative importance resets to 0."""
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.project_root", lambda: tmp_path
+        "askme.memory.episodic_memory.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 
@@ -420,10 +420,10 @@ async def test_reflect_resets_cumulative_importance(tmp_path, monkeypatch):
 async def test_reflect_with_mock_llm(tmp_path, monkeypatch):
     """reflect() processes LLM response and saves digest + knowledge."""
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.project_root", lambda: tmp_path
+        "askme.memory.episodic_memory.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 
@@ -475,10 +475,10 @@ async def test_reflect_with_mock_llm(tmp_path, monkeypatch):
 async def test_reflect_failure_does_not_start_cooldown(tmp_path, monkeypatch):
     """A failed reflection should be retriable immediately."""
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.project_root", lambda: tmp_path
+        "askme.memory.episodic_memory.project_root", lambda: tmp_path
     )
     monkeypatch.setattr(
-        "askme.brain.episodic_memory.get_config",
+        "askme.memory.episodic_memory.get_config",
         lambda: {
             "app": {"data_dir": str(tmp_path / "data")},
             "memory": {"episodic": {"reflect_min_events": 5}},
