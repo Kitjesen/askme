@@ -139,29 +139,85 @@ Available endpoints:
 - `/api/capabilities`: profile, component, skill contract, and OpenAPI summary
 - `/api/chat`: web chat entrypoint wired through the same dispatcher/runtime stack
 
+## Event-Driven Perception (V2)
+
+The perception pipeline transforms raw YOLO detections into structured events and scene state.
+
+```text
+frame_daemon (5Hz BPU YOLO)
+  → /tmp/askme_frame_detections.json
+    → ChangeDetector (1Hz IoU matching + N-frame debounce)
+      → ChangeEvent (person_appeared, person_left, object_appeared, ...)
+        → WorldState (live scene snapshot: tracked objects + Chinese summary)
+        → AttentionManager (cooldowns + importance thresholds → alert/investigate)
+        → ProactiveAgent._change_event_loop() (TTS alerts, episodic logging)
+```
+
+Key files:
+
+- `askme/perception/change_detector.py`: greedy IoU matching, configurable debounce (3 frames appear, 5 frames disappear)
+- `askme/perception/world_state.py`: `TrackedObject` dict, `get_summary_sync()` → "当前场景：1名人（距离2.3米）、2个椅子。"
+- `askme/perception/attention_manager.py`: per-event-type cooldowns, `should_alert()` / `should_investigate()`
+- `askme/schemas/observation.py`: `Detection`, `Observation` dataclasses
+- `askme/schemas/events.py`: `ChangeEvent`, `ChangeEventType` enum
+
+## Terminal UI (TUI)
+
+Full-screen terminal dashboard: `python -m askme` or `askme tui --robot`
+
+Features:
+- Header bar: THUNDER name, ESTOP state (red when active), profile, clock
+- Context bar: scene summary, mission state, LLM latency
+- Left panel: color-coded chat transcript (`[你]` cyan, `[askme]` green, `[系统]` yellow)
+- Right panel: component health (colored ● dots), event feed
+- `Ctrl+C` triggers ESTOP (not exit), `/estop` command
+- CJK-aware display width calculation
+
 ## Repository Layout
 
 ```text
 askme/
-  app.py
-  health_server.py
-  mcp_server.py
+  app.py                    # thin facade over runtime assembly
+  cli.py                    # CLI command tree (runtime/skills/agent/mcp/tui)
+  tui.py                    # full-screen terminal UI with color + ESTOP
+  health_server.py          # HTTP health/metrics/capabilities/chat
+  mcp_server.py             # MCP tool/resource server
   runtime/
-    assembly.py
-    components.py
-    profiles.py
+    assembly.py             # DI composition root + component lifecycle
+    components.py           # CallableComponent lifecycle abstraction
+    profiles.py             # voice/text/mcp/edge_robot profiles
   brain/
+    llm_client.py           # LLM with retry/timeout/fallback
+    conversation.py         # L1 sliding window, compression
+    intent_router.py        # ESTOP → quick_reply → voice_trigger → general
+    vision_bridge.py        # ROS2 camera + BPU YOLO + VLM (DashScope)
+    episodic_memory.py      # L3 robot experience + reflection
   pipeline/
-  agent_shell/
-  skills/
-    builtin/
-    contracts.py
-    contracts_builtin.py
-    skill_manager.py
-  tools/
-  voice/
+    brain_pipeline.py       # streaming LLM → TTS orchestration
+    prompt_builder.py       # system prompt assembly + seed injection
+    tool_executor.py        # LLM tool call execution + approval flow
+    skill_dispatcher.py     # mission tracking + multi-step orchestration
+    voice_loop.py           # mic → intent → dispatch → TTS
+    text_loop.py            # stdin → intent → dispatch → stdout
+    proactive_agent.py      # autonomous patrol + anomaly detection
   perception/
-tests/
+    change_detector.py      # YOLO frame diff → debounced events
+    world_state.py          # live scene snapshot (tracked objects)
+    attention_manager.py    # alert fatigue prevention (cooldowns)
+  agent_shell/
+    thunder_agent_shell.py  # autonomous task execution (5 iterations, 120s)
+  skills/
+    builtin/                # SKILL.md definitions (41 skills)
+    contracts.py            # code-defined skill contracts + OpenAPI
+    skill_manager.py        # merge contracts + markdown metadata
+  tools/                    # LLM tool-calling (24 tools)
+  voice/                    # ASR/VAD/KWS/TTS/noise reduction
+  schemas/                  # Detection, Observation, ChangeEvent
+tests/                      # 1431 tests, 0 failures
 ```
 
-There is no active `core/Module/Orchestrator/EventBus` layer in the current codebase. Older references to that structure were stale and have been removed.
+## Test Suite
+
+```bash
+python -m pytest tests/ -q    # ~2 min, 1431 tests
+```
