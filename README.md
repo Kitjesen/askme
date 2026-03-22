@@ -1,113 +1,167 @@
-# Askme — Thunder 工业巡检机器人语音 AI 系统
+# Askme
 
-自主感知 + 语音交互 + 记忆推理 + 联网搜索，全栈 on-device AI。
+Thunder industrial inspection assistant runtime.
 
-## 快速启动
+`askme` is not a generic transport framework. Its value is the runtime composition around voice I/O, memory, vision, robot APIs, agent execution, and skill dispatch for the dog platform.
+
+## Quick Start
 
 ```bash
-# 语音模式（生产）
-python -m askme --legacy
-
-# 文本模式（调试）
-python -m askme --legacy --text
-
-# MCP 服务器模式
+# Full-screen terminal UI
 python -m askme
+
+# Plain text runtime
+python -m askme --text
+
+# Voice runtime
+python -m askme --voice
+
+# Voice + robot edge runtime
+python -m askme runtime run --profile edge_robot
+
+# Text runtime with robot APIs enabled
+python -m askme runtime run --text --robot
+
+# One-shot agent CLI
+python -m askme agent send "帮我看看当前有哪些技能"
 ```
 
-## Sunrise 部署
+Legacy flags are still accepted for compatibility, including `python -m askme --legacy --text --robot`.
+
+## Runtime Direction
+
+The current architecture follows four rules:
+
+1. `voice_io`, `memory`, `vision`, `robot_api`, `agent_shell`, and `skill_runtime` are assembled as composable runtime components instead of being hard-wired inside `app.py`.
+2. A named profile layer controls assembly. The main profiles are `voice`, `text`, `mcp`, and `edge_robot`.
+3. Skill contracts are defined in code first. MCP catalogs and OpenAPI are generated from those contracts, while legacy `SKILL.md` files still provide prompt bodies during migration.
+4. Every runtime component exposes a consistent lifecycle and introspection surface: `start()`, `stop()`, `health()`, and `capabilities()`.
+
+This deliberately does not copy the `dimos` transport stack (`In/Out/LCM/Transport`). `askme` does not currently need a bigger message bus as much as it needs a smaller composition root and clearer boundaries between skill, tool, and agent execution.
+
+## CLI
+
+The CLI now follows a command-tree shape closer to `dimos`, but it stays local to `askme`'s runtime model.
+
+If you just want to tell askme what to do, running `askme` with no arguments now opens the full-screen terminal UI directly.
 
 ```bash
-# 同步代码到 sunrise（7 秒，tar pipe）
-bash scripts/sync_sunrise.sh
+# Full-screen terminal UI
+askme
+askme tui --robot
 
-# 端到端测试（9 个用例）
-bash scripts/e2e_test.sh
+# Plain interactive runtime
+askme --text
+askme runtime run --text --robot
 
-# 重启服务
-ssh sunrise@192.168.66.190 'tmux kill-session -t askme; \
-  tmux new-session -d -s askme bash -c "cd ~/askme && source .venv/bin/activate && \
-  export \$(grep -v ^# .env | xargs) && python -m askme --legacy"'
+# Inspect capabilities
+askme runtime capabilities --profile voice --json
+askme runtime status --server http://127.0.0.1:8765
+
+# Inspect skills
+askme skills list
+askme skills show navigate --json
+askme skills openapi
+
+# One-shot agent interaction
+askme agent send "去机房巡检一圈"
+
+# MCP serving
+askme mcp serve --transport sse --host 0.0.0.0 --port 8080
 ```
 
-## 系统架构
+`askme agent send` prefers a running local runtime at `http://127.0.0.1:8765` and falls back to local one-shot execution when that endpoint is unavailable.
 
+## Runtime Profiles
+
+Profiles live in [askme/runtime/profiles.py](/D:/inovxio/tools/askme/askme/runtime/profiles.py).
+
+| Profile | Primary loop | Purpose |
+| --- | --- | --- |
+| `voice` | `voice` | Interactive voice runtime with health HTTP endpoints and proactive services |
+| `text` | `text` | Interactive text runtime with the same shared memory/skill stack |
+| `mcp` | `mcp` | MCP-only serving profile for tools/resources |
+| `edge_robot` | `voice` | Voice-first edge runtime with robot API, LED bridge, and event-driven perception |
+
+The legacy CLI now resolves flags into profiles instead of rebuilding the app by hand.
+
+## Composition Layout
+
+The actual composition root is [askme/runtime/assembly.py](/D:/inovxio/tools/askme/askme/runtime/assembly.py).
+
+Key files:
+
+- [askme/app.py](/D:/inovxio/tools/askme/askme/app.py): thin legacy facade over the assembled runtime
+- [askme/runtime/components.py](/D:/inovxio/tools/askme/askme/runtime/components.py): uniform component lifecycle and introspection
+- [askme/runtime/profiles.py](/D:/inovxio/tools/askme/askme/runtime/profiles.py): named runtime profiles
+- [askme/skills/contracts.py](/D:/inovxio/tools/askme/askme/skills/contracts.py): code-defined skill contracts and OpenAPI generation
+- [askme/skills/contracts_builtin.py](/D:/inovxio/tools/askme/askme/skills/contracts_builtin.py): authoritative contracts for core built-in skills
+- [askme/skills/skill_manager.py](/D:/inovxio/tools/askme/askme/skills/skill_manager.py): merges code contracts with legacy markdown skill metadata
+
+High-level runtime view:
+
+```text
+profile
+  -> runtime assembly
+      -> voice_io
+      -> memory
+      -> vision
+      -> robot_api
+      -> agent_shell
+      -> skill_runtime
+      -> optional control_plane / proactive_runtime / perception_runtime / signal_runtime
 ```
-感知层 (持续运行)
-  Orbbec 相机 30fps → frame_daemon (BPU YOLO 3ms) → ChangeDetector (1Hz)
-  → 人出现/消失等事件 → ProactiveAgent 自动响应
 
-决策层 (按需)
-  语音输入 → ASR → IntentRouter → 31 个技能 / LLM 对话
-  感知事件 → ProactiveAgent → auto_solve
+## Skill Contracts
 
-记忆层 (持续积累)
-  对话历史 → 会话摘要 → 情景记忆 → qp_memory 长期知识
+Legacy `SKILL.md` is no longer the only source of truth.
 
-行动层 (通过 runtime API)
-  语音播报 / 视觉理解 / 联网搜索 / 运动控制
-```
+- Contract metadata comes from code via `SkillContract` and `@skill_contract`.
+- `SkillManager.get_contracts()` produces the structured catalog used by HTTP and MCP surfaces.
+- Markdown skills still provide prompt templates and fallback metadata while the migration is in progress.
+- OpenAPI is generated from loaded contracts through `SkillManager.openapi_document()`.
 
-## 技术栈
+Generated surfaces:
 
-| 模块 | 技术 |
-|------|------|
-| LLM | MiniMax M2.7 highspeed (TTFT avg 1.2s) |
-| VLM | 千问 VL (DashScope) |
-| ASR | sherpa-onnx + DashScope Paraformer |
-| TTS | MiniMax Speech 2.8 HD |
-| YOLO | BPU 3ms (Horizon Nash 128 TOPS) |
-| 深度 | Orbbec Gemini 335 (毫米精度) |
-| 搜索 | Bing + 百度 |
-| 记忆 | qp_memory (markdown, DashScope 提取) |
+- MCP catalog: `askme://skills`
+- MCP OpenAPI: `askme://skills/openapi`
+- HTTP capabilities: `/api/capabilities`
 
-## 技能 (31 启用 / 10 待 runtime)
+## Health And Introspection
 
-**自主推理**: solve_problem, agent_task, recall_memory
-**视觉搜索**: find_object, find_person, safety_check, check_location, patrol_scan
-**语音控制**: volume, speed, mute/unmute, stop_speaking, repeat_last
-**信息查询**: get_time, system_status, web_search, list_skills, environment_report
-**快速回复**: 你好/谢谢/再见 → 16ms 直回（不走 LLM）
+The embedded health server lives in [askme/health_server.py](/D:/inovxio/tools/askme/askme/health_server.py).
 
-## 关键性能（真实测量，5 次平均）
+Available endpoints:
 
-| 指标 | 平均 | 最快 | 最慢 |
-|------|------|------|------|
-| 快速回复 (你好) | 7ms | 3ms | 12ms |
-| LLM TTFT | 1.16s | 0.64s | 1.92s |
-| get_time 技能 | 2.1s | 2.0s | 2.4s |
-| recall_memory | 5.4s | 4.2s | 7.1s |
-| LLM 对话 | 9.7s | 6.4s | 12.2s |
-| BPU 检测读取 | <0.1ms | — | 0.2ms |
-| 帧读取 | 10ms | 1ms | 176ms |
+- `/health`: compact runtime health snapshot
+- `/metrics`: Prometheus-style metrics output
+- `/api/status`: broader runtime status for monitoring UI
+- `/api/capabilities`: profile, component, skill contract, and OpenAPI summary
+- `/api/chat`: web chat entrypoint wired through the same dispatcher/runtime stack
 
-## 目录结构
+## Repository Layout
 
-```
+```text
 askme/
-├── core/           # 框架层 (@tool @skill, Module, Orchestrator, EventBus)
-├── brain/          # 大脑 (LLM, 记忆, 视觉, 意图路由)
-├── pipeline/       # 管线 (语音循环, 技能调度, 主动巡逻)
-├── agent_shell/    # 自律执行 (ThunderAgentShell, 多轮工具调用)
-├── skills/builtin/ # 41 个技能 (SKILL.md 声明式)
-├── tools/          # 工具 (视觉, 运动, 搜索, bash)
-├── voice/          # 语音 (ASR, TTS, VAD, 降噪)
-├── perception/     # 感知 (ChangeDetector, 事件驱动)
-├── schemas/        # 数据结构 (Observation, ChangeEvent)
-scripts/
-├── sync_sunrise.sh         # 一键同步 (7s)
-├── e2e_test.sh             # 端到端测试 (9 cases)
-├── frame_daemon.py         # 帧+BPU 常驻服务
-docs/
-├── AUTONOMOUS_ARCHITECTURE.md
-├── PROACTIVE_AGENT_V2_ARCHITECTURE.md
-├── DECORATOR_ARCHITECTURE.md
-├── PRODUCTION_GAPS.md
+  app.py
+  health_server.py
+  mcp_server.py
+  runtime/
+    assembly.py
+    components.py
+    profiles.py
+  brain/
+  pipeline/
+  agent_shell/
+  skills/
+    builtin/
+    contracts.py
+    contracts_builtin.py
+    skill_manager.py
+  tools/
+  voice/
+  perception/
+tests/
 ```
 
-## 架构文档
-
-- [自主运行架构](docs/AUTONOMOUS_ARCHITECTURE.md) — 完整系统图、性能、技能矩阵
-- [ProactiveAgent V2](docs/PROACTIVE_AGENT_V2_ARCHITECTURE.md) — 事件驱动感知设计
-- [装饰器架构](docs/DECORATOR_ARCHITECTURE.md) — @tool @skill 声明式框架
-- [生产差距分析](docs/PRODUCTION_GAPS.md) — 上真机前的待办
+There is no active `core/Module/Orchestrator/EventBus` layer in the current codebase. Older references to that structure were stale and have been removed.

@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .contracts import SkillContract, SkillParameter
+
 
 @dataclass
 class SlotSpec:
@@ -65,3 +67,39 @@ class SkillDefinition:
         # so the LLM doesn't see confusing template syntax
         prompt = re.sub(r"\{\{[^}]+\}\}", "", prompt)
         return prompt
+
+    def to_contract(self) -> SkillContract:
+        """Build a contract view for legacy markdown-defined skills."""
+        return SkillContract(
+            name=self.name,
+            description=self.description,
+            version=self.version,
+            safety_level=self.safety_level,
+            execution=self.execution,
+            tags=tuple(self.tags),
+            parameters=tuple(
+                SkillParameter(
+                    name=slot.name,
+                    type=_slot_type_to_json_type(slot.type),
+                    description=slot.prompt,
+                    required=not slot.optional,
+                    default=slot.default or None,
+                )
+                for slot in self.required_slots
+            ),
+            confirm_before_execute=self.confirm_before_execute,
+            source="legacy_markdown",
+        )
+
+
+def _slot_type_to_json_type(slot_type: str) -> str:
+    return {
+        "text": "string",
+        "location": "string",
+        "referent": "string",
+        "datetime": "string",
+        "enum": "string",
+        "int": "integer",
+        "float": "number",
+        "bool": "boolean",
+    }.get(slot_type, "string")

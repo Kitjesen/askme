@@ -18,6 +18,7 @@ from typing import Any, AsyncIterator
 from mcp.server.fastmcp import FastMCP
 
 from askme.config import get_config, get_section, validate_config
+from askme.runtime.profiles import MCP_PROFILE
 
 # Logging MUST go to stderr — stdout is the JSON-RPC channel in stdio mode
 logging.basicConfig(
@@ -50,6 +51,7 @@ class AppContext:
     scene_intelligence: Any = None
     robot_enabled: bool = False
     voice_enabled: bool = False
+    runtime_profile: dict[str, Any] = field(default_factory=dict)
 
 
 @asynccontextmanager
@@ -57,6 +59,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Initialise and tear down all askme subsystems."""
     ctx = AppContext()
     ctx.config = get_config()
+    ctx.runtime_profile = MCP_PROFILE.snapshot()
 
     # ── Validate configuration ────────────────────────────────
     for warning in validate_config(ctx.config):
@@ -132,7 +135,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             logger.warning("ASR/VAD init failed: %s", exc)
 
     logger.info(
-        "Askme MCP server ready (robot=%s, voice=%s, skills=%d)",
+        "Askme MCP server ready (profile=%s, robot=%s, voice=%s, skills=%d)",
+        ctx.runtime_profile.get("name", "mcp"),
         ctx.robot_enabled,
         ctx.voice_enabled,
         len(ctx.skill_manager.get_enabled()),

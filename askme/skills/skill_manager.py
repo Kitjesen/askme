@@ -21,6 +21,8 @@ from typing import Any
 
 import yaml
 
+from . import contracts_builtin as _contracts_builtin  # noqa: F401
+from .contracts import SkillContract, build_skills_openapi, registered_skill_contracts
 from .skill_model import SkillDefinition
 
 logger = logging.getLogger(__name__)
@@ -97,6 +99,57 @@ class SkillManager:
     def get_enabled(self) -> list[SkillDefinition]:
         """Get only enabled skills."""
         return [s for s in self._skills.values() if s.enabled]
+
+    def get_contract(self, name: str) -> SkillContract | None:
+        """Return the authoritative contract for a loaded skill."""
+        skill = self._skills.get(name)
+        if skill is None:
+            return None
+
+        explicit = registered_skill_contracts().get(name)
+        if explicit is None:
+            return skill.to_contract()
+
+        return explicit.with_fallbacks(
+            description=skill.description,
+            version=skill.version,
+            safety_level=skill.safety_level,
+            execution=skill.execution,
+            tags=skill.tags,
+            confirm_before_execute=skill.confirm_before_execute,
+        )
+
+    def get_contracts(self) -> list[SkillContract]:
+        """Return contracts for all loaded skills."""
+        contracts: list[SkillContract] = []
+        for skill in self.get_all():
+            contract = self.get_contract(skill.name)
+            if contract is not None:
+                contracts.append(contract)
+        return contracts
+
+    def get_contract_catalog(self) -> list[dict[str, Any]]:
+        """Return a capability-friendly catalog generated from contracts."""
+        entries: list[dict[str, Any]] = []
+        for skill in self.get_all():
+            contract = self.get_contract(skill.name)
+            base = contract.summary() if contract is not None else {
+                "name": skill.name,
+                "description": skill.description,
+                "contract_source": "unavailable",
+            }
+            base.update({
+                "enabled": skill.enabled,
+                "trigger": skill.trigger,
+                "voice_trigger": skill.voice_trigger,
+                "legacy_source": skill.source,
+            })
+            entries.append(base)
+        return entries
+
+    def openapi_document(self) -> dict[str, Any]:
+        """Generate an OpenAPI document from the loaded contracts."""
+        return build_skills_openapi(self.get_contracts())
 
     def get_agent_shell_skills(self) -> set[str]:
         """Return names of enabled skills with execution='agent_shell'."""
