@@ -1,4 +1,4 @@
-"""Full-screen terminal UI for askme."""
+"""Full-screen terminal UI for askme with non-blocking refresh."""
 
 from __future__ import annotations
 
@@ -30,6 +30,8 @@ _C_RED = "\x1b[31m"
 _C_WHITE = "\x1b[97m"
 _C_BG_RED = "\x1b[41m"
 _C_BG_GREEN = "\x1b[42m"
+
+_REFRESH_INTERVAL = 0.5  # seconds between screen refreshes
 
 
 def _display_width(text: str) -> int:
@@ -132,7 +134,12 @@ class SilentAudio:
 
 
 class AskmeTerminalUI:
-    """Full-screen chat UI with live status panel."""
+    """Full-screen chat UI with non-blocking 2Hz refresh.
+
+    Background thread reads stdin → asyncio.Queue.
+    Main loop polls queue with 0.5s timeout → re-renders on every tick.
+    Events, status, and perception data update even while waiting for input.
+    """
 
     def __init__(self, app: AskmeApp) -> None:
         self.app = app
@@ -141,34 +148,73 @@ class AskmeTerminalUI:
         self._pending_user_input = ""
         self._status_text = "就绪"
         self._started_at = time.monotonic()
+        self._input_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._processing = False
+        self._quit = False
         self._sync_history()
         self._append_system("欢迎使用 askme。输入 /help 查看命令。")
 
     async def run(self) -> None:
-        """Run the terminal UI until the user quits."""
-        # Replace audio with null-object (not monkey-patching)
+        """Run the terminal UI with non-blocking refresh."""
         self.app.audio = SilentAudio()
 
+        # Start background stdin reader thread
+        stdin_task = asyncio.create_task(self._stdin_reader())
+
         with _suppress_console_logs(), _alternate_screen():
-            while True:
-                self._sync_history()
-                self._render()
+            try:
+                while not self._quit:
+                    self._sync_history()
+                    self._render()
+
+                    try:
+                        line = await asyncio.wait_for(
+                            self._input_queue.get(), timeout=_REFRESH_INTERVAL,
+                        )
+                    except asyncio.TimeoutError:
+                        continue  # re-render with updated status/events
+
+                    if line is None:
+                        # EOF — stdin closed
+                        break
+
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    should_exit = await self._handle_input(line)
+                    if should_exit:
+                        break
+            finally:
+                self._quit = True
+                stdin_task.cancel()
                 try:
-                    user_text = await asyncio.to_thread(input, "askme> ")
-                except KeyboardInterrupt:
-                    # Ctrl+C → trigger ESTOP instead of exit
-                    self._handle_estop()
-                    continue
-                except EOFError:
-                    break
+                    await stdin_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
-                user_text = user_text.strip()
-                if not user_text:
-                    continue
+    async def _stdin_reader(self) -> None:
+        """Background task: read lines from stdin in a thread, post to queue."""
+        loop = asyncio.get_running_loop()
 
-                should_exit = await self._handle_input(user_text)
-                if should_exit:
+        def _blocking_read() -> str | None:
+            try:
+                return input()
+            except EOFError:
+                return None
+            except KeyboardInterrupt:
+                return "\x03"  # Ctrl+C sentinel
+
+        while not self._quit:
+            try:
+                line = await loop.run_in_executor(None, _blocking_read)
+                await self._input_queue.put(line)
+                if line is None:
                     break
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                break
 
     def _handle_estop(self) -> None:
         """Trigger emergency stop via Ctrl+C."""
@@ -178,10 +224,14 @@ class AskmeTerminalUI:
         except Exception:
             self._append_system(f"{_C_RED}[ESTOP] 紧急停止（安全服务未连接）{_C_RESET}")
         self._status_text = "ESTOP"
-        self._render()
 
     async def _handle_input(self, user_text: str) -> bool:
         """Handle slash commands or dispatch a normal turn."""
+        # Ctrl+C sentinel
+        if user_text == "\x03":
+            self._handle_estop()
+            return False
+
         if user_text in {"/quit", "/exit", "quit", "exit"}:
             return True
 
@@ -215,13 +265,42 @@ class AskmeTerminalUI:
             self._append_system(self._status_summary())
             return False
 
+        # Normal turn — process with periodic refresh
         before_history_len = len(self.app.conversation.history)
         self._pending_user_input = user_text
         self._status_text = "处理中..."
+        self._processing = True
         self._render()
 
         try:
-            reply = await self.app._text_loop.process_turn(user_text)  # noqa: SLF001
+            # Run LLM turn as a task so we can refresh while it processes
+            turn_task = asyncio.create_task(
+                self.app._text_loop.process_turn(user_text)  # noqa: SLF001
+            )
+
+            # Refresh loop during processing
+            while not turn_task.done():
+                self._sync_history()
+                self._render()
+
+                # Also check for Ctrl+C during processing
+                try:
+                    line = await asyncio.wait_for(
+                        self._input_queue.get(), timeout=_REFRESH_INTERVAL,
+                    )
+                    if line == "\x03":
+                        self._handle_estop()
+                    elif line is None:
+                        self._quit = True
+                        turn_task.cancel()
+                        break
+                except asyncio.TimeoutError:
+                    pass
+
+            reply = await turn_task
+        except asyncio.CancelledError:
+            self._append_system(f"{_C_YELLOW}已取消{_C_RESET}")
+            reply = ""
         except Exception as exc:
             logger.exception("TUI turn failed")
             self._append_system(f"{_C_RED}处理失败: {exc}{_C_RESET}")
@@ -229,6 +308,7 @@ class AskmeTerminalUI:
             return False
         finally:
             self._pending_user_input = ""
+            self._processing = False
 
         self._sync_history()
         if reply and len(self.app.conversation.history) == before_history_len:
@@ -245,12 +325,11 @@ class AskmeTerminalUI:
 
         right_width = min(34, max(24, width // 3))
         left_width = max(40, width - right_width - 3)
-        body_height = max(8, height - 6)  # header(2) + sep(1) + body + sep(1) + footer(1)
+        body_height = max(8, height - 6)
 
         chat_lines = self._build_chat_lines(left_width, body_height)
         status_lines = self._build_status_lines(right_width, body_height)
 
-        # Header bar with safety status
         header = self._build_header(width)
         context = self._build_context_bar(width)
         separator = f"{_C_DIM}{'─' * width}{_C_RESET}"
@@ -275,7 +354,6 @@ class AskmeTerminalUI:
         elapsed = int(time.monotonic() - self._started_at)
         now = time.strftime("%H:%M:%S")
 
-        # Safety state
         estop_active = False
         try:
             if hasattr(self.app, '_dog_safety') and self.app._dog_safety:
@@ -288,10 +366,9 @@ class AskmeTerminalUI:
         else:
             estop_str = f"{_C_GREEN}ESTOP:正常{_C_RESET}"
 
-        # Status color
         if self._status_text == "ESTOP":
             status_colored = f"{_C_BG_RED}{_C_WHITE} {self._status_text} {_C_RESET}"
-        elif self._status_text == "处理中...":
+        elif self._processing:
             status_colored = f"{_C_YELLOW}{self._status_text}{_C_RESET}"
         elif self._status_text == "错误":
             status_colored = f"{_C_RED}{self._status_text}{_C_RESET}"
@@ -301,31 +378,25 @@ class AskmeTerminalUI:
         profile = getattr(self.app, 'profile', None)
         profile_name = getattr(profile, 'name', 'text') if profile else 'text'
 
-        header = (
+        return (
             f" {_C_BOLD}THUNDER{_C_RESET}"
             f"  {status_colored}"
             f"  {estop_str}"
             f"  {_C_DIM}{profile_name}{_C_RESET}"
             f"  {_C_DIM}{now}  {elapsed}s{_C_RESET}"
         )
-        return header
 
     def _build_context_bar(self, width: int) -> str:
         """Build row 2: scene summary + mission state."""
         parts: list[str] = []
 
-        # Scene summary from WorldState
         try:
-            if hasattr(self.app, '_change_detector') and self.app._change_detector:
-                from askme.perception.world_state import WorldState
-                # Try to get world_state from runtime services
-                ws = getattr(self.app, '_world_state', None)
-                if ws:
-                    parts.append(ws.get_summary_sync())
+            ws = getattr(self.app, '_world_state', None)
+            if ws:
+                parts.append(ws.get_summary_sync())
         except Exception:
             pass
 
-        # Mission state from SkillDispatcher
         try:
             dispatcher = getattr(self.app, '_dispatcher', None)
             if dispatcher:
@@ -338,7 +409,6 @@ class AskmeTerminalUI:
         except Exception:
             pass
 
-        # LLM latency
         try:
             health = self.app.health_snapshot()
             lat = health.get('last_llm_latency_ms')
@@ -354,10 +424,16 @@ class AskmeTerminalUI:
 
     def _render(self) -> None:
         width, height = shutil.get_terminal_size((120, 36))
-        screen = self.render_text(width=width, height=height)
+        # Reserve 1 line for input prompt
+        screen = self.render_text(width=width, height=height - 1)
         sys.stdout.write("\x1b[2J\x1b[H")
         sys.stdout.write(screen)
         sys.stdout.write("\n")
+        # Show cursor position for input
+        if not self._processing:
+            sys.stdout.write("\x1b[?25h")  # show cursor
+        else:
+            sys.stdout.write("\x1b[?25l")  # hide cursor during processing
         sys.stdout.flush()
 
     def _sync_history(self) -> None:
@@ -388,8 +464,10 @@ class AskmeTerminalUI:
 
         if self._pending_user_input:
             lines.extend(self._wrap_entry(DisplayEntry("user", self._pending_user_input), width))
+            # Animated thinking indicator
+            dots = "." * (1 + int(time.monotonic() * 2) % 3)
             lines.extend(self._wrap_entry(
-                DisplayEntry("system", f"{_C_YELLOW}思考中...{_C_RESET}"), width
+                DisplayEntry("system", f"{_C_YELLOW}思考中{dots}{_C_RESET}"), width
             ))
 
         if len(lines) > height:
@@ -413,7 +491,6 @@ class AskmeTerminalUI:
         else:
             status_colored = f"{_C_RED}{status_val}{_C_RESET}"
 
-        # Component health with colors
         component_lines = []
         for name, component in capabilities["components"].items():
             s = component["health"].get("status", "unknown")
@@ -441,7 +518,6 @@ class AskmeTerminalUI:
             f"{_C_BOLD}事件{_C_RESET}",
         ]
 
-        # Recent events from WorldState
         event_lines = self._get_recent_events()
         if event_lines:
             lines.extend(event_lines[:max(0, height - len(lines) - 1)])
@@ -499,12 +575,11 @@ class AskmeTerminalUI:
         lines = [f"{colored_label} {wrapped[0]}"]
         indent = " " * (label_width + 1)
         lines.extend(f"{indent}{line}" for line in wrapped[1:])
-        return [_truncate_to_width(line, width + 20) for line in lines]  # +20 for ANSI escapes
+        return [_truncate_to_width(line, width + 20) for line in lines]
 
     def _wrap_line(self, text: str, width: int) -> list[str]:
         if not text:
             return [""]
-        # Don't wrap lines with ANSI codes (they mess up width calc)
         if "\x1b[" in text:
             return [text]
         wrapped = textwrap.wrap(
