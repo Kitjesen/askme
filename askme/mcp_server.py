@@ -71,7 +71,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     from askme.brain.memory_bridge import MemoryBridge
     from askme.brain.session_memory import SessionMemory
     from askme.brain.episodic_memory import EpisodicMemory
-    from askme.brain.vision_bridge import VisionBridge
+    from askme.perception.vision_bridge import VisionBridge
     from askme.brain.scene_intelligence import SceneIntelligence
     from askme.skills.skill_manager import SkillManager
     from askme.skills.skill_executor import SkillExecutor

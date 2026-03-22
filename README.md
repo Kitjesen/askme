@@ -39,6 +39,29 @@ The current architecture follows four rules:
 
 This deliberately does not copy the `dimos` transport stack (`In/Out/LCM/Transport`). `askme` does not currently need a bigger message bus as much as it needs a smaller composition root and clearer boundaries between skill, tool, and agent execution.
 
+## Platform Boundary
+
+Inside `askme`, the runtime still assembles local components such as `vision`,
+`robot_api`, and `skill_runtime`. That is an internal composition concern, not a
+statement that `askme` owns the full robot runtime.
+
+For the NOVA Dog product boundary:
+
+- `askme` is the operator AI and channel entry layer
+- `voice` is the production service wrapper around `askme`
+- `arbiter` owns mission lifecycle
+- `safety` and `control` own action gating and actuation
+- `nav` owns the product navigation contract
+- `sense` owns product-readable perception snapshots
+- `lingtu` remains the autonomy and perception provider behind `nav` and `sense`
+
+The deeper rationale and migration direction are documented in
+[`products/nova-dog/runtime/docs/ASKME_LINGTU_DECOUPLING.md`](/D:/inovxio/products/nova-dog/runtime/docs/ASKME_LINGTU_DECOUPLING.md).
+
+This means local `VisionBridge` and direct runtime clients inside `askme` are
+valid for development and fallback profiles, but they should not be described as
+the production system of record.
+
 ## CLI
 
 The CLI now follows a command-tree shape closer to `dimos`, but it stays local to `askme`'s runtime model.

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from .tool_registry import BaseTool
 
 if TYPE_CHECKING:
-    from askme.brain.vision_bridge import VisionBridge
+    from askme.perception.vision_bridge import VisionBridge
 
 logger = logging.getLogger(__name__)
 

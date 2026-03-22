@@ -16,7 +16,7 @@ from askme.pipeline.alert_dispatcher import AlertDispatcher
 if TYPE_CHECKING:
     from askme.brain.episodic_memory import EpisodicMemory
     from askme.brain.llm_client import LLMClient
-    from askme.brain.vision_bridge import VisionBridge
+    from askme.perception.vision_bridge import VisionBridge
     from askme.voice.audio_agent import AudioAgent
 
 logger = logging.getLogger(__name__)

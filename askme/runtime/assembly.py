@@ -20,7 +20,7 @@ from askme.brain.llm_client import LLMClient
 from askme.brain.memory_bridge import MemoryBridge
 from askme.brain.memory_system import MemorySystem
 from askme.brain.session_memory import SessionMemory
-from askme.brain.vision_bridge import VisionBridge
+from askme.perception.vision_bridge import VisionBridge
 from askme.config import validate_config
 from askme.dog_control_client import DogControlClient
 from askme.dog_safety_client import DogSafetyClient
