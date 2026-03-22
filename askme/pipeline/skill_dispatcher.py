@@ -146,6 +146,16 @@ class SkillDispatcher:
         # Background agent task (agent_task skill runs here so VoiceLoop stays responsive)
         self._active_agent_task: asyncio.Task[None] | None = None
 
+    # ── Helpers ────────────────────────────────────────────────────
+
+    async def _speak_voice(self, text: str, source: str) -> None:
+        """Speak text. In voice mode, also wait for playback to finish."""
+        self._audio.speak(text)
+        if source == "voice":
+            self._audio.start_playback()
+            await asyncio.to_thread(self._audio.wait_speaking_done)
+            self._audio.stop_playback()
+
     # ── Public API (called by loops) ──────────────────────────────
 
     async def dispatch(
@@ -180,11 +190,7 @@ class SkillDispatcher:
             step_num = self._current_mission.step_count + 1
             _step_def = self._skill_manager.get(skill_name)
             step_label = (_step_def.description if _step_def and _step_def.description else skill_name)
-            self._audio.speak(f"继续执行第{step_num}步：{step_label}")
-            if source == "voice":
-                self._audio.start_playback()
-                await asyncio.to_thread(self._audio.wait_speaking_done)
-                self._audio.stop_playback()
+            await self._speak_voice(f"继续执行第{step_num}步：{step_label}", source)
 
         # Build combined context: prior mission steps + caller-supplied context
         mission_history = self._current_mission.history_for_context()
@@ -262,11 +268,7 @@ class SkillDispatcher:
                 result[:60],
             )
             # Speak the timeout error so the user is not left in silence
-            self._audio.speak(result)
-            if source == "voice":
-                self._audio.start_playback()
-                await asyncio.to_thread(self._audio.wait_speaking_done)
-                self._audio.stop_playback()
+            await self._speak_voice(result, source)
             # Clean up the mission — a timed-out mission cannot be continued
             self.complete_mission()
             return result
@@ -326,11 +328,7 @@ class SkillDispatcher:
                     for s in steps
                 ]
                 _plan_summary = "、".join(_step_labels)
-                self._audio.speak(f"好的，分{len(steps)}步：{_plan_summary}")
-                if source == "voice":
-                    self._audio.start_playback()
-                    await asyncio.to_thread(self._audio.wait_speaking_done)
-                    self._audio.stop_playback()
+                await self._speak_voice(f"好的，分{len(steps)}步：{_plan_summary}", source)
 
                 results: list[str] = []
                 for step in steps:
@@ -351,11 +349,7 @@ class SkillDispatcher:
                     ):
                         logger.warning("Plan aborted at step '%s' due to FAILED state", step.skill_name)
                         _step_n = len(results)
-                        self._audio.speak(f"第{_step_n}步执行失败，任务中止。")
-                        if source == "voice":
-                            self._audio.start_playback()
-                            await asyncio.to_thread(self._audio.wait_speaking_done)
-                            self._audio.stop_playback()
+                        await self._speak_voice(f"第{_step_n}步执行失败，任务中止。", source)
                         break
                 _done_mission = self.complete_mission()
                 # Announce plan success and await TTS so it isn't eaten by the
@@ -368,11 +362,7 @@ class SkillDispatcher:
                          else s.skill_name)
                         for s in _done_mission.steps
                     )
-                    self._audio.speak(f"多步任务完成：{_names}")
-                    if source == "voice":
-                        self._audio.start_playback()
-                        await asyncio.to_thread(self._audio.wait_speaking_done)
-                        self._audio.stop_playback()
+                    await self._speak_voice(f"多步任务完成：{_names}", source)
                 return "\n".join(results)
 
         # Single-step or conversational: delegate to LLM pipeline
