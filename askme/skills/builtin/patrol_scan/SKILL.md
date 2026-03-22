@@ -9,6 +9,7 @@ tags: [patrol, inspection, navigation, vision]
 depends: []
 conflicts: []
 safety_level: normal
+execution: agent_shell
 voice_trigger: 开始巡逻,巡逻一圈,自动巡逻,巡一圈,去巡逻,巡检一遍,全面巡检,挨个检查
 ---
 

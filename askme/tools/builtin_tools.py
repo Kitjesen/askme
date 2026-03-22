@@ -53,6 +53,8 @@ class GetTimeTool(BaseTool):
     description = "获取当前系统时间"
     parameters: dict[str, Any] = {"type": "object", "properties": {}}
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "获取时间"
 
     def execute(self, **kwargs: Any) -> str:
         return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -115,6 +117,8 @@ class ReadFileTool(BaseTool):
         "required": ["path"],
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "读取文件"
 
     def execute(self, *, path: str = "", **kwargs: Any) -> str:
         if not path:
@@ -149,6 +153,8 @@ class ListDirectoryTool(BaseTool):
         },
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "查看目录"
 
     def execute(self, *, path: str = ".", **kwargs: Any) -> str:
         target = path or "."
@@ -238,6 +244,8 @@ class HttpRequestTool(BaseTool):
         "required": ["method", "url"],
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "调用接口"
 
     def execute(
         self,
@@ -583,6 +591,9 @@ class SandboxedBashTool(BaseTool):
     safety_level = "dangerous"
     dev_only = False  # production-safe: sandboxed
 
+    agent_allowed = True
+    voice_label = "运行命令"
+
     _WORKSPACE = project_root() / "data" / "agent_workspace"
     _MAX_OUTPUT = 4000
     _TIMEOUT = 30
@@ -707,6 +718,8 @@ class WriteFileTool(BaseTool):
         "required": ["path", "content"],
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "写入文件"
 
     _ALLOWED_ROOT = project_root() / "data" / "agent_workspace"
 
@@ -765,6 +778,8 @@ class EditFileTool(BaseTool):
         "required": ["path", "old_string", "new_string"],
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "编辑文件"
 
     _WORKSPACE = project_root() / "data" / "agent_workspace"
 
@@ -833,6 +848,8 @@ class SpeakProgressTool(BaseTool):
         "required": ["text"],
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = ""
 
     def __init__(self, audio_agent: Any = None) -> None:
         self._audio = audio_agent
@@ -871,6 +888,8 @@ class WebFetchTool(BaseTool):
         "required": ["url"],
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "抓取网页"
     _TIMEOUT = 15
     _DEFAULT_MAX = 6000
 
@@ -951,6 +970,8 @@ class WebSearchTool(BaseTool):
         "required": ["query"],
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "搜索网络"
     _TIMEOUT = 10
 
     def execute(self, *, query: str = "", **kwargs: Any) -> str:

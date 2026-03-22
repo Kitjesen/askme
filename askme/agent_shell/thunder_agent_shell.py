@@ -31,26 +31,6 @@ logger = logging.getLogger(__name__)
 # Tools exposed to the agentic loop — subset of full tool registry.
 # Excludes voice-control tools (mute/unmute) and dispatch_skill
 # (to avoid nested skill-in-skill recursion).
-_AGENT_ALLOWED_TOOLS = {
-    "bash",
-    "write_file",
-    "read_file",
-    "list_directory",
-    "http_request",
-    "robot_api",
-    "get_current_time",
-    "speak_progress",
-    "web_fetch",
-    "web_search",
-    "edit_file",     # surgical string replacement in any file
-    "create_skill",  # agent can solidify solutions into reusable skills
-    "spawn_agent",   # spawn child agent for focused sub-tasks
-    "look_around",   # vision: describe current scene
-    "find_target",   # vision: search for specific object by YOLO class
-    "move_robot",    # motion: rotate, forward, go_to, stop
-    "scan_around",   # fast 360° scan: rotate + capture + batch analyze
-}
-
 _DEFAULT_AGENT_MODEL = "MiniMax-M2.7-highspeed"  # fast + stable + reasoning, no relay dependency
 _MAX_ITERATIONS = 5
 _DEFAULT_TIMEOUT = 120.0
@@ -58,27 +38,6 @@ _MAX_DEPTH = 1  # max sub-agent nesting depth (0=root, 1=child, children cannot 
 # Keep the original task message + last N to cap prompt size (prevents TTFT blowup
 # on later iterations and avoids memory pressure on Sunrise's constrained RAM).
 _MAX_MESSAGES = 20
-
-# Friendly Chinese names for TTS progress announcements
-_TOOL_VOICE_LABELS: dict[str, str] = {
-    "bash": "运行命令",
-    "write_file": "写入文件",
-    "edit_file": "编辑文件",
-    "read_file": "读取文件",
-    "list_directory": "查看目录",
-    "web_search": "搜索网络",
-    "web_fetch": "抓取网页",
-    "http_request": "调用接口",
-    "robot_api": "查询机器人",
-    "spawn_agent": "启动子任务",
-    "create_skill": "创建新技能",
-    "get_current_time": "获取时间",
-    "speak_progress": None,  # LLM-driven TTS — don't double-announce
-    "look_around": "观察环境",
-    "move_robot": "移动机器人",
-    "scan_around": "全方位扫描",
-    "find_target": "搜索物体",
-}
 
 # Inline schema for spawn_agent — not registered in ToolRegistry to avoid shared-state mutation
 _SPAWN_AGENT_SCHEMA: dict[str, Any] = {
@@ -188,6 +147,11 @@ class ThunderAgentShell:
         logger.info("[AgentShell] Starting task: %s", task[:80])
         self._workspace.mkdir(parents=True, exist_ok=True)
 
+        # Read allowed tools + voice labels from registry (not hardcoded)
+        self._allowed_tools = self._tools.get_agent_allowed_names()
+        self._allowed_tools.add("spawn_agent")  # spawn_agent is inline, not in registry
+        self._voice_labels = self._tools.get_voice_labels()
+
         self._did_stream_tts = False
         self._streamed_tts_text = ""
 
@@ -241,7 +205,7 @@ class ThunderAgentShell:
 
         # Get tool definitions for allowed tools only
         tool_definitions = self._tools.get_definitions(
-            allowed_names=_AGENT_ALLOWED_TOOLS,
+            allowed_names=self._allowed_tools,
             max_safety_level="dangerous",
         )
         # Inject spawn_agent inline schema (not in registry) when nesting allows it
@@ -310,7 +274,7 @@ class ThunderAgentShell:
             # ("第3步正在搜索网络，请稍候") instead of a generic message.
             if tool_calls:
                 first_name = tool_calls[0].get("name", "")
-                label = _TOOL_VOICE_LABELS.get(first_name)
+                label = self._voice_labels.get(first_name)
                 if label:
                     step_prefix = f"第{iterations}步，" if iterations > 1 else ""
                     self._current_action = f"{step_prefix}正在{label}"
@@ -498,7 +462,7 @@ class ThunderAgentShell:
                     self._tools.execute,
                     name,
                     args_json,
-                    allowed_names=_AGENT_ALLOWED_TOOLS,
+                    allowed_names=self._allowed_tools,
                     max_safety_level="dangerous",
                 ),
                 timeout=35.0,  # slightly above SandboxedBashTool's 30s limit

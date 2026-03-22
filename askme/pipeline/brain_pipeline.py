@@ -432,14 +432,12 @@ class BrainPipeline:
 
         logger.info("Executing skill: %s", skill_name)
 
-        # Route agent-shell skills to ThunderAgentShell for autonomous execution
-        _AGENT_SHELL_SKILLS = {
-            "agent_task", "find_object", "safety_check",
-            "find_person", "check_location", "patrol_scan",
-            "solve_problem",
-            # recall_memory uses SkillExecutor (simple read_file, no multi-step agent needed)
-        }
-        if skill_name in _AGENT_SHELL_SKILLS and self._agent_shell is not None:
+        # Route to ThunderAgentShell if skill declares execution=agent_shell
+        _skill_def = self._skill_manager.get(skill_name)
+        _is_agent_shell = (
+            _skill_def is not None and _skill_def.execution == "agent_shell"
+        )
+        if _is_agent_shell and self._agent_shell is not None:
             logger.info("[AgentShell] Routing agent_task to ThunderAgentShell")
             self._audio.drain_buffers()
             self._audio.start_playback()

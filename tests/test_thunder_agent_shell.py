@@ -11,7 +11,6 @@ import pytest
 
 from askme.agent_shell.thunder_agent_shell import (
     ThunderAgentShell,
-    _AGENT_ALLOWED_TOOLS,
     _MAX_DEPTH,
     _MAX_ITERATIONS,
     _SPAWN_AGENT_SCHEMA,
@@ -215,19 +214,23 @@ async def test_timeout_returns_gracefully(shell, mock_llm) -> None:
 # ── Allowed tools ─────────────────────────────────────────────────────────────
 
 
-def test_allowed_tools_set_contains_key_tools() -> None:
-    """Critical tools must be in the allowed set."""
-    assert "bash" in _AGENT_ALLOWED_TOOLS
-    assert "write_file" in _AGENT_ALLOWED_TOOLS
-    assert "read_file" in _AGENT_ALLOWED_TOOLS
-    assert "http_request" in _AGENT_ALLOWED_TOOLS
-    assert "robot_api" in _AGENT_ALLOWED_TOOLS
-    assert "speak_progress" in _AGENT_ALLOWED_TOOLS
+def test_key_tools_have_agent_allowed() -> None:
+    """Critical tools must have agent_allowed=True."""
+    from askme.tools.builtin_tools import (
+        SandboxedBashTool, WriteFileTool, ReadFileTool,
+        HttpRequestTool, SpeakProgressTool,
+    )
+    assert SandboxedBashTool.agent_allowed is True
+    assert WriteFileTool.agent_allowed is True
+    assert ReadFileTool.agent_allowed is True
+    assert HttpRequestTool.agent_allowed is True
+    assert SpeakProgressTool.agent_allowed is True
 
 
-def test_allowed_tools_excludes_dispatch_skill() -> None:
-    """dispatch_skill must NOT be in allowed set (prevents nested recursion)."""
-    assert "dispatch_skill" not in _AGENT_ALLOWED_TOOLS
+def test_dispatch_skill_not_agent_allowed() -> None:
+    """dispatch_skill must NOT have agent_allowed (prevents nested recursion)."""
+    from askme.tools.builtin_tools import DispatchSkillTool
+    assert DispatchSkillTool.agent_allowed is False
 
 
 # ── Context injection ─────────────────────────────────────────────────────────
@@ -285,8 +288,9 @@ def test_robot_api_tool_service_unreachable(monkeypatch) -> None:
 # ── SpawnAgent: sub-agent support ────────────────────────────────────────────
 
 
-def test_spawn_agent_in_allowed_tools() -> None:
-    assert "spawn_agent" in _AGENT_ALLOWED_TOOLS
+def test_spawn_agent_schema_exists() -> None:
+    """spawn_agent is inline (not in registry) but must have a schema."""
+    assert _SPAWN_AGENT_SCHEMA["function"]["name"] == "spawn_agent"
 
 
 def test_spawn_agent_schema_well_formed() -> None:

@@ -92,6 +92,8 @@ class MoveRobotTool(BaseTool):
         "required": ["action"],
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "移动机器人"
 
     def execute(
         self,

@@ -9,6 +9,7 @@ tags: [reasoning, autonomous, search, problem-solving]
 depends: []
 conflicts: []
 safety_level: normal
+execution: agent_shell
 voice_trigger: 怎么办,出了问题,帮我解决,解决一下,想想办法,怎么处理,该怎么做,分析一下,帮我想想,研究这个问题,自己想办法,你觉得怎么办,有什么办法,能解决吗,处理一下
 ---
 

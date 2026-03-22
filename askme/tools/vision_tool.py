@@ -39,6 +39,8 @@ class LookAroundTool(BaseTool):
         },
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "观察环境"
 
     def __init__(self) -> None:
         self._vision: VisionBridge | None = None
@@ -106,6 +108,8 @@ class FindTargetTool(BaseTool):
         "required": ["target"],
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "搜索物体"
 
     def __init__(self) -> None:
         self._vision: VisionBridge | None = None

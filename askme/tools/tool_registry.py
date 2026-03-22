@@ -101,6 +101,8 @@ class BaseTool(ABC):
     parameters: dict[str, Any] = {}
     safety_level: str = "normal"  # normal | dangerous | critical
     dev_only: bool = False  # if True, excluded when production_mode=True
+    agent_allowed: bool = False  # if True, available in ThunderAgentShell
+    voice_label: str = ""  # Chinese TTS label (e.g. "观察环境"), empty = no announce
 
     @abstractmethod
     def execute(self, **kwargs: Any) -> str:
@@ -195,6 +197,15 @@ class ToolRegistry:
     def get(self, name: str) -> BaseTool | None:
         """Get a tool by name, or None."""
         return self._tools.get(name)
+
+    def get_agent_allowed_names(self) -> set[str]:
+        """Return names of all tools with agent_allowed=True."""
+        return {name for name, tool in self._tools.items() if tool.agent_allowed}
+
+    def get_voice_labels(self) -> dict[str, str]:
+        """Return {name: voice_label} for tools with non-empty voice_label."""
+        return {name: tool.voice_label for name, tool in self._tools.items()
+                if tool.voice_label}
 
     def get_definitions(
         self,

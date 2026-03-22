@@ -108,7 +108,9 @@ class CreateSkillTool(BaseTool):
         },
         "required": ["name", "description", "prompt"],
     }
-    safety_level = "normal"  # visible to LLM in general chat; skill content is prompt-only
+    safety_level = "normal"
+    agent_allowed = True
+    voice_label = "创建新技能"  # visible to LLM in general chat; skill content is prompt-only
 
     def __init__(self) -> None:
         self._mgr: SkillManager | None = None

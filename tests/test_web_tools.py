@@ -196,10 +196,10 @@ def test_bing_returns_results(search_tool: WebSearchTool) -> None:
 # ── create_skill in agent allowed tools ──────────────────────────────────────
 
 
-def test_create_skill_in_agent_allowed_tools() -> None:
-    """create_skill must be in ThunderAgentShell's allowed tool set."""
-    from askme.agent_shell.thunder_agent_shell import _AGENT_ALLOWED_TOOLS
-    assert "create_skill" in _AGENT_ALLOWED_TOOLS
+def test_create_skill_has_agent_allowed() -> None:
+    """create_skill must have agent_allowed=True."""
+    from askme.tools.skill_tools import CreateSkillTool
+    assert CreateSkillTool.agent_allowed is True
 
 
 # ── DDG fallback tests removed — DDG is blocked in China ─────────────────────

@@ -42,6 +42,8 @@ class ScanAroundTool(BaseTool):
         },
     }
     safety_level = "normal"
+    agent_allowed = True
+    voice_label = "全方位扫描"
 
     def __init__(self) -> None:
         self._vision: Any = None

@@ -98,6 +98,11 @@ class SkillManager:
         """Get only enabled skills."""
         return [s for s in self._skills.values() if s.enabled]
 
+    def get_agent_shell_skills(self) -> set[str]:
+        """Return names of enabled skills with execution='agent_shell'."""
+        return {s.name for s in self._skills.values()
+                if s.enabled and s.execution == "agent_shell"}
+
     def set_enabled(self, name: str, enabled: bool) -> bool:
         """Enable or disable a skill. Returns False if skill not found."""
         skill = self._skills.get(name)
@@ -232,6 +237,7 @@ class SkillManager:
             schedule=meta.get("schedule"),
             prompt_template=prompt,
             tools_section=tools_section,
+            execution=meta.get("execution", "skill_executor"),
             source=source,
             path=str(file_path),
             enabled=bool(meta.get("enabled", True)),

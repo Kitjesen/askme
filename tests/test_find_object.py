@@ -128,19 +128,17 @@ class TestFindObjectSkill:
 # ---------- Agent Shell Whitelist ----------
 
 class TestAgentShellWhitelist:
-    def test_vision_tools_in_whitelist(self):
-        from askme.agent_shell.thunder_agent_shell import _AGENT_ALLOWED_TOOLS
-        assert "look_around" in _AGENT_ALLOWED_TOOLS
-        assert "find_target" in _AGENT_ALLOWED_TOOLS
+    def test_vision_tools_have_agent_allowed(self):
+        from askme.tools.vision_tool import LookAroundTool, FindTargetTool
+        assert LookAroundTool.agent_allowed is True
+        assert FindTargetTool.agent_allowed is True
 
 
 # ---------- Brain Pipeline Routing ----------
 
 class TestBrainPipelineRouting:
-    def test_find_object_in_agent_shell_skills(self):
-        """find_object should be routed to agent shell like agent_task."""
-        # Read the source to verify the routing set
-        from pathlib import Path
-        src = Path("askme/pipeline/brain_pipeline.py").read_text(encoding="utf-8")
-        assert '"find_object"' in src
-        assert "_AGENT_SHELL_SKILLS" in src
+    def test_find_object_is_agent_shell(self):
+        """find_object should have execution=agent_shell in SKILL.md."""
+        from askme.skills.skill_manager import SkillManager
+        mgr = SkillManager(); mgr.load()
+        assert "find_object" in mgr.get_agent_shell_skills()

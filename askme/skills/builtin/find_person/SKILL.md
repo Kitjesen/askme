@@ -9,6 +9,7 @@ tags: [person, search, vision]
 depends: []
 conflicts: []
 safety_level: normal
+execution: agent_shell
 voice_trigger: 找人,找个人,有没有人,谁在,人在哪,找一下人,看看有没有人在,有人吗
 ---
 

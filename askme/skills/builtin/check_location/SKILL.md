@@ -9,6 +9,7 @@ tags: [check, navigation, vision]
 depends: []
 conflicts: []
 safety_level: normal
+execution: agent_shell
 voice_trigger: 去看看,帮我看看,去检查,看一下那边,过去看看,帮我去看,去确认一下,帮我确认
 ---
 

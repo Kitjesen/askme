@@ -9,6 +9,7 @@ tags: [navigation, vision, search]
 depends: []
 conflicts: []
 safety_level: normal
+execution: agent_shell
 voice_trigger: 帮我找,找一下,哪里有,找找看,帮我找到,找瓶水,找个,去找,帮我找个,能找到,有没有,找到
 ---
 

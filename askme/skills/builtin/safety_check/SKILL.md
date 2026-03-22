@@ -9,6 +9,7 @@ tags: [safety, inspection, vision]
 depends: []
 conflicts: []
 safety_level: normal
+execution: agent_shell
 voice_trigger: 安全检查,安全巡检,检查安全,有没有隐患,有没有危险,排查隐患,安全排查,检查一下安全,看看有没有问题
 ---
 

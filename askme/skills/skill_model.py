@@ -43,6 +43,7 @@ class SkillDefinition:
     schedule: str | None = None  # cron expression
     prompt_template: str = ""
     tools_section: str = ""
+    execution: str = "skill_executor"  # skill_executor | agent_shell
     source: str = "builtin"  # builtin | user | project
     path: str = ""
     enabled: bool = True
