@@ -118,7 +118,7 @@ class ChangeDetector:
         """Read latest detections from frame_daemon. Returns None if stale/missing."""
         # Heartbeat check
         try:
-            with open(_HEARTBEAT_PATH, "r") as f:
+            with open(_HEARTBEAT_PATH, "r", encoding="utf-8") as f:
                 ts = float(f.read().strip())
             if time.time() - ts > self._max_staleness:
                 return None
@@ -127,7 +127,7 @@ class ChangeDetector:
 
         # Read detections
         try:
-            with open(_DETECTIONS_PATH, "r") as f:
+            with open(_DETECTIONS_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return Observation.from_daemon_json(data)
         except (FileNotFoundError, json.JSONDecodeError, KeyError):

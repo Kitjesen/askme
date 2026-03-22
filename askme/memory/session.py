@@ -101,6 +101,8 @@ class SessionMemory:
             return self._summary_cache
         session_files = sorted(self._sessions_dir.glob("*.md"), reverse=True)
         if not session_files:
+            self._summary_cache = ""
+            self._summary_cache_time = now
             return ""
 
         summaries = []

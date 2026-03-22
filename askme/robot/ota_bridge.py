@@ -721,7 +721,7 @@ class OTABridge:
     async def _sleep_or_stop(self, delay_s: float) -> None:
         try:
             await asyncio.wait_for(self._stop_event.wait(), timeout=delay_s)
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             return
 
 
