@@ -27,7 +27,7 @@ def _make_memory(tmp_path, monkeypatch):
             "memory": {"episodic": {"reflect_min_events": 5}},
         },
     )
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
     return EpisodicMemory()
 
 

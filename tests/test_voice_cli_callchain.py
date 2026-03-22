@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from askme.brain.intent_router import IntentRouter, IntentType
+from askme.llm.intent_router import IntentRouter, IntentType
 from askme.skills.skill_manager import SkillManager
 from askme.tools.skill_tools import CreateSkillTool
 

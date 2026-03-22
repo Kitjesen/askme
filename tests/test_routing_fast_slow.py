@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from askme.brain.intent_router import IntentRouter, IntentType
+from askme.llm.intent_router import IntentRouter, IntentType
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────

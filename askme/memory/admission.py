@@ -8,7 +8,7 @@ Reference: A-MAC (arXiv 2603.04549, March 2026)
 
 Usage::
 
-    from askme.brain.memory_admission import MemoryAdmissionControl
+    from askme.memory.admission import MemoryAdmissionControl
 
     mac = MemoryAdmissionControl(threshold=0.4)
     admitted, score = mac.should_admit("error", "Motor overcurrent", importance=0.8)

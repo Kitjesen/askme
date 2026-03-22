@@ -33,7 +33,7 @@ def _make_conv(tmp_path, monkeypatch, max_history: int = 40):
             }
         },
     )
-    from askme.brain.conversation import ConversationManager
+    from askme.llm.conversation import ConversationManager
 
     return ConversationManager()
 
@@ -138,7 +138,7 @@ class TestMaybeCompressSkipsOnPendingToolCalls:
         monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", 4)
         monkeypatch.setattr("askme.llm.conversation.KEEP_RECENT", 2)
 
-        from askme.brain.conversation import ConversationManager
+        from askme.llm.conversation import ConversationManager
 
         conv = ConversationManager()
         # Add enough messages to exceed the threshold
@@ -176,7 +176,7 @@ class TestMaybeCompressSkipsOnPendingToolCalls:
         monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", 4)
         monkeypatch.setattr("askme.llm.conversation.KEEP_RECENT", 2)
 
-        from askme.brain.conversation import ConversationManager
+        from askme.llm.conversation import ConversationManager
 
         conv = ConversationManager()
         for i in range(5):
@@ -197,7 +197,7 @@ class TestStripOrphanToolMessages:
     """Static method tests — no ConversationManager state needed."""
 
     def _strip(self, history: list[dict]) -> list[dict]:
-        from askme.brain.conversation import ConversationManager
+        from askme.llm.conversation import ConversationManager
 
         return ConversationManager._strip_orphan_tool_messages(history)
 

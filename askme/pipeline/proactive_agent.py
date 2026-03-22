@@ -14,8 +14,8 @@ from urllib import error, parse, request
 from askme.pipeline.alert_dispatcher import AlertDispatcher
 
 if TYPE_CHECKING:
-    from askme.brain.episodic_memory import EpisodicMemory
-    from askme.brain.llm_client import LLMClient
+    from askme.memory.episodic_memory import EpisodicMemory
+    from askme.llm.client import LLMClient
     from askme.perception.vision_bridge import VisionBridge
     from askme.voice.audio_agent import AudioAgent
 

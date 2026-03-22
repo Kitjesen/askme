@@ -74,6 +74,6 @@ def make_proactive_orch():
 @pytest.fixture
 def app_context():
     """Create a minimal AppContext for MCP tool unit tests."""
-    from askme.mcp_server import AppContext
+    from askme.mcp.server import AppContext
 
     return AppContext()

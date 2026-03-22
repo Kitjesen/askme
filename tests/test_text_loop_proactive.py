@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from askme.brain.intent_router import Intent, IntentType
+from askme.llm.intent_router import Intent, IntentType
 from askme.pipeline.proactive.base import ProactiveResult
 from askme.pipeline.text_loop import TextLoop, _TextClarificationAudio
 

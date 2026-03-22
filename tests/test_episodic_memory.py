@@ -20,7 +20,7 @@ def _make_memory(tmp_path, monkeypatch):
             "memory": {"episodic": {"reflect_min_events": 5}},
         },
     )
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     return EpisodicMemory()
 
@@ -30,7 +30,7 @@ def _make_memory(tmp_path, monkeypatch):
 
 def test_importance_command_high():
     """User commands get high importance."""
-    from askme.brain.episodic_memory import score_importance
+    from askme.memory.episodic_memory import score_importance
 
     score = score_importance("command", "用户说: 过来")
     assert score >= 0.7
@@ -38,7 +38,7 @@ def test_importance_command_high():
 
 def test_importance_error_high():
     """Errors get high importance."""
-    from askme.brain.episodic_memory import score_importance
+    from askme.memory.episodic_memory import score_importance
 
     score = score_importance("error", "电机过流")
     assert score >= 0.8
@@ -46,7 +46,7 @@ def test_importance_error_high():
 
 def test_importance_system_low():
     """System events get low importance."""
-    from askme.brain.episodic_memory import score_importance
+    from askme.memory.episodic_memory import score_importance
 
     score = score_importance("system", "电量 80%")
     assert score <= 0.2
@@ -54,7 +54,7 @@ def test_importance_system_low():
 
 def test_importance_person_detection_boost():
     """Detecting a person boosts importance."""
-    from askme.brain.episodic_memory import score_importance
+    from askme.memory.episodic_memory import score_importance
 
     base = score_importance("perception", "YOLO检测")
     boosted = score_importance("perception", "YOLO检测: person",
@@ -65,7 +65,7 @@ def test_importance_person_detection_boost():
 
 def test_importance_danger_keywords():
     """Danger keywords boost importance."""
-    from askme.brain.episodic_memory import score_importance
+    from askme.memory.episodic_memory import score_importance
 
     score = score_importance("perception", "检测到危险物体")
     assert score > 0.5
@@ -73,7 +73,7 @@ def test_importance_danger_keywords():
 
 def test_importance_new_entity_boost():
     """New/unknown entity keywords boost importance."""
-    from askme.brain.episodic_memory import score_importance
+    from askme.memory.episodic_memory import score_importance
 
     score = score_importance("perception", "发现新的物体")
     assert score > 0.5
@@ -81,7 +81,7 @@ def test_importance_new_entity_boost():
 
 def test_importance_clamped_to_one():
     """Importance never exceeds 1.0."""
-    from askme.brain.episodic_memory import score_importance
+    from askme.memory.episodic_memory import score_importance
 
     # Stack all boosts
     score = score_importance(
@@ -93,7 +93,7 @@ def test_importance_clamped_to_one():
 
 def test_importance_surprise_boost():
     """Surprise/novelty flag in context boosts importance."""
-    from askme.brain.episodic_memory import score_importance
+    from askme.memory.episodic_memory import score_importance
 
     base = score_importance("perception", "检测到一只猫")
     surprise = score_importance("perception", "检测到一只猫", {"surprise": True})
@@ -103,7 +103,7 @@ def test_importance_surprise_boost():
 
 def test_importance_novel_flag_equivalent():
     """Both 'surprise' and 'novel' context flags trigger the same boost."""
-    from askme.brain.episodic_memory import score_importance
+    from askme.memory.episodic_memory import score_importance
 
     s1 = score_importance("perception", "检测到一只猫", {"surprise": True})
     s2 = score_importance("perception", "检测到一只猫", {"novel": True})
@@ -112,7 +112,7 @@ def test_importance_novel_flag_equivalent():
 
 def test_importance_person_keyword_in_text():
     """Person keyword in description triggers person boost even without structured detections."""
-    from askme.brain.episodic_memory import score_importance
+    from askme.memory.episodic_memory import score_importance
 
     no_person = score_importance("perception", "我看到了: 2个cup")
     with_person = score_importance("perception", "我看到了: 1个person, 2个cup")
@@ -121,7 +121,7 @@ def test_importance_person_keyword_in_text():
 
 def test_importance_person_chinese_keyword():
     """Chinese person keywords also trigger the boost."""
-    from askme.brain.episodic_memory import score_importance
+    from askme.memory.episodic_memory import score_importance
 
     base = score_importance("perception", "检测到物体")
     with_person = score_importance("perception", "检测到一个人在门口")
@@ -133,7 +133,7 @@ def test_importance_person_chinese_keyword():
 
 def test_episode_initial_retrievability():
     """New episode starts with retrievability ~1.0."""
-    from askme.brain.episodic_memory import Episode
+    from askme.memory.episodic_memory import Episode
 
     ep = Episode("action", "test", importance=0.5)
     assert ep.retrievability() > 0.99
@@ -142,7 +142,7 @@ def test_episode_initial_retrievability():
 
 def test_episode_ebbinghaus_decay():
     """Retrievability decays following R = e^(-t/S)."""
-    from askme.brain.episodic_memory import Episode, DEFAULT_STABILITY_S
+    from askme.memory.episodic_memory import Episode, DEFAULT_STABILITY_S
 
     ep = Episode("action", "test", importance=0.5)
     # After one stability period, R = e^(-1) ≈ 0.368
@@ -153,7 +153,7 @@ def test_episode_ebbinghaus_decay():
 
 def test_episode_access_doubles_stability():
     """Each access doubles stability (spacing effect)."""
-    from askme.brain.episodic_memory import Episode
+    from askme.memory.episodic_memory import Episode
 
     ep = Episode("action", "test", importance=0.5)
     initial_s = ep.stability
@@ -167,7 +167,7 @@ def test_episode_access_doubles_stability():
 
 def test_episode_access_improves_retrievability():
     """Accessing an old episode improves its retrievability (via stability growth)."""
-    from askme.brain.episodic_memory import Episode
+    from askme.memory.episodic_memory import Episode
 
     ep = Episode("action", "test", importance=0.5)
     ep.timestamp -= 7200  # 2 hours ago
@@ -182,7 +182,7 @@ def test_episode_access_improves_retrievability():
 
 def test_importance_affects_initial_stability():
     """Higher importance gives higher initial stability."""
-    from askme.brain.episodic_memory import Episode
+    from askme.memory.episodic_memory import Episode
 
     ep_low = Episode("system", "heartbeat", importance=0.1)
     ep_high = Episode("error", "motor overcurrent", importance=0.8)
@@ -192,7 +192,7 @@ def test_importance_affects_initial_stability():
 
 def test_retrieval_score_with_keywords():
     """Retrieval score increases with keyword relevance."""
-    from askme.brain.episodic_memory import Episode
+    from askme.memory.episodic_memory import Episode
 
     ep1 = Episode("perception", "检测到猫在沙发上", importance=0.3)
     ep2 = Episode("action", "巡逻走廊", importance=0.2)
@@ -273,7 +273,7 @@ def test_retrieve_relevance(tmp_path, monkeypatch):
 
 def test_episode_to_log_line():
     """Episode.to_log_line() produces readable format with importance."""
-    from askme.brain.episodic_memory import Episode
+    from askme.memory.episodic_memory import Episode
 
     ep = Episode("perception", "检测到障碍物", {"distance": 1.5}, importance=0.6)
     line = ep.to_log_line()
@@ -284,7 +284,7 @@ def test_episode_to_log_line():
 
 def test_episode_to_dict():
     """Episode.to_dict() contains all fields including importance and stability."""
-    from askme.brain.episodic_memory import Episode
+    from askme.memory.episodic_memory import Episode
 
     ep = Episode("action", "移动到A点", importance=0.4)
     d = ep.to_dict()
@@ -310,7 +310,7 @@ def test_flush_to_disk(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("askme.memory.episodic_memory.FLUSH_THRESHOLD", 3)
 
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mem = EpisodicMemory()
     mem.log("a", "one")
@@ -339,7 +339,7 @@ def test_should_reflect_importance_trigger(tmp_path, monkeypatch):
     monkeypatch.setattr("askme.memory.episodic_memory.IMPORTANCE_THRESHOLD", 2.0)
     monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_MIN_EVENTS", 100)
 
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mem = EpisodicMemory()
     # Log high-importance events
@@ -361,7 +361,7 @@ def test_should_reflect_cooldown(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_MIN_EVENTS", 2)
 
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mem = EpisodicMemory()
     mem.log("a", "one")
@@ -398,7 +398,7 @@ async def test_reflect_resets_cumulative_importance(tmp_path, monkeypatch):
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mock_llm = AsyncMock()
     mock_llm.chat.return_value = json.dumps({
@@ -427,7 +427,7 @@ async def test_reflect_with_mock_llm(tmp_path, monkeypatch):
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mock_llm = AsyncMock()
     mock_llm.chat.return_value = json.dumps({
@@ -485,7 +485,7 @@ async def test_reflect_failure_does_not_start_cooldown(tmp_path, monkeypatch):
         },
     )
 
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mock_llm = AsyncMock()
     mock_llm.chat.return_value = "not json"
@@ -672,7 +672,7 @@ def test_cleanup_old_episodes(tmp_path, monkeypatch):
 
 def test_parse_reflection_valid_json():
     """_parse_reflection extracts JSON from LLM response."""
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mem = EpisodicMemory.__new__(EpisodicMemory)
     result = mem._parse_reflection(
@@ -684,7 +684,7 @@ def test_parse_reflection_valid_json():
 
 def test_parse_reflection_invalid():
     """_parse_reflection returns None for invalid input."""
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mem = EpisodicMemory.__new__(EpisodicMemory)
     assert mem._parse_reflection("no json here") is None

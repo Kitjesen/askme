@@ -11,8 +11,8 @@ from askme.pipeline.external_turns import record_external_turn
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from askme.brain.conversation import ConversationManager
-    from askme.brain.intent_router import IntentRouter
+    from askme.llm.conversation import ConversationManager
+    from askme.llm.intent_router import IntentRouter
     from askme.pipeline.brain_pipeline import BrainPipeline
     from askme.pipeline.commands import CommandHandler
     from askme.pipeline.skill_dispatcher import SkillDispatcher
@@ -101,7 +101,7 @@ class TextLoop:
 
     async def run(self) -> None:
         """Block until the user types /quit or presses Ctrl+C."""
-        from askme.brain.intent_router import IntentType
+        from askme.llm.intent_router import IntentType
 
         logger.info("Text mode. Commands: /clear /history /skills /quit")
         logger.info("Loaded %d previous messages.", len(self._conversation.history))
@@ -265,7 +265,7 @@ class TextLoop:
         terminal text loop (IntentRouter → ProactiveOrchestrator → SkillDispatcher).
         Returns the response string (empty string for commands/estop).
         """
-        from askme.brain.intent_router import IntentType
+        from askme.llm.intent_router import IntentType
 
         memory_task = self._pipeline.start_memory_prefetch(user_text)
         try:

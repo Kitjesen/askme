@@ -23,7 +23,7 @@ def _make_conv(tmp_path, monkeypatch, *, max_history=100, threshold=20, keep_rec
     monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", threshold)
     monkeypatch.setattr("askme.llm.conversation.KEEP_RECENT", keep_recent)
 
-    from askme.brain.conversation import ConversationManager
+    from askme.llm.conversation import ConversationManager
 
     return ConversationManager()
 

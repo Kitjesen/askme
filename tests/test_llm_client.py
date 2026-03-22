@@ -26,7 +26,7 @@ def _make_client(monkeypatch, **overrides):
             **overrides,
         }},
     )
-    from askme.brain.llm_client import LLMClient
+    from askme.llm.client import LLMClient
     return LLMClient()
 
 
@@ -369,7 +369,7 @@ def test_model_chain_deduplicates(monkeypatch):
 
 def test_backoff_first_attempt_is_fast():
     """First retry (attempt=0) is fast: ~0.3-0.5s."""
-    from askme.brain.llm_client import _backoff
+    from askme.llm.client import _backoff
 
     for _ in range(10):
         val = _backoff(0)
@@ -378,7 +378,7 @@ def test_backoff_first_attempt_is_fast():
 
 def test_backoff_grows_with_attempt():
     """Later attempts have longer backoff."""
-    from askme.brain.llm_client import _backoff
+    from askme.llm.client import _backoff
 
     val0 = _backoff(0)
     val2 = _backoff(2)
@@ -388,7 +388,7 @@ def test_backoff_grows_with_attempt():
 
 def test_backoff_caps_at_8():
     """Backoff base is capped at 8 seconds."""
-    from askme.brain.llm_client import _backoff
+    from askme.llm.client import _backoff
 
     for _ in range(10):
         val = _backoff(10)

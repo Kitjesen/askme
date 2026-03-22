@@ -1,6 +1,6 @@
 """Tests for askme.brain.intent_router module."""
 
-from askme.brain.intent_router import IntentRouter, IntentType
+from askme.llm.intent_router import IntentRouter, IntentType
 
 
 class FakeSafety:

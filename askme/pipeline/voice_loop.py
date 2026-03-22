@@ -12,7 +12,7 @@ from askme.voice.address_detector import AddressDetector
 from askme.voice.audio_router import AudioErrorKind, AudioRouter
 
 if TYPE_CHECKING:
-    from askme.brain.intent_router import IntentRouter
+    from askme.llm.intent_router import IntentRouter
     from askme.pipeline.brain_pipeline import BrainPipeline
     from askme.pipeline.skill_dispatcher import SkillDispatcher
     from askme.voice.audio_agent import AudioAgent
@@ -67,7 +67,7 @@ class VoiceLoop:
 
     async def run(self) -> None:
         """Block until Ctrl+C or too many consecutive errors."""
-        from askme.brain.intent_router import IntentType
+        from askme.llm.intent_router import IntentType
 
         logger.info("Voice mode active. Say something! (Ctrl+C to quit)")
 

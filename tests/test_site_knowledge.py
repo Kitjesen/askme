@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from askme.brain.site_knowledge import SiteKnowledge, Location
+from askme.memory.site_knowledge import SiteKnowledge, Location
 
 
 def test_record_visit_creates_location(tmp_path):

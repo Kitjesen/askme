@@ -176,7 +176,7 @@ class TestUnknownSkillHandling:
 class TestSemanticMismatch:
     def test_negated_trigger_does_not_fire(self):
         """'不要导航' should NOT trigger navigate skill."""
-        from askme.brain.intent_router import IntentRouter, IntentType
+        from askme.llm.intent_router import IntentRouter, IntentType
         router = IntentRouter(voice_triggers={"导航到仓库": "navigate"})
         intent = router.route("不要导航到仓库")
         assert intent.type == IntentType.GENERAL, (
@@ -185,13 +185,13 @@ class TestSemanticMismatch:
         )
 
     def test_别导航_does_not_fire(self):
-        from askme.brain.intent_router import IntentRouter, IntentType
+        from askme.llm.intent_router import IntentRouter, IntentType
         router = IntentRouter(voice_triggers={"导航": "navigate"})
         intent = router.route("别导航了")
         assert intent.type == IntentType.GENERAL
 
     def test_positive_command_still_fires(self):
-        from askme.brain.intent_router import IntentRouter, IntentType
+        from askme.llm.intent_router import IntentRouter, IntentType
         router = IntentRouter(voice_triggers={"导航到仓库": "navigate"})
         intent = router.route("帮我导航到仓库")
         assert intent.type == IntentType.VOICE_TRIGGER

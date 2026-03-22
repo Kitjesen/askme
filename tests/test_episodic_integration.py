@@ -28,7 +28,7 @@ def _make_memory_with_llm(tmp_path, monkeypatch, reflection_response=None):
     monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_COOLDOWN_S", 0)
     monkeypatch.setattr("askme.memory.episodic_memory.IMPORTANCE_THRESHOLD", 1.0)
 
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mock_llm = AsyncMock()
     if reflection_response is None:
@@ -131,7 +131,7 @@ async def test_importance_based_reflection_trigger(tmp_path, monkeypatch):
     monkeypatch.setattr("askme.memory.episodic_memory.IMPORTANCE_THRESHOLD", 3.0)
     monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_MIN_EVENTS", 100)
 
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mem = EpisodicMemory()
 
@@ -158,7 +158,7 @@ async def test_knowledge_accumulates_across_reflections(tmp_path, monkeypatch):
     monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_MIN_EVENTS", 3)
     monkeypatch.setattr("askme.memory.episodic_memory.REFLECT_COOLDOWN_S", 0)
 
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mock_llm = AsyncMock()
     mem = EpisodicMemory(llm=mock_llm)

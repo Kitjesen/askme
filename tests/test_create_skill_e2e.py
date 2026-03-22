@@ -126,9 +126,9 @@ class _SilentAudio:
 @pytest.mark.asyncio
 async def test_llm_creates_skill_via_tool_call(tmp_path: Path) -> None:
     """LLM issues a create_skill tool call → skill written → router updated."""
-    from askme.brain.conversation import ConversationManager
-    from askme.brain.intent_router import IntentRouter, IntentType
-    from askme.brain.memory_bridge import MemoryBridge
+    from askme.llm.conversation import ConversationManager
+    from askme.llm.intent_router import IntentRouter, IntentType
+    from askme.memory.bridge import MemoryBridge
     from askme.pipeline.brain_pipeline import BrainPipeline
     from askme.skills.skill_executor import SkillExecutor
     from askme.skills.skill_manager import SkillManager

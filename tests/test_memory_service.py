@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from askme.brain.memory_service import MemoryService, get_memory_service, reset_memory_service
+from askme.memory.service import MemoryService, get_memory_service, reset_memory_service
 
 
 def test_record_visit_delegates_to_site(tmp_path):

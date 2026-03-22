@@ -5,7 +5,7 @@ like ``if self._episodic: self._episodic.log(...)`` throughout the pipeline.
 
 Usage::
 
-    from askme.brain.memory_system import MemorySystem
+    from askme.memory.system import MemorySystem
 
     mem = MemorySystem(
         llm=llm,

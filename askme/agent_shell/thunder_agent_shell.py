@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from askme.brain.llm_client import LLMClient
+    from askme.llm.client import LLMClient
     from askme.tools.tool_registry import ToolRegistry
     from askme.voice.audio_agent import AudioAgent
 

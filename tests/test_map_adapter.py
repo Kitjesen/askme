@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from askme.brain.map_adapter import MapAdapter
-from askme.brain.site_knowledge import SiteKnowledge
+from askme.memory.map_adapter import MapAdapter
+from askme.memory.site_knowledge import SiteKnowledge
 
 
 SAMPLE_TOPO = {

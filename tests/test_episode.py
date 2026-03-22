@@ -1,6 +1,6 @@
 """Tests for Episode dataclass and score_importance."""
 
-from askme.brain.episode import Episode, score_importance
+from askme.memory.episode import Episode, score_importance
 
 
 class TestEpisode:

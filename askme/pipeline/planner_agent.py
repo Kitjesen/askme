@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from askme.brain.llm_client import LLMClient
+    from askme.llm.client import LLMClient
     from askme.skills.skill_manager import SkillManager
 
 logger = logging.getLogger(__name__)

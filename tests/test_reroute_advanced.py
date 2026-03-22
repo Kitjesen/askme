@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
-from askme.brain.intent_router import IntentType
+from askme.llm.intent_router import IntentType
 from askme.pipeline.proactive.base import ProactiveResult
 from askme.pipeline.voice_loop import VoiceLoop
 

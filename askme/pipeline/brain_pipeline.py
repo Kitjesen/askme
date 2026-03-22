@@ -15,12 +15,12 @@ from askme.pipeline.trace import get_tracer
 
 if TYPE_CHECKING:
     from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
-    from askme.brain.conversation import ConversationManager
-    from askme.brain.episodic_memory import EpisodicMemory
-    from askme.brain.llm_client import LLMClient
-    from askme.brain.memory_bridge import MemoryBridge
-    from askme.brain.memory_system import MemorySystem
-    from askme.brain.session_memory import SessionMemory
+    from askme.llm.conversation import ConversationManager
+    from askme.memory.episodic_memory import EpisodicMemory
+    from askme.llm.client import LLMClient
+    from askme.memory.bridge import MemoryBridge
+    from askme.memory.system import MemorySystem
+    from askme.memory.session import SessionMemory
     from askme.perception.vision_bridge import VisionBridge
     from askme.robot.control_client import DogControlClient
     from askme.robot.safety_client import DogSafetyClient

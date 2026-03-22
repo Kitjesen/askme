@@ -21,7 +21,7 @@ Reflection triggers (Park 2023 hybrid):
 
 Usage::
 
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
 
     mem = EpisodicMemory(llm=llm_client)
     mem.log("perception", "检测到一个人站在门口",

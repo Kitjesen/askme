@@ -22,7 +22,7 @@ def _make_pipeline(
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.memory.episodic_memory import EpisodicMemory
     from askme.pipeline.brain_pipeline import BrainPipeline
 
     # Mocks

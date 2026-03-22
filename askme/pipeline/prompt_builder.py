@@ -7,8 +7,8 @@ import logging
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from askme.brain.episodic_memory import EpisodicMemory
-    from askme.brain.session_memory import SessionMemory
+    from askme.memory.episodic_memory import EpisodicMemory
+    from askme.memory.session import SessionMemory
     from askme.perception.vision_bridge import VisionBridge
     from askme.robot.safety_client import DogSafetyClient
     from askme.skills.skill_manager import SkillManager

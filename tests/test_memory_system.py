@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from askme.brain.memory_system import MemorySystem
+from askme.memory.system import MemorySystem
 
 
 def _make_system(

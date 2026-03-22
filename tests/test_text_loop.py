@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from askme.brain.intent_router import Intent, IntentType
+from askme.llm.intent_router import Intent, IntentType
 from askme.pipeline.text_loop import TextLoop
 
 

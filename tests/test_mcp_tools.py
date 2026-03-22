@@ -33,7 +33,7 @@ class TestRobotToolsNoConnection:
 
     @pytest.mark.asyncio
     async def test_robot_move_no_controller(self, app_context):
-        from askme.mcp_tools.robot_tools import robot_move
+        from askme.mcp.tools.robot_tools import robot_move
 
         ctx = _make_ctx(app_context)
         result = await robot_move(100.0, 200.0, 50.0, ctx)
@@ -41,7 +41,7 @@ class TestRobotToolsNoConnection:
 
     @pytest.mark.asyncio
     async def test_robot_pick_no_controller(self, app_context):
-        from askme.mcp_tools.robot_tools import robot_pick
+        from askme.mcp.tools.robot_tools import robot_pick
 
         ctx = _make_ctx(app_context)
         result = await robot_pick("cup", ctx)
@@ -49,7 +49,7 @@ class TestRobotToolsNoConnection:
 
     @pytest.mark.asyncio
     async def test_robot_home_no_controller(self, app_context):
-        from askme.mcp_tools.robot_tools import robot_home
+        from askme.mcp.tools.robot_tools import robot_home
 
         ctx = _make_ctx(app_context)
         result = await robot_home(ctx)
@@ -57,7 +57,7 @@ class TestRobotToolsNoConnection:
 
     @pytest.mark.asyncio
     async def test_robot_state_no_controller(self, app_context):
-        from askme.mcp_tools.robot_tools import robot_state
+        from askme.mcp.tools.robot_tools import robot_state
 
         ctx = _make_ctx(app_context)
         result = await robot_state(ctx)
@@ -65,7 +65,7 @@ class TestRobotToolsNoConnection:
 
     @pytest.mark.asyncio
     async def test_robot_estop_no_controller(self, app_context):
-        from askme.mcp_tools.robot_tools import robot_estop
+        from askme.mcp.tools.robot_tools import robot_estop
 
         ctx = _make_ctx(app_context)
         result = await robot_estop(ctx)
@@ -73,7 +73,7 @@ class TestRobotToolsNoConnection:
 
     @pytest.mark.asyncio
     async def test_robot_wave_no_controller(self, app_context):
-        from askme.mcp_tools.robot_tools import robot_wave
+        from askme.mcp.tools.robot_tools import robot_wave
 
         ctx = _make_ctx(app_context)
         result = await robot_wave(ctx)
@@ -81,7 +81,7 @@ class TestRobotToolsNoConnection:
 
     @pytest.mark.asyncio
     async def test_robot_place_no_controller(self, app_context):
-        from askme.mcp_tools.robot_tools import robot_place
+        from askme.mcp.tools.robot_tools import robot_place
 
         ctx = _make_ctx(app_context)
         result = await robot_place("table", ctx)
@@ -95,7 +95,7 @@ class TestRobotToolsWithMock:
 
     @pytest.fixture
     def robot_context(self):
-        from askme.mcp_server import AppContext
+        from askme.mcp.server import AppContext
 
         ctx = AppContext()
         ctx.arm_controller = MagicMock()
@@ -107,7 +107,7 @@ class TestRobotToolsWithMock:
 
     @pytest.mark.asyncio
     async def test_robot_move_success(self, robot_context):
-        from askme.mcp_tools.robot_tools import robot_move
+        from askme.mcp.tools.robot_tools import robot_move
 
         ctx = _make_ctx(robot_context)
         result = await robot_move(100.0, 200.0, 50.0, ctx)
@@ -116,7 +116,7 @@ class TestRobotToolsWithMock:
 
     @pytest.mark.asyncio
     async def test_robot_state_success(self, robot_context):
-        from askme.mcp_tools.robot_tools import robot_state
+        from askme.mcp.tools.robot_tools import robot_state
 
         ctx = _make_ctx(robot_context)
         result = await robot_state(ctx)
@@ -125,7 +125,7 @@ class TestRobotToolsWithMock:
 
     @pytest.mark.asyncio
     async def test_robot_estop_success(self, robot_context):
-        from askme.mcp_tools.robot_tools import robot_estop
+        from askme.mcp.tools.robot_tools import robot_estop
 
         ctx = _make_ctx(robot_context)
         result = await robot_estop(ctx)
@@ -141,7 +141,7 @@ class TestVoiceToolsNoEngine:
 
     @pytest.mark.asyncio
     async def test_voice_listen_no_engine(self, app_context):
-        from askme.mcp_tools.voice_tools import voice_listen
+        from askme.mcp.tools.voice_tools import voice_listen
 
         ctx = _make_ctx(app_context)
         result = await voice_listen(ctx)
@@ -149,7 +149,7 @@ class TestVoiceToolsNoEngine:
 
     @pytest.mark.asyncio
     async def test_voice_speak_no_engine(self, app_context):
-        from askme.mcp_tools.voice_tools import voice_speak
+        from askme.mcp.tools.voice_tools import voice_speak
 
         ctx = _make_ctx(app_context)
         result = await voice_speak("hello", ctx)
@@ -163,7 +163,7 @@ class TestVoiceToolsWithMock:
 
     @pytest.fixture
     def voice_context(self):
-        from askme.mcp_server import AppContext
+        from askme.mcp.server import AppContext
 
         ctx = AppContext()
         ctx.tts_engine = MagicMock()
@@ -176,7 +176,7 @@ class TestVoiceToolsWithMock:
 
     @pytest.mark.asyncio
     async def test_voice_speak_success(self, voice_context):
-        from askme.mcp_tools.voice_tools import voice_speak
+        from askme.mcp.tools.voice_tools import voice_speak
 
         ctx = _make_ctx(voice_context)
         result = await voice_speak("hello world", ctx)
@@ -191,7 +191,7 @@ class TestSkillToolNoManager:
 
     @pytest.mark.asyncio
     async def test_execute_skill_no_manager(self, app_context):
-        from askme.mcp_tools.skill_tools import execute_skill
+        from askme.mcp.tools.skill_tools import execute_skill
 
         ctx = _make_ctx(app_context)
         result = await execute_skill("test_skill", "hello", ctx)
@@ -204,14 +204,14 @@ class TestResources:
     """MCP resources should return valid JSON."""
 
     def test_robot_status_resource(self):
-        from askme.mcp_resources.robot_resources import robot_status
+        from askme.mcp.resources.robot_resources import robot_status
 
         result = robot_status()
         data = json.loads(result)
         assert "enabled" in data
 
     def test_robot_joint_info_valid(self):
-        from askme.mcp_resources.robot_resources import robot_joint_info
+        from askme.mcp.resources.robot_resources import robot_joint_info
 
         result = robot_joint_info("0")
         data = json.loads(result)
@@ -220,7 +220,7 @@ class TestResources:
         assert data["type"] == "arm"
 
     def test_robot_joint_info_finger(self):
-        from askme.mcp_resources.robot_resources import robot_joint_info
+        from askme.mcp.resources.robot_resources import robot_joint_info
 
         result = robot_joint_info("7")
         data = json.loads(result)
@@ -228,21 +228,21 @@ class TestResources:
         assert data["type"] == "finger"
 
     def test_robot_joint_info_invalid(self):
-        from askme.mcp_resources.robot_resources import robot_joint_info
+        from askme.mcp.resources.robot_resources import robot_joint_info
 
         result = robot_joint_info("abc")
         data = json.loads(result)
         assert "error" in data
 
     def test_robot_joint_info_out_of_range(self):
-        from askme.mcp_resources.robot_resources import robot_joint_info
+        from askme.mcp.resources.robot_resources import robot_joint_info
 
         result = robot_joint_info("20")
         data = json.loads(result)
         assert "error" in data
 
     def test_robot_safety_config_resource(self):
-        from askme.mcp_resources.robot_resources import robot_safety_config
+        from askme.mcp.resources.robot_resources import robot_safety_config
 
         result = robot_safety_config()
         data = json.loads(result)
@@ -250,7 +250,7 @@ class TestResources:
         assert "停" in data["estop_keywords"]
 
     def test_askme_config_resource(self):
-        from askme.mcp_resources.skill_resources import askme_config
+        from askme.mcp.resources.skill_resources import askme_config
 
         result = askme_config()
         data = json.loads(result)

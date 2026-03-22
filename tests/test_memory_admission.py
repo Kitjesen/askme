@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import math
 
-from askme.brain.episode import decay_importance
-from askme.brain.memory_admission import AdmissionScore, MemoryAdmissionControl
+from askme.memory.episode import decay_importance
+from askme.memory.admission import AdmissionScore, MemoryAdmissionControl
 
 
 # ── decay_importance ──────────────────────────────────────

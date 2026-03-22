@@ -23,7 +23,7 @@ def _make_client(monkeypatch, **overrides):
             **overrides,
         }},
     )
-    from askme.brain.llm_client import LLMClient
+    from askme.llm.client import LLMClient
     return LLMClient()
 
 

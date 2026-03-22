@@ -7,8 +7,8 @@ import logging
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from askme.brain.conversation import ConversationManager
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.llm.conversation import ConversationManager
+    from askme.memory.episodic_memory import EpisodicMemory
     from askme.pipeline.prompt_builder import PromptBuilder
     from askme.tools.tool_registry import ToolRegistry
     from askme.voice.audio_agent import AudioAgent

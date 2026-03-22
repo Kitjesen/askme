@@ -66,13 +66,13 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         logger.warning("Config: %s", warning)
 
     # ── Always init: skills, tools, brain ──────────────────────
-    from askme.brain.llm_client import LLMClient
-    from askme.brain.conversation import ConversationManager
-    from askme.brain.memory_bridge import MemoryBridge
-    from askme.brain.session_memory import SessionMemory
-    from askme.brain.episodic_memory import EpisodicMemory
+    from askme.llm.client import LLMClient
+    from askme.llm.conversation import ConversationManager
+    from askme.memory.bridge import MemoryBridge
+    from askme.memory.session import SessionMemory
+    from askme.memory.episodic_memory import EpisodicMemory
     from askme.perception.vision_bridge import VisionBridge
-    from askme.brain.scene_intelligence import SceneIntelligence
+    from askme.perception.scene_intelligence import SceneIntelligence
     from askme.skills.skill_manager import SkillManager
     from askme.skills.skill_executor import SkillExecutor
     from askme.tools.tool_registry import ToolRegistry

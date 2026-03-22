@@ -13,13 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
-from askme.brain.conversation import ConversationManager
-from askme.brain.episodic_memory import EpisodicMemory
-from askme.brain.intent_router import IntentRouter
-from askme.brain.llm_client import LLMClient
-from askme.brain.memory_bridge import MemoryBridge
-from askme.brain.memory_system import MemorySystem
-from askme.brain.session_memory import SessionMemory
+from askme.llm.conversation import ConversationManager
+from askme.memory.episodic_memory import EpisodicMemory
+from askme.llm.intent_router import IntentRouter
+from askme.llm.client import LLMClient
+from askme.memory.bridge import MemoryBridge
+from askme.memory.system import MemorySystem
+from askme.memory.session import SessionMemory
 from askme.perception.vision_bridge import VisionBridge
 from askme.config import validate_config
 from askme.robot.control_client import DogControlClient
@@ -114,7 +114,7 @@ def _init_qp_memory(llm: LLMClient) -> Any:
             logger.info("qp_memory: synced %d locations from LingTu map", synced)
 
         try:
-            from askme.brain.extraction_adapter import ExtractionAdapter
+            from askme.memory.extraction_adapter import ExtractionAdapter
 
             extractor = ExtractionAdapter(llm, model="qwen-turbo")
             qp_memory.set_extraction_callback(extractor)
@@ -874,7 +874,7 @@ def build_legacy_runtime(
         health_server.set_vision_bridge(services.vision)
         health_server.set_capabilities_provider(runtime.capabilities_snapshot)
 
-        from askme.brain.image_archive import ImageArchive
+        from askme.perception.image_archive import ImageArchive
 
         health_server.set_image_archive(ImageArchive())
         services.health_server = health_server

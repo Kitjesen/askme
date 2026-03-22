@@ -52,21 +52,21 @@ def _runtime_snapshot() -> dict:
 
 class TestHealthResource:
     def test_health_returns_valid_json(self):
-        from askme.mcp_resources.health_resources import health_check
+        from askme.mcp.resources.health_resources import health_check
 
         result = health_check()
         data = json.loads(result)
         assert data["status"] == "ok"
 
     def test_health_has_version(self):
-        from askme.mcp_resources.health_resources import health_check
+        from askme.mcp.resources.health_resources import health_check
 
         data = json.loads(health_check())
         assert "version" in data
         assert isinstance(data["version"], str)
 
     def test_health_has_subsystems(self):
-        from askme.mcp_resources.health_resources import health_check
+        from askme.mcp.resources.health_resources import health_check
 
         data = json.loads(health_check())
         assert "subsystems" in data
@@ -75,7 +75,7 @@ class TestHealthResource:
         assert "voice" in data["subsystems"]
 
     def test_health_has_uptime(self):
-        from askme.mcp_resources.health_resources import health_check
+        from askme.mcp.resources.health_resources import health_check
 
         data = json.loads(health_check())
         assert "uptime_seconds" in data

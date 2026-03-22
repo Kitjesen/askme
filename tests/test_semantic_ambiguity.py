@@ -172,7 +172,7 @@ class TestQuestionVsCommand:
     """Intent routing: questions must go to GENERAL, not fire voice triggers."""
 
     def test_navigate_question_routes_to_general(self):
-        from askme.brain.intent_router import IntentRouter, IntentType
+        from askme.llm.intent_router import IntentRouter, IntentType
         router = IntentRouter(voice_triggers={"导航": "navigate"})
         # "导航会失败吗" ends with 吗 → question → GENERAL
         intent = router.route("导航会失败吗")
@@ -181,13 +181,13 @@ class TestQuestionVsCommand:
         )
 
     def test_navigation_command_fires_skill(self):
-        from askme.brain.intent_router import IntentRouter, IntentType
+        from askme.llm.intent_router import IntentRouter, IntentType
         router = IntentRouter(voice_triggers={"导航": "navigate", "导航到仓库": "navigate"})
         intent = router.route("帮我导航到仓库")
         assert intent.type == IntentType.VOICE_TRIGGER
 
     def test_ambiguous_probe_does_not_navigate(self):
-        from askme.brain.intent_router import IntentRouter, IntentType
+        from askme.llm.intent_router import IntentRouter, IntentType
         router = IntentRouter(voice_triggers={"导航到仓库": "navigate"})
         # "有没有仓库可以导航到" → embedded trigger but it's a question
         intent = router.route("有没有仓库可以导航到吗")

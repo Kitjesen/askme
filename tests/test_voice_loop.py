@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from askme.brain.intent_router import Intent, IntentType
+from askme.llm.intent_router import Intent, IntentType
 from askme.pipeline.voice_loop import VoiceLoop
 
 

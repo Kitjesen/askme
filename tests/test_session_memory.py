@@ -13,7 +13,7 @@ def test_save_and_load_summary(tmp_path, monkeypatch):
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 
-    from askme.brain.session_memory import SessionMemory
+    from askme.memory.session import SessionMemory
 
     sm = SessionMemory()
     sm.save_direct("用户询问了天气和时间。用户偏好简洁回答。")
@@ -33,7 +33,7 @@ def test_empty_summaries(tmp_path, monkeypatch):
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 
-    from askme.brain.session_memory import SessionMemory
+    from askme.memory.session import SessionMemory
 
     sm = SessionMemory()
     assert sm.get_recent_summaries() == ""
@@ -49,7 +49,7 @@ def test_max_sessions_limit(tmp_path, monkeypatch):
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 
-    from askme.brain.session_memory import SessionMemory, MAX_RECENT_SESSIONS
+    from askme.memory.session import SessionMemory, MAX_RECENT_SESSIONS
 
     sm = SessionMemory()
 
@@ -67,7 +67,7 @@ def test_max_sessions_limit(tmp_path, monkeypatch):
 
 def test_format_messages():
     """Message formatting for summarization."""
-    from askme.brain.session_memory import SessionMemory
+    from askme.memory.session import SessionMemory
 
     messages = [
         {"role": "user", "content": "你好"},
