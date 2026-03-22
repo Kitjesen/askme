@@ -12,25 +12,23 @@ logger = logging.getLogger(__name__)
 
 @mcp.resource("askme://skills")
 def skills_catalog() -> str:
-    """Catalog of all available skills with metadata."""
+    """Catalog of all available skills with generated contract metadata."""
     from askme.skills.skill_manager import SkillManager
 
     mgr = SkillManager()
     mgr.load()
-
-    skills = []
-    for skill in mgr.get_all():
-        skills.append({
-            "name": skill.name,
-            "description": skill.description,
-            "enabled": skill.enabled,
-            "trigger": skill.trigger,
-            "voice_trigger": skill.voice_trigger,
-            "tags": skill.tags,
-            "safety_level": skill.safety_level,
-        })
-
+    skills = mgr.get_contract_catalog()
     return json.dumps({"skills": skills, "count": len(skills)}, ensure_ascii=False)
+
+
+@mcp.resource("askme://skills/openapi")
+def skills_openapi() -> str:
+    """OpenAPI document generated from the loaded skill contracts."""
+    from askme.skills.skill_manager import SkillManager
+
+    mgr = SkillManager()
+    mgr.load()
+    return json.dumps(mgr.openapi_document(), ensure_ascii=False)
 
 
 @mcp.resource("askme://config")

@@ -1,5 +1,5 @@
 """
-Askme application — dependency assembly and lifecycle.
+Askme interactive application facade over the runtime assembly layer.
 
 Usage::
 
@@ -12,525 +12,59 @@ Usage::
 
 from __future__ import annotations
 
-import asyncio
-import io
 import logging
-import os
-import re
-import sys
+from typing import Any
 
 from askme import __version__ as ASKME_VERSION
-from askme.brain.conversation import ConversationManager
-from askme.dog_control_client import DogControlClient
-from askme.dog_safety_client import DogSafetyClient
-from askme.brain.episodic_memory import EpisodicMemory
-from askme.brain.intent_router import IntentRouter
-from askme.brain.memory_system import MemorySystem
-from askme.brain.llm_client import LLMClient
-from askme.brain.memory_bridge import MemoryBridge
-from askme.brain.session_memory import SessionMemory
-from askme.brain.vision_bridge import VisionBridge
-from askme.config import get_config, get_section, validate_config
-from askme.health_server import (
-    AskmeHealthServer,
-    build_health_snapshot,
-    merge_voice_pipeline_status,
-)
-from askme.ota_bridge import OTABridgeMetrics
-from askme.pipeline.brain_pipeline import BrainPipeline
-from askme.pipeline.commands import CommandHandler
-from askme.pipeline.proactive_agent import ProactiveAgent
-from askme.pipeline.planner_agent import PlannerAgent
-from askme.pipeline.skill_dispatcher import SkillDispatcher
-from askme.pipeline.text_loop import TextLoop
-from askme.pipeline.voice_loop import VoiceLoop
-from askme.skills.skill_executor import SkillExecutor
-from askme.skills.skill_manager import SkillManager
-from askme.tools.builtin_tools import DispatchSkillTool, register_builtin_tools
-from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
-from askme.led_controller import HttpLedController, NullLedController
-from askme.pipeline.state_led_bridge import StateLedBridge
-from askme.tools.robot_api_tool import RobotApiTool
-from askme.tools.builtin_tools import SpeakProgressTool
-from askme.tools.skill_tools import register_skill_tools
-from askme.tools.tool_registry import ToolRegistry
-from askme.tools.move_tool import register_move_tools
-from askme.tools.scan_tool import register_scan_tools
-from askme.tools.vision_tool import register_vision_tools
-from askme.tools.voice_tools import register_voice_tools
-from askme.voice.address_detector import AddressDetector
-from askme.voice.audio_agent import AudioAgent
-from askme.voice.runtime_bridge import VoiceRuntimeBridge
-from askme.voice.stream_splitter import StreamSplitter
+from askme.config import get_config
+from askme.runtime import build_legacy_runtime, legacy_profile_for
 
 logger = logging.getLogger(__name__)
 
 
 class AskmeApp:
-    """Top-level application: assembles modules and starts the loop."""
+    """Thin facade that exposes the assembled runtime through the legacy API."""
 
     def __init__(self, *, voice_mode: bool = False, robot_mode: bool = False) -> None:
-        self.voice_mode = voice_mode
-        self.robot_mode = robot_mode
-
-        # Fix Windows console encoding
-        if sys.platform == "win32":
-            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-
         self.cfg = get_config()
         self._app_name = self.cfg.get("app", {}).get("name", "askme")
         self._app_version = self.cfg.get("app", {}).get("version") or ASKME_VERSION
         self._setup_logging()
 
-        # ── Create modules ──────────────────────────────────
-        self.ota_metrics = OTABridgeMetrics()
-        self.llm = LLMClient(metrics=self.ota_metrics)
-        self.session_memory = SessionMemory(llm=self.llm)
-        self.conversation = ConversationManager(
-            session_memory=self.session_memory,
-            metrics=self.ota_metrics,
-        )
-        self.memory = MemoryBridge()
-        self.episodic = EpisodicMemory(llm=self.llm)
-        self.memory_system = MemorySystem(
-            llm=self.llm,
-            conversation=self.conversation,
-            session_memory=self.session_memory,
-            episodic=self.episodic,
-            vector_memory=self.memory,
-        )
-        # ── qp_memory (shared spatial/procedural/markdown memory) ────────
-        self.qp_memory = None
-        try:
-            # Try multiple paths: shared/python/src (dev), ./qp_memory/.. (deploy)
-            _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            for _try_path in [
-                os.path.normpath(os.path.join(_project_root, "..", "..", "shared", "python", "src")),
-                _project_root,  # qp_memory/ next to askme/
-            ]:
-                if _try_path not in sys.path:
-                    sys.path.insert(0, _try_path)
-            from qp_memory import Memory as QpMemory
-
-            self.qp_memory = QpMemory(
-                data_dir=os.path.join(_project_root, "data", "qp_memory"),
-                site_id="default",
-                robot_id="thunder_01",
-            )
-            # Sync LingTu map if available
-            _topo_dir = os.path.join(_project_root, "maps", "semantic")
-            if os.path.isdir(_topo_dir):
-                n = self.qp_memory.sync_map(_topo_dir)
-                logger.info("qp_memory: synced %d locations from LingTu map", n)
-            logger.info("qp_memory initialized (data_dir=%s)", os.path.join(_project_root, "data", "qp_memory"))
-
-            # Wire LLM auto-extraction: after each turn, extract facts into memory
-            try:
-                from askme.brain.extraction_adapter import ExtractionAdapter
-                _extractor = ExtractionAdapter(self.llm, model="qwen-turbo")
-                self.qp_memory.set_extraction_callback(_extractor)
-                logger.info("qp_memory: LLM auto-extraction enabled")
-            except Exception as _ext_e:
-                logger.debug("qp_memory: auto-extraction not available: %s", _ext_e)
-        except ImportError:
-            logger.info("qp_memory not available (shared package not installed)")
-        except Exception as _e:
-            logger.warning("qp_memory init failed: %s", _e)
-
-        self.vision = VisionBridge()
-        self.tools = ToolRegistry()
-        _production_mode = bool(self.cfg.get("tools", {}).get("production_mode", False))
-        register_builtin_tools(self.tools, production_mode=_production_mode)
-        # Register RobotApiTool (unified runtime API)
-        self.tools.register(RobotApiTool())
-        # Register vision tools (look_around, find_target)
-        register_vision_tools(self.tools, self.vision)
-        # Register movement tools (move_robot)
-        register_move_tools(self.tools)
-        # Register scan tools (scan_around — fast 360° capture)
-        register_scan_tools(self.tools, self.vision)
-
-        # Robot (optional)
-        self.arm_controller = None
-        if robot_mode or self.cfg.get("robot", {}).get("enabled", False):
-            self._init_robot()
-
-        # Skills
-        self.skill_manager = SkillManager()
-        self.skill_manager.load()
-        # In voice mode, skills use the faster voice_model for low latency
-        brain_cfg_skills = self.cfg.get("brain", {})
-        skill_model = (
-            brain_cfg_skills.get("voice_model")
-            if voice_mode
-            else brain_cfg_skills.get("model")
-        ) or brain_cfg_skills.get("model", "claude-sonnet-4-5-20250929")
-        self.skill_executor = SkillExecutor(
-            self.llm,
-            self.tools,
-            default_model=skill_model,
-            metrics=self.ota_metrics,
-        )
-
-        # Intent router
-        safety = self.arm_controller._safety if self.arm_controller else None  # noqa: SLF001
-        self.router = IntentRouter(
-            safety_checker=safety,
-            voice_triggers=self.skill_manager.get_voice_triggers(),
-        )
-
-        # Audio router — shared between AudioAgent (input) and TTSEngine (output).
-        # Serialises mic open and aplay on half-duplex ALSA hardware (sunrise).
-        # None in text-only mode — no audio device coordination needed.
-        from askme.voice.audio_router import AudioRouter
-        self.audio_router: AudioRouter | None = AudioRouter() if voice_mode else None
-
-        # Audio / voice
-        self.audio = AudioAgent(
-            self.cfg,
+        profile = legacy_profile_for(
             voice_mode=voice_mode,
-            metrics=self.ota_metrics,
-            audio_router=self.audio_router,
+            robot_mode=robot_mode,
         )
-        register_voice_tools(self.tools, self.audio)
-        self.tools.register(SpeakProgressTool(self.audio))
-        self.voice_runtime_bridge = VoiceRuntimeBridge(
-            self.cfg.get("runtime", {}).get("voice_bridge", {})
+        self.runtime = build_legacy_runtime(
+            cfg=self.cfg,
+            app_name=self._app_name,
+            app_version=self._app_version,
+            profile=profile,
+            robot_requested=robot_mode,
         )
-        self.splitter = StreamSplitter()
+        self.profile = self.runtime.profile
+        self.voice_mode = self.runtime.voice_mode
+        self.robot_mode = self.runtime.robot_mode
 
-        # Dog safety client (optional — enabled when DOG_SAFETY_SERVICE_URL is set)
-        self.dog_safety = DogSafetyClient(
-            self.cfg.get("runtime", {}).get("dog_safety", {})
-        )
-
-        # Dog control client (optional — enabled when DOG_CONTROL_SERVICE_URL is set)
-        self.dog_control = DogControlClient(
-            self.cfg.get("runtime", {}).get("dog_control", {})
-        )
-
-        # ── Assemble pipeline ───────────────────────────────
-        brain_cfg = get_section("brain")
-        tools_cfg = get_section("tools")
-
-        # Load SOUL.md character definition (overrides config prompt_seed)
-        soul_seed = self._load_soul()
-        prompt_seed = soul_seed if soul_seed else brain_cfg.get("prompt_seed", [])
-
-        self._pipeline = BrainPipeline(
-            llm=self.llm,
-            conversation=self.conversation,
-            memory=self.memory,
-            tools=self.tools,
-            skill_manager=self.skill_manager,
-            skill_executor=self.skill_executor,
-            audio=self.audio,
-            splitter=self.splitter,
-            arm_controller=self.arm_controller,
-            dog_safety_client=self.dog_safety,
-            dog_control_client=self.dog_control,
-            vision=self.vision,
-            session_memory=self.session_memory,
-            episodic_memory=self.episodic,
-            memory_system=self.memory_system,
-            system_prompt=brain_cfg.get(
-                "system_prompt",
-                "你是一个有用的AI语音助手。用中文简洁口语化回答。",
-            ),
-            prompt_seed=prompt_seed,
-            user_prefix=brain_cfg.get("user_prefix", ""),
-            voice_model=brain_cfg.get("voice_model"),
-            general_tool_max_safety_level=tools_cfg.get(
-                "general_chat_max_safety_level",
-                "normal",
-            ),
-            max_response_chars=int(brain_cfg.get("max_response_chars", 0)),
-            qp_memory=self.qp_memory,
-        )
-
-        # ── Skill dispatcher (unified orchestration) ────────────
-        # plan_model: fast/cheap model for JSON-only planning task (e.g. haiku).
-        # Falls back to the LLM client default when not configured.
-        _plan_model = brain_cfg.get("plan_model")
-        _planner = PlannerAgent(
-            llm_client=self._pipeline._llm,
-            skill_manager=self.skill_manager,
-            model=_plan_model,
-        )
-        self.dispatcher = SkillDispatcher(
-            pipeline=self._pipeline,
-            skill_manager=self.skill_manager,
-            audio=self.audio,
-            planner=_planner,
-        )
-
-        # ── ThunderAgentShell (agentic task execution) ───────────────
-        _agent_model = brain_cfg.get("agent_model")
-        self.agent_shell = ThunderAgentShell(
-            llm_client=self.llm,
-            tool_registry=self.tools,
-            audio=self.audio,
-            model=_agent_model,
-        )
-        # Allow config override for agent task timeout (default 120s)
-        self.agent_shell._default_timeout = float(brain_cfg.get("agent_timeout", 120.0))
-        # Wire agent_shell into the pipeline
-        self._pipeline._agent_shell = self.agent_shell
-
-        # Register dispatch_skill meta-tool (LLM can invoke skills)
-        dispatch_tool = DispatchSkillTool()
-        dispatch_tool.set_dispatcher(self.dispatcher)
-        self.tools.register(dispatch_tool)
-
-        # Register create_skill tool (LLM can create new skills at runtime)
-        register_skill_tools(self.tools, self.skill_manager, self.router)
-
-        self._commands = CommandHandler(
-            conversation=self.conversation,
-            skill_manager=self.skill_manager,
-        )
-
-        self._text_loop = TextLoop(
-            router=self.router,
-            pipeline=self._pipeline,
-            commands=self._commands,
-            conversation=self.conversation,
-            skill_manager=self.skill_manager,
-            audio=self.audio,
-            voice_runtime_bridge=self.voice_runtime_bridge,
-            dispatcher=self.dispatcher,
-        )
-
-        self._voice_loop = VoiceLoop(
-            router=self.router,
-            pipeline=self._pipeline,
-            audio=self.audio,
-            voice_runtime_bridge=self.voice_runtime_bridge,
-            dispatcher=self.dispatcher,
-            audio_router=self.audio_router,
-        )
-
-        # Address detector: filter out bystander chat (not talking to robot)
-        _ad_cfg = self.cfg.get("voice", {}).get("address_detection", {})
-        self._address_detector = AddressDetector(_ad_cfg)
-        self._voice_loop.set_address_detector(self._address_detector)
-
-        self._proactive = ProactiveAgent(
-            vision=self.vision,
-            audio=self.audio,
-            episodic=self.episodic,
-            llm=self.llm,
-            config=self.cfg,
-        )
-        # Wire auto-solve: when proactive agent detects anomaly, trigger solve_problem
-        self._proactive.set_solve_callback(
-            lambda anomaly_text: self._pipeline.execute_skill("solve_problem", anomaly_text)
-        )
-        # askme 只暴露本地 HTTP 健康/指标端点，不直接连接 OTA Server。
-        # Terminal Agent (OTA Agent) 负责拉取此端点并统一上报给 OTA Server。
-        self.health_server = AskmeHealthServer(
-            self.cfg.get("health_server", {}),
-            snapshot_provider=self.health_snapshot,
-        )
-
-        # Wire chat handler for /api/chat and /dashboard web UI.
-        # Routes through full IntentRouter → SkillDispatcher pipeline so skills
-        # (including create_skill, agent_task, navigate, etc.) execute properly.
-        async def _chat_handler(text: str) -> str:
-            import time as _t
-
-            t0 = _t.perf_counter()
-            full = await self._text_loop.process_turn(text)
-            logger.info("[WebChat] Total: %.2fs chars=%d", _t.perf_counter() - t0, len(full))
-
-            # Record to qp_memory (fire-and-forget — never block response)
-            if full and self.qp_memory is not None:
-                _qp = self.qp_memory
-                _cnt = self._pipeline
-
-                async def _qp_bg():
-                    try:
-                        await asyncio.to_thread(_qp.record_observation, "webchat", text)
-                        await asyncio.to_thread(_qp.process_turn, text, full)
-                        _cnt._qp_turn_count += 1
-                        if _cnt._qp_turn_count % 10 == 0:
-                            await asyncio.to_thread(_qp.save)
-                    except Exception:
-                        pass
-
-                asyncio.create_task(_qp_bg())
-
-            # Pipeline already speaks via TTS during streaming — do NOT re-speak here.
-            # The old _speak_and_stop caused every response to play twice.
-            return full
-
-        self.health_server.set_chat_handler(_chat_handler)
-        self.health_server.set_conversation_provider(
-            lambda: list(self.conversation.history)
-        )
-        self.health_server.set_vision_bridge(self.vision)
-        from askme.brain.image_archive import ImageArchive
-        self.health_server.set_image_archive(ImageArchive())
-
-        # ── LED state bridge ─────────────────────────────────────────────
-        # Drives the status LED from AgentState + agent_task + ESTOP.
-        # Configure dog-control-service URL to enable HTTP LED control:
-        #   led:
-        #     base_url: http://localhost:5080
-        # Omit (or leave blank) to use NullLedController (silent no-op).
-        led_cfg = self.cfg.get("led", {})
-        led_base_url = led_cfg.get("base_url", "").strip()
-        _led_ctrl = (
-            HttpLedController(led_base_url)
-            if led_base_url
-            else NullLedController()
-        )
-        self._led_bridge = StateLedBridge(
-            audio=self.audio,
-            dispatcher=self.dispatcher,
-            safety=getattr(self._pipeline, "_dog_safety", None),
-            led=_led_ctrl,
-        )
-        logger.info(
-            "[LED] controller=%s",
-            "http(%s)" % led_base_url if led_base_url else "null",
-        )
-
-        # ── Config validation (warnings only — never crash) ─────────────
-        cfg_warnings = validate_config(self.cfg)
-        for w in cfg_warnings:
-            logger.warning("[Config] %s", w)
-
-        # ── Structured startup summary ───────────────────────────────────
-        enabled_skills = self.skill_manager.get_enabled()
-        skill_names = [s.name for s in enabled_skills]
-        brain_cfg_log = self.cfg.get("brain", {})
-        fallback_models = brain_cfg_log.get("fallback_models", [])
-        dog_safety_url = (
-            self.cfg.get("runtime", {}).get("dog_safety", {}).get("base_url", "")
-        )
-        logger.info(
-            "Askme started | app=%s v%s | voice=%s robot=%s | "
-            "llm=%s fallbacks=%s | skills(%d)=%s | tools=%d | "
-            "voice_bridge=%s | dog_safety=%s",
-            self._app_name,
-            self._app_version,
-            voice_mode,
-            robot_mode,
-            brain_cfg_log.get("model", "?"),
-            fallback_models or [],
-            len(skill_names),
-            skill_names,
-            len(self.tools),
-            "enabled" if self.voice_runtime_bridge.enabled else "disabled",
-            "configured" if dog_safety_url else "not configured",
-        )
-        from askme.runtime_health import log_startup_service_status
-        log_startup_service_status()
-
-    # ── Lifecycle ────────────────────────────────────────────
+        for attr, value in self.runtime.services.bindings().items():
+            setattr(self, attr, value)
 
     async def run(self) -> None:
-        """Start the appropriate main loop."""
-        stop_event = asyncio.Event()
-        warmup_task: asyncio.Task[None] | None = None
-        proactive_task: asyncio.Task[None] | None = None
-        led_task: asyncio.Task[None] | None = None
+        """Start the profile runtime and enter the selected interactive loop."""
+        await self.runtime.start()
         try:
-            await self.health_server.start()
-            warmup_task = asyncio.create_task(self.memory.warmup())
-            proactive_task = asyncio.create_task(self._proactive.run(stop_event))
-            # Launch ChangeDetector for event-driven perception
-            from askme.perception.change_detector import ChangeDetector
-            self._change_detector = ChangeDetector(config=self.cfg)
-            change_detector_task = asyncio.create_task(self._change_detector.run(stop_event))
-            led_task = asyncio.create_task(self._led_bridge.run())
             if self.voice_mode:
+                if self._voice_loop is None:
+                    raise RuntimeError("voice profile is missing the voice loop")
                 await self._voice_loop.run()
             else:
                 await self._text_loop.run()
         finally:
-            stop_event.set()
-            pending_tasks = [
-                task for task in (warmup_task, proactive_task, led_task, change_detector_task)
-                if task is not None
-            ]
-            for task in pending_tasks:
-                task.cancel()
-            if pending_tasks:
-                await asyncio.gather(*pending_tasks, return_exceptions=True)
-            await self.health_server.stop()
-            await self.shutdown()
+            await self.runtime.stop()
 
     async def shutdown(self) -> None:
-        """Graceful cleanup — cancel in-flight tasks, drain audio, close hardware."""
-        await self._pipeline.shutdown()
-        self.audio.shutdown()
-        if self.arm_controller:
-            self.arm_controller.close()
-        if self.qp_memory is not None:
-            try:
-                self.qp_memory.save()
-                logger.info("qp_memory saved on shutdown")
-            except Exception as _e:
-                logger.warning("qp_memory save failed on shutdown: %s", _e)
-
-    # ── Private ──────────────────────────────────────────────
-
-    def _load_soul(self) -> list[dict[str, str]]:
-        """Load SOUL.md and convert to prompt seed for character injection.
-
-        Returns a list of fake user/assistant turns that establish the
-        character defined in SOUL.md.  Falls back to empty list if the
-        file is missing.
-        """
-        soul_file = self.cfg.get("brain", {}).get("soul_file", "SOUL.md")
-        # Resolve relative to project root
-        if not os.path.isabs(soul_file):
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            soul_file = os.path.join(project_root, soul_file)
-
-        if not os.path.isfile(soul_file):
-            return []
-
-        try:
-            with open(soul_file, encoding="utf-8") as f:
-                raw = f.read()
-        except OSError:
-            return []
-
-        # Strip markdown headers but keep content, compact whitespace
-        brief = re.sub(r"^#+\s+.*$", "", raw, flags=re.MULTILINE)
-        brief = re.sub(r"\n{3,}", "\n\n", brief).strip()
-
-        if not brief:
-            return []
-
-        logger.info("Loaded SOUL.md (%d chars) as character definition.", len(brief))
-
-        return [
-            {"role": "user", "content": f"你的角色设定如下，严格遵守：\n{brief}"},
-            {"role": "assistant", "content": "收到。我是Thunder，穹沛的巡检机器人。等待指令。"},
-            {"role": "user", "content": "重要：你不是AI助手，不是Claude，不是开发工具。你就是Thunder巡检机器人。只用中文口语回答，绝不用英文，绝不用markdown。"},
-            {"role": "assistant", "content": "明白。我是Thunder，穹沛的四足巡检机器人。中文口语回答，简洁汇报。"},
-        ]
-
-    def _init_robot(self) -> None:
-        """Initialise the robot arm controller."""
-        try:
-            from askme.robot.arm_controller import ArmController
-            from askme.tools.robot_tools import register_robot_tools
-
-            robot_cfg = get_section("robot")
-            self.arm_controller = ArmController(robot_cfg)
-            register_robot_tools(self.tools, self.arm_controller)
-            self.robot_mode = True
-            logger.info("Robot arm controller initialised.")
-        except Exception as exc:
-            logger.warning("Failed to initialise robot: %s", exc)
-            self.arm_controller = None
-            self.robot_mode = False
+        """Gracefully stop the assembled runtime."""
+        await self.runtime.stop()
 
     def _setup_logging(self) -> None:
         """Configure logging from config."""
@@ -540,35 +74,25 @@ class AskmeApp:
         datefmt = "%H:%M:%S"
         logging.basicConfig(level=level, format=fmt, datefmt=datefmt)
 
-        # Also log to file so external tools can tail the output
         log_file = self.cfg.get("app", {}).get("log_file")
         if log_file:
-            fh = logging.FileHandler(log_file, encoding="utf-8", mode="w")
-            fh.setLevel(level)
-            fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
-            logging.getLogger().addHandler(fh)
+            handler = logging.FileHandler(log_file, encoding="utf-8", mode="w")
+            handler.setLevel(level)
+            handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+            logging.getLogger().addHandler(handler)
 
     def health_snapshot(self) -> dict[str, object]:
         """Return the compact HTTP health payload."""
-        return build_health_snapshot(
-            app_name=self._app_name,
-            app_version=self._app_version,
-            model_name=self.llm.model,
-            metrics_snapshot=self.ota_metrics.snapshot(),
-            active_skills=[skill.name for skill in self.skill_manager.get_enabled()],
-            voice_status=self._voice_status_snapshot(),
-            ota_status=None,  # OTA Agent pulls this endpoint and reports to OTA Server
-            voice_bridge=self.voice_runtime_bridge.status_snapshot(),
-        )
+        return self.runtime.health_snapshot()
 
     def metrics_snapshot(self) -> dict[str, object]:
         """Return the latest runtime metrics snapshot."""
-        return self.ota_metrics.snapshot()
+        return self.runtime.metrics_snapshot()
+
+    def capabilities_snapshot(self) -> dict[str, Any]:
+        """Return the runtime/profile/component capability view."""
+        return self.runtime.capabilities_snapshot()
 
     def _voice_status_snapshot(self) -> dict[str, object]:
-        """Combine live voice readiness with recent OTA voice metrics."""
-        live_status = self.audio.status_snapshot()
-        return merge_voice_pipeline_status(
-            live_status,
-            self.ota_metrics.snapshot().get("voice_pipeline", {}),
-        )
+        """Compatibility adapter for legacy callers."""
+        return self.runtime.voice_status_snapshot()

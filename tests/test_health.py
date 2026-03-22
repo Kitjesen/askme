@@ -113,6 +113,31 @@ class TestHealthServer:
         assert "askme_voice_pipeline_ok 1" in response.text
         assert "askme_ota_bridge_registered 1" in response.text
 
+    def test_capabilities_endpoint_returns_runtime_contracts(self):
+        client = TestClient(
+            create_health_app(
+                lambda: _runtime_snapshot(),
+                capabilities_provider=lambda: {
+                    "profile": {"name": "voice", "primary_loop": "voice"},
+                    "components": {
+                        "skill_runtime": {
+                            "health": {"status": "ok"},
+                            "capabilities": {"openapi_generated": True},
+                        }
+                    },
+                    "skills": {"contract_count": 3, "code_contract_count": 2},
+                },
+            )
+        )
+
+        response = client.get("/api/capabilities")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["profile"]["name"] == "voice"
+        assert data["components"]["skill_runtime"]["capabilities"]["openapi_generated"] is True
+        assert data["skills"]["contract_count"] == 3
+
 
 class TestVoiceBridgeSnapshot:
     """Cover the voice_bridge=None / voice_bridge=<dict> branches of build_health_snapshot."""

@@ -24,6 +24,7 @@ _DEGRADED_OTA_STATES = {"auth_error", "degraded"}
 
 HealthProvider = Callable[[], dict[str, Any]]
 MetricsProvider = Callable[[], dict[str, Any]]
+CapabilitiesProvider = Callable[[], dict[str, Any]]
 
 
 class HealthSnapshotProvider(RuntimeHealthSnapshot):
@@ -169,6 +170,7 @@ def create_health_app(
     *,
     health_provider: HealthProvider | None = None,
     metrics_provider: MetricsProvider | None = None,
+    capabilities_provider: CapabilitiesProvider | None = None,
     chat_handler: ChatHandler | None = None,
     conversation_provider: Callable[[], list[dict[str, Any]]] | None = None,
     vision_snapshot_handler: VisionSnapshotHandler | None = None,
@@ -360,6 +362,29 @@ def create_health_app(
             status,
             headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
         )
+
+    @app.get("/api/capabilities", tags=["System"])
+    async def capabilities() -> JSONResponse:
+        """Return the runtime profile, components, and generated contracts."""
+        if capabilities_provider is None:
+            return JSONResponse(
+                {"error": "capabilities not available"},
+                status_code=503,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+        try:
+            payload = capabilities_provider()
+            return JSONResponse(
+                payload,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Capabilities endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
 
     @app.get("/dashboard", tags=["Monitor"])
     async def dashboard() -> Response:
@@ -598,6 +623,7 @@ class AskmeHealthServer:
         self._chat_handler: ChatHandler | None = None
         self._vision_bridge: Any | None = None
         self._image_archive: Any | None = None
+        self._capabilities_provider: CapabilitiesProvider | None = None
 
         resolved_health_provider = health_provider or snapshot_provider or provider
         if resolved_health_provider is None:
@@ -613,6 +639,7 @@ class AskmeHealthServer:
         self._app = create_health_app(
             health_provider=resolved_health_provider,
             metrics_provider=resolved_metrics_provider,
+            capabilities_provider=self._get_capabilities,
             chat_handler=self._dispatch_chat,
             conversation_provider=self._get_conversation,
             vision_snapshot_handler=self._dispatch_snapshot,
@@ -637,9 +664,18 @@ class AskmeHealthServer:
         """Wire the chat handler after construction (avoids circular deps)."""
         self._chat_handler = handler
 
+    def set_capabilities_provider(self, provider: CapabilitiesProvider) -> None:
+        """Wire the capabilities provider after construction."""
+        self._capabilities_provider = provider
+
     def set_conversation_provider(self, provider: Callable[[], list[dict[str, Any]]]) -> None:
         """Wire conversation history provider for /api/live endpoint."""
         self._conversation_provider = provider
+
+    def _get_capabilities(self) -> dict[str, Any]:
+        if self._capabilities_provider is None:
+            return {}
+        return self._capabilities_provider()
 
     def set_vision_bridge(self, bridge: Any) -> None:
         """Wire the VisionBridge after construction."""
