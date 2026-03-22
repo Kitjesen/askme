@@ -9,6 +9,7 @@ import shutil
 import sys
 import textwrap
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,60 @@ from askme.app import AskmeApp
 
 logger = logging.getLogger(__name__)
 
+# ANSI color codes
+_C_RESET = "\x1b[0m"
+_C_BOLD = "\x1b[1m"
+_C_DIM = "\x1b[2m"
+_C_CYAN = "\x1b[36m"
+_C_GREEN = "\x1b[32m"
+_C_YELLOW = "\x1b[33m"
+_C_RED = "\x1b[31m"
+_C_WHITE = "\x1b[97m"
+_C_BG_RED = "\x1b[41m"
+_C_BG_GREEN = "\x1b[42m"
+
+
+def _display_width(text: str) -> int:
+    """Calculate terminal display width accounting for CJK double-width chars."""
+    w = 0
+    for ch in text:
+        eaw = unicodedata.east_asian_width(ch)
+        w += 2 if eaw in ("W", "F") else 1
+    return w
+
+
+def _pad_to_width(text: str, width: int) -> str:
+    """Pad text with spaces to reach target display width."""
+    current = _display_width(text)
+    if current >= width:
+        return text
+    return text + " " * (width - current)
+
+
+def _truncate_to_width(text: str, width: int) -> str:
+    """Truncate text to fit within display width, adding '...' if needed."""
+    if _display_width(text) <= width:
+        return text
+    if width <= 3:
+        result = ""
+        w = 0
+        for ch in text:
+            cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+            if w + cw > width:
+                break
+            result += ch
+            w += cw
+        return result
+    result = ""
+    w = 0
+    for ch in text:
+        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if w + cw > width - 3:
+            break
+        result += ch
+        w += cw
+    return result + "..."
+
 
 @dataclass
 class DisplayEntry:
@@ -25,6 +80,7 @@ class DisplayEntry:
 
     role: str
     content: str
+    color: str = ""
 
 
 @contextlib.contextmanager
@@ -57,26 +113,26 @@ def _suppress_console_logs() -> Any:
             handler.setLevel(level)
 
 
-def _install_silent_audio(audio: Any) -> None:
-    """Disable audible playback for the terminal UI while keeping shutdown intact."""
-    for name in (
-        "speak",
-        "start_playback",
-        "stop_playback",
-        "wait_speaking_done",
-        "drain_buffers",
-        "stop_immediately",
-    ):
-        setattr(audio, name, lambda *args, **kwargs: None)
+class SilentAudio:
+    """Null-object audio replacement for TUI mode."""
 
-    async def _no_speak_and_wait(*args: Any, **kwargs: Any) -> None:
-        return None
+    awaiting_confirmation = False
+    is_muted = False
 
-    setattr(audio, "speak_and_wait", _no_speak_and_wait)
+    def speak(self, *a: Any, **kw: Any) -> None: pass
+    def start_playback(self, *a: Any, **kw: Any) -> None: pass
+    def stop_playback(self, *a: Any, **kw: Any) -> None: pass
+    def wait_speaking_done(self, *a: Any, **kw: Any) -> None: pass
+    def drain_buffers(self, *a: Any, **kw: Any) -> None: pass
+    def stop_immediately(self, *a: Any, **kw: Any) -> None: pass
+    def acknowledge(self, *a: Any, **kw: Any) -> None: pass
+    def play_thinking(self, *a: Any, **kw: Any) -> None: pass
+
+    async def speak_and_wait(self, *a: Any, **kw: Any) -> None: pass
 
 
 class AskmeTerminalUI:
-    """Simple full-screen chat UI built on top of the text runtime."""
+    """Full-screen chat UI with live status panel."""
 
     def __init__(self, app: AskmeApp) -> None:
         self.app = app
@@ -86,18 +142,24 @@ class AskmeTerminalUI:
         self._status_text = "就绪"
         self._started_at = time.monotonic()
         self._sync_history()
-        self._append_system("欢迎使用 askme。直接输入需求，输入 /help 查看命令。")
+        self._append_system("欢迎使用 askme。输入 /help 查看命令。")
 
     async def run(self) -> None:
         """Run the terminal UI until the user quits."""
-        _install_silent_audio(self.app.audio)
+        # Replace audio with null-object (not monkey-patching)
+        self.app.audio = SilentAudio()
+
         with _suppress_console_logs(), _alternate_screen():
             while True:
                 self._sync_history()
                 self._render()
                 try:
                     user_text = await asyncio.to_thread(input, "askme> ")
-                except (EOFError, KeyboardInterrupt):
+                except KeyboardInterrupt:
+                    # Ctrl+C → trigger ESTOP instead of exit
+                    self._handle_estop()
+                    continue
+                except EOFError:
                     break
 
                 user_text = user_text.strip()
@@ -108,6 +170,16 @@ class AskmeTerminalUI:
                 if should_exit:
                     break
 
+    def _handle_estop(self) -> None:
+        """Trigger emergency stop via Ctrl+C."""
+        try:
+            self.app.pipeline.handle_estop()
+            self._append_system(f"{_C_RED}[ESTOP] 紧急停止已触发！{_C_RESET}")
+        except Exception:
+            self._append_system(f"{_C_RED}[ESTOP] 紧急停止（安全服务未连接）{_C_RESET}")
+        self._status_text = "ESTOP"
+        self._render()
+
     async def _handle_input(self, user_text: str) -> bool:
         """Handle slash commands or dispatch a normal turn."""
         if user_text in {"/quit", "/exit", "quit", "exit"}:
@@ -115,8 +187,13 @@ class AskmeTerminalUI:
 
         if user_text == "/help":
             self._append_system(
-                "命令: /help /skills /cap /status /clear /quit"
+                "命令: /help /skills /cap /status /estop /clear /quit\n"
+                "快捷键: Ctrl+C = 紧急停止"
             )
+            return False
+
+        if user_text == "/estop":
+            self._handle_estop()
             return False
 
         if user_text == "/clear":
@@ -147,7 +224,7 @@ class AskmeTerminalUI:
             reply = await self.app._text_loop.process_turn(user_text)  # noqa: SLF001
         except Exception as exc:
             logger.exception("TUI turn failed")
-            self._append_system(f"处理失败: {exc}")
+            self._append_system(f"{_C_RED}处理失败: {exc}{_C_RESET}")
             self._status_text = "错误"
             return False
         finally:
@@ -166,31 +243,114 @@ class AskmeTerminalUI:
         width = max(width, 80)
         height = max(height, 20)
 
-        right_width = min(38, max(28, width // 3))
+        right_width = min(34, max(24, width // 3))
         left_width = max(40, width - right_width - 3)
-        body_height = max(8, height - 5)
+        body_height = max(8, height - 6)  # header(2) + sep(1) + body + sep(1) + footer(1)
 
         chat_lines = self._build_chat_lines(left_width, body_height)
         status_lines = self._build_status_lines(right_width, body_height)
 
-        header = self._truncate(
-            f" askme | profile={self.app.profile.name} | {self._status_text} ",
-            width,
-        )
-        separator = "=" * width
-        footer = self._truncate(
-            " 回车发送  /help /skills /cap /status /clear /quit ",
+        # Header bar with safety status
+        header = self._build_header(width)
+        context = self._build_context_bar(width)
+        separator = f"{_C_DIM}{'─' * width}{_C_RESET}"
+        footer = _truncate_to_width(
+            f" Ctrl+C:ESTOP  /help /skills /status /clear /quit ",
             width,
         )
 
-        lines = [header, separator]
+        lines = [header, context, separator]
         for index in range(body_height):
             left = chat_lines[index] if index < len(chat_lines) else ""
             right = status_lines[index] if index < len(status_lines) else ""
-            lines.append(f"{left.ljust(left_width)} | {right.ljust(right_width)}")
+            left_padded = _pad_to_width(left, left_width)
+            right_padded = _pad_to_width(right, right_width)
+            lines.append(f"{left_padded} {_C_DIM}│{_C_RESET} {right_padded}")
         lines.append(separator)
         lines.append(footer)
         return "\n".join(lines)
+
+    def _build_header(self, width: int) -> str:
+        """Build the top header bar with safety/connectivity status."""
+        elapsed = int(time.monotonic() - self._started_at)
+        now = time.strftime("%H:%M:%S")
+
+        # Safety state
+        estop_active = False
+        try:
+            if hasattr(self.app, '_dog_safety') and self.app._dog_safety:
+                estop_active = self.app._dog_safety.is_estop_active()
+        except Exception:
+            pass
+
+        if estop_active:
+            estop_str = f"{_C_BG_RED}{_C_WHITE} ESTOP:激活 {_C_RESET}"
+        else:
+            estop_str = f"{_C_GREEN}ESTOP:正常{_C_RESET}"
+
+        # Status color
+        if self._status_text == "ESTOP":
+            status_colored = f"{_C_BG_RED}{_C_WHITE} {self._status_text} {_C_RESET}"
+        elif self._status_text == "处理中...":
+            status_colored = f"{_C_YELLOW}{self._status_text}{_C_RESET}"
+        elif self._status_text == "错误":
+            status_colored = f"{_C_RED}{self._status_text}{_C_RESET}"
+        else:
+            status_colored = f"{_C_GREEN}{self._status_text}{_C_RESET}"
+
+        profile = getattr(self.app, 'profile', None)
+        profile_name = getattr(profile, 'name', 'text') if profile else 'text'
+
+        header = (
+            f" {_C_BOLD}THUNDER{_C_RESET}"
+            f"  {status_colored}"
+            f"  {estop_str}"
+            f"  {_C_DIM}{profile_name}{_C_RESET}"
+            f"  {_C_DIM}{now}  {elapsed}s{_C_RESET}"
+        )
+        return header
+
+    def _build_context_bar(self, width: int) -> str:
+        """Build row 2: scene summary + mission state."""
+        parts: list[str] = []
+
+        # Scene summary from WorldState
+        try:
+            if hasattr(self.app, '_change_detector') and self.app._change_detector:
+                from askme.perception.world_state import WorldState
+                # Try to get world_state from runtime services
+                ws = getattr(self.app, '_world_state', None)
+                if ws:
+                    parts.append(ws.get_summary_sync())
+        except Exception:
+            pass
+
+        # Mission state from SkillDispatcher
+        try:
+            dispatcher = getattr(self.app, '_dispatcher', None)
+            if dispatcher:
+                mission = getattr(dispatcher, 'current_mission', None)
+                if mission:
+                    state = getattr(mission, 'state', None)
+                    steps = getattr(mission, 'steps', [])
+                    state_str = state.value if state else "?"
+                    parts.append(f"任务:{state_str} ({len(steps)}步)")
+        except Exception:
+            pass
+
+        # LLM latency
+        try:
+            health = self.app.health_snapshot()
+            lat = health.get('last_llm_latency_ms')
+            if lat:
+                parts.append(f"LLM:{int(lat)}ms")
+        except Exception:
+            pass
+
+        if not parts:
+            parts.append(f"{_C_DIM}无活动任务{_C_RESET}")
+
+        return f" {_C_DIM}{'  │  '.join(parts)}{_C_RESET}"
 
     def _render(self) -> None:
         width, height = shutil.get_terminal_size((120, 36))
@@ -228,7 +388,9 @@ class AskmeTerminalUI:
 
         if self._pending_user_input:
             lines.extend(self._wrap_entry(DisplayEntry("user", self._pending_user_input), width))
-            lines.extend(self._wrap_entry(DisplayEntry("system", "askme 正在思考..."), width))
+            lines.extend(self._wrap_entry(
+                DisplayEntry("system", f"{_C_YELLOW}思考中...{_C_RESET}"), width
+            ))
 
         if len(lines) > height:
             lines = lines[-height:]
@@ -243,36 +405,48 @@ class AskmeTerminalUI:
         enabled_skills = capabilities["skills"]["enabled_count"]
         total_skills = capabilities["skills"]["count"]
 
+        status_val = health.get('status', 'unknown')
+        if status_val == 'ok':
+            status_colored = f"{_C_GREEN}ok{_C_RESET}"
+        elif status_val == 'degraded':
+            status_colored = f"{_C_YELLOW}degraded{_C_RESET}"
+        else:
+            status_colored = f"{_C_RED}{status_val}{_C_RESET}"
+
+        # Component health with colors
         component_lines = []
         for name, component in capabilities["components"].items():
-            status = component["health"].get("status", "unknown")
-            component_lines.append(f"{name}: {status}")
+            s = component["health"].get("status", "unknown")
+            if s == "ok":
+                component_lines.append(f"  {_C_GREEN}●{_C_RESET} {name}")
+            elif s == "degraded":
+                component_lines.append(f"  {_C_YELLOW}●{_C_RESET} {name}")
+            else:
+                component_lines.append(f"  {_C_RED}●{_C_RESET} {name}")
 
-        recent_skills = [
-            entry["name"]
-            for entry in capabilities["skills"]["catalog"]
-            if entry.get("enabled", False)
-        ][:6]
+        lat = health.get('last_llm_latency_ms')
+        lat_str = f"{int(lat)}ms" if lat else "-"
 
         lines = [
-            "状态",
-            f"服务: {health.get('status', 'unknown')}",
-            f"模式: {'voice' if capabilities['app']['voice_mode'] else 'text'}",
-            f"机器人: {'on' if capabilities['app']['robot_mode'] else 'off'}",
-            f"会话: {health.get('total_conversations', 0)}",
-            f"延迟: {health.get('last_llm_latency_ms') or '-'} ms",
+            f"{_C_BOLD}系统状态{_C_RESET}",
+            f"服务: {status_colored}",
+            f"延迟: {lat_str}",
             f"技能: {enabled_skills}/{total_skills}",
+            f"会话: {health.get('total_conversations', 0)}",
             f"运行: {elapsed}s",
             "",
-            "组件",
-            *component_lines[: max(0, height - 18)],
+            f"{_C_BOLD}组件{_C_RESET}",
+            *component_lines[: max(0, height - 12)],
             "",
-            "已启用技能",
-            ", ".join(recent_skills) if recent_skills else "-",
-            "",
-            "提示",
-            "右侧是状态，左侧是对话。",
+            f"{_C_BOLD}事件{_C_RESET}",
         ]
+
+        # Recent events from WorldState
+        event_lines = self._get_recent_events()
+        if event_lines:
+            lines.extend(event_lines[:max(0, height - len(lines) - 1)])
+        else:
+            lines.append(f"{_C_DIM}暂无事件{_C_RESET}")
 
         wrapped: list[str] = []
         for line in lines:
@@ -284,43 +458,62 @@ class AskmeTerminalUI:
             wrapped.extend([""] * (height - len(wrapped)))
         return wrapped
 
+    def _get_recent_events(self) -> list[str]:
+        """Get recent perception events for the status panel."""
+        try:
+            ws = getattr(self.app, '_world_state', None)
+            if ws:
+                events = ws.event_history_sync()
+                result = []
+                for ev in events[-5:]:
+                    ts = time.strftime("%H:%M", time.localtime(ev.timestamp))
+                    desc = ev.description_zh()
+                    if ev.is_person_event:
+                        result.append(f"{_C_YELLOW}{ts}{_C_RESET} {desc}")
+                    else:
+                        result.append(f"{_C_DIM}{ts}{_C_RESET} {desc}")
+                return result
+        except Exception:
+            pass
+        return []
+
     def _wrap_entry(self, entry: DisplayEntry, width: int) -> list[str]:
-        label = {
-            "user": "[你]",
-            "assistant": "[askme]",
-            "system": "[系统]",
-        }.get(entry.role, "[askme]")
+        label_colors = {
+            "user": (_C_CYAN, "[你]"),
+            "assistant": (_C_GREEN, "[askme]"),
+            "system": (_C_YELLOW, "[系统]"),
+        }
+        color, label = label_colors.get(entry.role, (_C_GREEN, "[askme]"))
+        colored_label = f"{color}{label}{_C_RESET}"
+        label_width = _display_width(label)
 
         content = entry.content.strip() or "-"
+        wrap_width = max(12, width - label_width - 1)
         wrapped = textwrap.wrap(
             content,
-            width=max(12, width - len(label) - 1),
+            width=wrap_width,
             replace_whitespace=False,
             drop_whitespace=False,
         ) or ["-"]
 
-        lines = [f"{label} {wrapped[0]}"]
-        indent = " " * (len(label) + 1)
+        lines = [f"{colored_label} {wrapped[0]}"]
+        indent = " " * (label_width + 1)
         lines.extend(f"{indent}{line}" for line in wrapped[1:])
-        return [self._truncate(line, width) for line in lines]
+        return [_truncate_to_width(line, width + 20) for line in lines]  # +20 for ANSI escapes
 
     def _wrap_line(self, text: str, width: int) -> list[str]:
         if not text:
             return [""]
+        # Don't wrap lines with ANSI codes (they mess up width calc)
+        if "\x1b[" in text:
+            return [text]
         wrapped = textwrap.wrap(
             text,
             width=max(8, width),
             replace_whitespace=False,
             drop_whitespace=False,
         )
-        return [self._truncate(line, width) for line in (wrapped or [""])]
-
-    def _truncate(self, text: str, width: int) -> str:
-        if len(text) <= width:
-            return text
-        if width <= 3:
-            return text[:width]
-        return text[: width - 3] + "..."
+        return [_truncate_to_width(line, width) for line in (wrapped or [""])]
 
     def _skills_summary(self) -> str:
         skills = self.app.skill_manager.get_enabled()
@@ -353,6 +546,7 @@ class AskmeTerminalUI:
 async def run_terminal_ui(*, robot_mode: bool = False) -> None:
     """Run askme inside the full-screen terminal UI."""
     app = AskmeApp(voice_mode=False, robot_mode=robot_mode)
+    await app.runtime.start()
     ui = AskmeTerminalUI(app)
     try:
         await ui.run()
