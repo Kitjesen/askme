@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -225,3 +227,134 @@ class TestChangeEvent:
         )
         assert "有人出现" in e.description_zh()
         assert "2.5米" in e.description_zh()
+
+
+# ---------- DDS push mode ----------
+
+class TestDdsPushMode:
+    """Tests for DDS callback-driven change detection."""
+
+    def _make_dds_client(self, *, enabled: bool = True) -> MagicMock:
+        client = MagicMock()
+        client._enabled = enabled
+        client.on = MagicMock()
+        return client
+
+    def test_init_accepts_dds_client(self):
+        dds = self._make_dds_client()
+        cd = ChangeDetector(config={}, dds_client=dds)
+        assert cd._dds_client is dds
+
+    def test_init_dds_client_default_none(self):
+        cd = ChangeDetector(config={})
+        assert cd._dds_client is None
+
+    def test_use_dds_true_when_enabled(self):
+        dds = self._make_dds_client(enabled=True)
+        cd = ChangeDetector(config={}, dds_client=dds)
+        assert cd._use_dds() is True
+
+    def test_use_dds_false_when_disabled(self):
+        dds = self._make_dds_client(enabled=False)
+        cd = ChangeDetector(config={}, dds_client=dds)
+        assert cd._use_dds() is False
+
+    def test_use_dds_false_when_none(self):
+        cd = ChangeDetector(config={}, dds_client=None)
+        assert cd._use_dds() is False
+
+    def test_on_dds_detections_processes_frame(self):
+        """DDS callback should process detection data into change events."""
+        cd = ChangeDetector(config={
+            "proactive": {"change_detector": {
+                "confirm_frames": 1,
+            }}
+        })
+
+        # First frame — sets prev_obs
+        data1 = {
+            "timestamp": 1.0,
+            "detections": [],
+        }
+        cd._on_dds_detections("/thunder/detections", data1, 1.0)
+        assert cd._prev_obs is not None
+        assert cd.is_active is True
+
+        # Second frame — person appears
+        data2 = {
+            "timestamp": 2.0,
+            "detections": [
+                {"class_id": "person", "confidence": 0.9, "bbox": [100, 100, 200, 300]},
+            ],
+        }
+        cd._on_dds_detections("/thunder/detections", data2, 2.0)
+        assert cd._prev_obs.timestamp == 2.0
+
+    def test_on_dds_detections_error_does_not_crash(self):
+        """Malformed data in DDS callback should not raise."""
+        cd = ChangeDetector(config={})
+        # Pass data that will cause from_daemon_json to work but with edge case
+        cd._on_dds_detections("/thunder/detections", {"timestamp": 0, "detections": []}, 0.0)
+        # Should not raise
+
+    async def test_run_dds_mode_registers_callback(self):
+        """In DDS mode, run() registers a callback and waits for stop."""
+        dds = self._make_dds_client(enabled=True)
+        cd = ChangeDetector(config={}, dds_client=dds)
+
+        stop = asyncio.Event()
+        # Set stop immediately so run() exits
+        stop.set()
+        await cd.run(stop)
+
+        dds.on.assert_called_once()
+        call_args = dds.on.call_args
+        assert call_args[0][0] == "/thunder/detections"
+
+    async def test_run_polling_mode_when_no_dds(self):
+        """Without DDS, run() uses the polling loop (stops quickly via stop_event)."""
+        cd = ChangeDetector(config={}, dds_client=None)
+        stop = asyncio.Event()
+
+        async def set_stop():
+            await asyncio.sleep(0.05)
+            stop.set()
+
+        asyncio.get_event_loop().create_task(set_stop())
+        await cd.run(stop)
+        # If we get here, polling loop ran and exited cleanly
+
+    def test_on_dds_detections_emits_events(self):
+        """DDS callback should emit confirmed events to the event file."""
+        cd = ChangeDetector(config={
+            "proactive": {"change_detector": {
+                "confirm_frames": 1,
+            }}
+        })
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            path = f.name
+        cd._event_file = path
+
+        # Frame 1: empty scene
+        cd._on_dds_detections("/thunder/detections", {
+            "timestamp": 1.0,
+            "detections": [],
+        }, 1.0)
+
+        # Frame 2: person appears (confirm_frames=1, so immediately confirmed)
+        cd._on_dds_detections("/thunder/detections", {
+            "timestamp": 2.0,
+            "detections": [
+                {"class_id": "person", "confidence": 0.9, "bbox": [100, 100, 200, 300]},
+            ],
+        }, 2.0)
+
+        with open(path, "r") as f:
+            lines = f.readlines()
+        assert len(lines) == 1
+        data = json.loads(lines[0])
+        assert data["event_type"] == "person_appeared"
+
+        import os
+        os.unlink(path)

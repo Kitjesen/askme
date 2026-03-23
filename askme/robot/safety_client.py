@@ -16,10 +16,13 @@ import logging
 import os
 import threading
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
 import requests
+
+if TYPE_CHECKING:
+    from askme.robot.dds_bridge_client import DdsBridgeClient
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +41,11 @@ class DogSafetyClient:
     is never delayed by network latency or service unavailability.
     """
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        dds_client: DdsBridgeClient | None = None,
+    ) -> None:
         cfg = config or {}
         self._base_url: str = (
             cfg.get("base_url")
@@ -52,6 +59,9 @@ class DogSafetyClient:
             cfg.get("operator_id")
             or os.environ.get("RUNTIME_OPERATOR_ID", "askme")
         )
+
+        # DDS bridge — used as primary ESTOP source when available
+        self._dds_client = dds_client
 
         # Cached estop state — refreshed lazily; never blocks callers
         self._cached_estop: dict[str, Any] | None = None
@@ -107,13 +117,26 @@ class DogSafetyClient:
             logger.debug("DogSafetyClient: estop state query failed: %s", exc)
             return None
 
+    def _dds_has_estop(self) -> bool:
+        """Return True if DDS client has estop data available."""
+        if self._dds_client is None:
+            return False
+        return self._dds_client.get_latest("/thunder/estop") is not None
+
     def is_estop_active(self) -> bool:
         """Return True if estop is currently active.
 
-        Uses only the in-memory cache — never triggers a network call.
-        Returns False when no cached data is available (service down = assume
-        safe to avoid blocking normal operation on a disconnected robot).
+        Prefers DDS bridge data when available; falls back to HTTP cache.
+        Returns False when no data source is available (assume safe to
+        avoid blocking normal operation on a disconnected robot).
         """
+        # Prefer DDS bridge (real-time, sub-second latency)
+        if self._dds_has_estop():
+            logger.debug("[Safety] ESTOP source: DDS")
+            return self._dds_client.is_estop_active()
+
+        # Fallback: HTTP 30s TTL cache
+        logger.debug("[Safety] ESTOP source: HTTP cache")
         with self._state_lock:
             if self._cached_estop is None:
                 return False

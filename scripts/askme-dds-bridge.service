@@ -1,0 +1,18 @@
+[Unit]
+Description=askme DDS bridge (Unix socket relay for robot telemetry)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=sunrise
+WorkingDirectory=/home/sunrise/askme
+EnvironmentFile=-/home/sunrise/askme/.env
+ExecStart=/home/sunrise/askme/.venv/bin/python -m askme.robot.dds_bridge
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:/home/sunrise/askme/logs/dds-bridge.log
+StandardError=append:/home/sunrise/askme/logs/dds-bridge.log
+
+[Install]
+WantedBy=multi-user.target

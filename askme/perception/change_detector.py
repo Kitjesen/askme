@@ -28,7 +28,14 @@ from askme.constants import (
 from askme.schemas.events import ChangeEvent, ChangeEventType
 from askme.schemas.observation import Detection, Observation
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from askme.robot.dds_bridge_client import DdsBridgeClient
+
 logger = logging.getLogger(__name__)
+
+_TOPIC_DETECTIONS = "/thunder/detections"
 
 _DETECTIONS_PATH = DAEMON_DETECTIONS_PATH
 _HEARTBEAT_PATH = DAEMON_HEARTBEAT_PATH
@@ -48,7 +55,11 @@ class _RawChange:
 class ChangeDetector:
     """Detects scene changes by comparing consecutive YOLO frames."""
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        dds_client: DdsBridgeClient | None = None,
+    ) -> None:
         cfg = (config or {}).get("proactive", {}).get("change_detector", {})
 
         self._enabled: bool = cfg.get("enabled", True)
@@ -58,6 +69,9 @@ class ChangeDetector:
         self._iou_threshold: float = float(cfg.get("iou_threshold", 0.3))
         self._event_file: str = cfg.get("event_file", _DEFAULT_EVENT_FILE)
         self._max_staleness: float = 3.0  # daemon heartbeat max age
+
+        # DDS bridge (push mode) — None means use /tmp/ polling fallback
+        self._dds_client = dds_client
 
         # State
         self._prev_obs: Observation | None = None
@@ -76,6 +90,13 @@ class ChangeDetector:
     # Main loop
     # ------------------------------------------------------------------
 
+    def _use_dds(self) -> bool:
+        """Return True if DDS push mode should be used."""
+        return (
+            self._dds_client is not None
+            and getattr(self._dds_client, "_enabled", False)
+        )
+
     async def run(self, stop_event: asyncio.Event) -> None:
         if not self._enabled:
             logger.info("[ChangeDetector] Disabled in config.")
@@ -86,6 +107,36 @@ class ChangeDetector:
             self._read_interval, self._confirm_frames, self._disappear_frames, self._iou_threshold,
         )
 
+        if self._use_dds():
+            logger.info("[ChangeDetector] Using DDS push mode")
+            self._dds_client.on(_TOPIC_DETECTIONS, self._on_dds_detections)
+            # In DDS mode, just wait for stop — callbacks handle the work
+            await stop_event.wait()
+        else:
+            logger.info("[ChangeDetector] Using /tmp/ file polling (fallback)")
+            await self._polling_loop(stop_event)
+
+        logger.info("[ChangeDetector] Stopped.")
+
+    def _on_dds_detections(self, topic: str, data: dict, ts: float) -> None:
+        """Callback for DDS detection messages (push mode).
+
+        Called in the asyncio event loop by DdsBridgeClient.
+        """
+        try:
+            obs = Observation.from_daemon_json(data)
+            self._active = True
+            if self._prev_obs is not None:
+                raw_changes = self._compare(self._prev_obs, obs)
+                events = self._debounce(raw_changes, obs.timestamp)
+                if events:
+                    self._emit_events(events)
+            self._prev_obs = obs
+        except Exception as exc:
+            logger.debug("[ChangeDetector] DDS callback error: %s", exc)
+
+    async def _polling_loop(self, stop_event: asyncio.Event) -> None:
+        """Original /tmp/ file polling loop (fallback when DDS is unavailable)."""
         while not stop_event.is_set():
             try:
                 obs = await asyncio.to_thread(self._read_daemon)
@@ -107,8 +158,6 @@ class ChangeDetector:
                 break
             except asyncio.TimeoutError:
                 pass
-
-        logger.info("[ChangeDetector] Stopped.")
 
     # ------------------------------------------------------------------
     # Daemon reading

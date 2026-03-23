@@ -23,6 +23,7 @@ from askme.memory.session import SessionMemory
 from askme.perception.vision_bridge import VisionBridge
 from askme.config import validate_config
 from askme.robot.control_client import DogControlClient
+from askme.robot.dds_bridge_client import DdsBridgeClient
 from askme.robot.safety_client import DogSafetyClient
 from askme.health_server import AskmeHealthServer, build_health_snapshot
 from askme.robot.led_controller import HttpLedController, NullLedController
@@ -172,6 +173,7 @@ class RuntimeServices:
     audio_router: AudioRouter | None
     audio: AudioAgent
     voice_runtime_bridge: VoiceRuntimeBridge
+    dds_bridge: DdsBridgeClient
     dog_safety: DogSafetyClient
     dog_control: DogControlClient
     pipeline: BrainPipeline
@@ -206,6 +208,7 @@ class RuntimeServices:
             "audio_router": self.audio_router,
             "audio": self.audio,
             "voice_runtime_bridge": self.voice_runtime_bridge,
+            "dds_bridge": self.dds_bridge,
             "dog_safety": self.dog_safety,
             "dog_control": self.dog_control,
             "dispatcher": self.dispatcher,
@@ -434,6 +437,8 @@ def _build_components(runtime: RuntimeAssembly) -> dict[str, RuntimeComponent]:
             "arm_controller": services.arm_controller is not None,
             "dog_control_service": services.dog_control.is_configured(),
             "dog_safety_service": services.dog_safety.is_configured(),
+            "dds_bridge_connected": services.dds_bridge.connected,
+            "dds_bridge_messages": services.dds_bridge.message_count,
         }
 
     def robot_capabilities() -> dict[str, Any]:
@@ -441,6 +446,7 @@ def _build_components(runtime: RuntimeAssembly) -> dict[str, RuntimeComponent]:
             "local_arm": services.arm_controller is not None,
             "runtime_control_plane": services.dog_control.is_configured(),
             "runtime_safety_plane": services.dog_safety.is_configured(),
+            "dds_bridge_enabled": services.dds_bridge._enabled,
             "profile_enabled": profile.robot_api,
         }
 
@@ -518,6 +524,24 @@ def _build_components(runtime: RuntimeAssembly) -> dict[str, RuntimeComponent]:
             description="Skill discovery, dispatch, contracts, and OpenAPI generation.",
             health_hook=skill_runtime_health,
             capabilities_hook=skill_runtime_capabilities,
+        ),
+        "dds_bridge": CallableComponent(
+            name="dds_bridge",
+            description="DDS bridge Unix socket client for real-time robot telemetry.",
+            start_hook=services.dds_bridge.start,
+            stop_hook=services.dds_bridge.stop,
+            health_hook=lambda: {
+                "status": "ok" if services.dds_bridge.connected else (
+                    "degraded" if services.dds_bridge._enabled else "disabled"
+                ),
+                "connected": services.dds_bridge.connected,
+                "message_count": services.dds_bridge.message_count,
+            },
+            capabilities_hook=lambda: {
+                "enabled": services.dds_bridge._enabled,
+                "socket_path": services.dds_bridge._socket_path,
+            },
+            default_status="disabled",
         ),
     }
 
@@ -674,7 +698,11 @@ def build_legacy_runtime(
         cfg.get("runtime", {}).get("voice_bridge", {})
     )
     splitter = StreamSplitter()
-    dog_safety = DogSafetyClient(cfg.get("runtime", {}).get("dog_safety", {}))
+    dds_bridge = DdsBridgeClient(cfg.get("dds_bridge", {}))
+    dog_safety = DogSafetyClient(
+        cfg.get("runtime", {}).get("dog_safety", {}),
+        dds_client=dds_bridge,
+    )
     dog_control = DogControlClient(cfg.get("runtime", {}).get("dog_control", {}))
 
     prompt_seed = _load_soul_seed(cfg) or brain_cfg.get("prompt_seed", [])
@@ -798,7 +826,7 @@ def build_legacy_runtime(
     if profile.change_detector:
         from askme.perception.change_detector import ChangeDetector
 
-        change_detector = ChangeDetector(config=cfg)
+        change_detector = ChangeDetector(config=cfg, dds_client=dds_bridge)
 
     services = RuntimeServices(
         ota_metrics=ota_metrics,
@@ -818,6 +846,7 @@ def build_legacy_runtime(
         audio_router=audio_router,
         audio=audio,
         voice_runtime_bridge=voice_runtime_bridge,
+        dds_bridge=dds_bridge,
         dog_safety=dog_safety,
         dog_control=dog_control,
         pipeline=pipeline,
