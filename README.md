@@ -2,6 +2,8 @@
 
 Thunder industrial inspection assistant runtime.
 
+Architecture reference: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
 `askme` is not a generic transport framework. Its value is the runtime composition around voice I/O, memory, vision, robot APIs, agent execution, and skill dispatch for the dog platform.
 
 ## Quick Start

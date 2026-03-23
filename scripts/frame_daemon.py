@@ -141,7 +141,9 @@ def main():
     import rclpy
     from rclpy.node import Node
     from rclpy.executors import MultiThreadedExecutor
+    from rclpy.qos import QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import Image
+    from std_msgs.msg import Bool, String
 
     # Init BPU model
     bpu_model = None
@@ -156,6 +158,10 @@ def main():
 
     rclpy.init()
     node = Node("askme_frame_daemon")
+
+    _be_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+    _pub_detections = node.create_publisher(String, "/thunder/detections", _be_qos)
+    _pub_heartbeat = node.create_publisher(Bool, "/thunder/heartbeat", _be_qos)
 
     color_frame = [None]
     depth_frame = [None]
@@ -218,6 +224,7 @@ def main():
                     with open(tmp_d, "w") as f:
                         json.dump(det_json, f)
                     os.rename(tmp_d, DETECTIONS_PATH)
+                    _pub_detections.publish(String(data=json.dumps(det_json)))
                 except Exception as e:
                     pass  # silent — don't crash daemon on detection error
 
@@ -237,6 +244,7 @@ def main():
         try:
             with open(HEARTBEAT_PATH, "w") as f:
                 f.write(f"{time.time():.3f}\n")
+            _pub_heartbeat.publish(Bool(data=True))
         except Exception:
             pass
 
