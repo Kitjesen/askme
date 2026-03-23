@@ -1,31 +1,31 @@
 """Declarative module system for askme runtime.
 
-Inspired by DimOS Blueprint but lighter — no automatic stream wiring,
-just declarative dependency resolution and one-line composition.
+Modules declare typed ports via ``In[T]`` / ``Out[T]`` class annotations.
+The runtime auto-wires matching ports by name + type during ``build()``.
 
 Usage::
 
-    from askme.runtime.module import Module, Runtime
+    from askme.runtime.module import Module, Runtime, In, Out
+
+    class MyBus(Module):
+        detections: Out[DetectionFrame]   # I produce detections
+        estop: Out[EstopState]            # I produce estop state
+
+        def build(self, cfg, registry):
+            ...
 
     class MyPerception(Module):
-        name = "perception"
-        depends_on = ("pulse",)
-        provides = ("detections", "world_state")
+        detections: In[DetectionFrame]    # I need detections
 
-        def build(self, cfg, services):
-            self.detector = ChangeDetector(cfg, pulse=services.pulse)
+        def build(self, cfg, registry):
+            # self.detections is auto-wired to MyBus.detections
+            print(self.detections)  # → the Out port from MyBus
 
-        async def start(self):
-            await self.detector.start()
+    # Compose — ports auto-connect:
+    runtime = Runtime.use(MyBus) + Runtime.use(MyPerception)
 
-        async def stop(self):
-            await self.detector.stop()
-
-    # Compose:
-    runtime = Runtime.use(Pulse) + Runtime.use(MyPerception)
-
-    # Swap:
-    runtime = runtime.replace(Pulse, MockPulse)
+    # Swap — same ports, different implementation:
+    runtime = runtime.replace(MyBus, MockBus)
 
     # Build and run:
     app = await runtime.build(cfg)
@@ -36,12 +36,118 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Generic, TypeVar, get_args, get_origin, get_type_hints
 
 logger = logging.getLogger(__name__)
+
+# ── Typed port descriptors ────────────────────────────────────────────
+
+T = TypeVar("T")
+
+
+class Out(Generic[T]):
+    """Output port — this module produces data of type T.
+
+    Declare as a class annotation::
+
+        class MyBus(Module):
+            detections: Out[DetectionFrame]
+    """
+
+
+class In(Generic[T]):
+    """Input port — this module consumes data of type T.
+
+    Declare as a class annotation::
+
+        class MyPerception(Module):
+            detections: In[DetectionFrame]
+
+    After build(), ``self.detections`` is auto-wired to the matching Out port.
+    """
+
+
+@dataclass(frozen=True)
+class PortInfo:
+    """Metadata about a declared port on a module."""
+
+    name: str
+    direction: str  # "in" or "out"
+    data_type: type
+    module_name: str
+
+
+def _scan_ports(module_class: type[Module]) -> list[PortInfo]:
+    """Scan a Module subclass for In[T]/Out[T] annotations."""
+    ports: list[PortInfo] = []
+    try:
+        # Build namespace from MRO for resolving forward refs
+        globalns: dict[str, Any] = {}
+        for c in reversed(module_class.__mro__):
+            if c.__module__ in sys.modules:
+                globalns.update(sys.modules[c.__module__].__dict__)
+        hints = get_type_hints(module_class, globalns=globalns)
+    except Exception:
+        hints = getattr(module_class, "__annotations__", {})
+
+    for attr_name, annotation in hints.items():
+        origin = get_origin(annotation)
+        if origin is Out:
+            args = get_args(annotation)
+            data_type = args[0] if args else Any
+            ports.append(PortInfo(attr_name, "out", data_type, module_class.name))
+        elif origin is In:
+            args = get_args(annotation)
+            data_type = args[0] if args else Any
+            ports.append(PortInfo(attr_name, "in", data_type, module_class.name))
+    return ports
+
+
+def _auto_wire(instances: dict[str, Module]) -> list[tuple[str, str, str]]:
+    """Match In ports to Out ports by name + type. Returns list of (in_mod, port_name, out_mod).
+
+    Rules:
+    - An In[T] named "foo" on module A matches an Out[T] named "foo" on module B
+    - Name AND type must both match
+    - If no match found, the In port is left as None (optional dependency)
+    - If multiple Out ports match, raises ValueError (ambiguity)
+    """
+    # Collect all Out ports: (name, type) → (module_name, module_instance)
+    out_ports: dict[tuple[str, type], tuple[str, Module]] = {}
+    for name, mod in instances.items():
+        for port in _scan_ports(type(mod)):
+            if port.direction == "out":
+                key = (port.name, port.data_type)
+                if key in out_ports:
+                    raise ValueError(
+                        f"Ambiguous Out port '{port.name}' ({port.data_type.__name__}): "
+                        f"provided by both '{out_ports[key][0]}' and '{name}'"
+                    )
+                out_ports[key] = (name, mod)
+
+    # Wire In ports
+    wired: list[tuple[str, str, str]] = []
+    for name, mod in instances.items():
+        for port in _scan_ports(type(mod)):
+            if port.direction == "in":
+                key = (port.name, port.data_type)
+                match = out_ports.get(key)
+                if match:
+                    out_mod_name, out_mod = match
+                    setattr(mod, port.name, out_mod)
+                    wired.append((name, port.name, out_mod_name))
+                    logger.debug(
+                        "Wired: %s.%s ← %s.%s (%s)",
+                        name, port.name, out_mod_name, port.name,
+                        port.data_type.__name__,
+                    )
+                else:
+                    setattr(mod, port.name, None)
+    return wired
 
 
 class Module(ABC):
@@ -154,7 +260,7 @@ class Runtime:
         return Runtime(_module_classes=filtered)
 
     async def build(self, cfg: dict[str, Any] | None = None) -> RuntimeApp:
-        """Resolve dependencies, build all modules, return a startable app."""
+        """Resolve dependencies, auto-wire ports, build all modules."""
         cfg = cfg or {}
         registry = ModuleRegistry()
 
@@ -163,6 +269,9 @@ class Runtime:
         for mc in self._module_classes:
             instance = mc()
             instances[instance.name] = instance
+
+        # Auto-wire In[T] ← Out[T] by name + type
+        wired = _auto_wire(instances)
 
         # Topological sort by depends_on
         order = _topo_sort(instances)
@@ -174,7 +283,7 @@ class Runtime:
             mod.build(cfg.get(name, cfg), registry)
             logger.debug("Module built: %s", name)
 
-        return RuntimeApp(modules=instances, start_order=order)
+        return RuntimeApp(modules=instances, start_order=order, wired_ports=wired)
 
 
 @dataclass
@@ -183,6 +292,7 @@ class RuntimeApp:
 
     modules: dict[str, Module]
     start_order: list[str]
+    wired_ports: list[tuple[str, str, str]] = field(default_factory=list)
     _started: bool = field(default=False, init=False)
 
     async def start(self) -> None:

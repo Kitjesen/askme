@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from askme.runtime.module import Module, ModuleRegistry, Runtime, RuntimeApp
+from askme.runtime.module import In, Module, ModuleRegistry, Out, Runtime, RuntimeApp, _scan_ports
 
 
 # ── Test modules ─────────────────────────────────────
@@ -261,3 +261,170 @@ async def test_four_module_diamond():
     assert app.start_order[0] == "pulse"
     await app.start()
     await app.stop()
+
+
+# ── In[T] / Out[T] typed ports ──────────────────────
+
+
+class DetectionData:
+    """Dummy typed message for port tests."""
+    pass
+
+
+class EstopData:
+    """Dummy typed message for port tests."""
+    pass
+
+
+class SensorBus(Module):
+    name = "sensor_bus"
+    detections: Out[DetectionData]
+    estop: Out[EstopData]
+
+    def build(self, cfg, registry):
+        self.value = "real_bus"
+
+
+class MockSensorBus(Module):
+    name = "sensor_bus"
+    detections: Out[DetectionData]
+    estop: Out[EstopData]
+
+    def build(self, cfg, registry):
+        self.value = "mock_bus"
+
+
+class DetectionConsumer(Module):
+    name = "det_consumer"
+    detections: In[DetectionData]
+
+    def build(self, cfg, registry):
+        pass
+
+
+class EstopConsumer(Module):
+    name = "estop_consumer"
+    estop: In[EstopData]
+
+    def build(self, cfg, registry):
+        pass
+
+
+class MultiConsumer(Module):
+    name = "multi_consumer"
+    detections: In[DetectionData]
+    estop: In[EstopData]
+
+    def build(self, cfg, registry):
+        pass
+
+
+class NoPortModule(Module):
+    name = "no_ports"
+
+    def build(self, cfg, registry):
+        pass
+
+
+# ── scan_ports ───────────────────────────────────────
+
+
+def test_scan_out_ports():
+    ports = _scan_ports(SensorBus)
+    out_names = [p.name for p in ports if p.direction == "out"]
+    assert "detections" in out_names
+    assert "estop" in out_names
+
+
+def test_scan_in_ports():
+    ports = _scan_ports(DetectionConsumer)
+    in_names = [p.name for p in ports if p.direction == "in"]
+    assert "detections" in in_names
+
+
+def test_scan_no_ports():
+    ports = _scan_ports(NoPortModule)
+    assert len(ports) == 0
+
+
+def test_scan_port_types():
+    ports = _scan_ports(SensorBus)
+    det_port = [p for p in ports if p.name == "detections"][0]
+    assert det_port.data_type is DetectionData
+    assert det_port.direction == "out"
+
+
+# ── auto-wiring ─────────────────────────────────────
+
+
+async def test_auto_wire_single_port():
+    rt = Runtime.use(SensorBus) + Runtime.use(DetectionConsumer)
+    app = await rt.build()
+    consumer = app.modules["det_consumer"]
+    assert consumer.detections is app.modules["sensor_bus"]
+
+
+async def test_auto_wire_multiple_ports():
+    rt = Runtime.use(SensorBus) + Runtime.use(MultiConsumer)
+    app = await rt.build()
+    mc = app.modules["multi_consumer"]
+    assert mc.detections is app.modules["sensor_bus"]
+    assert mc.estop is app.modules["sensor_bus"]
+
+
+async def test_auto_wire_unmatched_in_is_none():
+    """In port with no matching Out → set to None."""
+    rt = Runtime.use(DetectionConsumer)  # no SensorBus
+    app = await rt.build()
+    assert app.modules["det_consumer"].detections is None
+
+
+async def test_auto_wire_recorded_in_wired_ports():
+    rt = Runtime.use(SensorBus) + Runtime.use(DetectionConsumer)
+    app = await rt.build()
+    assert len(app.wired_ports) >= 1
+    assert any(
+        w[0] == "det_consumer" and w[1] == "detections" and w[2] == "sensor_bus"
+        for w in app.wired_ports
+    )
+
+
+async def test_replace_preserves_wiring():
+    """Replace SensorBus with MockSensorBus — wiring still works."""
+    rt = Runtime.use(SensorBus) + Runtime.use(DetectionConsumer)
+    rt = rt.replace(SensorBus, MockSensorBus)
+    app = await rt.build()
+    consumer = app.modules["det_consumer"]
+    bus = app.modules["sensor_bus"]
+    assert consumer.detections is bus
+    assert bus.value == "mock_bus"
+
+
+async def test_type_mismatch_not_wired():
+    """In[X] does not match Out[Y] even if name is same."""
+
+    class OtherType:
+        pass
+
+    class WrongTypeProducer(Module):
+        name = "wrong_producer"
+        detections: Out[OtherType]
+        def build(self, cfg, registry): pass
+
+    rt = Runtime.use(WrongTypeProducer) + Runtime.use(DetectionConsumer)
+    app = await rt.build()
+    # detections: In[DetectionData] should NOT match Out[OtherType]
+    assert app.modules["det_consumer"].detections is None
+
+
+async def test_ambiguous_out_raises():
+    """Two modules with same Out name+type → ValueError."""
+
+    class Bus2(Module):
+        name = "bus2"
+        detections: Out[DetectionData]
+        def build(self, cfg, registry): pass
+
+    rt = Runtime.use(SensorBus) + Runtime.use(Bus2) + Runtime.use(DetectionConsumer)
+    with pytest.raises(ValueError, match="Ambiguous"):
+        await rt.build()
