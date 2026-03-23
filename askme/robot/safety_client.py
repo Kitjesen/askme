@@ -22,7 +22,7 @@ from uuid import uuid4
 import requests
 
 if TYPE_CHECKING:
-    from askme.robot.dds_bridge_client import DdsBridgeClient
+    from askme.robot.pulse import Pulse
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class DogSafetyClient:
     def __init__(
         self,
         config: dict[str, Any] | None = None,
-        dds_client: DdsBridgeClient | None = None,
+        pulse: Pulse | None = None,
     ) -> None:
         cfg = config or {}
         self._base_url: str = (
@@ -60,8 +60,8 @@ class DogSafetyClient:
             or os.environ.get("RUNTIME_OPERATOR_ID", "askme")
         )
 
-        # DDS bridge — used as primary ESTOP source when available
-        self._dds_client = dds_client
+        # Pulse bus — used as primary ESTOP source when available
+        self._pulse = pulse
 
         # Cached estop state — refreshed lazily; never blocks callers
         self._cached_estop: dict[str, Any] | None = None
@@ -69,7 +69,7 @@ class DogSafetyClient:
         self._state_lock = threading.Lock()
 
         if self._base_url:
-            logger.info("DogSafetyClient configured: %s", self._base_url)
+            logger.info("DogSafetyClient configured: %s (Pulse=%s)", self._base_url, pulse is not None)
         else:
             logger.debug("DogSafetyClient: DOG_SAFETY_SERVICE_URL not set, notifications disabled")
 
@@ -117,11 +117,11 @@ class DogSafetyClient:
             logger.debug("DogSafetyClient: estop state query failed: %s", exc)
             return None
 
-    def _dds_has_estop(self) -> bool:
-        """Return True if DDS client has estop data available."""
-        if self._dds_client is None:
+    def _pulse_has_estop(self) -> bool:
+        """Return True if Pulse bus has estop data available."""
+        if self._pulse is None:
             return False
-        return self._dds_client.get_latest("/thunder/estop") is not None
+        return self._pulse.get_latest("/thunder/estop") is not None
 
     def is_estop_active(self) -> bool:
         """Return True if estop is currently active.
@@ -130,10 +130,10 @@ class DogSafetyClient:
         Returns False when no data source is available (assume safe to
         avoid blocking normal operation on a disconnected robot).
         """
-        # Prefer DDS bridge (real-time, sub-second latency)
-        if self._dds_has_estop():
-            logger.debug("[Safety] ESTOP source: DDS")
-            return self._dds_client.is_estop_active()
+        # Prefer Pulse bus (real-time, sub-second latency)
+        if self._pulse_has_estop():
+            logger.debug("[Safety] ESTOP source: Pulse")
+            return self._pulse.is_estop_active()
 
         # Fallback: HTTP 30s TTL cache
         logger.debug("[Safety] ESTOP source: HTTP cache")

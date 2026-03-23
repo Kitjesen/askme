@@ -31,7 +31,7 @@ from askme.schemas.observation import Detection, Observation
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from askme.robot.dds_bridge_client import DdsBridgeClient
+    from askme.robot.pulse import Pulse
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class ChangeDetector:
     def __init__(
         self,
         config: dict[str, Any] | None = None,
-        dds_client: DdsBridgeClient | None = None,
+        pulse: Pulse | None = None,
     ) -> None:
         cfg = (config or {}).get("proactive", {}).get("change_detector", {})
 
@@ -70,8 +70,8 @@ class ChangeDetector:
         self._event_file: str = cfg.get("event_file", _DEFAULT_EVENT_FILE)
         self._max_staleness: float = 3.0  # daemon heartbeat max age
 
-        # DDS bridge (push mode) — None means use /tmp/ polling fallback
-        self._dds_client = dds_client
+        # Pulse bus (push mode) — None means use /tmp/ polling fallback
+        self._pulse = pulse
 
         # State
         self._prev_obs: Observation | None = None
@@ -90,11 +90,11 @@ class ChangeDetector:
     # Main loop
     # ------------------------------------------------------------------
 
-    def _use_dds(self) -> bool:
-        """Return True if DDS push mode should be used."""
+    def _use_pulse(self) -> bool:
+        """Return True if Pulse push mode should be used."""
         return (
-            self._dds_client is not None
-            and getattr(self._dds_client, "_enabled", False)
+            self._pulse is not None
+            and getattr(self._pulse, "_enabled", False)
         )
 
     async def run(self, stop_event: asyncio.Event) -> None:
@@ -107,10 +107,10 @@ class ChangeDetector:
             self._read_interval, self._confirm_frames, self._disappear_frames, self._iou_threshold,
         )
 
-        if self._use_dds():
-            logger.info("[ChangeDetector] Using DDS push mode")
-            self._dds_client.on(_TOPIC_DETECTIONS, self._on_dds_detections)
-            # In DDS mode, just wait for stop — callbacks handle the work
+        if self._use_pulse():
+            logger.info("[ChangeDetector] Using Pulse push mode")
+            self._pulse.on(_TOPIC_DETECTIONS, self._on_pulse_detections)
+            # In Pulse mode, just wait for stop — callbacks handle the work
             await stop_event.wait()
         else:
             logger.info("[ChangeDetector] Using /tmp/ file polling (fallback)")
@@ -118,10 +118,10 @@ class ChangeDetector:
 
         logger.info("[ChangeDetector] Stopped.")
 
-    def _on_dds_detections(self, topic: str, data: dict, ts: float) -> None:
-        """Callback for DDS detection messages (push mode).
+    def _on_pulse_detections(self, topic: str, data: dict) -> None:
+        """Callback for Pulse detection messages (push mode).
 
-        Called in the asyncio event loop by DdsBridgeClient.
+        Called in the asyncio event loop by Pulse.
         """
         try:
             obs = Observation.from_daemon_json(data)
@@ -133,7 +133,7 @@ class ChangeDetector:
                     self._emit_events(events)
             self._prev_obs = obs
         except Exception as exc:
-            logger.debug("[ChangeDetector] DDS callback error: %s", exc)
+            logger.debug("[ChangeDetector] Pulse callback error: %s", exc)
 
     async def _polling_loop(self, stop_event: asyncio.Event) -> None:
         """Original /tmp/ file polling loop (fallback when DDS is unavailable)."""
