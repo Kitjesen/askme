@@ -1,4 +1,4 @@
-"""Composable runtime assembly for the legacy askme app."""
+"""Composable runtime assembly for askme."""
 
 from __future__ import annotations
 
@@ -155,7 +155,7 @@ def _init_robot(
 
 @dataclass
 class RuntimeServices:
-    """Concrete service instances created for a runtime profile."""
+    """Concrete service instances created for a runtime mode."""
 
     ota_metrics: OTABridgeMetrics
     llm: LLMClient
@@ -210,25 +210,31 @@ class RuntimeServices:
             "audio": self.audio,
             "voice_runtime_bridge": self.voice_runtime_bridge,
             "pulse": self.pulse,
+            "telemetry": self.pulse,
             "dog_safety": self.dog_safety,
             "dog_control": self.dog_control,
             "dispatcher": self.dispatcher,
             "agent_shell": self.agent_shell,
+            "executor": self.agent_shell,
             "health_server": self.health_server,
+            "diagnostics_server": self.health_server,
             "_pipeline": self.pipeline,
             "_commands": self.commands,
             "_text_loop": self.text_loop,
             "_voice_loop": self.voice_loop,
             "_address_detector": self.address_detector,
             "_proactive": self.proactive,
+            "_supervisor": self.proactive,
             "_led_bridge": self.led_bridge,
+            "_indicators": self.led_bridge,
             "_change_detector": self.change_detector,
+            "_change_monitor": self.change_detector,
         }
 
 
 @dataclass
 class RuntimeAssembly:
-    """Assembled runtime with profile metadata and component introspection."""
+    """Assembled runtime with mode metadata and component introspection."""
 
     cfg: dict[str, Any]
     app_name: str
@@ -374,13 +380,17 @@ class RuntimeAssembly:
 
 
 def _build_components(runtime: RuntimeAssembly) -> dict[str, RuntimeComponent]:
-    """Assemble all runtime components by delegating to the 3 plane builders."""
-    from askme.runtime.planes import build_agent_plane, build_control_plane, build_robot_plane
+    """Assemble runtime components from executive, platform, and diagnostics planes."""
+    from askme.runtime.planes import (
+        build_diagnostics_plane,
+        build_executive_plane,
+        build_platform_plane,
+    )
 
     all_components: dict[str, RuntimeComponent] = {}
-    all_components.update(build_robot_plane(runtime))
-    all_components.update(build_agent_plane(runtime))
-    all_components.update(build_control_plane(runtime))
+    all_components.update(build_platform_plane(runtime))
+    all_components.update(build_executive_plane(runtime))
+    all_components.update(build_diagnostics_plane(runtime))
 
     # Filter: only keep components included in this profile
     if runtime.profile.components:
@@ -388,7 +398,7 @@ def _build_components(runtime: RuntimeAssembly) -> dict[str, RuntimeComponent]:
     return all_components  # legacy fallback when no bundle defined
 
 
-def build_legacy_runtime(
+def build_runtime(
     *,
     cfg: dict[str, Any],
     app_name: str,
@@ -396,7 +406,7 @@ def build_legacy_runtime(
     profile: RuntimeProfile,
     robot_requested: bool,
 ) -> RuntimeAssembly:
-    """Build the runtime services used by the legacy interactive app."""
+    """Build the runtime services used by the interactive app."""
     if sys.platform == "win32":
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
@@ -443,7 +453,7 @@ def build_legacy_runtime(
     brain_cfg = cfg.get("brain", {})
     skill_model = (
         brain_cfg.get("voice_model")
-        if profile.has("voice_io")
+        if profile.has("operator_io")
         else brain_cfg.get("model")
     ) or brain_cfg.get("model", "claude-sonnet-4-5-20250929")
     skill_executor = SkillExecutor(
@@ -459,10 +469,10 @@ def build_legacy_runtime(
         voice_triggers=skill_manager.get_voice_triggers(),
     )
 
-    audio_router = AudioRouter() if profile.has("voice_io") else None
+    audio_router = AudioRouter() if profile.has("operator_io") else None
     audio = AudioAgent(
         cfg,
-        voice_mode=profile.has("voice_io"),
+        voice_mode=profile.has("operator_io"),
         metrics=ota_metrics,
         audio_router=audio_router,
     )
@@ -565,7 +575,7 @@ def build_legacy_runtime(
         voice_loop.set_address_detector(address_detector)
 
     proactive = None
-    if profile.has("proactive_runtime"):
+    if profile.has("supervisor"):
         proactive = ProactiveAgent(
             vision=vision,
             audio=audio,
@@ -578,7 +588,7 @@ def build_legacy_runtime(
         )
 
     led_bridge = None
-    if profile.has("signal_runtime"):
+    if profile.has("indicators"):
         led_cfg = cfg.get("led", {})
         led_base_url = led_cfg.get("base_url", "").strip()
         led_controller = (
@@ -598,7 +608,7 @@ def build_legacy_runtime(
         )
 
     change_detector = None
-    if profile.has("perception_runtime"):
+    if profile.has("change_monitor"):
         from askme.perception.change_detector import ChangeDetector
 
         change_detector = ChangeDetector(config=cfg, pulse=pulse)
@@ -647,7 +657,7 @@ def build_legacy_runtime(
         robot_mode=robot_mode,
     )
 
-    if profile.has("control_plane"):
+    if profile.has("diagnostics"):
         health_server = AskmeHealthServer(
             cfg.get("health_server", {}),
             snapshot_provider=runtime.health_snapshot,
@@ -706,3 +716,6 @@ def build_legacy_runtime(
     )
     log_startup_service_status()
     return runtime
+
+
+build_legacy_runtime = build_runtime

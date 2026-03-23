@@ -1,0 +1,50 @@
+"""PulseModule — wraps the Pulse DDS bus as a declarative module.
+
+Mirrors the Pulse creation logic from ``assembly.py`` line 486::
+
+    pulse = Pulse(cfg.get("pulse", {}))
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from askme.runtime.module import Module, ModuleRegistry, Out
+from askme.robot.pulse import Pulse
+from askme.schemas.messages import (
+    CmsState,
+    DetectionFrame,
+    EstopState,
+    ImuSnapshot,
+    JointStateSnapshot,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class PulseModule(Module):
+    """Provides the Pulse DDS data bus to the runtime."""
+
+    name = "pulse"
+    provides = ("telemetry", "dds")
+
+    detections: Out[DetectionFrame]
+    estop: Out[EstopState]
+    joints: Out[JointStateSnapshot]
+    imu: Out[ImuSnapshot]
+    cms_state: Out[CmsState]
+
+    def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
+        pulse_cfg = cfg.get("pulse", {})
+        self.bus = Pulse(pulse_cfg)
+        logger.info("PulseModule: built (enabled=%s)", self.bus.available)
+
+    async def start(self) -> None:
+        await self.bus.start()
+
+    async def stop(self) -> None:
+        await self.bus.stop()
+
+    def health(self) -> dict[str, Any]:
+        return self.bus.health()

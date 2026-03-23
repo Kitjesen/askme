@@ -38,7 +38,7 @@ class _FakeApp:
             "profile": {"name": "text", "primary_loop": "text"},
             "components": {
                 "memory": {"health": {"status": "ok"}},
-                "skill_runtime": {"health": {"status": "ok"}},
+                "skills": {"health": {"status": "ok"}},
             },
             "skills": {
                 "count": 2,

@@ -2,14 +2,31 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from askme.runtime.components import CallableComponent, resolve_start_order
+from askme.runtime.profiles import (
+    EDGE_ROBOT_MODE,
+    EDGE_ROBOT_PROFILE,
+    MCP_MODE,
+    MCP_PROFILE,
+    TEXT_MODE,
+    TEXT_PROFILE,
+    VOICE_MODE,
+    VOICE_PROFILE,
+    RuntimeMode,
+    RuntimeProfile,
+    legacy_profile_for,
+    mode_for,
+)
 
 
 # ---------------------------------------------------------------------------
 # resolve_start_order
 # ---------------------------------------------------------------------------
+
 
 class TestResolveStartOrder:
     def test_empty_components(self) -> None:
@@ -83,49 +100,53 @@ class TestResolveStartOrder:
 # RuntimeProfile.has()
 # ---------------------------------------------------------------------------
 
-from askme.runtime.profiles import (
-    EDGE_ROBOT_PROFILE,
-    MCP_PROFILE,
-    TEXT_PROFILE,
-    VOICE_PROFILE,
-    RuntimeProfile,
-    legacy_profile_for,
-)
-
 
 class TestRuntimeProfileHas:
-    def test_voice_profile_has_voice_io(self) -> None:
-        assert VOICE_PROFILE.has("voice_io") is True
+    def test_voice_profile_has_operator_io(self) -> None:
+        assert VOICE_PROFILE.has("operator_io") is True
 
-    def test_text_profile_lacks_voice_io(self) -> None:
-        assert TEXT_PROFILE.has("voice_io") is False
+    def test_text_profile_lacks_operator_io(self) -> None:
+        assert TEXT_PROFILE.has("operator_io") is False
 
-    def test_edge_robot_has_signal_runtime(self) -> None:
-        assert EDGE_ROBOT_PROFILE.has("signal_runtime") is True
+    def test_edge_robot_has_indicators(self) -> None:
+        assert EDGE_ROBOT_PROFILE.has("indicators") is True
 
-    def test_voice_profile_lacks_signal_runtime(self) -> None:
-        assert VOICE_PROFILE.has("signal_runtime") is False
+    def test_voice_profile_lacks_indicators(self) -> None:
+        assert VOICE_PROFILE.has("indicators") is False
 
     def test_all_profiles_have_memory(self) -> None:
         for profile in [VOICE_PROFILE, TEXT_PROFILE, MCP_PROFILE, EDGE_ROBOT_PROFILE]:
             assert profile.has("memory") is True
 
     def test_has_always_true_for_common_components(self) -> None:
-        assert TEXT_PROFILE.has("skill_runtime") is True
-        assert TEXT_PROFILE.has("agent_shell") is True
+        assert TEXT_PROFILE.has("skills") is True
+        assert TEXT_PROFILE.has("executor") is True
 
     def test_snapshot_serializes_components(self) -> None:
         snap = VOICE_PROFILE.snapshot()
         assert isinstance(snap["components"], list)
         assert sorted(snap["components"]) == snap["components"]
 
-    def test_legacy_profile_for_robot_adds_robot_api(self) -> None:
+    def test_legacy_profile_for_robot_adds_robot_io(self) -> None:
         profile = legacy_profile_for(voice_mode=False, robot_mode=True)
-        assert profile.has("robot_api") is True
+        assert profile.has("robot_io") is True
         assert profile.robot_api is True
 
+    def test_mode_aliases_match_profiles(self) -> None:
+        assert RuntimeMode is RuntimeProfile
+        assert VOICE_MODE == VOICE_PROFILE
+        assert TEXT_MODE == TEXT_PROFILE
+        assert MCP_MODE == MCP_PROFILE
+        assert EDGE_ROBOT_MODE == EDGE_ROBOT_PROFILE
+
+    def test_mode_for_alias_matches_legacy_profile_for(self) -> None:
+        assert mode_for(voice_mode=True, robot_mode=False) == legacy_profile_for(
+            voice_mode=True,
+            robot_mode=False,
+        )
+
     def test_legacy_fallback_for_empty_components(self) -> None:
-        """Profile created via replace() without components uses bool fallback."""
+        """Profile created directly without components uses bool fallback."""
         bare = RuntimeProfile(
             name="bare",
             description="test",
@@ -140,11 +161,12 @@ class TestRuntimeProfileHas:
             change_detector=False,
             http_chat=False,
         )
-        # components is empty frozenset → falls back to bool fields
-        assert bare.has("voice_io") is True
+        assert bare.has("operator_io") is True
+        assert bare.has("robot_io") is False
+        assert bare.has("diagnostics") is True  # maps to health_http
+        assert bare.has("voice_io") is True  # legacy alias still resolves
         assert bare.has("robot_api") is False
-        assert bare.has("control_plane") is True  # maps to health_http
-        # Unknown component → True (always included)
+        assert bare.has("control_plane") is True
         assert bare.has("memory") is True
 
 
@@ -152,49 +174,45 @@ class TestRuntimeProfileHas:
 # Profile-based component filtering
 # ---------------------------------------------------------------------------
 
+
 class TestProfileComponentFiltering:
     """Verify _build_components filters by profile.has()."""
 
     def test_profile_components_match_runtime(self) -> None:
         """Components built for a profile are a subset of profile.components."""
         profile = VOICE_PROFILE
-        # Simulate the filter logic from _build_components
         all_components = {
             "memory": CallableComponent(name="memory", description="M"),
-            "skill_runtime": CallableComponent(name="skill_runtime", description="S"),
-            "agent_shell": CallableComponent(name="agent_shell", description="A"),
-            "voice_io": CallableComponent(name="voice_io", description="V"),
-            "pulse": CallableComponent(name="pulse", description="P"),
-            "control_plane": CallableComponent(name="control_plane", description="CP"),
-            "robot_api": CallableComponent(name="robot_api", description="R"),
+            "skills": CallableComponent(name="skills", description="S"),
+            "executor": CallableComponent(name="executor", description="A"),
+            "operator_io": CallableComponent(name="operator_io", description="V"),
+            "telemetry": CallableComponent(name="telemetry", description="P"),
+            "diagnostics": CallableComponent(name="diagnostics", description="D"),
+            "robot_io": CallableComponent(name="robot_io", description="R"),
             "vision": CallableComponent(name="vision", description="Vis"),
-            "proactive_runtime": CallableComponent(name="proactive_runtime", description="PR"),
-            "perception_runtime": CallableComponent(name="perception_runtime", description="PER"),
-            "signal_runtime": CallableComponent(name="signal_runtime", description="SIG"),
+            "supervisor": CallableComponent(name="supervisor", description="Sup"),
+            "change_monitor": CallableComponent(name="change_monitor", description="Mon"),
+            "indicators": CallableComponent(name="indicators", description="Ind"),
         }
-        if profile.components:
-            filtered = {k: v for k, v in all_components.items() if profile.has(k)}
-        else:
-            filtered = all_components
-
+        filtered = {k: v for k, v in all_components.items() if profile.has(k)}
         assert set(filtered.keys()) <= set(profile.components)
 
-    def test_robot_api_excluded_from_voice_profile(self) -> None:
-        """VOICE_PROFILE does not include robot_api."""
-        assert VOICE_PROFILE.has("robot_api") is False
-        # Simulate: robot_api built by plane but filtered out
+    def test_robot_io_excluded_from_voice_profile(self) -> None:
+        """VOICE_PROFILE does not include robot_io."""
+        assert VOICE_PROFILE.has("robot_io") is False
         all_components = {
             "memory": CallableComponent(name="memory", description="M"),
-            "robot_api": CallableComponent(name="robot_api", description="R"),
+            "robot_io": CallableComponent(name="robot_io", description="R"),
         }
         filtered = {k: v for k, v in all_components.items() if VOICE_PROFILE.has(k)}
-        assert "robot_api" not in filtered
+        assert "robot_io" not in filtered
         assert "memory" in filtered
 
 
 # ---------------------------------------------------------------------------
 # Stop order is reverse of start order
 # ---------------------------------------------------------------------------
+
 
 class TestStopOrderReversesStartOrder:
     """Verify RuntimeAssembly stops components in reverse topological order."""
@@ -221,9 +239,6 @@ class TestStopOrderReversesStartOrder:
             "c": make_component("c", depends_on=("b",)),
         }
 
-        # Build a minimal RuntimeAssembly with async-safe mock services
-        from unittest.mock import AsyncMock, MagicMock
-
         services = MagicMock()
         services.pipeline.shutdown = AsyncMock()
         services.audio.shutdown = MagicMock()
@@ -244,8 +259,6 @@ class TestStopOrderReversesStartOrder:
         await runtime.start()
         start_log = [entry for entry in log if entry.startswith("start:")]
         assert start_log == ["start:a", "start:b", "start:c"]
-
-        # Verify _start_order is stored
         assert runtime._start_order == ["a", "b", "c"]
 
         await runtime.stop()

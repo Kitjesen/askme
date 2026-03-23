@@ -17,7 +17,7 @@ from typing import Any
 
 from askme import __version__ as ASKME_VERSION
 from askme.config import get_config
-from askme.runtime import build_legacy_runtime, legacy_profile_for
+from askme.runtime import build_runtime, mode_for
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +31,11 @@ class AskmeApp:
         self._app_version = self.cfg.get("app", {}).get("version") or ASKME_VERSION
         self._setup_logging()
 
-        profile = legacy_profile_for(
+        profile = mode_for(
             voice_mode=voice_mode,
             robot_mode=robot_mode,
         )
-        self.runtime = build_legacy_runtime(
+        self.runtime = build_runtime(
             cfg=self.cfg,
             app_name=self._app_name,
             app_version=self._app_version,
@@ -43,6 +43,7 @@ class AskmeApp:
             robot_requested=robot_mode,
         )
         self.profile = self.runtime.profile
+        self.mode = self.runtime.profile
         self.voice_mode = self.runtime.voice_mode
         self.robot_mode = self.runtime.robot_mode
 

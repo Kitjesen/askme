@@ -120,7 +120,7 @@ class TestHealthServer:
                 capabilities_provider=lambda: {
                     "profile": {"name": "voice", "primary_loop": "voice"},
                     "components": {
-                        "skill_runtime": {
+                        "skills": {
                             "health": {"status": "ok"},
                             "capabilities": {"openapi_generated": True},
                         }
@@ -135,7 +135,7 @@ class TestHealthServer:
         assert response.status_code == 200
         data = response.json()
         assert data["profile"]["name"] == "voice"
-        assert data["components"]["skill_runtime"]["capabilities"]["openapi_generated"] is True
+        assert data["components"]["skills"]["capabilities"]["openapi_generated"] is True
         assert data["skills"]["contract_count"] == 3
 
 

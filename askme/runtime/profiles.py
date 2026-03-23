@@ -1,4 +1,4 @@
-"""Named runtime profiles used to assemble askme."""
+"""Named runtime modes used to assemble askme."""
 
 from __future__ import annotations
 
@@ -10,24 +10,36 @@ from typing import Any
 # Component bundle constants — used by RuntimeProfile.components frozenset
 # ---------------------------------------------------------------------------
 
+_COMPONENT_ALIASES = {
+    "voice_io": "operator_io",
+    "skill_runtime": "skills",
+    "agent_shell": "executor",
+    "proactive_runtime": "supervisor",
+    "pulse": "telemetry",
+    "robot_api": "robot_io",
+    "perception_runtime": "change_monitor",
+    "signal_runtime": "indicators",
+    "control_plane": "diagnostics",
+}
+
 _COMMON_COMPONENTS = frozenset({
-    "memory", "skill_runtime", "agent_shell", "vision",
+    "memory", "skills", "executor", "vision",
 })
 
 _VOICE_COMPONENTS = _COMMON_COMPONENTS | frozenset({
-    "pulse", "voice_io", "control_plane", "proactive_runtime",
+    "telemetry", "operator_io", "diagnostics", "supervisor",
 })
 
 _TEXT_COMPONENTS = _COMMON_COMPONENTS | frozenset({
-    "pulse", "control_plane", "proactive_runtime",
+    "telemetry", "diagnostics", "supervisor",
 })
 
 _MCP_COMPONENTS = _COMMON_COMPONENTS | frozenset({
-    "pulse", "voice_io", "robot_api",
+    "telemetry", "operator_io", "robot_io",
 })
 
 _EDGE_ROBOT_COMPONENTS = _VOICE_COMPONENTS | frozenset({
-    "robot_api", "signal_runtime", "perception_runtime",
+    "robot_io", "indicators", "change_monitor",
 })
 
 
@@ -55,16 +67,17 @@ class RuntimeProfile:
         Falls back to the legacy bool fields when the components set is
         empty (backward-compatible with profiles built via ``replace()``).
         """
+        component_name = _COMPONENT_ALIASES.get(component_name, component_name)
         if self.components:
             return component_name in self.components
         # Legacy fallback: map component names to bool fields
         _FIELD_MAP: dict[str, str] = {
-            "voice_io": "voice_io",
-            "robot_api": "robot_api",
-            "control_plane": "health_http",
-            "proactive_runtime": "proactive",
-            "signal_runtime": "led_bridge",
-            "perception_runtime": "change_detector",
+            "operator_io": "voice_io",
+            "robot_io": "robot_api",
+            "diagnostics": "health_http",
+            "supervisor": "proactive",
+            "indicators": "led_bridge",
+            "change_monitor": "change_detector",
         }
         field_name = _FIELD_MAP.get(component_name)
         if field_name is not None:
@@ -93,7 +106,7 @@ VOICE_PROFILE = RuntimeProfile(
     led_bridge=False,
     change_detector=True,
     http_chat=True,
-    components=_VOICE_COMPONENTS | frozenset({"perception_runtime"}),
+    components=_VOICE_COMPONENTS | frozenset({"change_monitor"}),
 )
 
 TEXT_PROFILE = RuntimeProfile(
@@ -154,8 +167,20 @@ def legacy_profile_for(*, voice_mode: bool, robot_mode: bool) -> RuntimeProfile:
             TEXT_PROFILE,
             robot_api=True,
             description="Interactive text runtime with robot APIs and health endpoints.",
-            components=_TEXT_COMPONENTS | frozenset({"robot_api"}),
+            components=_TEXT_COMPONENTS | frozenset({"robot_io"}),
         )
     if voice_mode:
         return VOICE_PROFILE
     return TEXT_PROFILE
+
+
+RuntimeMode = RuntimeProfile
+VOICE_MODE = VOICE_PROFILE
+TEXT_MODE = TEXT_PROFILE
+MCP_MODE = MCP_PROFILE
+EDGE_ROBOT_MODE = EDGE_ROBOT_PROFILE
+
+
+def mode_for(*, voice_mode: bool, robot_mode: bool) -> RuntimeMode:
+    """Resolve legacy CLI flags into a named runtime mode."""
+    return legacy_profile_for(voice_mode=voice_mode, robot_mode=robot_mode)

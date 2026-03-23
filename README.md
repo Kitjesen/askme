@@ -34,8 +34,8 @@ Legacy flags are still accepted for compatibility, including `python -m askme --
 
 The current architecture follows four rules:
 
-1. `voice_io`, `memory`, `vision`, `robot_api`, `agent_shell`, and `skill_runtime` are assembled as composable runtime components instead of being hard-wired inside `app.py`.
-2. A named profile layer controls assembly. The main profiles are `voice`, `text`, `mcp`, and `edge_robot`.
+1. `operator_io`, `memory`, `vision`, `robot_io`, `executor`, and `skills` are assembled as composable runtime components instead of being hard-wired inside `app.py`.
+2. A named mode layer controls assembly. The main modes are `voice`, `text`, `mcp`, and `edge_robot`.
 3. Skill contracts are defined in code first. MCP catalogs and OpenAPI are generated from those contracts, while legacy `SKILL.md` files still provide prompt bodies during migration.
 4. Every runtime component exposes a consistent lifecycle and introspection surface: `start()`, `stop()`, `health()`, and `capabilities()`.
 
@@ -44,7 +44,7 @@ This deliberately does not copy the `dimos` transport stack (`In/Out/LCM/Transpo
 ## Platform Boundary
 
 Inside `askme`, the runtime still assembles local components such as `vision`,
-`robot_api`, and `skill_runtime`. That is an internal composition concern, not a
+`robot_io`, and `skills`. That is an internal composition concern, not a
 statement that `askme` owns the full robot runtime.
 
 For the NOVA Dog product boundary:
@@ -126,16 +126,22 @@ Key files:
 High-level runtime view:
 
 ```text
-profile
+mode
   -> runtime assembly
-      -> voice_io
+      -> operator_io
       -> memory
       -> vision
-      -> robot_api
-      -> agent_shell
-      -> skill_runtime
-      -> optional control_plane / proactive_runtime / perception_runtime / signal_runtime
+      -> robot_io
+      -> executor
+      -> skills
+      -> optional diagnostics / supervisor / change_monitor / indicators
 ```
+
+Runtime planes:
+
+- `executive`: operator IO, memory, executor, skills
+- `platform`: telemetry, robot IO, vision, indicators
+- `diagnostics`: health, metrics, capabilities, HTTP endpoints
 
 ## Skill Contracts
 
