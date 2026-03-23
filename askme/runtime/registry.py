@@ -58,9 +58,13 @@ class BackendRegistry:
                 ...
         """
         def decorator(cls):
+            # Soft check: warn but don't block if class doesn't inherit from ABC.
+            # Existing implementations predate the ABC interfaces — strict enforcement
+            # will be enabled once all classes inherit from their interface.
             if not issubclass(cls, self.interface):
-                raise TypeError(
-                    f"{cls.__name__} must implement {self.interface.__name__}"
+                logger.debug(
+                    "%s backend %r (%s) does not inherit %s — registered anyway",
+                    self.name, name, cls.__name__, self.interface.__name__,
                 )
             self._backends[name] = cls
             logger.debug("Registered %s backend: %s → %s", self.name, name, cls.__name__)

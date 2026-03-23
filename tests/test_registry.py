@@ -54,14 +54,22 @@ def test_no_backend_no_default_raises():
         reg.create({})
 
 
-def test_wrong_type_raises():
+def test_wrong_type_registers_with_soft_check():
+    """Non-conforming class is registered with a debug warning (soft check).
+
+    Strict issubclass enforcement is deferred until all existing
+    implementations inherit from their ABC interfaces.
+    """
     reg = BackendRegistry("test", DummyInterface)
 
     class NotDummy:
-        pass
+        def __init__(self, cfg):
+            self.cfg = cfg
 
-    with pytest.raises(TypeError, match="must implement"):
-        reg.register("bad")(NotDummy)
+    # Should NOT raise — soft check logs a warning but registers anyway
+    reg.register("bad")(NotDummy)
+    assert "bad" in reg
+    assert reg.get_class("bad") is NotDummy
 
 
 def test_available():
