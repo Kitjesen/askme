@@ -1,11 +1,11 @@
-"""ThunderBus — 雷霆数据总线.
+"""Pulse — 脉搏数据总线.
 
 在 askme 进程内直接订阅 ROS2 DDS 话题，后台线程 spin。
 不需要 bridge 进程、socket、systemd service。
 
 Usage::
 
-    bus = ThunderBus(cfg)
+    bus = Pulse(cfg)
     bus.on("/thunder/detections", my_callback)
     await bus.start()
     ...
@@ -79,8 +79,8 @@ if _RCLPY_AVAILABLE:
     }
 
 
-class ThunderBus:
-    """雷霆数据总线 — 进程内直连 DDS.
+class Pulse:
+    """脉搏数据总线 — 进程内直连 DDS.
 
     rclpy 在后台线程 spin，回调通过 ``call_soon_threadsafe`` 推到 asyncio。
     没有 bridge 进程、没有 socket、没有 reconnect 逻辑。
@@ -121,7 +121,7 @@ class ThunderBus:
         if self._started:
             return
         if not self.available:
-            logger.info("ThunderBus: disabled (rclpy not available)")
+            logger.info("Pulse: disabled (rclpy not available)")
             return
 
         self._loop = asyncio.get_running_loop()
@@ -145,11 +145,11 @@ class ThunderBus:
         # Spin in background thread
         self._stop_event.clear()
         self._spin_thread = threading.Thread(
-            target=self._spin, name="thunder_bus_spin", daemon=True,
+            target=self._spin, name="pulse_spin", daemon=True,
         )
         self._spin_thread.start()
         self._started = True
-        logger.info("ThunderBus: started (node=%s, topics=%d)", self._node_name, len(_TOPIC_REGISTRY))
+        logger.info("Pulse: started (node=%s, topics=%d)", self._node_name, len(_TOPIC_REGISTRY))
 
     async def stop(self) -> None:
         """Stop the bus — shutdown rclpy executor and join thread."""
@@ -165,7 +165,7 @@ class ThunderBus:
             self._node.destroy_node()
             self._node = None
         self._started = False
-        logger.info("ThunderBus: stopped (total_msgs=%d)", self._msg_count)
+        logger.info("Pulse: stopped (total_msgs=%d)", self._msg_count)
 
     def _spin(self) -> None:
         """Background thread: spin rclpy executor until stop."""
@@ -173,7 +173,7 @@ class ThunderBus:
             while not self._stop_event.is_set() and rclpy.ok():
                 self._executor.spin_once(timeout_sec=0.1)
         except Exception as e:
-            logger.warning("ThunderBus spin error: %s", e)
+            logger.warning("Pulse spin error: %s", e)
 
     def _on_message(self, topic: str, parser: Callable, raw_msg: Any) -> None:
         """Called from rclpy thread — parse and dispatch."""
