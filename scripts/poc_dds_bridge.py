@@ -40,6 +40,7 @@ from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
 )
+from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Bool, String
 
 SOCKET_PATH = "/tmp/askme_dds_bridge.sock"
@@ -87,6 +88,31 @@ class DdsBridge(Node):
         )
         self.get_logger().info("Subscribed to /thunder/estop")
 
+        # Subscribe to brainstem topics (Phase 4)
+        self.create_subscription(
+            JointState,
+            "/thunder/joint_states",
+            self._on_joint_states,
+            QOS_SENSOR,
+        )
+        self.get_logger().info("Subscribed to /thunder/joint_states")
+
+        self.create_subscription(
+            Imu,
+            "/thunder/imu",
+            self._on_imu,
+            QOS_SENSOR,
+        )
+        self.get_logger().info("Subscribed to /thunder/imu")
+
+        self.create_subscription(
+            String,
+            "/thunder/cms_state",
+            self._on_cms_state,
+            QOS_RELIABLE_LATCHED,
+        )
+        self.get_logger().info("Subscribed to /thunder/cms_state")
+
         # Timer to log stats every 10s
         self._msg_count = 0
         self.create_timer(10.0, self._log_stats)
@@ -121,8 +147,32 @@ class DdsBridge(Node):
     def _on_estop(self, msg: Bool) -> None:
         self._msg_count += 1
         self._broadcast("/thunder/estop", {"active": msg.data})
-        level = "WARN" if msg.data else "INFO"
         self.get_logger().info(f"ESTOP state: {'ACTIVE' if msg.data else 'normal'}")
+
+    def _on_joint_states(self, msg: JointState) -> None:
+        self._msg_count += 1
+        self._broadcast("/thunder/joint_states", {
+            "name": list(msg.name),
+            "position": list(msg.position),
+            "velocity": list(msg.velocity),
+            "effort": list(msg.effort),
+        })
+
+    def _on_imu(self, msg: Imu) -> None:
+        self._msg_count += 1
+        self._broadcast("/thunder/imu", {
+            "angular_velocity": {"x": msg.angular_velocity.x, "y": msg.angular_velocity.y, "z": msg.angular_velocity.z},
+            "orientation": {"x": msg.orientation.x, "y": msg.orientation.y, "z": msg.orientation.z, "w": msg.orientation.w},
+            "linear_acceleration": {"x": msg.linear_acceleration.x, "y": msg.linear_acceleration.y, "z": msg.linear_acceleration.z},
+        })
+
+    def _on_cms_state(self, msg: String) -> None:
+        self._msg_count += 1
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            data = {"raw": msg.data}
+        self._broadcast("/thunder/cms_state", data)
 
     def _log_stats(self) -> None:
         with self._sock_clients_lock:

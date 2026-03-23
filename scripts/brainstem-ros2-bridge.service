@@ -1,0 +1,17 @@
+[Unit]
+Description=Brainstem gRPC to ROS2 bridge (joint_states, imu, cmd_vel)
+After=network.target
+Wants=askme-dds-bridge.service
+
+[Service]
+Type=simple
+User=sunrise
+Environment=PYTHONPATH=/home/sunrise/shared/proto/python
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 /home/sunrise/askme/scripts/brainstem_ros2_bridge.py --host 127.0.0.1 --port 13145'
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
