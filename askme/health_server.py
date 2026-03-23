@@ -781,6 +781,7 @@ class AskmeHealthServer:
         if self._task is not None and not self._task.done():
             return self._task
 
+        self._started_event = asyncio.Event()
         self._task = asyncio.create_task(self.serve(), name="askme-health-server")
         await self.wait_started(self._task, timeout_s=self._startup_timeout_s)
         logger.info("Askme health server listening on %s", self.url)
