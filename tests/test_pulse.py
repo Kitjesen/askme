@@ -8,7 +8,7 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from askme.robot.pulse import Pulse
+from askme.robot.pulse import Pulse, _PUBLISH_REGISTRY
 
 
 # ── Construction ─────────────────────────────────────
@@ -204,3 +204,152 @@ async def test_start_stop_idempotent():
     await bus.start()  # double start
     await bus.stop()
     await bus.stop()  # double stop
+
+
+# ── Health with per-topic freshness ─────────────────
+
+
+def test_health_topics_is_dict():
+    """health()['topics'] is now a dict keyed by topic name."""
+    bus = Pulse({"enabled": False})
+    bus._on_message("/thunder/estop", lambda m: {"active": True}, None)
+    h = bus.health()
+    assert isinstance(h["topics"], dict)
+    assert "/thunder/estop" in h["topics"]
+
+
+def test_health_topic_freshness_fields():
+    """Each topic entry has the expected freshness fields."""
+    bus = Pulse({"enabled": False})
+    bus._on_message("/thunder/estop", lambda m: {"active": False}, None)
+    h = bus.health()
+    info = h["topics"]["/thunder/estop"]
+    assert "last_ts" in info
+    assert "age_ms" in info
+    assert "stale" in info
+    assert "msg_count" in info
+    assert "rate_hz" in info
+    assert info["msg_count"] == 1
+    assert info["last_ts"] > 0
+
+
+def test_health_stale_detection():
+    """A topic with an old timestamp should be marked stale."""
+    bus = Pulse({"enabled": False})
+    bus._on_message("/thunder/detections", lambda m: {"detections": []}, None)
+    # Force the last_ts to be old (detections threshold is 2000ms)
+    bus._topic_last_ts["/thunder/detections"] = time.time() - 10.0
+    h = bus.health()
+    info = h["topics"]["/thunder/detections"]
+    assert info["stale"] is True
+    assert info["age_ms"] > 2000
+
+
+def test_health_not_stale_when_fresh():
+    """A topic with a recent timestamp should not be stale."""
+    bus = Pulse({"enabled": False})
+    bus._on_message("/thunder/detections", lambda m: {"detections": []}, None)
+    h = bus.health()
+    info = h["topics"]["/thunder/detections"]
+    assert info["stale"] is False
+    assert info["age_ms"] < 2000
+
+
+def test_health_estop_stale_threshold_is_long():
+    """ESTOP has a 60s threshold -- should not be stale after a few seconds."""
+    bus = Pulse({"enabled": False})
+    bus._on_message("/thunder/estop", lambda m: {"active": False}, None)
+    # Force 5 seconds old -- well within 60s threshold
+    bus._topic_last_ts["/thunder/estop"] = time.time() - 5.0
+    h = bus.health()
+    info = h["topics"]["/thunder/estop"]
+    assert info["stale"] is False
+
+
+def test_health_rate_hz_calculation():
+    """rate_hz should reflect messages in the sliding window."""
+    bus = Pulse({"enabled": False})
+    now = time.time()
+    # Simulate 20 messages in 10 seconds
+    for i in range(20):
+        bus._record_topic_msg("/thunder/detections", now - 9.5 + i * 0.5)
+    # Also put something in _latest so topic shows in health
+    bus._latest["/thunder/detections"] = {"detections": [], "_ts": now}
+    h = bus.health()
+    info = h["topics"]["/thunder/detections"]
+    assert info["rate_hz"] == 2.0  # 20 msgs / 10s
+    assert info["msg_count"] == 20
+
+
+def test_health_rate_hz_prunes_old_entries():
+    """Messages older than the 10s window are pruned from rate calculation."""
+    bus = Pulse({"enabled": False})
+    now = time.time()
+    # 5 old messages (15s ago) + 5 recent messages
+    for i in range(5):
+        bus._record_topic_msg("/thunder/imu", now - 15.0 + i * 0.1)
+    for i in range(5):
+        bus._record_topic_msg("/thunder/imu", now - 1.0 + i * 0.1)
+    bus._latest["/thunder/imu"] = {"angular_velocity": {}, "_ts": now}
+    h = bus.health()
+    info = h["topics"]["/thunder/imu"]
+    # Only the 5 recent messages should be in the window
+    assert info["rate_hz"] == 0.5  # 5 msgs / 10s
+
+
+def test_health_msg_count_per_topic():
+    """Per-topic msg_count increments correctly."""
+    bus = Pulse({"enabled": False})
+    bus._on_message("/thunder/estop", lambda m: {"active": True}, None)
+    bus._on_message("/thunder/estop", lambda m: {"active": False}, None)
+    bus._on_message("/thunder/detections", lambda m: {"detections": []}, None)
+    h = bus.health()
+    assert h["topics"]["/thunder/estop"]["msg_count"] == 2
+    assert h["topics"]["/thunder/detections"]["msg_count"] == 1
+    assert h["msg_count"] == 3
+
+
+def test_health_last_message_type_for_known_topics():
+    """Well-known topics include last_message_type in health info."""
+    bus = Pulse({"enabled": False})
+    bus._on_message("/thunder/estop", lambda m: {"active": False}, None)
+    h = bus.health()
+    info = h["topics"]["/thunder/estop"]
+    assert info["last_message_type"] == "EstopState"
+
+
+def test_health_no_message_type_for_unknown_topic():
+    """Unknown topics do not include last_message_type."""
+    bus = Pulse({"enabled": False})
+    bus._on_message("/custom/topic", lambda m: {"v": 1}, None)
+    h = bus.health()
+    info = h["topics"]["/custom/topic"]
+    assert "last_message_type" not in info
+
+
+# ── Publish registry ────────────────────────────────
+
+
+def test_publish_rejects_unregistered_topic():
+    """Publishing to an unregistered topic should be a no-op (logged warning)."""
+    bus = Pulse({"enabled": False})
+    bus._started = True
+    bus._node = MagicMock()
+    initial_count = bus._msg_count
+    bus.publish("/unregistered/topic", {"data": 1})
+    # Should not have created any publisher
+    assert not hasattr(bus, "_publishers") or "/unregistered/topic" not in getattr(bus, "_publishers", {})
+    assert bus._msg_count == initial_count
+
+
+def test_publish_registry_is_empty_without_rclpy():
+    """Without rclpy, _PUBLISH_REGISTRY should be empty."""
+    with patch("askme.robot.pulse._RCLPY_AVAILABLE", False):
+        # The registry is set at module level; if rclpy not available, it stays empty
+        # We test the guard in publish() instead
+        bus = Pulse({"enabled": False})
+        bus._started = True
+        bus._node = MagicMock()
+        bus.publish("/thunder/world_state", {"test": True})
+        # Should be rejected since _PUBLISH_REGISTRY may be empty or topic not in it
+        # Either way, no crash

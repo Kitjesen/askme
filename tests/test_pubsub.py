@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock
 
 from askme.robot.pubsub import PubSubBase
@@ -157,6 +158,7 @@ def test_mock_pulse_health_shows_topics():
     mock.publish("/thunder/estop", {"active": False})
     mock.publish("/thunder/imu", {"x": 0})
     h = mock.health()
+    # topics is now a dict keyed by topic name; `in` still works on dict keys
     assert "/thunder/estop" in h["topics"]
     assert "/thunder/imu" in h["topics"]
 
@@ -183,3 +185,86 @@ def test_mock_pulse_isinstance_pubsub():
     """MockPulse is a proper PubSubBase implementation."""
     mock = MockPulse()
     assert isinstance(mock, PubSubBase)
+
+
+# ── MockPulse health with per-topic freshness ─────
+
+
+def test_mock_pulse_health_topic_freshness():
+    """MockPulse health() returns per-topic freshness info."""
+    mock = MockPulse()
+    mock.publish("/thunder/estop", {"active": False})
+    h = mock.health()
+    topics = h["topics"]
+    assert isinstance(topics, dict)
+    info = topics["/thunder/estop"]
+    assert "last_ts" in info
+    assert "age_ms" in info
+    assert "stale" in info
+    assert "msg_count" in info
+    assert "rate_hz" in info
+    assert info["msg_count"] == 1
+
+
+def test_mock_pulse_health_msg_count():
+    """MockPulse health() includes total msg_count."""
+    mock = MockPulse()
+    mock.publish("/thunder/estop", {"active": False})
+    mock.publish("/thunder/estop", {"active": True})
+    mock.publish("/thunder/imu", {"angular_velocity": {"x": 0}})
+    h = mock.health()
+    assert h["msg_count"] == 3
+    assert h["topics"]["/thunder/estop"]["msg_count"] == 2
+    assert h["topics"]["/thunder/imu"]["msg_count"] == 1
+
+
+def test_mock_pulse_health_stale_detection():
+    """MockPulse health() detects stale topics."""
+    mock = MockPulse()
+    mock.publish("/thunder/detections", {"detections": []})
+    # Force the timestamp to be old (detections threshold is 2000ms)
+    mock._topic_last_ts["/thunder/detections"] = time.time() - 10.0
+    h = mock.health()
+    info = h["topics"]["/thunder/detections"]
+    assert info["stale"] is True
+
+
+def test_mock_pulse_health_not_stale_when_fresh():
+    """MockPulse health() shows fresh topics as not stale."""
+    mock = MockPulse()
+    mock.publish("/thunder/detections", {"detections": []})
+    h = mock.health()
+    info = h["topics"]["/thunder/detections"]
+    assert info["stale"] is False
+
+
+def test_mock_pulse_health_rate_hz():
+    """MockPulse health() calculates rate_hz from sliding window."""
+    mock = MockPulse()
+    now = time.time()
+    # Simulate 10 messages in 10 seconds via _record_topic_msg
+    for i in range(10):
+        mock._record_topic_msg("/thunder/imu", now - 9.0 + i)
+    mock._latest["/thunder/imu"] = {"angular_velocity": {}}
+    mock._msg_count = 10
+    h = mock.health()
+    info = h["topics"]["/thunder/imu"]
+    assert info["rate_hz"] == 1.0  # 10 msgs / 10s
+
+
+def test_mock_pulse_health_last_message_type():
+    """MockPulse health() includes last_message_type for known topics."""
+    mock = MockPulse()
+    mock.publish("/thunder/estop", {"active": False})
+    h = mock.health()
+    info = h["topics"]["/thunder/estop"]
+    assert info["last_message_type"] == "EstopState"
+
+
+def test_mock_pulse_health_no_message_type_for_unknown():
+    """Unknown topics do not get last_message_type."""
+    mock = MockPulse()
+    mock.publish("/custom/topic", {"v": 1})
+    h = mock.health()
+    info = h["topics"]["/custom/topic"]
+    assert "last_message_type" not in info

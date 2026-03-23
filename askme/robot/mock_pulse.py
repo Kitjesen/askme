@@ -5,6 +5,7 @@ No rclpy, no threads, no I/O.  Dict-based storage with synchronous callbacks.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
 
 from askme.robot.pubsub import PubSubBase
@@ -17,6 +18,8 @@ class MockPulse(PubSubBase):
         self._latest: dict[str, dict] = {}
         self._callbacks: dict[str, list[Callable]] = {}
         self._started = False
+        self._msg_count = 0
+        self._init_topic_tracking()
 
     @property
     def connected(self) -> bool:
@@ -39,14 +42,18 @@ class MockPulse(PubSubBase):
 
     def publish(self, topic: str, data: dict) -> None:
         """Publish a message: store in cache and fire callbacks synchronously."""
+        ts = time.time()
         self._latest[topic] = data
+        self._msg_count += 1
+        self._record_topic_msg(topic, ts)
         for cb in self._callbacks.get(topic, []):
             cb(topic, data)
 
     def health(self) -> dict[str, Any]:
-        """Health snapshot."""
+        """Health snapshot with per-topic freshness."""
         return {
             "status": "ok" if self.connected else "disconnected",
             "connected": self.connected,
-            "topics": list(self._latest.keys()),
+            "msg_count": self._msg_count,
+            "topics": self._build_topics_health(list(self._latest.keys())),
         }

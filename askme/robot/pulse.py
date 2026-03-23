@@ -80,6 +80,16 @@ if _RCLPY_AVAILABLE:
         "/thunder/cms_state": (String, "latched", lambda m: json.loads(m.data) if m.data.startswith("{") else {"state": m.data}),
     }
 
+# Publish registry: topic → (msg_type, encoder).
+# Only topics listed here may be published via Pulse.publish().
+_PUBLISH_REGISTRY: dict[str, tuple] = {}
+
+if _RCLPY_AVAILABLE:
+    _PUBLISH_REGISTRY = {
+        "/thunder/world_state": (String, lambda d: String(data=json.dumps(d))),
+        "/thunder/askme_status": (String, lambda d: String(data=json.dumps(d))),
+    }
+
 
 class Pulse(PubSubBase):
     """脉搏数据总线 — 进程内直连 DDS.
@@ -105,6 +115,9 @@ class Pulse(PubSubBase):
         self._callbacks: dict[str, list[Callable]] = {}
         self._msg_count = 0
         self._started = False
+
+        # Per-topic freshness tracking (from PubSubBase)
+        self._init_topic_tracking()
 
     @property
     def available(self) -> bool:
@@ -184,8 +197,12 @@ class Pulse(PubSubBase):
         except Exception:
             return
 
-        data["_ts"] = time.time()
+        ts = time.time()
+        data["_ts"] = ts
         self._msg_count += 1
+
+        # Per-topic freshness tracking
+        self._record_topic_msg(topic, ts)
 
         # Update latest cache (thread-safe)
         with self._latest_lock:
@@ -217,26 +234,33 @@ class Pulse(PubSubBase):
     def publish(self, topic: str, data: dict) -> None:
         """Publish a message to a DDS topic.
 
-        Creates a rclpy String publisher on first publish per topic.
-        No-op if rclpy is not available.
+        Only topics in ``_PUBLISH_REGISTRY`` are allowed. Unregistered topics
+        are logged as a warning and rejected.
         """
         if not self._started or self._node is None:
             return
+
+        if topic not in _PUBLISH_REGISTRY:
+            logger.warning("Pulse.publish: rejected unregistered topic %r", topic)
+            return
+
         if not hasattr(self, "_publishers"):
             self._publishers: dict[str, Any] = {}
+
+        msg_type, encoder = _PUBLISH_REGISTRY[topic]
         if topic not in self._publishers:
             qos = _QOS_LATCHED if topic.endswith("/estop") else _QOS_SENSOR
-            self._publishers[topic] = self._node.create_publisher(String, topic, qos)
-        msg = String()
-        msg.data = json.dumps(data)
+            self._publishers[topic] = self._node.create_publisher(msg_type, topic, qos)
+
+        msg = encoder(data)
         self._publishers[topic].publish(msg)
 
     def health(self) -> dict[str, Any]:
-        """Health snapshot for runtime introspection."""
+        """Health snapshot for runtime introspection with per-topic freshness."""
         return {
             "status": "ok" if self.connected else ("disabled" if not self.available else "disconnected"),
             "available": self.available,
             "connected": self.connected,
             "msg_count": self._msg_count,
-            "topics": list(self._latest.keys()),
+            "topics": self._build_topics_health(list(self._latest.keys())),
         }
