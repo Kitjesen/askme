@@ -146,6 +146,7 @@ class ProactiveAgent:
         self._event_poll_interval: float = float(pro_cfg.get("event_poll_interval", 5))
         self._telemetry_api_key: str | None = pro_cfg.get("telemetry_api_key")
         self._last_event_id: str | None = None
+        self._seen_event_ids: set[str] = set()
         self._topic_last_spoken: dict[str, float] = {}
 
         # Auto-tasks
@@ -521,9 +522,10 @@ class ProactiveAgent:
             event_id = event.get("event_id", "")
             topic = event.get("topic", "")
 
-            # Skip events we've already processed
-            if self._last_event_id and event_id <= self._last_event_id:
+            # Skip events we've already processed (use set for safe dedup)
+            if event_id in self._seen_event_ids:
                 continue
+            self._seen_event_ids.add(event_id)
 
             # Only alert on recognized topics
             if topic not in _ALERT_TOPICS:
@@ -555,6 +557,9 @@ class ProactiveAgent:
         # Track last event_id to avoid re-processing
         if events:
             self._last_event_id = events[-1].get("event_id")
+            # Bound the dedup set to prevent unbounded memory growth
+            if len(self._seen_event_ids) > 1000:
+                self._seen_event_ids.clear()
 
     def _fetch_events(self) -> list[dict[str, Any]]:
         """Synchronous HTTP fetch of recent telemetry events."""

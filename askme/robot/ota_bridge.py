@@ -705,14 +705,14 @@ class OTABridge:
             self._device_id = device_id
             self._device_token = device_token
             self._registered_at = registered_at
-            self._save_state()
+        self._save_state()
 
     def _clear_registration(self) -> None:
         with self._state_lock:
             self._device_id = None
             self._device_token = None
             self._registered_at = None
-            self._save_state()
+        self._save_state()
 
     def _is_registered(self) -> bool:
         with self._state_lock:

@@ -80,57 +80,57 @@ class MemoryBridge:
                 return self._service is not None
             self._init_attempted = True
 
-        if not self._enabled:
-            logger.info("[Memory] Memory disabled in config.")
-            return False
+            if not self._enabled:
+                logger.info("[Memory] Memory disabled in config.")
+                return False
 
-        # Health check via thread to avoid blocking the event loop
-        reachable = await asyncio.to_thread(self._check_embedding_server)
-        if not reachable:
-            logger.warning("[Memory] Embedding server not reachable -- memory disabled.")
-            return False
+            # Health check via thread to avoid blocking the event loop
+            reachable = await asyncio.to_thread(self._check_embedding_server)
+            if not reachable:
+                logger.warning("[Memory] Embedding server not reachable -- memory disabled.")
+                return False
 
-        # Import MemU lazily so the rest of askme works without it installed
-        try:
-            # Add memU/src to path if not already present
-            import os
-            from askme.config import project_root
-            memu_src = str(project_root() / "memU" / "src")
-            if memu_src not in sys.path:
-                sys.path.insert(0, memu_src)
+            # Import MemU lazily so the rest of askme works without it installed
+            try:
+                # Add memU/src to path if not already present
+                import os
+                from askme.config import project_root
+                memu_src = str(project_root() / "memU" / "src")
+                if memu_src not in sys.path:
+                    sys.path.insert(0, memu_src)
 
-            from memu.app import MemoryService  # type: ignore[import-untyped]
+                from memu.app import MemoryService  # type: ignore[import-untyped]
 
-            self._service = MemoryService(
-                llm_profiles={
-                    "default": {
-                        "api_key": self._brain_cfg.get("api_key", ""),
-                        "base_url": self._brain_cfg.get("base_url", ""),
-                        "chat_model": self._brain_cfg.get("model", "MiniMax-M2.7-highspeed"),
-                        "client_backend": "sdk",
+                self._service = MemoryService(
+                    llm_profiles={
+                        "default": {
+                            "api_key": self._brain_cfg.get("api_key", ""),
+                            "base_url": self._brain_cfg.get("base_url", ""),
+                            "chat_model": self._brain_cfg.get("model", "MiniMax-M2.7-highspeed"),
+                            "client_backend": "sdk",
+                        },
+                        "embedding": {
+                            "api_key": "sk-dummy",
+                            "base_url": self._embed_url,
+                            "embed_model": self._embed_model,
+                        },
                     },
-                    "embedding": {
-                        "api_key": "sk-dummy",
-                        "base_url": self._embed_url,
-                        "embed_model": self._embed_model,
+                    retrieve_config={
+                        "method": self._retrieve_method,
+                        "route_intention": False,
+                        "sufficiency_check": False,
+                        "resource": {"enabled": False},
+                        "category": {"top_k": 3},
+                        "item": {"top_k": 5},
                     },
-                },
-                retrieve_config={
-                    "method": self._retrieve_method,
-                    "route_intention": False,
-                    "sufficiency_check": False,
-                    "resource": {"enabled": False},
-                    "category": {"top_k": 3},
-                    "item": {"top_k": 5},
-                },
-            )
-            logger.info("[Memory] MemoryService initialised successfully.")
-            return True
+                )
+                logger.info("[Memory] MemoryService initialised successfully.")
+                return True
 
-        except Exception as exc:
-            logger.warning("[Memory] MemoryService init failed: %s", exc)
-            self._service = None
-            return False
+            except Exception as exc:
+                logger.warning("[Memory] MemoryService init failed: %s", exc)
+                self._service = None
+                return False
 
     # ------------------------------------------------------------------
     # Public API

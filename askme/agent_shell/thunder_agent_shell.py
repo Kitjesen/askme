@@ -129,6 +129,7 @@ class ThunderAgentShell:
             Path(__file__).parent.parent.parent / "data" / "agent_workspace"
         )
         self._depth = _depth
+        self._default_timeout: float = float(os.environ.get("AGENT_TIMEOUT", 120.0))
         # Current action string — updated during tool execution so the heartbeat
         # can report what the agent is doing instead of a generic message.
         self._current_action = ""

@@ -633,7 +633,7 @@ class AskmeHealthServer:
         self._conversation_provider: Callable[[], list[dict[str, Any]]] | None = None
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task[None] | None = None
-        self._started_event: asyncio.Event = asyncio.Event()
+        self._started_event: asyncio.Event | None = None  # lazy-init in async context
         self._bound_port: int | None = None
 
         self._app = create_health_app(
@@ -729,7 +729,7 @@ class AskmeHealthServer:
             return None
         import asyncio
         import base64
-        frame = await asyncio.get_event_loop().run_in_executor(None, vb._capture_frame)
+        frame = await asyncio.to_thread(vb._capture_frame)
         if frame is None:
             return None
         try:

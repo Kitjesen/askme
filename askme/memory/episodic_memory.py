@@ -177,6 +177,7 @@ class EpisodicMemory:
         self._total_logged: int = 0
         self._cumulative_importance: float = 0.0  # Park 2023 trigger
         self._reflecting: bool = False
+        self._reflect_lock: asyncio.Lock | None = None  # lazy-init in async context
         # Cache for _load_all_knowledge — invalidated by _update_knowledge
         self._knowledge_cache: str | None = None
         self._knowledge_cache_time: float = 0.0
@@ -260,6 +261,9 @@ class EpisodicMemory:
         """
         if not self._llm:
             return None
+        # Atomic check-and-set via asyncio.Lock to prevent concurrent reflections
+        if self._reflect_lock is None:
+            self._reflect_lock = asyncio.Lock()
         if self._reflecting:
             logger.debug("Reflection skipped: already running")
             return None

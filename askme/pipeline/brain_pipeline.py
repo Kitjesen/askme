@@ -239,10 +239,12 @@ class BrainPipeline:
         self._audio.drain_buffers()
 
         if self._dog_safety and self._dog_safety.is_configured():
-            asyncio.create_task(
+            _estop_t = asyncio.create_task(
                 asyncio.to_thread(self._dog_safety.query_estop_state),
                 name="estop_refresh",
             )
+            self._pending_tasks.add(_estop_t)
+            _estop_t.add_done_callback(self._pending_tasks.discard)
 
         async def _compress_bg() -> None:
             try:

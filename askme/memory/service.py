@@ -76,16 +76,19 @@ class MemoryService:
 
     def get_anomaly_hotspots(self, min_count: int = 2) -> list[Location]:
         """Get locations with frequent anomalies."""
-        return self._site.get_anomaly_hotspots(min_count=min_count)
+        with self._lock:
+            return self._site.get_anomaly_hotspots(min_count=min_count)
 
     def find_nearby(self, coords: tuple[float, float],
                     radius: float = 10.0) -> list[Location]:
         """Find locations within radius of coordinates."""
-        return self._site.find_nearby(coords, radius=radius)
+        with self._lock:
+            return self._site.find_nearby(coords, radius=radius)
 
     def get_location_history(self, name: str, limit: int = 10) -> list:
         """Get recent events at a location."""
-        return self._site.get_location_history(name, limit=limit)
+        with self._lock:
+            return self._site.get_location_history(name, limit=limit)
 
     # -- Procedural --
 
@@ -100,7 +103,8 @@ class MemoryService:
 
     def get_best_procedure(self, task_type: str):
         """Get the best-scoring procedure for a task type."""
-        return self._procedures.get_best_procedure(task_type)
+        with self._lock:
+            return self._procedures.get_best_procedure(task_type)
 
     # -- Admission --
 
@@ -136,14 +140,15 @@ class MemoryService:
 
         Combines spatial + procedural context.
         """
-        parts: list[str] = []
-        site_ctx = self._site.get_context(query)
-        if site_ctx:
-            parts.append(site_ctx)
-        proc_ctx = self._procedures.get_context()
-        if proc_ctx:
-            parts.append(proc_ctx)
-        return "\n".join(parts)
+        with self._lock:
+            parts: list[str] = []
+            site_ctx = self._site.get_context(query)
+            if site_ctx:
+                parts.append(site_ctx)
+            proc_ctx = self._procedures.get_context()
+            if proc_ctx:
+                parts.append(proc_ctx)
+            return "\n".join(parts)
 
     # -- Persistence --
 
