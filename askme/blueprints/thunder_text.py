@@ -1,0 +1,60 @@
+"""Thunder Text — 纯文本交互模式.
+
+No voice IO, no audio hardware. For SSH sessions and development.
+
+Usage::
+
+    python -m askme.blueprints.thunder_text
+"""
+
+from askme.runtime.module import Runtime
+from askme.runtime.modules import (
+    ExecutorModule,
+    HealthModule,
+    LLMModule,
+    MemoryModule,
+    PipelineModule,
+    ProactiveModule,
+    PulseModule,
+    SafetyModule,
+    SkillModule,
+    TextModule,
+    ToolsModule,
+)
+
+thunder_text = (
+    Runtime.use(LLMModule)
+    + Runtime.use(ToolsModule)
+    + Runtime.use(PulseModule)
+    + Runtime.use(MemoryModule)
+    + Runtime.use(SafetyModule)
+    + Runtime.use(PipelineModule)
+    + Runtime.use(SkillModule)
+    + Runtime.use(ExecutorModule)
+    + Runtime.use(TextModule)
+    + Runtime.use(ProactiveModule)
+    + Runtime.use(HealthModule)
+)
+
+__all__ = ["thunder_text"]
+
+if __name__ == "__main__":
+    import asyncio
+    import signal
+
+    from askme.config import load_config
+
+    async def main():
+        cfg = load_config()
+        app = await thunder_text.build(cfg)
+
+        stop = asyncio.Event()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            asyncio.get_running_loop().add_signal_handler(sig, stop.set)
+
+        await app.start()
+        print(f"Thunder Text running — {len(app.modules)} modules")
+        await stop.wait()
+        await app.stop()
+
+    asyncio.run(main())
