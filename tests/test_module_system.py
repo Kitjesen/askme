@@ -7,7 +7,10 @@ from typing import Any
 
 import pytest
 
-from askme.runtime.module import In, Module, ModuleRegistry, Out, Runtime, RuntimeApp, _scan_ports
+from askme.runtime.module import (
+    In, Module, ModuleRegistry, Out, Required, Runtime, RuntimeApp,
+    WireResult, _scan_ports, _validate_topology,
+)
 
 
 # ── Test modules ─────────────────────────────────────
@@ -428,3 +431,121 @@ async def test_ambiguous_out_raises():
     rt = Runtime.use(SensorBus) + Runtime.use(Bus2) + Runtime.use(DetectionConsumer)
     with pytest.raises(ValueError, match="Ambiguous"):
         await rt.build()
+
+
+# ── Required[T] ports ────────────────────────────────
+
+
+class RequiredConsumer(Module):
+    name = "req_consumer"
+    detections: Required[DetectionData]
+
+    def build(self, cfg, registry):
+        pass
+
+
+async def test_required_port_satisfied():
+    rt = Runtime.use(SensorBus) + Runtime.use(RequiredConsumer)
+    app = await rt.build()
+    assert app.modules["req_consumer"].detections is app.modules["sensor_bus"]
+
+
+async def test_required_port_missing_raises():
+    rt = Runtime.use(RequiredConsumer)  # no SensorBus
+    with pytest.raises(ValueError, match="Required port"):
+        await rt.build()
+
+
+async def test_optional_in_missing_is_none():
+    """In[T] without provider → None (no error)."""
+    rt = Runtime.use(DetectionConsumer)
+    app = await rt.build()
+    assert app.modules["det_consumer"].detections is None
+
+
+# ── Semantic matching (same type, different name) ────
+
+
+class PoseData:
+    pass
+
+
+class SlamModule(Module):
+    name = "slam"
+    odom: Out[PoseData]
+
+    def build(self, cfg, registry):
+        pass
+
+
+class PlannerModule(Module):
+    name = "planner"
+    robot_pose: In[PoseData]  # different name than "odom"
+
+    def build(self, cfg, registry):
+        pass
+
+
+async def test_semantic_match_different_names():
+    """Same type, different name, unique provider → auto-wired."""
+    rt = Runtime.use(SlamModule) + Runtime.use(PlannerModule)
+    app = await rt.build()
+    assert app.modules["planner"].robot_pose is app.modules["slam"]
+    assert len(app.wire_result.semantic_matches) == 1
+
+
+async def test_semantic_match_not_used_when_exact_exists():
+    """Exact name+type match takes priority over semantic."""
+    class ExactProducer(Module):
+        name = "exact_prod"
+        detections: Out[DetectionData]
+        def build(self, cfg, registry): pass
+
+    rt = Runtime.use(ExactProducer) + Runtime.use(DetectionConsumer)
+    app = await rt.build()
+    assert app.modules["det_consumer"].detections is app.modules["exact_prod"]
+    assert len(app.wire_result.semantic_matches) == 0  # exact, not semantic
+
+
+async def test_semantic_match_ambiguous_skipped():
+    """Two Out[PoseData] with different names → semantic match skipped."""
+    class Slam2(Module):
+        name = "slam2"
+        world_pose: Out[PoseData]
+        def build(self, cfg, registry): pass
+
+    rt = Runtime.use(SlamModule) + Runtime.use(Slam2) + Runtime.use(PlannerModule)
+    app = await rt.build()
+    # robot_pose: In[PoseData] can't decide between odom and world_pose
+    assert app.modules["planner"].robot_pose is None
+
+
+# ── Topology validation ──────────────────────────────
+
+
+async def test_orphan_out_detected():
+    """Out port with no subscriber → flagged in wire_result."""
+    class LonelyProducer(Module):
+        name = "lonely"
+        data: Out[PoseData]
+        def build(self, cfg, registry): pass
+
+    rt = Runtime.use(LonelyProducer)
+    app = await rt.build()
+    assert len(app.wire_result.orphan_outs) == 1
+    assert app.wire_result.orphan_outs[0][0] == "lonely"
+
+
+async def test_no_orphans_when_fully_wired():
+    rt = Runtime.use(SensorBus) + Runtime.use(MultiConsumer)
+    app = await rt.build()
+    assert len(app.wire_result.orphan_outs) == 0
+
+
+async def test_wire_result_has_diagnostics():
+    rt = Runtime.use(SensorBus) + Runtime.use(DetectionConsumer)
+    app = await rt.build()
+    wr = app.wire_result
+    assert len(wr.wired) >= 1
+    # estop Out has no subscriber → orphan
+    assert any(o[1] == "estop" for o in wr.orphan_outs)

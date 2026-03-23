@@ -71,21 +71,31 @@ class In(Generic[T]):
     """
 
 
+class Required(Generic[T]):
+    """Required input port — build() fails if no matching Out exists.
+
+    Same as In[T] but enforced at build time::
+
+        class Planner(Module):
+            scene: Required[SceneGraph]   # must have a provider
+            weather: In[WeatherInfo]      # optional, None if missing
+    """
+
+
 @dataclass(frozen=True)
 class PortInfo:
     """Metadata about a declared port on a module."""
 
     name: str
-    direction: str  # "in" or "out"
+    direction: str  # "in", "out", or "required_in"
     data_type: type
     module_name: str
 
 
 def _scan_ports(module_class: type[Module]) -> list[PortInfo]:
-    """Scan a Module subclass for In[T]/Out[T] annotations."""
+    """Scan a Module subclass for In[T]/Out[T]/Required[T] annotations."""
     ports: list[PortInfo] = []
     try:
-        # Build namespace from MRO for resolving forward refs
         globalns: dict[str, Any] = {}
         for c in reversed(module_class.__mro__):
             if c.__module__ in sys.modules:
@@ -100,6 +110,10 @@ def _scan_ports(module_class: type[Module]) -> list[PortInfo]:
             args = get_args(annotation)
             data_type = args[0] if args else Any
             ports.append(PortInfo(attr_name, "out", data_type, module_class.name))
+        elif origin is Required:
+            args = get_args(annotation)
+            data_type = args[0] if args else Any
+            ports.append(PortInfo(attr_name, "required_in", data_type, module_class.name))
         elif origin is In:
             args = get_args(annotation)
             data_type = args[0] if args else Any
@@ -107,47 +121,132 @@ def _scan_ports(module_class: type[Module]) -> list[PortInfo]:
     return ports
 
 
-def _auto_wire(instances: dict[str, Module]) -> list[tuple[str, str, str]]:
-    """Match In ports to Out ports by name + type. Returns list of (in_mod, port_name, out_mod).
+@dataclass
+class WireResult:
+    """Result of auto-wiring: connections made + diagnostics."""
 
-    Rules:
-    - An In[T] named "foo" on module A matches an Out[T] named "foo" on module B
-    - Name AND type must both match
-    - If no match found, the In port is left as None (optional dependency)
-    - If multiple Out ports match, raises ValueError (ambiguity)
+    wired: list[tuple[str, str, str]]  # (in_mod, port_name, out_mod)
+    unwired_optional: list[tuple[str, str, str]]  # (mod, port, type_name)
+    orphan_outs: list[tuple[str, str, str]]  # (mod, port, type_name) — no subscriber
+    semantic_matches: list[tuple[str, str, str, str]]  # (in_mod, in_port, out_mod, out_port)
+
+
+def _auto_wire(instances: dict[str, Module]) -> WireResult:
+    """Match In/Required ports to Out ports. Supports:
+
+    1. **Exact match**: name + type both match (highest priority)
+    2. **Semantic match**: type matches but name differs — only when the type has
+       exactly one Out and one In across all modules (unambiguous)
+    3. **Required enforcement**: Required[T] ports with no match raise ValueError
+    4. **Orphan detection**: Out ports with no subscriber are flagged
     """
-    # Collect all Out ports: (name, type) → (module_name, module_instance)
-    out_ports: dict[tuple[str, type], tuple[str, Module]] = {}
-    for name, mod in instances.items():
+    # Collect all Out ports
+    out_by_name_type: dict[tuple[str, type], tuple[str, Module]] = {}
+    out_by_type: dict[type, list[tuple[str, str, Module]]] = {}  # type → [(port_name, mod_name, mod)]
+
+    for mod_name, mod in instances.items():
         for port in _scan_ports(type(mod)):
             if port.direction == "out":
                 key = (port.name, port.data_type)
-                if key in out_ports:
+                if key in out_by_name_type:
                     raise ValueError(
                         f"Ambiguous Out port '{port.name}' ({port.data_type.__name__}): "
-                        f"provided by both '{out_ports[key][0]}' and '{name}'"
+                        f"provided by both '{out_by_name_type[key][0]}' and '{mod_name}'"
                     )
-                out_ports[key] = (name, mod)
+                out_by_name_type[key] = (mod_name, mod)
+                out_by_type.setdefault(port.data_type, []).append(
+                    (port.name, mod_name, mod)
+                )
 
-    # Wire In ports
     wired: list[tuple[str, str, str]] = []
-    for name, mod in instances.items():
+    unwired_optional: list[tuple[str, str, str]] = []
+    semantic_matches: list[tuple[str, str, str, str]] = []
+    consumed_outs: set[tuple[str, type]] = set()
+
+    # Collect all In/Required ports
+    in_ports: list[tuple[str, Module, PortInfo]] = []
+    for mod_name, mod in instances.items():
         for port in _scan_ports(type(mod)):
-            if port.direction == "in":
-                key = (port.name, port.data_type)
-                match = out_ports.get(key)
-                if match:
-                    out_mod_name, out_mod = match
-                    setattr(mod, port.name, out_mod)
-                    wired.append((name, port.name, out_mod_name))
-                    logger.debug(
-                        "Wired: %s.%s ← %s.%s (%s)",
-                        name, port.name, out_mod_name, port.name,
-                        port.data_type.__name__,
-                    )
-                else:
-                    setattr(mod, port.name, None)
-    return wired
+            if port.direction in ("in", "required_in"):
+                in_ports.append((mod_name, mod, port))
+
+    for mod_name, mod, port in in_ports:
+        # 1. Try exact match (name + type)
+        key = (port.name, port.data_type)
+        match = out_by_name_type.get(key)
+
+        if match:
+            out_mod_name, out_mod = match
+            setattr(mod, port.name, out_mod)
+            wired.append((mod_name, port.name, out_mod_name))
+            consumed_outs.add(key)
+            logger.debug("Wired (exact): %s.%s ← %s.%s", mod_name, port.name, out_mod_name, port.name)
+            continue
+
+        # 2. Try semantic match (same type, different name, unambiguous)
+        type_providers = out_by_type.get(port.data_type, [])
+        if len(type_providers) == 1:
+            out_port_name, out_mod_name, out_mod = type_providers[0]
+            setattr(mod, port.name, out_mod)
+            wired.append((mod_name, port.name, out_mod_name))
+            consumed_outs.add((out_port_name, port.data_type))
+            semantic_matches.append((mod_name, port.name, out_mod_name, out_port_name))
+            logger.info(
+                "Wired (semantic): %s.%s ← %s.%s (%s) — names differ but type unique",
+                mod_name, port.name, out_mod_name, out_port_name,
+                port.data_type.__name__,
+            )
+            continue
+
+        # 3. No match
+        if port.direction == "required_in":
+            raise ValueError(
+                f"Required port '{mod_name}.{port.name}' ({port.data_type.__name__}) "
+                f"has no matching Out — cannot build"
+            )
+
+        setattr(mod, port.name, None)
+        unwired_optional.append((mod_name, port.name, port.data_type.__name__))
+        logger.debug("Unwired (optional): %s.%s (%s)", mod_name, port.name, port.data_type.__name__)
+
+    # 4. Detect orphan Outs (no subscriber)
+    orphan_outs: list[tuple[str, str, str]] = []
+    for (port_name, data_type), (mod_name, _) in out_by_name_type.items():
+        if (port_name, data_type) not in consumed_outs:
+            orphan_outs.append((mod_name, port_name, data_type.__name__))
+            logger.warning("Orphan Out: %s.%s (%s) — no subscriber", mod_name, port_name, data_type.__name__)
+
+    return WireResult(
+        wired=wired,
+        unwired_optional=unwired_optional,
+        orphan_outs=orphan_outs,
+        semantic_matches=semantic_matches,
+    )
+
+
+def _validate_topology(instances: dict[str, Module], wire_result: WireResult) -> list[str]:
+    """Validate the wired topology. Returns list of warnings (empty = healthy).
+
+    Checks:
+    1. No Required ports left unwired (already enforced in _auto_wire)
+    2. Orphan Outs flagged
+    3. Reachability: every module with In ports has at least one wired connection
+    """
+    warnings: list[str] = []
+
+    for mod_name, port_name, type_name in wire_result.orphan_outs:
+        warnings.append(f"Orphan Out: {mod_name}.{port_name} ({type_name}) has no subscriber")
+
+    # Check modules with In ports have at least one wired
+    wired_consumers = {w[0] for w in wire_result.wired}
+    for mod_name, mod in instances.items():
+        in_ports = [p for p in _scan_ports(type(mod)) if p.direction in ("in", "required_in")]
+        if in_ports and mod_name not in wired_consumers:
+            all_optional = all(p.direction == "in" for p in in_ports)
+            if not all_optional:
+                warnings.append(f"Module '{mod_name}' has input ports but none are wired")
+
+    return warnings
 
 
 class Module(ABC):
@@ -260,7 +359,7 @@ class Runtime:
         return Runtime(_module_classes=filtered)
 
     async def build(self, cfg: dict[str, Any] | None = None) -> RuntimeApp:
-        """Resolve dependencies, auto-wire ports, build all modules."""
+        """Resolve dependencies, auto-wire ports, validate topology, build."""
         cfg = cfg or {}
         registry = ModuleRegistry()
 
@@ -270,8 +369,13 @@ class Runtime:
             instance = mc()
             instances[instance.name] = instance
 
-        # Auto-wire In[T] ← Out[T] by name + type
-        wired = _auto_wire(instances)
+        # Auto-wire In[T]/Required[T] ← Out[T] (exact + semantic match)
+        wire_result = _auto_wire(instances)
+
+        # Validate topology
+        warnings = _validate_topology(instances, wire_result)
+        for w in warnings:
+            logger.warning("Topology: %s", w)
 
         # Topological sort by depends_on
         order = _topo_sort(instances)
@@ -283,7 +387,12 @@ class Runtime:
             mod.build(cfg.get(name, cfg), registry)
             logger.debug("Module built: %s", name)
 
-        return RuntimeApp(modules=instances, start_order=order, wired_ports=wired)
+        return RuntimeApp(
+            modules=instances,
+            start_order=order,
+            wired_ports=wire_result.wired,
+            wire_result=wire_result,
+        )
 
 
 @dataclass
@@ -293,6 +402,7 @@ class RuntimeApp:
     modules: dict[str, Module]
     start_order: list[str]
     wired_ports: list[tuple[str, str, str]] = field(default_factory=list)
+    wire_result: WireResult | None = None
     _started: bool = field(default=False, init=False)
 
     async def start(self) -> None:
