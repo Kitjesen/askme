@@ -11,7 +11,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 _COMMON_COMPONENTS = frozenset({
-    "memory", "skill_runtime", "agent_shell",
+    "memory", "skill_runtime", "agent_shell", "vision",
 })
 
 _VOICE_COMPONENTS = _COMMON_COMPONENTS | frozenset({

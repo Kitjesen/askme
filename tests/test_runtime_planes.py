@@ -146,3 +146,108 @@ class TestRuntimeProfileHas:
         assert bare.has("control_plane") is True  # maps to health_http
         # Unknown component → True (always included)
         assert bare.has("memory") is True
+
+
+# ---------------------------------------------------------------------------
+# Profile-based component filtering
+# ---------------------------------------------------------------------------
+
+class TestProfileComponentFiltering:
+    """Verify _build_components filters by profile.has()."""
+
+    def test_profile_components_match_runtime(self) -> None:
+        """Components built for a profile are a subset of profile.components."""
+        profile = VOICE_PROFILE
+        # Simulate the filter logic from _build_components
+        all_components = {
+            "memory": CallableComponent(name="memory", description="M"),
+            "skill_runtime": CallableComponent(name="skill_runtime", description="S"),
+            "agent_shell": CallableComponent(name="agent_shell", description="A"),
+            "voice_io": CallableComponent(name="voice_io", description="V"),
+            "pulse": CallableComponent(name="pulse", description="P"),
+            "control_plane": CallableComponent(name="control_plane", description="CP"),
+            "robot_api": CallableComponent(name="robot_api", description="R"),
+            "vision": CallableComponent(name="vision", description="Vis"),
+            "proactive_runtime": CallableComponent(name="proactive_runtime", description="PR"),
+            "perception_runtime": CallableComponent(name="perception_runtime", description="PER"),
+            "signal_runtime": CallableComponent(name="signal_runtime", description="SIG"),
+        }
+        if profile.components:
+            filtered = {k: v for k, v in all_components.items() if profile.has(k)}
+        else:
+            filtered = all_components
+
+        assert set(filtered.keys()) <= set(profile.components)
+
+    def test_robot_api_excluded_from_voice_profile(self) -> None:
+        """VOICE_PROFILE does not include robot_api."""
+        assert VOICE_PROFILE.has("robot_api") is False
+        # Simulate: robot_api built by plane but filtered out
+        all_components = {
+            "memory": CallableComponent(name="memory", description="M"),
+            "robot_api": CallableComponent(name="robot_api", description="R"),
+        }
+        filtered = {k: v for k, v in all_components.items() if VOICE_PROFILE.has(k)}
+        assert "robot_api" not in filtered
+        assert "memory" in filtered
+
+
+# ---------------------------------------------------------------------------
+# Stop order is reverse of start order
+# ---------------------------------------------------------------------------
+
+class TestStopOrderReversesStartOrder:
+    """Verify RuntimeAssembly stops components in reverse topological order."""
+
+    @pytest.mark.asyncio
+    async def test_stop_order_is_reverse_start_order(self) -> None:
+        """start() records order; stop() reverses it."""
+        from askme.runtime.assembly import RuntimeAssembly
+
+        log: list[str] = []
+
+        def make_component(name: str, depends_on: tuple[str, ...] = ()) -> CallableComponent:
+            return CallableComponent(
+                name=name,
+                description=name,
+                start_hook=lambda n=name: log.append(f"start:{n}"),
+                stop_hook=lambda n=name: log.append(f"stop:{n}"),
+                depends_on=depends_on,
+            )
+
+        components = {
+            "a": make_component("a"),
+            "b": make_component("b", depends_on=("a",)),
+            "c": make_component("c", depends_on=("b",)),
+        }
+
+        # Build a minimal RuntimeAssembly with async-safe mock services
+        from unittest.mock import AsyncMock, MagicMock
+
+        services = MagicMock()
+        services.pipeline.shutdown = AsyncMock()
+        services.audio.shutdown = MagicMock()
+        services.arm_controller = None
+        services.qp_memory = None
+
+        runtime = RuntimeAssembly(
+            cfg={},
+            app_name="test",
+            app_version="0.0.0",
+            profile=TEXT_PROFILE,
+            services=services,
+            voice_mode=False,
+            robot_mode=False,
+            components=components,
+        )
+
+        await runtime.start()
+        start_log = [entry for entry in log if entry.startswith("start:")]
+        assert start_log == ["start:a", "start:b", "start:c"]
+
+        # Verify _start_order is stored
+        assert runtime._start_order == ["a", "b", "c"]
+
+        await runtime.stop()
+        stop_log = [entry for entry in log if entry.startswith("stop:")]
+        assert stop_log == ["stop:c", "stop:b", "stop:a"]

@@ -240,6 +240,7 @@ class RuntimeAssembly:
     components: dict[str, RuntimeComponent] = field(default_factory=dict)
     _background_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict, init=False)
     _stop_event: asyncio.Event | None = field(default=None, init=False)
+    _start_order: list[str] = field(default_factory=list, init=False)
     _started: bool = field(default=False, init=False)
     _closed: bool = field(default=False, init=False)
 
@@ -272,8 +273,8 @@ class RuntimeAssembly:
             return
         self._closed = False
         self._stop_event = asyncio.Event()
-        ordered = resolve_start_order(self.components)
-        for name in ordered:
+        self._start_order = resolve_start_order(self.components)
+        for name in self._start_order:
             await self.components[name].start()
         self._started = True
 
@@ -286,8 +287,8 @@ class RuntimeAssembly:
         if self._stop_event is not None:
             self._stop_event.set()
 
-        for component in reversed(list(self.components.values())):
-            await component.stop()
+        for name in reversed(self._start_order):
+            await self.components[name].stop()
 
         if self._background_tasks:
             tasks = list(self._background_tasks.values())
@@ -376,11 +377,15 @@ def _build_components(runtime: RuntimeAssembly) -> dict[str, RuntimeComponent]:
     """Assemble all runtime components by delegating to the 3 plane builders."""
     from askme.runtime.planes import build_agent_plane, build_control_plane, build_robot_plane
 
-    components: dict[str, RuntimeComponent] = {}
-    components.update(build_robot_plane(runtime))
-    components.update(build_agent_plane(runtime))
-    components.update(build_control_plane(runtime))
-    return components
+    all_components: dict[str, RuntimeComponent] = {}
+    all_components.update(build_robot_plane(runtime))
+    all_components.update(build_agent_plane(runtime))
+    all_components.update(build_control_plane(runtime))
+
+    # Filter: only keep components included in this profile
+    if runtime.profile.components:
+        return {k: v for k, v in all_components.items() if runtime.profile.has(k)}
+    return all_components  # legacy fallback when no bundle defined
 
 
 def build_legacy_runtime(
@@ -438,7 +443,7 @@ def build_legacy_runtime(
     brain_cfg = cfg.get("brain", {})
     skill_model = (
         brain_cfg.get("voice_model")
-        if profile.voice_io
+        if profile.has("voice_io")
         else brain_cfg.get("model")
     ) or brain_cfg.get("model", "claude-sonnet-4-5-20250929")
     skill_executor = SkillExecutor(
@@ -454,10 +459,10 @@ def build_legacy_runtime(
         voice_triggers=skill_manager.get_voice_triggers(),
     )
 
-    audio_router = AudioRouter() if profile.voice_io else None
+    audio_router = AudioRouter() if profile.has("voice_io") else None
     audio = AudioAgent(
         cfg,
-        voice_mode=profile.voice_io,
+        voice_mode=profile.has("voice_io"),
         metrics=ota_metrics,
         audio_router=audio_router,
     )
@@ -560,7 +565,7 @@ def build_legacy_runtime(
         voice_loop.set_address_detector(address_detector)
 
     proactive = None
-    if profile.proactive:
+    if profile.has("proactive_runtime"):
         proactive = ProactiveAgent(
             vision=vision,
             audio=audio,
@@ -573,7 +578,7 @@ def build_legacy_runtime(
         )
 
     led_bridge = None
-    if profile.led_bridge:
+    if profile.has("signal_runtime"):
         led_cfg = cfg.get("led", {})
         led_base_url = led_cfg.get("base_url", "").strip()
         led_controller = (
@@ -593,7 +598,7 @@ def build_legacy_runtime(
         )
 
     change_detector = None
-    if profile.change_detector:
+    if profile.has("perception_runtime"):
         from askme.perception.change_detector import ChangeDetector
 
         change_detector = ChangeDetector(config=cfg, pulse=pulse)
@@ -642,7 +647,7 @@ def build_legacy_runtime(
         robot_mode=robot_mode,
     )
 
-    if profile.health_http:
+    if profile.has("control_plane"):
         health_server = AskmeHealthServer(
             cfg.get("health_server", {}),
             snapshot_provider=runtime.health_snapshot,
