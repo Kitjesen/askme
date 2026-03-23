@@ -9,6 +9,14 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Callable
 
+from askme.schemas.messages import (
+    CmsState,
+    DetectionFrame,
+    EstopState,
+    ImuSnapshot,
+    JointStateSnapshot,
+)
+
 
 class PubSubBase(ABC):
     """Abstract pub/sub interface -- all transport backends implement this."""
@@ -49,10 +57,10 @@ class PubSubBase(ABC):
 
     def is_estop_active(self) -> bool:
         """Read cached ESTOP state. Returns False if no data."""
-        data = self.get_latest("/thunder/estop")
-        if data is None:
+        estop = self.get_estop()
+        if estop is None:
             return False
-        return bool(data.get("active", False))
+        return estop.active
 
     def get_detections(self) -> dict | None:
         """Get latest YOLO detections."""
@@ -65,3 +73,40 @@ class PubSubBase(ABC):
     def get_imu(self) -> dict | None:
         """Get latest IMU data."""
         return self.get_latest("/thunder/imu")
+
+    # ── Typed convenience methods ────────────────────
+
+    def get_estop(self) -> EstopState | None:
+        """Get latest ESTOP state as a typed dataclass."""
+        data = self.get_latest("/thunder/estop")
+        if data is None:
+            return None
+        return EstopState.from_dict(data)
+
+    def get_detection_frame(self) -> DetectionFrame | None:
+        """Get latest detection frame as a typed dataclass."""
+        data = self.get_latest("/thunder/detections")
+        if data is None:
+            return None
+        return DetectionFrame.from_dict(data)
+
+    def get_joints(self) -> JointStateSnapshot | None:
+        """Get latest joint state as a typed dataclass."""
+        data = self.get_latest("/thunder/joint_states")
+        if data is None:
+            return None
+        return JointStateSnapshot.from_dict(data)
+
+    def get_imu_snapshot(self) -> ImuSnapshot | None:
+        """Get latest IMU reading as a typed dataclass."""
+        data = self.get_latest("/thunder/imu")
+        if data is None:
+            return None
+        return ImuSnapshot.from_dict(data)
+
+    def get_cms_state(self) -> CmsState | None:
+        """Get latest CMS state as a typed dataclass."""
+        data = self.get_latest("/thunder/cms_state")
+        if data is None:
+            return None
+        return CmsState.from_dict(data)

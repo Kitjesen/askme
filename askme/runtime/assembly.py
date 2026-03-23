@@ -24,6 +24,7 @@ from askme.perception.vision_bridge import VisionBridge
 from askme.config import validate_config
 from askme.robot.control_client import DogControlClient
 from askme.robot.pulse import Pulse
+from askme.robot.pubsub import PubSubBase
 from askme.robot.safety_client import DogSafetyClient
 from askme.health_server import AskmeHealthServer, build_health_snapshot
 from askme.robot.led_controller import HttpLedController, NullLedController
@@ -173,7 +174,7 @@ class RuntimeServices:
     audio_router: AudioRouter | None
     audio: AudioAgent
     voice_runtime_bridge: VoiceRuntimeBridge
-    pulse: Pulse
+    pulse: PubSubBase
     dog_safety: DogSafetyClient
     dog_control: DogControlClient
     pipeline: BrainPipeline
@@ -432,21 +433,23 @@ def _build_components(runtime: RuntimeAssembly) -> dict[str, RuntimeComponent]:
         status = "ok" if configured else "disabled"
         if profile.robot_api and not configured:
             status = "degraded"
+        pulse_health = services.pulse.health()
         return {
             "status": status,
             "arm_controller": services.arm_controller is not None,
             "dog_control_service": services.dog_control.is_configured(),
             "dog_safety_service": services.dog_safety.is_configured(),
-            "pulse_connected": services.pulse.connected,
-            "pulse_messages": services.pulse.msg_count,
+            "pulse_connected": pulse_health.get("connected", False),
+            "pulse_messages": pulse_health.get("msg_count", 0),
         }
 
     def robot_capabilities() -> dict[str, Any]:
+        pulse_health = services.pulse.health()
         return {
             "local_arm": services.arm_controller is not None,
             "runtime_control_plane": services.dog_control.is_configured(),
             "runtime_safety_plane": services.dog_safety.is_configured(),
-            "pulse_enabled": services.pulse._enabled,
+            "pulse_enabled": pulse_health.get("available", False),
             "profile_enabled": profile.robot_api,
         }
 
@@ -532,8 +535,8 @@ def _build_components(runtime: RuntimeAssembly) -> dict[str, RuntimeComponent]:
             stop_hook=services.pulse.stop,
             health_hook=lambda: services.pulse.health(),
             capabilities_hook=lambda: {
-                "enabled": services.pulse._enabled,
-                "available": services.pulse.available,
+                "enabled": services.pulse.health().get("available", False),
+                "available": services.pulse.health().get("available", False),
             },
             default_status="disabled",
         ),

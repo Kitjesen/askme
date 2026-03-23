@@ -31,7 +31,7 @@ from askme.schemas.observation import Detection, Observation
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from askme.robot.pulse import Pulse
+    from askme.robot.pubsub import PubSubBase
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class ChangeDetector:
     def __init__(
         self,
         config: dict[str, Any] | None = None,
-        pulse: Pulse | None = None,
+        pulse: PubSubBase | None = None,
     ) -> None:
         cfg = (config or {}).get("proactive", {}).get("change_detector", {})
 
@@ -92,10 +92,10 @@ class ChangeDetector:
 
     def _use_pulse(self) -> bool:
         """Return True if Pulse push mode should be used."""
-        return (
-            self._pulse is not None
-            and getattr(self._pulse, "_enabled", False)
-        )
+        if self._pulse is None:
+            return False
+        h = self._pulse.health()
+        return h.get("available", False) or self._pulse.connected
 
     async def run(self, stop_event: asyncio.Event) -> None:
         if not self._enabled:

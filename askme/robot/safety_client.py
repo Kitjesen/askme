@@ -22,7 +22,7 @@ from uuid import uuid4
 import requests
 
 if TYPE_CHECKING:
-    from askme.robot.pulse import Pulse
+    from askme.robot.pubsub import PubSubBase
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class DogSafetyClient:
     def __init__(
         self,
         config: dict[str, Any] | None = None,
-        pulse: Pulse | None = None,
+        pulse: PubSubBase | None = None,
     ) -> None:
         cfg = config or {}
         self._base_url: str = (

@@ -237,6 +237,8 @@ class TestPulsePushMode:
     def _make_pulse(self, *, enabled: bool = True) -> MagicMock:
         client = MagicMock()
         client._enabled = enabled
+        client.connected = enabled
+        client.health.return_value = {"available": enabled, "connected": enabled}
         client.on = MagicMock()
         return client
 

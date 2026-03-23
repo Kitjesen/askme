@@ -8,8 +8,9 @@ module layout.
 
 ## 1. System Overview
 
-Five processes run on the S100P robot. Each owns a distinct concern; none share
-memory space.
+Four processes run on the S100P robot. Each owns a distinct concern; none share
+memory space. askme subscribes to DDS topics directly via **Pulse** (in-process
+rclpy node) — no bridge process needed.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -24,29 +25,25 @@ memory space.
 │  └──────┬───────────┘                     │  /thunder/heartbeat      │  │
 │         │ gRPC                            └──────────┬───────────────┘  │
 │         ▼                                            │ DDS              │
-│  ┌──────────────────┐   DDS topics        ┌──────────▼───────────────┐  │
-│  │  nav-gateway     │                     │  askme_dds_bridge        │  │
-│  │  (REST :8088)    │                     │  Python 3.10, rclpy      │  │
-│  │  Navigation      │                     │  Subscribes DDS topics   │  │
-│  │  contract layer  │                     │  → Unix socket           │  │
-│  └──────────────────┘                     │  /tmp/askme_dds_bridge   │  │
-│                                           │  .sock (NDJSON)          │  │
-│  ┌──────────────────┐                     └──────────┬───────────────┘  │
-│  │  brainstem       │                                │ Unix socket      │
-│  │  (Dart)          │                                │                  │
-│  │  Motor ctrl      │◄───────────────────────────────┤                  │
-│  │  CAN bus         │   gRPC :13145                  │                  │
-│  │  gRPC server     │                     ┌──────────▼───────────────┐  │
-│  └──────────────────┘                     │  askme                   │  │
-│                                           │  Python 3.13, asyncio    │  │
-│  ┌──────────────────┐                     │  AI assistant runtime    │  │
-│  │  dog-safety-svc  │◄────────────────────│  Health HTTP :8765       │  │
-│  │  (REST :5070)    │   HTTP REST         │  MCP server              │  │
-│  └──────────────────┘                     └──────────────────────────┘  │
-│  ┌──────────────────┐                                │                  │
-│  │  dog-control-svc │◄───────────────────────────────┘                  │
-│  │  (REST :5080)    │   HTTP REST                                        │
-│  └──────────────────┘                                                   │
+│  ┌──────────────────┐                     ┌──────────▼───────────────┐  │
+│  │  nav-gateway     │   DDS topics        │  askme                   │  │
+│  │  (REST :8088)    │                     │  Python, asyncio          │  │
+│  │  Navigation      │                     │  Pulse (in-process rclpy) │  │
+│  │  contract layer  │                     │  AI assistant runtime    │  │
+│  └──────────────────┘                     │  Health HTTP :8765       │  │
+│                                           │  MCP server              │  │
+│  ┌──────────────────┐                     └──────────────────────────┘  │
+│  │  brainstem       │                                │                  │
+│  │  (Dart)          │◄───────────────────────────────┤                  │
+│  │  Motor ctrl      │   gRPC :13145                  │                  │
+│  │  CAN bus         │                                │                  │
+│  │  gRPC server     │                     ┌──────────┘                  │
+│  └──────────────────┘                     │ HTTP REST                   │
+│                                           ▼                             │
+│  ┌──────────────────┐              ┌──────────────────┐                 │
+│  │  dog-safety-svc  │◄─────────────│  dog-control-svc │                 │
+│  │  (REST :5070)    │              │  (REST :5080)    │                 │
+│  └──────────────────┘              └──────────────────┘                 │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                HTTPS/WSS
@@ -62,45 +59,33 @@ memory space.
 
 ## 2. Communication Architecture
 
-### Data Plane — CycloneDDS topics → Unix socket
+### Data Plane — Pulse (in-process DDS)
 
-High-frequency sensor and safety data flows over DDS and is forwarded to askme
-via a Unix domain socket. This keeps Python 3.13 (askme) and Python 3.10 (rclpy)
-in separate processes.
+High-frequency sensor and safety data flows over DDS topics. askme subscribes
+directly via **Pulse**, an in-process rclpy node running in a background thread.
+No bridge process, no socket, no serialization overhead.
 
 ```
-DDS publisher            Bridge process              askme (consumer)
-(frame_daemon /          (askme_dds_bridge)          (Python 3.13 asyncio)
- brainstem)
-     │                         │                           │
-     │  DDS QoS BEST_EFFORT    │                           │
-     │────────────────────────►│                           │
-     │                         │  Unix socket NDJSON       │
-     │                         │──────────────────────────►│
-     │                         │  {"topic":"/thunder/…",   │
-     │                         │   "data":{…}, "ts":…}     │
+DDS publisher                        askme (Pulse)
+(frame_daemon / brainstem)           (rclpy node in background thread)
+     │                                      │
+     │  DDS QoS (BEST_EFFORT/RELIABLE)      │
+     │─────────────────────────────────────►│
+     │                                      │ call_soon_threadsafe
+     │                                      │──► asyncio callbacks
 ```
 
-**Wire format** — newline-delimited JSON per message:
-```json
-{"topic": "/thunder/detections", "data": {"detections": [...], "frame_id": 42}, "ts": 1234567890.123}
-{"topic": "/thunder/estop",      "data": {"active": false},                      "ts": 1234567890.456}
-```
+`PubSubBase` is the abstract interface. `Pulse` is the production DDS backend;
+`MockPulse` provides a pure in-memory implementation for tests. Consumers
+type-hint `PubSubBase`, never `Pulse` directly.
 
-**Socket path**: `/tmp/askme_dds_bridge.sock`
-
-**Topics implemented** (PoC, 2026-03):
+**Topics subscribed** by Pulse:
 
 | Topic | Msg type | Hz | QoS | Publisher | Status |
 |---|---|---|---|---|---|
 | `/thunder/detections` | `std_msgs/String` (JSON) | 5 | BEST_EFFORT / VOLATILE / KEEP_LAST(1) | frame_daemon | Live |
 | `/thunder/estop` | `std_msgs/Bool` | event | RELIABLE / TRANSIENT_LOCAL / KEEP_LAST(1) | brainstem safety bridge | Live |
 | `/thunder/heartbeat` | `std_msgs/Bool` | 5 | BEST_EFFORT / VOLATILE / KEEP_LAST(1) | frame_daemon | Live |
-
-**Topics planned** (not yet published):
-
-| Topic | Msg type | Hz | QoS | Publisher | Status |
-|---|---|---|---|---|---|
 | `/thunder/joint_states` | `sensor_msgs/JointState` | 50 | BEST_EFFORT / VOLATILE / KEEP_LAST(1) | brainstem | Planned |
 | `/thunder/imu` | `sensor_msgs/Imu` | 100 | BEST_EFFORT / VOLATILE / KEEP_LAST(1) | brainstem | Planned |
 | `/thunder/cms_state` | `std_msgs/String` (JSON) | 2 | RELIABLE / TRANSIENT_LOCAL / KEEP_LAST(1) | brainstem | Planned |
@@ -155,6 +140,9 @@ askme/
 │   └── vision_bridge.py   — reads /tmp/askme_frame_*.bin|json from frame_daemon
 │
 ├── robot/
+│   ├── pubsub.py          — PubSubBase ABC + typed convenience methods
+│   ├── pulse.py           — Pulse: in-process DDS via rclpy (PubSubBase impl)
+│   ├── mock_pulse.py      — MockPulse: in-memory test double (PubSubBase impl)
 │   ├── safety_client.py   — DogSafetyClient: E-STOP notify + state query (30s TTL cache)
 │   ├── control_client.py  — DogControlClient: capability dispatch
 │   ├── ota_bridge.py      — OTA platform registration + telemetry
@@ -210,45 +198,49 @@ askme/
 │
 └── schemas/
     ├── observation.py     — Detection, Observation dataclasses
-    └── events.py          — ChangeEvent, ChangeEventType enum
+    ├── events.py          — ChangeEvent, ChangeEventType enum
+    └── messages.py        — Typed Pulse messages: EstopState, DetectionFrame, JointStateSnapshot, ImuSnapshot, CmsState
 ```
 
 ---
 
-## 4. DDS Bridge Architecture
+## 4. Pulse Architecture
 
-### Why a separate process
+### In-process DDS via rclpy
 
-askme runs Python 3.13 (asyncio). ROS2 Humble's `rclpy` requires Python 3.10 and
-installs its own event loop executor that conflicts with asyncio. Bridging via a
-Unix socket keeps the two runtimes fully isolated.
+askme subscribes to DDS topics directly using **Pulse** (`askme/robot/pulse.py`),
+which initialises an rclpy node and spins it in a daemon thread. Parsed messages
+are forwarded to the asyncio event loop via `call_soon_threadsafe`.
 
 ```
-Process 1: frame_daemon (Python 3.10 + rclpy)
-  - Subscribes /camera/color/image_raw + /camera/depth/image_raw
-  - Runs BPU YOLO11s (~3ms per frame on Nash BPU)
-  - Publishes /thunder/detections at 5Hz (JSON string)
-  - Writes /tmp/askme_frame_color.bin + depth.bin for direct VisionBridge reads
-
-Process 2: askme_dds_bridge (Python 3.10 + rclpy)
-  - Subscribes /thunder/detections + /thunder/estop
-  - Accepts Unix socket connections from N clients (fan-out)
-  - Broadcasts each DDS message as NDJSON: {topic, data, ts}
-  - Socket server runs in background thread; ROS2 executor spins in main thread
-
-Process 3: askme (Python 3.13 + asyncio)
-  - Connects to /tmp/askme_dds_bridge.sock via asyncio.open_unix_connection()
-  - Reads NDJSON messages, dispatches to topic callbacks
-  - DdsBridgeClient auto-reconnects every 2s on disconnect
-  - No rclpy dependency anywhere in askme
+askme process
+  ┌─────────────────────────────────────────────────┐
+  │  asyncio event loop (main thread)               │
+  │    ├── VoiceLoop / TextLoop / BrainPipeline     │
+  │    ├── ChangeDetector (Pulse push callbacks)     │
+  │    └── DogSafetyClient (Pulse ESTOP reads)       │
+  │                                                   │
+  │  Pulse spin thread (daemon)                       │
+  │    └── rclpy SingleThreadedExecutor               │
+  │        ├── sub /thunder/detections (String)       │
+  │        ├── sub /thunder/estop (Bool)              │
+  │        ├── sub /thunder/heartbeat (Bool)          │
+  │        ├── sub /thunder/joint_states (JointState) │
+  │        ├── sub /thunder/imu (Imu)                 │
+  │        └── sub /thunder/cms_state (String)        │
+  └─────────────────────────────────────────────────┘
 ```
 
-### Latency
+**Abstraction**: `PubSubBase` (ABC) defines the transport interface. `Pulse` is
+the production DDS backend; `MockPulse` is a pure in-memory test double. All
+consumers depend on `PubSubBase`, never on `Pulse` directly.
 
-End-to-end DDS → Unix socket → askme callback: **~0.4ms** measured in PoC
-(`poc_dds_client.py` logs per-message latency from `ts` field to receipt time).
+**Typed messages**: `askme/schemas/messages.py` provides frozen dataclasses
+(`EstopState`, `DetectionFrame`, `JointStateSnapshot`, `ImuSnapshot`, `CmsState`)
+with `from_dict` / `to_dict` for type-safe access. Convenience methods on
+`PubSubBase` (e.g. `get_estop()`, `get_joints()`) return these typed objects.
 
-### File-based perception channel
+### File-based perception channel (fallback)
 
 `frame_daemon` also writes frames atomically via `rename()` to:
 - `/tmp/askme_frame_color.bin` — raw RGB, width+height prepended as two uint32
@@ -256,24 +248,24 @@ End-to-end DDS → Unix socket → askme callback: **~0.4ms** measured in PoC
 - `/tmp/askme_frame_detections.json` — latest YOLO detections
 - `/tmp/askme_frame_daemon.heartbeat` — timestamp of last write
 
-`VisionBridge` in askme reads these files directly at 1Hz for the
-`ChangeDetector` pipeline, bypassing the DDS socket.
+`VisionBridge` reads these files directly. `ChangeDetector` falls back to
+file polling when Pulse is unavailable.
 
 ---
 
 ## 5. Topic Specification
 
-Full topic inventory. Status: **Live** = implemented and tested on S100P PoC;
-**Planned** = listed in architecture, not yet published.
+Full topic inventory. Status: **Live** = implemented and tested on S100P;
+**Planned** = registered in Pulse, not yet published by brainstem.
 
 | Topic | Msg type | Hz | Reliability | Durability | Depth | Publisher | askme consumer | Status |
 |---|---|---|---|---|---|---|---|---|
-| `/thunder/detections` | `std_msgs/String` (JSON) | 5 | BEST_EFFORT | VOLATILE | 1 | frame_daemon | VisionBridge (via file), DdsBridgeClient | Live |
-| `/thunder/estop` | `std_msgs/Bool` | event | RELIABLE | TRANSIENT_LOCAL | 1 | brainstem safety bridge | DdsBridgeClient → IntentRouter | Live |
-| `/thunder/heartbeat` | `std_msgs/Bool` | 5 | BEST_EFFORT | VOLATILE | 1 | frame_daemon | DdsBridgeClient | Live |
-| `/thunder/joint_states` | `sensor_msgs/JointState` | 50 | BEST_EFFORT | VOLATILE | 1 | brainstem | DdsBridgeClient → telemetry | Planned |
-| `/thunder/imu` | `sensor_msgs/Imu` | 100 | BEST_EFFORT | VOLATILE | 1 | brainstem | DdsBridgeClient → telemetry | Planned |
-| `/thunder/cms_state` | `std_msgs/String` (JSON) | 2 | RELIABLE | TRANSIENT_LOCAL | 1 | brainstem | DdsBridgeClient → health block | Planned |
+| `/thunder/detections` | `std_msgs/String` (JSON) | 5 | BEST_EFFORT | VOLATILE | 1 | frame_daemon | Pulse → ChangeDetector | Live |
+| `/thunder/estop` | `std_msgs/Bool` | event | RELIABLE | TRANSIENT_LOCAL | 1 | brainstem safety bridge | Pulse → DogSafetyClient | Live |
+| `/thunder/heartbeat` | `std_msgs/Bool` | 5 | BEST_EFFORT | VOLATILE | 1 | frame_daemon | Pulse | Live |
+| `/thunder/joint_states` | `sensor_msgs/JointState` | 50 | BEST_EFFORT | VOLATILE | 1 | brainstem | Pulse → telemetry | Planned |
+| `/thunder/imu` | `sensor_msgs/Imu` | 100 | BEST_EFFORT | VOLATILE | 1 | brainstem | Pulse → telemetry | Planned |
+| `/thunder/cms_state` | `std_msgs/String` (JSON) | 2 | RELIABLE | TRANSIENT_LOCAL | 1 | brainstem | Pulse → health block | Planned |
 | `/camera/color/image_raw` | `sensor_msgs/Image` | 30 | BEST_EFFORT | VOLATILE | 1 | camera driver | frame_daemon (subscribe) | Live |
 | `/camera/depth/image_raw` | `sensor_msgs/Image` | 30 | BEST_EFFORT | VOLATILE | 1 | camera driver | frame_daemon (subscribe) | Live |
 
