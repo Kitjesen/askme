@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
@@ -25,6 +26,46 @@ async def _call_maybe_async(func: Callable[[], Any] | None) -> Any:
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+def resolve_start_order(
+    components: dict[str, RuntimeComponent],
+) -> list[str]:
+    """Topological sort of components by *depends_on*.
+
+    Returns component names in an order that satisfies all declared
+    dependencies.  Components without dependencies come first.
+    Raises ``ValueError`` on cycles.
+    """
+    # Build adjacency: name -> set of dependents
+    in_degree: dict[str, int] = {name: 0 for name in components}
+    dependents: dict[str, list[str]] = {name: [] for name in components}
+
+    for name, comp in components.items():
+        for dep in getattr(comp, "depends_on", ()):
+            if dep not in components:
+                # Dependency not registered — skip silently (optional dep).
+                continue
+            in_degree[name] += 1
+            dependents[dep].append(name)
+
+    queue: deque[str] = deque(
+        name for name, degree in in_degree.items() if degree == 0
+    )
+    ordered: list[str] = []
+    while queue:
+        current = queue.popleft()
+        ordered.append(current)
+        for dependent in dependents[current]:
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                queue.append(dependent)
+
+    if len(ordered) != len(components):
+        missing = set(components) - set(ordered)
+        raise ValueError(f"Dependency cycle detected among components: {missing}")
+
+    return ordered
 
 
 class RuntimeComponent(ABC):
@@ -70,6 +111,9 @@ class CallableComponent(RuntimeComponent):
     health_hook: Callable[[], dict[str, Any] | None] | None = None
     capabilities_hook: Callable[[], dict[str, Any] | None] | None = None
     default_status: str = "ok"
+    depends_on: tuple[str, ...] = ()
+    provides: tuple[str, ...] = ()
+    profiles: tuple[str, ...] = ("*",)
 
     async def start(self) -> None:
         await _call_maybe_async(self.start_hook)

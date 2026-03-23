@@ -37,7 +37,7 @@ from askme.pipeline.skill_dispatcher import SkillDispatcher
 from askme.robot.state_led_bridge import StateLedBridge
 from askme.pipeline.text_loop import TextLoop
 from askme.pipeline.voice_loop import VoiceLoop
-from askme.runtime.components import CallableComponent, RuntimeComponent
+from askme.runtime.components import RuntimeComponent, resolve_start_order
 from askme.runtime.profiles import RuntimeProfile
 from askme.robot.runtime_health import log_startup_service_status, merge_voice_pipeline_status
 from askme.skills.skill_executor import SkillExecutor
@@ -267,13 +267,14 @@ class RuntimeAssembly:
         self._background_tasks[name] = asyncio.create_task(coro, name=f"askme-{name}")
 
     async def start(self) -> None:
-        """Start all registered runtime components."""
+        """Start all registered runtime components in dependency order."""
         if self._started:
             return
         self._closed = False
         self._stop_event = asyncio.Event()
-        for component in self.components.values():
-            await component.start()
+        ordered = resolve_start_order(self.components)
+        for name in ordered:
+            await self.components[name].start()
         self._started = True
 
     async def stop(self) -> None:
@@ -372,241 +373,13 @@ class RuntimeAssembly:
 
 
 def _build_components(runtime: RuntimeAssembly) -> dict[str, RuntimeComponent]:
-    services = runtime.services
-    profile = runtime.profile
+    """Assemble all runtime components by delegating to the 3 plane builders."""
+    from askme.runtime.planes import build_agent_plane, build_control_plane, build_robot_plane
 
-    def voice_health() -> dict[str, Any]:
-        status = runtime.voice_status_snapshot()
-        if not profile.voice_io:
-            status["status"] = "disabled"
-            return status
-        status["status"] = "ok" if status.get("pipeline_ok", False) else "degraded"
-        return status
-
-    def voice_capabilities() -> dict[str, Any]:
-        return {
-            "primary_loop": profile.primary_loop,
-            "voice_enabled": profile.voice_io,
-            "text_enabled": profile.text_io,
-            "audio_router": services.audio_router is not None,
-            "voice_bridge_enabled": services.voice_runtime_bridge.enabled,
-            "address_detection": services.address_detector is not None,
-        }
-
-    def memory_health() -> dict[str, Any]:
-        return {
-            "status": "ok",
-            "warmup_running": runtime._task_running("memory-warmup"),
-            "qp_memory_enabled": services.qp_memory is not None,
-        }
-
-    def memory_capabilities() -> dict[str, Any]:
-        return {
-            "session_memory": True,
-            "episodic_memory": True,
-            "vector_memory": True,
-            "qp_memory": services.qp_memory is not None,
-        }
-
-    def vision_health() -> dict[str, Any]:
-        enabled = getattr(services.vision, "_enabled", False)
-        return {
-            "status": "ok" if enabled else "disabled",
-            "vision_enabled": enabled,
-            "change_detector_running": runtime._task_running("change-detector"),
-        }
-
-    def vision_capabilities() -> dict[str, Any]:
-        return {
-            "describe_scene": True,
-            "find_object": True,
-            "change_detector": services.change_detector is not None,
-            "capture_backend": getattr(services.vision, "_capture_backend", "unknown"),
-        }
-
-    def robot_health() -> dict[str, Any]:
-        configured = (
-            services.arm_controller is not None
-            or services.dog_control.is_configured()
-            or services.dog_safety.is_configured()
-        )
-        status = "ok" if configured else "disabled"
-        if profile.robot_api and not configured:
-            status = "degraded"
-        pulse_health = services.pulse.health()
-        return {
-            "status": status,
-            "arm_controller": services.arm_controller is not None,
-            "dog_control_service": services.dog_control.is_configured(),
-            "dog_safety_service": services.dog_safety.is_configured(),
-            "pulse_connected": pulse_health.get("connected", False),
-            "pulse_messages": pulse_health.get("msg_count", 0),
-        }
-
-    def robot_capabilities() -> dict[str, Any]:
-        pulse_health = services.pulse.health()
-        return {
-            "local_arm": services.arm_controller is not None,
-            "runtime_control_plane": services.dog_control.is_configured(),
-            "runtime_safety_plane": services.dog_safety.is_configured(),
-            "pulse_enabled": pulse_health.get("available", False),
-            "profile_enabled": profile.robot_api,
-        }
-
-    def agent_shell_health() -> dict[str, Any]:
-        return {
-            "status": "ok",
-            "default_timeout_s": services.agent_shell._default_timeout,
-        }
-
-    def agent_shell_capabilities() -> dict[str, Any]:
-        return {
-            "tool_count": len(services.tools),
-            "background_task_cancel": True,
-            "model": getattr(services.agent_shell, "_model", None),
-        }
-
-    def skill_runtime_health() -> dict[str, Any]:
-        enabled_count = len(services.skill_manager.get_enabled())
-        status = "ok" if enabled_count else "degraded"
-        return {
-            "status": status,
-            "enabled_skill_count": enabled_count,
-            "contract_count": len(services.skill_manager.get_contracts()),
-        }
-
-    def skill_runtime_capabilities() -> dict[str, Any]:
-        return {
-            "code_contracts": [
-                contract.name
-                for contract in services.skill_manager.get_contracts()
-                if contract.source == "code"
-            ],
-            "openapi_generated": True,
-            "mcp_catalog_ready": True,
-        }
-
-    components: dict[str, RuntimeComponent] = {
-        "voice_io": CallableComponent(
-            name="voice_io",
-            description="Audio input/output, wake word, ASR, TTS, and voice bridge integration.",
-            health_hook=voice_health,
-            capabilities_hook=voice_capabilities,
-            default_status="disabled",
-        ),
-        "memory": CallableComponent(
-            name="memory",
-            description="Conversation, episodic, vector, and qp_memory services.",
-            start_hook=lambda: runtime._start_task("memory-warmup", services.memory.warmup()),
-            stop_hook=lambda: runtime._cancel_task("memory-warmup"),
-            health_hook=memory_health,
-            capabilities_hook=memory_capabilities,
-        ),
-        "vision": CallableComponent(
-            name="vision",
-            description="Vision bridge, scene understanding, and optional change detection.",
-            health_hook=vision_health,
-            capabilities_hook=vision_capabilities,
-            default_status="disabled",
-        ),
-        "robot_api": CallableComponent(
-            name="robot_api",
-            description="Robot arm integration and remote runtime control/safety APIs.",
-            health_hook=robot_health,
-            capabilities_hook=robot_capabilities,
-            default_status="disabled",
-        ),
-        "agent_shell": CallableComponent(
-            name="agent_shell",
-            description="ThunderAgentShell multi-step tool execution runtime.",
-            health_hook=agent_shell_health,
-            capabilities_hook=agent_shell_capabilities,
-        ),
-        "skill_runtime": CallableComponent(
-            name="skill_runtime",
-            description="Skill discovery, dispatch, contracts, and OpenAPI generation.",
-            health_hook=skill_runtime_health,
-            capabilities_hook=skill_runtime_capabilities,
-        ),
-        "pulse": CallableComponent(
-            name="pulse",
-            description="Pulse in-process DDS bus for real-time robot telemetry.",
-            start_hook=services.pulse.start,
-            stop_hook=services.pulse.stop,
-            health_hook=lambda: services.pulse.health(),
-            capabilities_hook=lambda: {
-                "enabled": services.pulse.health().get("available", False),
-                "available": services.pulse.health().get("available", False),
-            },
-            default_status="disabled",
-        ),
-    }
-
-    if services.health_server is not None:
-        components["control_plane"] = CallableComponent(
-            name="control_plane",
-            description="Embedded HTTP health, metrics, live chat, and capabilities endpoints.",
-            start_hook=services.health_server.start,
-            stop_hook=services.health_server.stop,
-            health_hook=lambda: {
-                "status": "ok" if services.health_server.enabled else "disabled",
-                "url": services.health_server.url if services.health_server.enabled else "",
-            },
-            capabilities_hook=lambda: {
-                "health_http": profile.health_http,
-                "http_chat": profile.http_chat,
-            },
-            default_status="disabled",
-        )
-
-    if services.proactive is not None:
-        components["proactive_runtime"] = CallableComponent(
-            name="proactive_runtime",
-            description="Background proactive anomaly handling and auto-solve orchestration.",
-            start_hook=lambda: runtime._start_task(
-                "proactive-runtime",
-                services.proactive.run(runtime.stop_event),
-            ),
-            stop_hook=lambda: runtime._cancel_task("proactive-runtime"),
-            health_hook=lambda: {
-                "status": "ok" if runtime._task_running("proactive-runtime") else "degraded",
-                "running": runtime._task_running("proactive-runtime"),
-            },
-            capabilities_hook=lambda: {"enabled": profile.proactive},
-            default_status="disabled",
-        )
-
-    if services.change_detector is not None:
-        components["perception_runtime"] = CallableComponent(
-            name="perception_runtime",
-            description="Event-driven perception loop backed by ChangeDetector.",
-            start_hook=lambda: runtime._start_task(
-                "change-detector",
-                services.change_detector.run(runtime.stop_event),
-            ),
-            stop_hook=lambda: runtime._cancel_task("change-detector"),
-            health_hook=lambda: {
-                "status": "ok" if runtime._task_running("change-detector") else "degraded",
-                "running": runtime._task_running("change-detector"),
-            },
-            capabilities_hook=lambda: {"change_detector": True},
-            default_status="disabled",
-        )
-
-    if services.led_bridge is not None:
-        components["signal_runtime"] = CallableComponent(
-            name="signal_runtime",
-            description="Status LED bridge driven from agent and safety state.",
-            start_hook=lambda: runtime._start_task("led-bridge", services.led_bridge.run()),
-            stop_hook=lambda: runtime._cancel_task("led-bridge"),
-            health_hook=lambda: {
-                "status": "ok" if runtime._task_running("led-bridge") else "degraded",
-                "running": runtime._task_running("led-bridge"),
-            },
-            capabilities_hook=lambda: {"led_bridge": profile.led_bridge},
-            default_status="disabled",
-        )
-
+    components: dict[str, RuntimeComponent] = {}
+    components.update(build_robot_plane(runtime))
+    components.update(build_agent_plane(runtime))
+    components.update(build_control_plane(runtime))
     return components
 
 
