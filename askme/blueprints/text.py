@@ -1,11 +1,10 @@
-"""Thunder Voice — 语音巡检模式.
+"""Text — 纯文本交互模式.
 
-The default Thunder blueprint: voice AI assistant with perception,
-safety gating, skill dispatch, and proactive patrol.
+No voice IO, no audio hardware. For SSH sessions and development.
 
 Usage::
 
-    python -m askme.blueprints.thunder_voice
+    python -m askme.blueprints.text
 """
 
 from askme.runtime.module import Runtime
@@ -14,7 +13,6 @@ from askme.runtime.modules import (
     HealthModule,
     LLMModule,
     MemoryModule,
-    PerceptionModule,
     PipelineModule,
     ProactiveModule,
     PulseModule,
@@ -22,26 +20,23 @@ from askme.runtime.modules import (
     SkillModule,
     TextModule,
     ToolsModule,
-    VoiceModule,
 )
 
-thunder_voice = (
+text = (
     Runtime.use(LLMModule)
     + Runtime.use(ToolsModule)
     + Runtime.use(PulseModule)
     + Runtime.use(MemoryModule)
-    + Runtime.use(PerceptionModule)
     + Runtime.use(SafetyModule)
     + Runtime.use(PipelineModule)
     + Runtime.use(SkillModule)
     + Runtime.use(ExecutorModule)
-    + Runtime.use(VoiceModule)
     + Runtime.use(TextModule)
     + Runtime.use(ProactiveModule)
     + Runtime.use(HealthModule)
 )
 
-__all__ = ["thunder_voice"]
+__all__ = ["text"]
 
 if __name__ == "__main__":
     import asyncio
@@ -51,15 +46,14 @@ if __name__ == "__main__":
 
     async def main():
         cfg = load_config()
-        app = await thunder_voice.build(cfg)
+        app = await text.build(cfg)
 
         stop = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
             asyncio.get_running_loop().add_signal_handler(sig, stop.set)
 
         await app.start()
-        print(f"Thunder Voice running — {len(app.modules)} modules")
-        print(f"Wired: {len(app.wired_ports)} ports")
+        print(f"Text running — {len(app.modules)} modules")
         await stop.wait()
         await app.stop()
 
