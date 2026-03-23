@@ -21,6 +21,8 @@ import threading
 import time
 from typing import Any, Callable
 
+from askme.robot.pubsub import PubSubBase
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -79,7 +81,7 @@ if _RCLPY_AVAILABLE:
     }
 
 
-class Pulse:
+class Pulse(PubSubBase):
     """脉搏数据总线 — 进程内直连 DDS.
 
     rclpy 在后台线程 spin，回调通过 ``call_soon_threadsafe`` 推到 asyncio。
@@ -212,24 +214,22 @@ class Pulse:
             data = self._latest.get(topic)
             return dict(data) if data else None
 
-    def is_estop_active(self) -> bool:
-        """Read cached ESTOP state. Returns False if no data."""
-        data = self.get_latest("/thunder/estop")
-        if data is None:
-            return False
-        return bool(data.get("active", False))
+    def publish(self, topic: str, data: dict) -> None:
+        """Publish a message to a DDS topic.
 
-    def get_detections(self) -> dict | None:
-        """Get latest YOLO detections."""
-        return self.get_latest("/thunder/detections")
-
-    def get_joint_states(self) -> dict | None:
-        """Get latest joint states."""
-        return self.get_latest("/thunder/joint_states")
-
-    def get_imu(self) -> dict | None:
-        """Get latest IMU data."""
-        return self.get_latest("/thunder/imu")
+        Creates a rclpy String publisher on first publish per topic.
+        No-op if rclpy is not available.
+        """
+        if not self._started or self._node is None:
+            return
+        if not hasattr(self, "_publishers"):
+            self._publishers: dict[str, Any] = {}
+        if topic not in self._publishers:
+            qos = _QOS_LATCHED if topic.endswith("/estop") else _QOS_SENSOR
+            self._publishers[topic] = self._node.create_publisher(String, topic, qos)
+        msg = String()
+        msg.data = json.dumps(data)
+        self._publishers[topic].publish(msg)
 
     def health(self) -> dict[str, Any]:
         """Health snapshot for runtime introspection."""
