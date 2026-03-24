@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from askme.memory.admission import MemoryAdmissionControl
+from askme.memory.trend_analyzer import TrendAnalyzer
 from askme.memory.episode import (
     Episode,
     score_importance,
@@ -165,7 +166,7 @@ class EpisodicMemory:
     Reflection trigger: cumulative importance > IMPORTANCE_THRESHOLD (Park 2023)
     """
 
-    def __init__(self, *, llm: LLMClient | None = None) -> None:
+    def __init__(self, *, llm: LLMClient | None = None, vector_store: Any = None) -> None:
         cfg = get_config()
         data_dir = cfg.get("app", {}).get("data_dir", "data")
         episodic_cfg = cfg.get("memory", {}).get("episodic", {})
@@ -220,6 +221,9 @@ class EpisodicMemory:
         # Admission control gate — filters trivial events before buffering
         admission_threshold = float(episodic_cfg.get("admission_threshold", 0.1))
         self._admission = MemoryAdmissionControl(threshold=admission_threshold)
+        # Barrier capabilities (optional, injected by MemorySystem or caller)
+        self._trend_analyzer = TrendAnalyzer()
+        self._vector_store = vector_store  # VectorStore or None
 
         self._restore_active_buffer()
 
@@ -374,6 +378,18 @@ class EpisodicMemory:
                 self._clear_active_journal()
                 for ep in self._buffer:
                     self._append_to_active_journal(ep)
+
+                # Run trend analysis and persist to vector store
+                if self._trend_analyzer and self._vector_store:
+                    try:
+                        trends = self._trend_analyzer.analyze(buffer_snapshot)
+                        for trend in trends:
+                            self._vector_store.add(
+                                trend.description_zh,
+                                {"type": "trend", "ts": trend.window_end},
+                            )
+                    except Exception as _te:
+                        logger.debug("Trend analysis after reflect failed: %s", _te)
 
                 return reflection.get("summary", "")
 

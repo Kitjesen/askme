@@ -24,6 +24,10 @@ import asyncio
 import logging
 from typing import Any, TYPE_CHECKING
 
+from askme.memory.trend_analyzer import TrendAnalyzer
+from askme.memory.association import AssociationGraph
+from askme.memory.strategy import StrategyGenerator, Suggestion
+
 if TYPE_CHECKING:
     from askme.llm.conversation import ConversationManager
     from askme.memory.episodic_memory import EpisodicMemory
@@ -60,6 +64,12 @@ class MemorySystem:
         self._vector = vector_memory
         self._site = site_knowledge
         self._procedural = procedural
+
+        # Barrier capabilities: trend analysis, association, strategy
+        self._trend_analyzer = TrendAnalyzer()
+        vs = vector_memory.vector_store if vector_memory else None
+        self._association = AssociationGraph(vs) if vs else None
+        self._strategy = StrategyGenerator(llm) if llm else None
 
     # -- Record --
 
@@ -133,6 +143,46 @@ class MemorySystem:
         except Exception as e:
             logger.warning("Reflection failed: %s", e)
             return None
+
+    # -- Barrier capabilities: trends, associations, strategy --
+
+    def get_trends(self) -> str:
+        """Return Chinese text summary of active trends from episodic data."""
+        if not self._episodic:
+            return ""
+        episodes = list(self._episodic._buffer)
+        return self._trend_analyzer.get_summary(episodes)
+
+    def has_trends(self) -> bool:
+        """Whether there are active trends to report."""
+        return bool(self.get_trends())
+
+    def find_similar(self, description: str) -> str:
+        """Find historically similar situations via vector association."""
+        if not self._association:
+            return ""
+        return self._association.get_associations_text(description)
+
+    async def suggest_actions(
+        self,
+        *,
+        world_state: str = "",
+    ) -> list[Suggestion]:
+        """Generate action suggestions from current context."""
+        if not self._strategy:
+            return []
+        trends = self.get_trends()
+        procedures = ""
+        if self._procedural:
+            try:
+                procedures = self._procedural.get_context()
+            except Exception:
+                pass
+        return await self._strategy.suggest(
+            trends=trends,
+            world_state=world_state,
+            procedures=procedures,
+        )
 
     # -- Properties for direct access when needed --
 

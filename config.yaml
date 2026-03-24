@@ -56,11 +56,11 @@ brain:
 # Memory: MemU / Embedding
 # ----------------------------------------------------------
 memory:
-  # Requires local embedding server (python -m memu.embed_server)
-  # Set true when embed server is running, false for standalone mode
-  enabled: false
-  embed_url: ${LOCAL_EMBED_URL}
-  embed_model: Qwen/Qwen3-Embedding-0.6B
+  # L4 vector memory uses local sentence-transformers (no external server needed).
+  # Set true to enable; requires sentence-transformers package (pip install askme[embed]).
+  # Gracefully degrades to no-op when sentence-transformers is not installed.
+  enabled: true
+  embed_model: paraphrase-multilingual-MiniLM-L12-v2
   # Timeout (seconds) for embedding server reachability check
   health_check_timeout: 1
   # Timeout (seconds) for retrieval calls

@@ -186,6 +186,7 @@ class BrainPipeline:
             session_memory=session_memory,
             vision=vision,
             qp_memory=qp_memory,
+            memory_system=memory_system,
         )
         self._tool_executor = ToolExecutor(
             tools=tools,

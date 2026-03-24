@@ -9,6 +9,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.session import SessionMemory
+    from askme.memory.system import MemorySystem
     from askme.perception.vision_bridge import VisionBridge
     from askme.robot.safety_client import DogSafetyClient
     from askme.skills.skill_manager import SkillManager
@@ -34,6 +35,7 @@ class PromptBuilder:
         session_memory: SessionMemory | None,
         vision: VisionBridge | None,
         qp_memory: Any,
+        memory_system: MemorySystem | None = None,
     ) -> None:
         self._base_prompt = base_prompt
         self._prompt_seed = prompt_seed
@@ -46,6 +48,7 @@ class PromptBuilder:
         self._session_memory = session_memory
         self._vision = vision
         self._qp_memory = qp_memory
+        self._memory_system = memory_system
 
     def build_l0_runtime_block(self) -> str:
         """Return a compact L0 runtime truth block from authoritative services.
@@ -87,6 +90,15 @@ class PromptBuilder:
             session_ctx = self._session_memory.get_recent_summaries()
             if session_ctx:
                 prompt += f"\n{session_ctx}"
+
+        # Trends from barrier capability (TrendAnalyzer)
+        if self._memory_system:
+            try:
+                trends_text = self._memory_system.get_trends()
+                if trends_text:
+                    prompt += f"\n[趋势]\n{trends_text}"
+            except Exception as _e:
+                logger.debug("Trend injection failed: %s", _e)
 
         # qp_memory: spatial/procedural/markdown context (optional, additive)
         # NOTE: WebChat path injects into user message directly (app.py).
