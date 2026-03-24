@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import askme.interfaces.register_defaults  # noqa: F401 — register all backends
+
 from askme import __version__ as ASKME_VERSION
 from askme.config import get_config
 from askme.runtime.profiles import legacy_profile_for

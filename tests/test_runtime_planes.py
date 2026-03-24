@@ -220,7 +220,7 @@ class TestStopOrderReversesStartOrder:
     @pytest.mark.asyncio
     async def test_stop_order_is_reverse_start_order(self) -> None:
         """start() records order; stop() reverses it."""
-        from askme.runtime.assembly import RuntimeAssembly
+        from askme.runtime._assembly_legacy import RuntimeAssembly
 
         log: list[str] = []
 

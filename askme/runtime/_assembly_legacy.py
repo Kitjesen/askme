@@ -380,22 +380,8 @@ class RuntimeAssembly:
 
 
 def _build_components(runtime: RuntimeAssembly) -> dict[str, RuntimeComponent]:
-    """Assemble runtime components from executive, platform, and diagnostics planes."""
-    from askme.runtime.planes import (
-        build_diagnostics_plane,
-        build_executive_plane,
-        build_platform_plane,
-    )
-
-    all_components: dict[str, RuntimeComponent] = {}
-    all_components.update(build_platform_plane(runtime))
-    all_components.update(build_executive_plane(runtime))
-    all_components.update(build_diagnostics_plane(runtime))
-
-    # Filter: only keep components included in this profile
-    if runtime.profile.components:
-        return {k: v for k, v in all_components.items() if runtime.profile.has(k)}
-    return all_components  # legacy fallback when no bundle defined
+    """Legacy stub — planes have been removed. Returns empty dict."""
+    return {}
 
 
 def build_runtime(

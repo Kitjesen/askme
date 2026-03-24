@@ -12,7 +12,7 @@ import logging
 from typing import Any
 
 from askme.runtime.module import Module, ModuleRegistry, Out
-from askme.llm.client import LLMClient
+from askme.llm.client import LLMClient  # TODO: migrate to llm_registry.create(cfg) when LLMClient inherits LLMBackend
 from askme.robot.ota_bridge import OTABridgeMetrics
 
 logger = logging.getLogger(__name__)

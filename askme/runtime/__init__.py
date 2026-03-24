@@ -1,6 +1,6 @@
 """Runtime assembly primitives for askme."""
 
-from .assembly import RuntimeAssembly, RuntimeServices, build_legacy_runtime, build_runtime
+from ._assembly_legacy import RuntimeAssembly, RuntimeServices, build_legacy_runtime, build_runtime
 from .components import CallableComponent, RuntimeComponent, resolve_start_order
 from .profiles import (
     EDGE_ROBOT_MODE,
