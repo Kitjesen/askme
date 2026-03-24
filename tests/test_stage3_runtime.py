@@ -109,6 +109,7 @@ class TestIsEstopActive:
 def _make_pipeline(dog_safety=None):
     """Build a minimal BrainPipeline-like object for L0 tests."""
     from askme.pipeline.brain_pipeline import BrainPipeline
+    from askme.pipeline.prompt_builder import PromptBuilder
     pipeline = object.__new__(BrainPipeline)
     pipeline._dog_safety = dog_safety
     pipeline._dog_control = None
@@ -116,6 +117,7 @@ def _make_pipeline(dog_safety=None):
     pipeline._episodic = None
     pipeline._session_memory = None
     pipeline._memory = None
+    pipeline._mem = None
     pipeline._vision = None
     pipeline._tools = MagicMock()
     pipeline._tools.get_definitions.return_value = []
@@ -123,6 +125,19 @@ def _make_pipeline(dog_safety=None):
     pipeline._skill_manager.get_skill_catalog.return_value = "none"
     pipeline._general_tool_max_safety_level = "normal"
     pipeline._qp_memory = None
+    pipeline._prompt_builder = PromptBuilder(
+        base_prompt=pipeline._base_prompt,
+        prompt_seed=[],
+        user_prefix="",
+        tools=pipeline._tools,
+        skill_manager=pipeline._skill_manager,
+        general_tool_max_safety_level="normal",
+        dog_safety=dog_safety,
+        episodic=None,
+        session_memory=None,
+        vision=None,
+        qp_memory=None,
+    )
     return pipeline
 
 

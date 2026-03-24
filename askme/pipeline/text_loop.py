@@ -256,6 +256,14 @@ class TextLoop:
                     except (asyncio.CancelledError, Exception):
                         pass
 
+        # Session-end summarization — save L2 summary if enough conversation happened
+        _sm = getattr(self._pipeline, "_session_memory", None)
+        if _sm and len(self._conversation.history) > 4:
+            try:
+                await asyncio.to_thread(_sm.summarize_and_save, self._conversation.history)
+            except Exception as e:
+                logger.warning("Session summary failed: %s", e)
+
         logger.info("Bye!")
 
     async def process_turn(self, user_text: str) -> str:

@@ -211,12 +211,17 @@ class BrainPipeline:
 
     def start_idle_reflection(self, idle_seconds: float = 300.0) -> asyncio.Task[None] | None:
         """Start an idle-time reflection background task (dream consolidation)."""
-        if not self._episodic:
+        _ep = (self._mem.episodic if self._mem is not None else self._episodic)
+        if not _ep:
             return None
 
         async def _idle_reflect() -> None:
             await asyncio.sleep(idle_seconds)
-            if not (self._episodic and self._episodic.should_reflect()):
+            _should = (
+                self._mem.should_reflect() if self._mem is not None
+                else (_ep.should_reflect() if _ep else False)
+            )
+            if not _should:
                 return
             sem = self._llm_semaphore
             if sem is not None and sem.locked():
@@ -224,10 +229,13 @@ class BrainPipeline:
                 return
             logger.info("[Dream] Idle-time reflection triggered")
             try:
-                summary = await self._episodic.reflect()
+                if self._mem is not None:
+                    summary = await self._mem.reflect()
+                else:
+                    summary = await _ep.reflect()
+                    _ep.cleanup_old_episodes()
                 if summary:
                     logger.info("[Dream] Reflection result: %s", summary[:80])
-                self._episodic.cleanup_old_episodes()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -287,10 +295,10 @@ class BrainPipeline:
             except Exception:
                 scene_desc = ""
 
-        if scene_desc and self._episodic:
-            self._episodic.log("perception", scene_desc)
+        if scene_desc:
+            self._log_episode("perception", scene_desc)
 
-        system_prompt = self._build_system_prompt(
+        system_prompt = self._prompt_builder.build_system_prompt(
             context_str,
             scene_desc=scene_desc,
             user_text=user_text,
@@ -323,7 +331,11 @@ class BrainPipeline:
             self._conversation.add_assistant_message(full_response)
             self._last_spoken_text = full_response
 
-            if self._memory is not None:
+            if self._mem is not None:
+                _mt = asyncio.create_task(self._mem.save_to_vector(user_text, full_response))
+                self._pending_tasks.add(_mt)
+                _mt.add_done_callback(self._pending_tasks.discard)
+            elif self._memory is not None:
                 _mt = asyncio.create_task(self._memory.save(user_text, full_response))
                 self._pending_tasks.add(_mt)
                 _mt.add_done_callback(self._pending_tasks.discard)
@@ -490,10 +502,11 @@ class BrainPipeline:
                         )
                     break
 
-        if skill_name == "patrol_report" and self._episodic:
+        _ep = (self._mem.episodic if self._mem is not None else self._episodic)
+        if skill_name == "patrol_report" and _ep:
             parts = [
-                self._episodic.get_recent_digest(),
-                self._episodic.get_knowledge_context(),
+                _ep.get_recent_digest(),
+                _ep.get_knowledge_context(),
             ]
             patrol_data = "\n".join(p for p in parts if p)
             context["patrol_data"] = patrol_data or ""
@@ -519,15 +532,13 @@ class BrainPipeline:
             self._last_spoken_text = result
             self._conversation.add_user_message(user_text)
             self._conversation.add_assistant_message(result)
-            if self._episodic:
-                self._episodic.log("outcome", f"直接回复: {result[:100]}")
+            self._log_episode("outcome", f"直接回复: {result[:100]}")
             if source == "voice":
                 await asyncio.to_thread(self._audio.wait_speaking_done)
             return result
         except Exception as exc:
             logger.error("Skill error (%s): %s", skill_name, exc)
-            if self._episodic:
-                self._episodic.log("error", f"技能错误 {skill_name}: {exc}")
+            self._log_episode("error", f"技能错误 {skill_name}: {exc}")
             self._audio.speak(self._classify_skill_error_message(exc, skill_name))
             return f"[Skill Error] {exc}"
         finally:
@@ -599,60 +610,10 @@ class BrainPipeline:
         scene_desc: str = "",
         user_text: str = "",
     ) -> str:
-        """Assemble system prompt with episodic knowledge, session summaries, and memory context."""
-        l0 = self._build_l0_runtime_block()
-        prompt = (l0 + "\n") if l0 else ""
-        prompt += self._base_prompt
-
-        if self._episodic:
-            world_ctx = self._episodic.get_knowledge_context()
-            if world_ctx:
-                prompt += f"\n{world_ctx}"
-            digest_ctx = self._episodic.get_recent_digest()
-            if digest_ctx:
-                prompt += f"\n{digest_ctx}"
-            relevant_ctx = self._episodic.get_relevant_context(user_text)
-            if relevant_ctx:
-                prompt += f"\n{relevant_ctx}"
-
-        if self._session_memory:
-            session_ctx = self._session_memory.get_recent_summaries()
-            if session_ctx:
-                prompt += f"\n{session_ctx}"
-
-        if self._qp_memory is not None and "[站点记忆]" not in (user_text or ""):
-            try:
-                qp_ctx = self._qp_memory.get_context_smart(query=user_text, max_chars=800)
-                if qp_ctx:
-                    prompt += f"\n[站点记忆]\n{qp_ctx}"
-            except Exception as _e:
-                logger.debug("qp_memory context retrieval failed: %s", _e)
-
-        if context_str:
-            prompt += f"\nRelevant memory:\n{context_str}"
-
-        if self._vision and self._vision.available:
-            prompt += "\n视觉能力: 已启用"
-            if scene_desc:
-                prompt += f"\n当前视野: {scene_desc}"
-
-        tool_defs = self._tools.get_definitions(
-            max_safety_level=self._general_tool_max_safety_level
+        """Delegate to PromptBuilder (kept for backward compat with tests)."""
+        return self._prompt_builder.build_system_prompt(
+            context_str, scene_desc=scene_desc, user_text=user_text,
         )
-        if tool_defs:
-            tool_names = [
-                td.get("function", {}).get("name", "") for td in tool_defs
-            ]
-            prompt += (
-                f"\n你可以主动调用以下工具: {', '.join(tool_names)}。"
-                "当用户提问涉及时间、文件、目录等信息时，主动调用对应工具获取真实数据再回答。"
-            )
-
-        skill_catalog = self._skill_manager.get_skill_catalog()
-        if skill_catalog != "none":
-            prompt += f"\n可用技能: {skill_catalog}"
-
-        return prompt
 
     def _start_vision_capture(self) -> asyncio.Task[str] | None:
         if not self._vision or not self._vision.available:

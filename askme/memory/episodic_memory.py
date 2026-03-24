@@ -38,12 +38,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from askme.memory.admission import MemoryAdmissionControl
 from askme.memory.episode import (
     Episode,
     score_importance,
@@ -119,6 +121,40 @@ REFLECT_PROMPT = """\
 }}"""
 
 
+_RE_NORMALIZE = re.compile(r"[\s\-\—\·、，。！？：；""''（）()\[\]「」.,!?:;]+")
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Strip whitespace and punctuation for fuzzy dedup comparison."""
+    return _RE_NORMALIZE.sub("", text).lower()
+
+
+def _is_duplicate(new_text: str, existing_texts: list[str], threshold: float = 0.8) -> bool:
+    """Check if new_text is a near-duplicate of any existing text.
+
+    Uses character-set overlap ratio: if >threshold of the shorter text's
+    characters appear in the longer text, it's considered a duplicate.
+    """
+    norm_new = _normalize_for_dedup(new_text)
+    if not norm_new:
+        return False
+    new_chars = set(norm_new)
+    for existing in existing_texts:
+        norm_existing = _normalize_for_dedup(existing)
+        if not norm_existing:
+            continue
+        # Exact match after normalization
+        if norm_new == norm_existing:
+            return True
+        # Character overlap ratio
+        existing_chars = set(norm_existing)
+        intersection = new_chars & existing_chars
+        union = new_chars | existing_chars
+        if union and len(intersection) / len(union) > threshold:
+            return True
+    return False
+
+
 class EpisodicMemory:
     """Three-layer episodic memory for embodied robot agents.
 
@@ -181,6 +217,9 @@ class EpisodicMemory:
         # Cache for _load_all_knowledge — invalidated by _update_knowledge
         self._knowledge_cache: str | None = None
         self._knowledge_cache_time: float = 0.0
+        # Admission control gate — filters trivial events before buffering
+        admission_threshold = float(episodic_cfg.get("admission_threshold", 0.1))
+        self._admission = MemoryAdmissionControl(threshold=admission_threshold)
 
         self._restore_active_buffer()
 
@@ -206,6 +245,13 @@ class EpisodicMemory:
         """
         if importance is None:
             importance = score_importance(event_type, description, context)
+
+        # Admission control — skip trivial/duplicate events
+        admitted, _score = self._admission.should_admit(event_type, description, importance)
+        if not admitted:
+            logger.debug("Admission rejected [%s] imp=%.2f: %s", event_type, importance, description[:60])
+            # Return a throwaway episode so callers don't need None checks
+            return Episode(event_type, description, context, importance=importance)
 
         episode = Episode(event_type, description, context, importance=importance)
         self._buffer.append(episode)
@@ -622,12 +668,12 @@ class EpisodicMemory:
                                         category, old_fact[:30], new_fact[:30])
                             break
 
-            # Append new facts (dedup)
+            # Append new facts (fuzzy dedup — normalized 80% overlap)
             for fact in new_facts:
                 if not fact:
                     continue
                 fact_line = f"- {fact}"
-                if fact_line not in lines:
+                if not _is_duplicate(fact_line, lines):
                     lines.append(fact_line)
 
             knowledge_file.write_text("\n".join(lines), encoding="utf-8")

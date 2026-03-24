@@ -423,6 +423,15 @@ class VoiceLoop:
                     except (asyncio.CancelledError, Exception):
                         pass
 
+        # Session-end summarization — save L2 summary if enough conversation happened
+        _sm = getattr(self._pipeline, "_session_memory", None)
+        _conv = getattr(self._pipeline, "_conversation", None)
+        if _sm and _conv and len(_conv.history) > 4:
+            try:
+                await asyncio.to_thread(_sm.summarize_and_save, _conv.history)
+            except Exception as e:
+                logger.warning("Session summary failed: %s", e)
+
         logger.info("Bye!")
 
     def _slot_present(self, skill: "SkillDefinition", user_text: str) -> bool:  # type: ignore[name-defined]
