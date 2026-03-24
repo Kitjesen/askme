@@ -36,7 +36,9 @@ try:
     from dataclasses import dataclass as _dc
 
     _CYCLONE_AVAILABLE = True
-except ImportError:
+except (ImportError, Exception):
+    # ImportError: cyclonedds not installed
+    # Other exceptions: cyclonedds installed but libddsc.so not found (CycloneDDSLoaderException)
     _CYCLONE_AVAILABLE = False
 
 
