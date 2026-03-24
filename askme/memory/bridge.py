@@ -1,11 +1,11 @@
 """
-Memory bridge — L4 vector memory via local sentence-transformers.
+Memory bridge — L4 vector memory via Mem0 (primary) or local VectorStore (fallback).
 
-Replaced the MemU / external embedding server approach with a local
+Lazy initialization: Mem0 is only instantiated on first use. If Mem0 is
+unavailable (import error, config error, etc.), falls back to the local
 ``VectorStore`` that runs sentence-transformers in-process.
 
-Graceful degradation: when sentence-transformers is not installed,
-``available`` returns False and all operations no-op.
+Graceful degradation: all operations return empty / no-op on failure.
 
 Usage::
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryBridge:
-    """Thin wrapper around ``VectorStore`` for L4 vector memory."""
+    """L4 vector memory — Mem0 primary, VectorStore fallback."""
 
     def __init__(self) -> None:
         cfg = get_config()
@@ -41,7 +41,11 @@ class MemoryBridge:
         )
         self._retrieve_timeout: float = self._mem_cfg.get("retrieve_timeout", 2.0)
 
-        # Resolve store path
+        # Mem0 instance — lazy init via _ensure_mem0()
+        self._mem0: Any = None
+        self._mem0_failed: bool = False  # True after init failure, skip retries
+
+        # Fallback: local VectorStore
         data_dir = cfg.get("app", {}).get("data_dir", "data")
         resolved = Path(data_dir)
         if not resolved.is_absolute():
@@ -55,11 +59,53 @@ class MemoryBridge:
 
         if not self._enabled:
             logger.info("[Memory] Memory disabled in config.")
-        elif not self._store.available:
-            logger.info("[Memory] sentence-transformers not installed — L4 vector memory disabled.")
         else:
-            logger.info("[Memory] VectorStore ready (model=%s, entries=%d)",
-                        self._embed_model, self._store.size)
+            logger.info("[Memory] MemoryBridge ready (Mem0 lazy init, fallback VectorStore).")
+
+    # ------------------------------------------------------------------
+    # Mem0 lazy initialization
+    # ------------------------------------------------------------------
+
+    def _ensure_mem0(self) -> bool:
+        """Try to initialise the Mem0 instance. Returns True if ready."""
+        if self._mem0 is not None:
+            return True
+        if not self._enabled or self._mem0_failed:
+            return False
+        try:
+            from mem0 import Memory
+
+            brain_cfg = get_config().get("brain", {})
+            config = {
+                "vector_store": {
+                    "provider": "qdrant",
+                    "config": {
+                        "collection_name": "askme",
+                        "path": str(project_root() / "data" / "memory" / "mem0_store"),
+                    },
+                },
+                "llm": {
+                    "provider": "openai",
+                    "config": {
+                        "api_key": brain_cfg.get("api_key", ""),
+                        "openai_base_url": brain_cfg.get("base_url", ""),
+                        "model": brain_cfg.get("model", "MiniMax-M2.7-highspeed"),
+                    },
+                },
+                "embedder": {
+                    "provider": "huggingface",
+                    "config": {
+                        "model": self._embed_model,
+                    },
+                },
+            }
+            self._mem0 = Memory.from_config(config)
+            logger.info("[Memory] Mem0 initialised successfully.")
+            return True
+        except Exception as e:
+            logger.warning("[Memory] Mem0 init failed, using VectorStore fallback: %s", e)
+            self._mem0_failed = True
+            return False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -67,13 +113,24 @@ class MemoryBridge:
 
     async def warmup(self) -> None:
         """Pre-load the embedding model in a background thread."""
-        if not self._enabled or not self._store.available:
+        if not self._enabled:
             return
+        # Try Mem0 init first (warms up qdrant + embedder)
         try:
-            await asyncio.to_thread(self._store.search, "warmup", 1)
-            logger.info("[Memory] Warmup complete.")
+            inited = await asyncio.to_thread(self._ensure_mem0)
+            if inited:
+                logger.info("[Memory] Mem0 warmup complete.")
+                return
         except Exception:
-            logger.debug("[Memory] Warmup triggered model load (expected).")
+            logger.debug("[Memory] Mem0 warmup failed, trying VectorStore.")
+
+        # Fallback: warm up VectorStore
+        if self._store.available:
+            try:
+                await asyncio.to_thread(self._store.search, "warmup", 1)
+                logger.info("[Memory] VectorStore warmup complete.")
+            except Exception:
+                logger.debug("[Memory] VectorStore warmup triggered model load (expected).")
 
     # ------------------------------------------------------------------
     # Public API
@@ -85,49 +142,31 @@ class MemoryBridge:
         Returns a formatted context string (one ``- item`` per line),
         or an empty string if memory is unavailable / finds nothing.
         """
-        if not self._enabled or not self._store.available:
+        if not self._enabled:
             return ""
 
-        try:
-            logger.debug("[Memory] Searching for: %s", text[:60])
-            results = await asyncio.wait_for(
-                asyncio.to_thread(self._store.search, text, 5),
-                timeout=self._retrieve_timeout,
-            )
-            if results:
-                logger.info("[Memory] Found %d items.", len(results))
-                return "\n".join(
-                    f"- {item['text']}" for item in results if item.get("score", 0) > 0.3
-                )
-            logger.debug("[Memory] No relevant memories found.")
-            return ""
+        # Try Mem0 first
+        if self._ensure_mem0():
+            return await self._retrieve_mem0(text)
 
-        except asyncio.TimeoutError:
-            logger.warning("[Memory] Retrieval timed out (%.1fs).", self._retrieve_timeout)
-            return ""
-        except Exception as exc:
-            logger.warning("[Memory] Retrieval error: %s", exc)
-            return ""
+        # Fallback to VectorStore
+        return await self._retrieve_vector_store(text)
 
     async def save(self, user_text: str, assistant_text: str) -> None:
-        """Persist a conversation exchange to the L4 vector store.
+        """Persist a conversation exchange to L4 memory.
 
-        Silently no-ops when the embedding model is unavailable.
+        Silently no-ops when the backend is unavailable.
         """
-        if not self._enabled or not self._store.available:
+        if not self._enabled:
             return
-        content = f"用户: {user_text}\n助手: {assistant_text[:200]}"
-        try:
-            await asyncio.to_thread(self._store.add, content, {
-                "type": "conversation",
-                "ts": __import__("time").time(),
-            })
-            # Periodic save (every 10 new entries)
-            if self._store.size % 10 == 0:
-                await asyncio.to_thread(self._store.save)
-            logger.debug("[Memory] Saved conversation turn.")
-        except Exception as exc:
-            logger.warning("[Memory] Save failed: %s", exc)
+
+        # Try Mem0 first
+        if self._ensure_mem0():
+            await self._save_mem0(user_text, assistant_text)
+            return
+
+        # Fallback to VectorStore
+        await self._save_vector_store(user_text, assistant_text)
 
     def import_existing_data(self) -> int:
         """Scan L3 knowledge/digests and import into vector store.
@@ -180,9 +219,95 @@ class MemoryBridge:
     @property
     def available(self) -> bool:
         """Whether the memory service is initialised and usable."""
-        return self._enabled and self._store.available
+        if not self._enabled:
+            return False
+        if self._mem0 is not None:
+            return True
+        return self._store.available
 
     @property
     def vector_store(self) -> VectorStore:
-        """Direct access to the underlying VectorStore."""
+        """Direct access to the underlying VectorStore (for AssociationGraph)."""
         return self._store
+
+    # ------------------------------------------------------------------
+    # Mem0 backend
+    # ------------------------------------------------------------------
+
+    async def _retrieve_mem0(self, text: str) -> str:
+        """Search Mem0 for relevant memories."""
+        try:
+            logger.debug("[Memory] Mem0 searching for: %s", text[:60])
+            results = await asyncio.wait_for(
+                asyncio.to_thread(self._mem0.search, text, user_id="robot"),
+                timeout=self._retrieve_timeout,
+            )
+            if not results or not results.get("results"):
+                logger.debug("[Memory] Mem0 no relevant memories found.")
+                return ""
+            memories = [r.get("memory", "") for r in results["results"][:5]]
+            items = [m for m in memories if m]
+            if items:
+                logger.info("[Memory] Mem0 found %d items.", len(items))
+                return "\n".join(f"- {m}" for m in items)
+            return ""
+        except asyncio.TimeoutError:
+            logger.warning("[Memory] Mem0 retrieval timed out (%.1fs).", self._retrieve_timeout)
+            return ""
+        except Exception as exc:
+            logger.debug("[Memory] Mem0 retrieve failed: %s", exc)
+            return ""
+
+    async def _save_mem0(self, user_text: str, assistant_text: str) -> None:
+        """Add conversation turn to Mem0 (auto-extracts facts)."""
+        try:
+            text = f"用户: {user_text}\n回复: {assistant_text[:200]}"
+            await asyncio.to_thread(self._mem0.add, text, user_id="robot")
+            logger.debug("[Memory] Mem0 saved conversation turn.")
+        except Exception as exc:
+            logger.debug("[Memory] Mem0 save failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # VectorStore fallback
+    # ------------------------------------------------------------------
+
+    async def _retrieve_vector_store(self, text: str) -> str:
+        """Retrieve from local VectorStore."""
+        if not self._store.available:
+            return ""
+        try:
+            logger.debug("[Memory] VectorStore searching for: %s", text[:60])
+            results = await asyncio.wait_for(
+                asyncio.to_thread(self._store.search, text, 5),
+                timeout=self._retrieve_timeout,
+            )
+            if results:
+                logger.info("[Memory] VectorStore found %d items.", len(results))
+                return "\n".join(
+                    f"- {item['text']}" for item in results if item.get("score", 0) > 0.3
+                )
+            logger.debug("[Memory] VectorStore no relevant memories found.")
+            return ""
+        except asyncio.TimeoutError:
+            logger.warning("[Memory] VectorStore retrieval timed out (%.1fs).", self._retrieve_timeout)
+            return ""
+        except Exception as exc:
+            logger.warning("[Memory] VectorStore retrieval error: %s", exc)
+            return ""
+
+    async def _save_vector_store(self, user_text: str, assistant_text: str) -> None:
+        """Persist to local VectorStore."""
+        if not self._store.available:
+            return
+        content = f"用户: {user_text}\n助手: {assistant_text[:200]}"
+        try:
+            await asyncio.to_thread(self._store.add, content, {
+                "type": "conversation",
+                "ts": __import__("time").time(),
+            })
+            # Periodic save (every 10 new entries)
+            if self._store.size % 10 == 0:
+                await asyncio.to_thread(self._store.save)
+            logger.debug("[Memory] VectorStore saved conversation turn.")
+        except Exception as exc:
+            logger.warning("[Memory] VectorStore save failed: %s", exc)

@@ -37,7 +37,7 @@ robot = [
     "onnxruntime>=1.16.0",
 ]
 memory = [
-    "memu>=0.1.0",
+    "mem0ai>=0.1.0",
 ]
 vision = [
     "qp-perception>=0.1.0",
