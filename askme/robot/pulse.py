@@ -10,7 +10,8 @@ Usage::
     await bus.start()
 """
 
-from __future__ import annotations
+# NOTE: Do NOT use "from __future__ import annotations" here.
+# CycloneDDS IdlStruct needs real type objects (str, bool), not string literals.
 
 import asyncio
 import json
