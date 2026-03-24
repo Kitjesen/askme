@@ -15,11 +15,11 @@ app:
 # Brain: LLM / Reasoning
 # ----------------------------------------------------------
 brain:
-  api_key: ${LLM_API_KEY}
-  base_url: ${LLM_BASE_URL}
-  model: claude-opus-4-6
+  api_key: ${MINIMAX_API_KEY}
+  base_url: https://api.minimax.chat/v1
+  model: MiniMax-M2.7-highspeed
   # Lightweight model for real-time voice turns (lower TTFT)
-  voice_model: MiniMax-M2.5-highspeed
+  voice_model: MiniMax-M2.7-highspeed
   # Max tokens for a single completion (0 = model default)
   max_tokens: 0
   temperature: 0.7
@@ -27,8 +27,7 @@ brain:
   timeout: 30.0
   max_retries: 2
   fallback_models:
-    - claude-sonnet-4-5-20250929
-    - claude-haiku-4-5-20251001
+    - MiniMax-M2.5-highspeed
   # MiniMax LLM (OpenAI-compatible, 100 tps)
   minimax_api_key: ${MINIMAX_API_KEY}
   minimax_base_url: https://api.minimax.chat/v1
