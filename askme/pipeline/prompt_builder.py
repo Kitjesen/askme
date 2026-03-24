@@ -120,8 +120,9 @@ class PromptBuilder:
             if scene_desc:
                 prompt += f"\n当前视野: {scene_desc}"
 
-        tool_defs = self._tools.get_definitions(
-            max_safety_level=self._general_tool_max_safety_level
+        tool_defs = (
+            self._tools.get_definitions(max_safety_level=self._general_tool_max_safety_level)
+            if self._tools else []
         )
         if tool_defs:
             tool_names = [

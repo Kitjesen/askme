@@ -14,10 +14,12 @@ from askme.runtime.modules import (
     PipelineModule,
     SkillModule,
     TextModule,
+    ToolsModule,
 )
 
 text = (
     Runtime.use(LLMModule)
+    + Runtime.use(ToolsModule)
     + Runtime.use(MemoryModule)
     + Runtime.use(PipelineModule)
     + Runtime.use(SkillModule)

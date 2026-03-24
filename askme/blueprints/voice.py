@@ -14,11 +14,13 @@ from askme.runtime.modules import (
     PipelineModule,
     SkillModule,
     TextModule,
+    ToolsModule,
     VoiceModule,
 )
 
 voice = (
     Runtime.use(LLMModule)
+    + Runtime.use(ToolsModule)
     + Runtime.use(MemoryModule)
     + Runtime.use(PipelineModule)
     + Runtime.use(SkillModule)
