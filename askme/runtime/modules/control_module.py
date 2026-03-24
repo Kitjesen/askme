@@ -30,6 +30,12 @@ class ControlModule(Module):
         self.client = DogControlClient(control_cfg)
         logger.info("ControlModule: built (configured=%s)", bool(self.client._base_url))
 
+    # -- typed accessors ------------------------------------------------
+    @property
+    def control_client(self) -> DogControlClient:
+        """The DogControlClient instance."""
+        return self.client
+
     def health(self) -> dict[str, Any]:
         configured = bool(self.client._base_url)
         return {"status": "ok", "configured": configured}

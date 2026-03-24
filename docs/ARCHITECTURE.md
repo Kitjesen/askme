@@ -120,6 +120,43 @@ Voice "停！" → IntentRouter (tier-1, zero LLM) → DogSafetyClient.notify_es
 
 ```
 askme/
+├── blueprints/            — product composition definitions (declarative Runtime.use())
+│   ├── __init__.py
+│   ├── voice.py           — voice runtime: 13 modules, full perception + proactive
+│   ├── text.py            — text runtime: 11 modules, no audio hardware
+│   ├── edge_robot.py      — extends voice with ControlModule + LEDModule
+│   └── _runner.py         — shared __main__ boilerplate (build/start/stop + signals)
+│
+├── interfaces/            — ABC interfaces + backend registries
+│   ├── llm.py             — LLMBackend ABC
+│   ├── asr.py             — ASRBackend ABC
+│   ├── tts.py             — TTSBackend ABC
+│   ├── bus.py             — BusBackend ABC
+│   ├── detector.py        — DetectorBackend ABC
+│   ├── navigator.py       — NavigatorBackend ABC
+│   └── register_defaults.py — registers known implementations
+│
+├── runtime/
+│   ├── module.py          — Module ABC, In/Out/Required ports, Runtime, RuntimeApp
+│   ├── profiles.py        — RuntimeProfile: voice / text / mcp / edge_robot
+│   ├── registry.py        — BackendRegistry (interface layer)
+│   └── modules/           — 15 declarative modules
+│       ├── llm_module.py
+│       ├── tools_module.py
+│       ├── pulse_module.py
+│       ├── memory_module.py
+│       ├── perception_module.py
+│       ├── safety_module.py
+│       ├── pipeline_module.py
+│       ├── skill_module.py
+│       ├── executor_module.py
+│       ├── voice_module.py
+│       ├── text_module.py
+│       ├── control_module.py
+│       ├── led_module.py
+│       ├── proactive_module.py
+│       └── health_module.py
+│
 ├── llm/
 │   ├── client.py          — LLM HTTP client, retry/timeout/fallback chain
 │   ├── conversation.py    — L1 sliding window (40 msg), compression
@@ -191,15 +228,10 @@ askme/
 ├── agent_shell/
 │   └── thunder_agent_shell.py — ThunderAgentShell: autonomous execution (5 iter, 120s)
 │
-├── runtime/
-│   ├── assembly.py        — DI composition root, component lifecycle orchestration
-│   ├── components.py      — CallableComponent: start/stop/health/capabilities
-│   └── profiles.py        — voice / text / mcp / edge_robot profiles
-│
 └── schemas/
     ├── observation.py     — Detection, Observation dataclasses
     ├── events.py          — ChangeEvent, ChangeEventType enum
-    └── messages.py        — Typed Pulse messages: EstopState, DetectionFrame, JointStateSnapshot, ImuSnapshot, CmsState
+    └── messages.py        — Typed messages: MemoryContext, EstopState, DetectionFrame, JointStateSnapshot, ImuSnapshot, CmsState
 ```
 
 ---

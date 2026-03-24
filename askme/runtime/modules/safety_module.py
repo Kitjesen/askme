@@ -39,6 +39,12 @@ class SafetyModule(Module):
             self.client.is_configured(),
         )
 
+    # -- typed accessors ------------------------------------------------
+    @property
+    def safety_client(self) -> DogSafetyClient:
+        """The DogSafetyClient instance."""
+        return self.client
+
     def health(self) -> dict[str, Any]:
         configured = self.client.is_configured()
         estop_active = self.client.is_estop_active() if configured else False

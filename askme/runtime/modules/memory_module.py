@@ -25,13 +25,9 @@ from askme.memory.episodic_memory import EpisodicMemory
 from askme.memory.session import SessionMemory
 from askme.memory.system import MemorySystem
 from askme.runtime.module import In, Module, ModuleRegistry, Out
+from askme.schemas.messages import MemoryContext
 
 logger = logging.getLogger(__name__)
-
-
-class MemoryContext:
-    """Marker type for the assembled memory subsystem."""
-    pass
 
 
 class MemoryModule(Module):
@@ -50,25 +46,51 @@ class MemoryModule(Module):
 
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else None
 
-        self.session_memory = SessionMemory(llm=llm)
-        self.conversation = ConversationManager(
-            session_memory=self.session_memory,
+        self._session_memory = SessionMemory(llm=llm)
+        self._conversation = ConversationManager(
+            session_memory=self._session_memory,
             metrics=ota_metrics,
         )
-        self.memory_bridge = MemoryBridge()
-        self.episodic = EpisodicMemory(llm=llm)
-        self.memory_system = MemorySystem(
+        self._memory_bridge = MemoryBridge()
+        self._episodic = EpisodicMemory(llm=llm)
+        self._memory_system = MemorySystem(
             llm=llm,
-            conversation=self.conversation,
-            session_memory=self.session_memory,
-            episodic=self.episodic,
-            vector_memory=self.memory_bridge,
+            conversation=self._conversation,
+            session_memory=self._session_memory,
+            episodic=self._episodic,
+            vector_memory=self._memory_bridge,
         )
         logger.info("MemoryModule: built (llm=%s)", "wired" if llm else "none")
+
+    # -- typed accessors ------------------------------------------------
+    @property
+    def conversation(self) -> ConversationManager:
+        """L1 conversation manager."""
+        return self._conversation
+
+    @property
+    def session_memory(self) -> SessionMemory:
+        """L2 session memory."""
+        return self._session_memory
+
+    @property
+    def episodic(self) -> EpisodicMemory:
+        """L3 episodic memory."""
+        return self._episodic
+
+    @property
+    def memory_bridge(self) -> MemoryBridge:
+        """L4 vector memory bridge."""
+        return self._memory_bridge
+
+    @property
+    def memory_system(self) -> MemorySystem:
+        """Unified memory system."""
+        return self._memory_system
 
     def health(self) -> dict[str, Any]:
         return {
             "status": "ok",
-            "conversation_len": len(self.conversation.history),
-            "episodic_buffer_len": len(self.episodic._buffer),
+            "conversation_len": len(self._conversation.history),
+            "episodic_buffer_len": len(self._episodic._buffer),
         }

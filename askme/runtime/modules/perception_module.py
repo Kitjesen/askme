@@ -44,6 +44,12 @@ class PerceptionModule(Module):
             "enabled" if self.change_detector else "disabled",
         )
 
+    # -- typed accessors ------------------------------------------------
+    @property
+    def vision(self) -> VisionBridge:  # type: ignore[override]
+        """The VisionBridge instance."""
+        return self.vision_bridge
+
     async def start(self) -> None:
         if self.change_detector is not None:
             import asyncio

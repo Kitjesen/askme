@@ -20,6 +20,37 @@ from askme.schemas.observation import Detection
 
 
 @dataclass(frozen=True)
+class MemoryContext:
+    """Assembled memory context for a single LLM turn.
+
+    Carries the pre-fetched context from each memory layer so the pipeline
+    can inject it into the system prompt without blocking.
+    """
+
+    episodic_context: str = ""
+    session_context: str = ""
+    vector_context: str = ""
+    timestamp: float = 0.0
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "MemoryContext":
+        return cls(
+            episodic_context=str(d.get("episodic_context", "")),
+            session_context=str(d.get("session_context", "")),
+            vector_context=str(d.get("vector_context", "")),
+            timestamp=float(d.get("timestamp", 0.0)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "episodic_context": self.episodic_context,
+            "session_context": self.session_context,
+            "vector_context": self.vector_context,
+            "timestamp": self.timestamp,
+        }
+
+
+@dataclass(frozen=True)
 class EstopState:
     """Emergency stop state from ``/thunder/estop``."""
 

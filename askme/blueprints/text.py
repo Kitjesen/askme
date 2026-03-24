@@ -39,25 +39,6 @@ text = (
 __all__ = ["text"]
 
 if __name__ == "__main__":
-    import asyncio
-    import signal
+    from askme.blueprints._runner import run_blueprint
 
-    from askme.config import load_config
-
-    async def main():
-        cfg = load_config()
-        app = await text.build(cfg)
-
-        stop = asyncio.Event()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                asyncio.get_running_loop().add_signal_handler(sig, stop.set)
-            except NotImplementedError:
-                pass  # Windows — falls back to KeyboardInterrupt
-
-        await app.start()
-        print(f"Text running — {len(app.modules)} modules")
-        await stop.wait()
-        await app.stop()
-
-    asyncio.run(main())
+    run_blueprint(text, "Text")

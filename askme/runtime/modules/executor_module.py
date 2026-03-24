@@ -53,5 +53,11 @@ class ExecutorModule(Module):
 
         logger.info("ExecutorModule: built")
 
+    # -- typed accessors ------------------------------------------------
+    @property
+    def agent_shell(self) -> ThunderAgentShell:
+        """The ThunderAgentShell instance."""
+        return self.shell
+
     def health(self) -> dict[str, Any]:
         return {"status": "ok"}

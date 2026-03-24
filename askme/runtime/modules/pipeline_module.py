@@ -93,7 +93,7 @@ class PipelineModule(Module):
 
         prompt_seed = _load_soul_seed(cfg) or brain_cfg.get("prompt_seed", [])
 
-        self.brain_pipeline = BrainPipeline(
+        self._pipeline = BrainPipeline(
             llm=llm,
             conversation=conversation,
             memory=memory_bridge,
@@ -122,6 +122,12 @@ class PipelineModule(Module):
             memory_system=memory_system,
         )
         logger.info("PipelineModule: built")
+
+    # -- typed accessors ------------------------------------------------
+    @property
+    def brain_pipeline(self) -> BrainPipeline:
+        """The BrainPipeline instance."""
+        return self._pipeline
 
     def health(self) -> dict[str, Any]:
         return {"status": "ok"}

@@ -53,55 +53,86 @@ class VoiceModule(Module):
         agent_shell = getattr(executor_mod, "shell", None) if executor_mod else None
 
         # AudioRouter
-        self.audio_router = AudioRouter()
+        self._audio_router = AudioRouter()
 
         # AudioAgent
-        self.audio = AudioAgent(
+        self._audio = AudioAgent(
             cfg,
             voice_mode=True,
             metrics=ota_metrics,
-            audio_router=self.audio_router,
+            audio_router=self._audio_router,
         )
 
         # Register voice tools
         if tools is not None:
-            register_voice_tools(tools, self.audio)
-            tools.register(SpeakProgressTool(self.audio))
+            register_voice_tools(tools, self._audio)
+            tools.register(SpeakProgressTool(self._audio))
 
         # Wire audio into pipeline and shell
         if pipeline is not None:
-            pipeline._audio = self.audio
+            pipeline._audio = self._audio
         if agent_shell is not None:
-            agent_shell._audio = self.audio
+            agent_shell._audio = self._audio
         if dispatcher is not None:
-            dispatcher._audio = self.audio
+            dispatcher._audio = self._audio
 
         # VoiceRuntimeBridge
-        self.voice_runtime_bridge = VoiceRuntimeBridge(
+        self._voice_runtime_bridge = VoiceRuntimeBridge(
             cfg.get("runtime", {}).get("voice_bridge", {})
         )
 
         # IntentRouter
         voice_triggers = skill_manager.get_voice_triggers() if skill_manager else {}
-        self.router = IntentRouter(voice_triggers=voice_triggers)
+        self._router = IntentRouter(voice_triggers=voice_triggers)
 
         # VoiceLoop
-        self.voice_loop = VoiceLoop(
-            router=self.router,
+        self._voice_loop = VoiceLoop(
+            router=self._router,
             pipeline=pipeline,
-            audio=self.audio,
-            voice_runtime_bridge=self.voice_runtime_bridge,
+            audio=self._audio,
+            voice_runtime_bridge=self._voice_runtime_bridge,
             dispatcher=dispatcher,
-            audio_router=self.audio_router,
+            audio_router=self._audio_router,
         )
 
         # AddressDetector
-        self.address_detector = AddressDetector(
+        self._address_detector = AddressDetector(
             cfg.get("voice", {}).get("address_detection", {})
         )
-        self.voice_loop.set_address_detector(self.address_detector)
+        self._voice_loop.set_address_detector(self._address_detector)
 
         logger.info("VoiceModule: built")
+
+    # -- typed accessors ------------------------------------------------
+    @property
+    def audio(self) -> Any:
+        """The AudioAgent instance."""
+        return self._audio
+
+    @property
+    def voice_loop(self) -> Any:
+        """The VoiceLoop instance."""
+        return self._voice_loop
+
+    @property
+    def router(self) -> Any:
+        """The IntentRouter instance."""
+        return self._router
+
+    @property
+    def voice_runtime_bridge(self) -> Any:
+        """The VoiceRuntimeBridge instance."""
+        return self._voice_runtime_bridge
+
+    @property
+    def address_detector(self) -> Any:
+        """The AddressDetector instance."""
+        return self._address_detector
+
+    @property
+    def audio_router(self) -> Any:
+        """The AudioRouter instance."""
+        return self._audio_router
 
     def health(self) -> dict[str, Any]:
         return {

@@ -46,14 +46,14 @@ class SkillModule(Module):
         brain_cfg = cfg.get("brain", {})
 
         # Build skill manager
-        self.skill_manager = SkillManager()
-        self.skill_manager.load()
+        self._skill_manager = SkillManager()
+        self._skill_manager.load()
 
         # Build skill executor
         skill_model = brain_cfg.get("voice_model") or brain_cfg.get(
             "model", "claude-sonnet-4-5-20250929"
         )
-        self.skill_executor = SkillExecutor(
+        self._skill_executor = SkillExecutor(
             llm,
             tools,
             default_model=skill_model,
@@ -62,22 +62,22 @@ class SkillModule(Module):
 
         # Wire skill_manager and skill_executor into the pipeline
         if pipeline is not None:
-            pipeline._skill_manager = self.skill_manager
-            pipeline._skill_executor = self.skill_executor
+            pipeline._skill_manager = self._skill_manager
+            pipeline._skill_executor = self._skill_executor
 
         # Build planner
-        self.planner = PlannerAgent(
+        self._planner = PlannerAgent(
             llm_client=llm,
-            skill_manager=self.skill_manager,
+            skill_manager=self._skill_manager,
             model=brain_cfg.get("plan_model"),
         )
 
         # Build dispatcher (audio=None until VoiceModule/TextModule sets it)
-        self.skill_dispatcher = SkillDispatcher(
+        self._dispatcher = SkillDispatcher(
             pipeline=pipeline,
-            skill_manager=self.skill_manager,
+            skill_manager=self._skill_manager,
             audio=None,
-            planner=self.planner,
+            planner=self._planner,
         )
 
         # Wire dispatch_skill tool
@@ -87,23 +87,44 @@ class SkillModule(Module):
             from askme.llm.intent_router import IntentRouter
 
             dispatch_tool = DispatchSkillTool()
-            dispatch_tool.set_dispatcher(self.skill_dispatcher)
+            dispatch_tool.set_dispatcher(self._dispatcher)
             tools.register(dispatch_tool)
             # Build a temporary router for skill_tools registration
             router = IntentRouter(
-                voice_triggers=self.skill_manager.get_voice_triggers(),
+                voice_triggers=self._skill_manager.get_voice_triggers(),
             )
-            register_skill_tools(tools, self.skill_manager, router)
+            register_skill_tools(tools, self._skill_manager, router)
 
         logger.info(
             "SkillModule: built (%d skills loaded)",
-            len(self.skill_manager.get_all()),
+            len(self._skill_manager.get_all()),
         )
 
+    # -- typed accessors ------------------------------------------------
+    @property
+    def skill_manager(self) -> SkillManager:
+        """The skill manager."""
+        return self._skill_manager
+
+    @property
+    def skill_dispatcher(self) -> SkillDispatcher:
+        """The skill dispatcher."""
+        return self._dispatcher
+
+    @property
+    def skill_executor(self) -> SkillExecutor:
+        """The skill executor."""
+        return self._skill_executor
+
+    @property
+    def planner(self) -> PlannerAgent:
+        """The planner agent."""
+        return self._planner
+
     def health(self) -> dict[str, Any]:
-        enabled = self.skill_manager.get_enabled()
+        enabled = self._skill_manager.get_enabled()
         return {
             "status": "ok",
-            "skill_count": len(self.skill_manager.get_all()),
+            "skill_count": len(self._skill_manager.get_all()),
             "enabled_count": len(enabled),
         }

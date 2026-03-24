@@ -1,14 +1,10 @@
 """Tests for runtime mode resolution."""
 
 from askme.runtime.profiles import (
-    EDGE_ROBOT_MODE,
     EDGE_ROBOT_PROFILE,
-    TEXT_MODE,
     TEXT_PROFILE,
-    VOICE_MODE,
     VOICE_PROFILE,
     legacy_profile_for,
-    mode_for,
 )
 
 
@@ -46,16 +42,3 @@ def test_legacy_profile_enables_robot_io_for_text_robot_mode() -> None:
     assert profile.primary_loop == "text"
     assert profile.robot_api is True
     assert profile.has("robot_io") is True
-
-
-def test_mode_aliases_match_profiles() -> None:
-    assert VOICE_MODE == VOICE_PROFILE
-    assert TEXT_MODE == TEXT_PROFILE
-    assert EDGE_ROBOT_MODE == EDGE_ROBOT_PROFILE
-
-
-def test_mode_for_alias_matches_legacy_profile_for() -> None:
-    assert mode_for(voice_mode=True, robot_mode=False) == legacy_profile_for(
-        voice_mode=True,
-        robot_mode=False,
-    )

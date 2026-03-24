@@ -31,5 +31,16 @@ class LLMModule(Module):
         self.client = LLMClient(metrics=self.ota_metrics)
         logger.info("LLMModule: built (model=%s)", self.client.model)
 
+    # -- typed accessors ------------------------------------------------
+    @property
+    def llm_client(self) -> LLMClient:  # type: ignore[override]
+        """The LLM client instance."""
+        return self.client
+
+    @property
+    def metrics(self) -> Any:
+        """OTA bridge metrics collector."""
+        return self.ota_metrics
+
     def health(self) -> dict[str, Any]:
         return {"status": "ok", "model": self.client.model}

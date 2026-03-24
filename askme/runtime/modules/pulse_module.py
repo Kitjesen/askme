@@ -37,14 +37,20 @@ class PulseModule(Module):
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         pulse_cfg = cfg.get("pulse", {})
-        self.bus = Pulse(pulse_cfg)
-        logger.info("PulseModule: built (enabled=%s)", self.bus.available)
+        self._bus = Pulse(pulse_cfg)
+        logger.info("PulseModule: built (enabled=%s)", self._bus.available)
+
+    # -- typed accessors ------------------------------------------------
+    @property
+    def bus(self) -> Pulse:
+        """The Pulse DDS data bus instance."""
+        return self._bus
 
     async def start(self) -> None:
-        await self.bus.start()
+        await self._bus.start()
 
     async def stop(self) -> None:
-        await self.bus.stop()
+        await self._bus.stop()
 
     def health(self) -> dict[str, Any]:
-        return self.bus.health()
+        return self._bus.health()

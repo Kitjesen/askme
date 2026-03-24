@@ -63,16 +63,16 @@ class TextModule(Module):
             pipeline._audio = audio
 
         # CommandHandler
-        self.commands = CommandHandler(
+        self._commands = CommandHandler(
             conversation=conversation,
             skill_manager=skill_manager,
         )
 
         # TextLoop
-        self.text_loop = TextLoop(
+        self._text_loop = TextLoop(
             router=router,
             pipeline=pipeline,
-            commands=self.commands,
+            commands=self._commands,
             conversation=conversation,
             skill_manager=skill_manager,
             audio=audio,
@@ -81,6 +81,17 @@ class TextModule(Module):
         )
 
         logger.info("TextModule: built")
+
+    # -- typed accessors ------------------------------------------------
+    @property
+    def text_loop(self) -> Any:
+        """The TextLoop instance."""
+        return self._text_loop
+
+    @property
+    def commands(self) -> Any:
+        """The CommandHandler instance."""
+        return self._commands
 
     def health(self) -> dict[str, Any]:
         return {"status": "ok"}

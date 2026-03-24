@@ -172,15 +172,3 @@ def legacy_profile_for(*, voice_mode: bool, robot_mode: bool) -> RuntimeProfile:
     if voice_mode:
         return VOICE_PROFILE
     return TEXT_PROFILE
-
-
-RuntimeMode = RuntimeProfile
-VOICE_MODE = VOICE_PROFILE
-TEXT_MODE = TEXT_PROFILE
-MCP_MODE = MCP_PROFILE
-EDGE_ROBOT_MODE = EDGE_ROBOT_PROFILE
-
-
-def mode_for(*, voice_mode: bool, robot_mode: bool) -> RuntimeMode:
-    """Resolve legacy CLI flags into a named runtime mode."""
-    return legacy_profile_for(voice_mode=voice_mode, robot_mode=robot_mode)

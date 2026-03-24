@@ -8,18 +8,12 @@ import pytest
 
 from askme.runtime.module import Module, ModuleRegistry, Runtime, RuntimeApp
 from askme.runtime.profiles import (
-    EDGE_ROBOT_MODE,
     EDGE_ROBOT_PROFILE,
-    MCP_MODE,
     MCP_PROFILE,
-    TEXT_MODE,
     TEXT_PROFILE,
-    VOICE_MODE,
     VOICE_PROFILE,
-    RuntimeMode,
     RuntimeProfile,
     legacy_profile_for,
-    mode_for,
 )
 
 
@@ -110,19 +104,6 @@ class TestRuntimeProfileHas:
         profile = legacy_profile_for(voice_mode=False, robot_mode=True)
         assert profile.has("robot_io") is True
         assert profile.robot_api is True
-
-    def test_mode_aliases_match_profiles(self) -> None:
-        assert RuntimeMode is RuntimeProfile
-        assert VOICE_MODE == VOICE_PROFILE
-        assert TEXT_MODE == TEXT_PROFILE
-        assert MCP_MODE == MCP_PROFILE
-        assert EDGE_ROBOT_MODE == EDGE_ROBOT_PROFILE
-
-    def test_mode_for_alias_matches_legacy_profile_for(self) -> None:
-        assert mode_for(voice_mode=True, robot_mode=False) == legacy_profile_for(
-            voice_mode=True,
-            robot_mode=False,
-        )
 
     def test_legacy_fallback_for_empty_components(self) -> None:
         """Profile created directly without components uses bool fallback."""

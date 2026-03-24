@@ -1,7 +1,11 @@
 # Module System Migration Plan
 
 > Migrate askme from imperative `assembly.py` to declarative `Module` composition.
-> Status: PLAN — not yet started.
+> Status: COMPLETE — all 15 modules migrated, assembly.py deleted.
+>
+> **Remaining gaps**: See [`LAYER_GAPS.md`](./LAYER_GAPS.md) for outstanding
+> architectural gaps (port wiring, typed message propagation, BrainPipeline
+> decomposition, etc.).
 
 ## Current State
 
