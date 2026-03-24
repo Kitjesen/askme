@@ -1,254 +1,158 @@
 # Askme
 
-Thunder industrial inspection assistant runtime.
+语音 AI 助手。听 → 理解 → 回答 → 说。
 
-Architecture reference: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Boundary: [docs/ASKME_BOUNDARY.md](docs/ASKME_BOUNDARY.md)
 
-`askme` is not a generic transport framework. Its value is the runtime composition around voice I/O, memory, vision, robot APIs, agent execution, and skill dispatch for the dog platform.
+## What askme is
+
+```
+用户说话 → ASR → 理解意图 → LLM + Memory + Skills → TTS → 扬声器
+```
+
+askme 是语音 AI 助手，不是机器人操作系统。导航、电机控制、SLAM 是外部服务，askme 通过接口调用它们。
 
 ## Quick Start
 
 ```bash
-# Full-screen terminal UI
-python -m askme
+# 语音模式（6 模块：听说记答）
+python -m askme.blueprints.voice
 
-# Plain text runtime
-python -m askme --text
+# 语音 + 感知（10 模块：+ 看 + 主动反应）
+python -m askme.blueprints.voice_perception
 
-# Voice runtime
+# 完整机器人（16 模块：+ 硬件控制 + 巡检）
+python -m askme.blueprints.edge_robot
+
+# 纯文字（5 模块，SSH/开发用）
+python -m askme.blueprints.text
+
+# Legacy CLI
 python -m askme --voice
-
-# Voice + robot edge runtime
-python -m askme runtime run --profile edge_robot
-
-# Text runtime with robot APIs enabled
-python -m askme runtime run --text --robot
-
-# One-shot agent CLI
-python -m askme agent send "帮我看看当前有哪些技能"
+python -m askme --text
 ```
 
-Legacy flags are still accepted for compatibility, including `python -m askme --legacy --text --robot`.
+## Blueprints — 产品 = 文件
 
-## Runtime Direction
+```python
+# voice.py — 6 modules
+voice = (
+    Runtime.use(LLMModule)       # 理解语言
+    + Runtime.use(MemoryModule)  # 记住上下文
+    + Runtime.use(PipelineModule)# 对话流水线
+    + Runtime.use(SkillModule)   # 技能调度
+    + Runtime.use(VoiceModule)   # 听和说
+    + Runtime.use(TextModule)    # 文字交互
+)
 
-The current architecture follows four rules:
+# voice_perception.py — voice + 4 感知模块
+voice_perception = voice + Pulse + Perception + Safety + Reaction
 
-1. `operator_io`, `memory`, `vision`, `robot_io`, `executor`, and `skills` are assembled as composable runtime components instead of being hard-wired inside `app.py`.
-2. A named mode layer controls assembly. The main modes are `voice`, `text`, `mcp`, and `edge_robot`.
-3. Skill contracts are defined in code first. MCP catalogs and OpenAPI are generated from those contracts, while legacy `SKILL.md` files still provide prompt bodies during migration.
-4. Every runtime component exposes a consistent lifecycle and introspection surface: `start()`, `stop()`, `health()`, and `capabilities()`.
-
-This deliberately does not copy the `dimos` transport stack (`In/Out/LCM/Transport`). `askme` does not currently need a bigger message bus as much as it needs a smaller composition root and clearer boundaries between skill, tool, and agent execution.
-
-## Platform Boundary
-
-Inside `askme`, the runtime still assembles local components such as `vision`,
-`robot_io`, and `skills`. That is an internal composition concern, not a
-statement that `askme` owns the full robot runtime.
-
-For the NOVA Dog product boundary:
-
-- `askme` is the operator AI and channel entry layer
-- `voice` is the production service wrapper around `askme`
-- `arbiter` owns mission lifecycle
-- `safety` and `control` own action gating and actuation
-- `nav` owns the product navigation contract
-- `sense` owns product-readable perception snapshots
-- `lingtu` remains the autonomy and perception provider behind `nav` and `sense`
-
-The deeper rationale and migration direction are documented in
-[`products/nova-dog/runtime/docs/ASKME_LINGTU_DECOUPLING.md`](/D:/inovxio/products/nova-dog/runtime/docs/ASKME_LINGTU_DECOUPLING.md).
-
-This means local `VisionBridge` and direct runtime clients inside `askme` are
-valid for development and fallback profiles, but they should not be described as
-the production system of record.
-
-## CLI
-
-The CLI now follows a command-tree shape closer to `dimos`, but it stays local to `askme`'s runtime model.
-
-If you just want to tell askme what to do, running `askme` with no arguments now opens the full-screen terminal UI directly.
-
-```bash
-# Full-screen terminal UI
-askme
-askme tui --robot
-
-# Plain interactive runtime
-askme --text
-askme runtime run --text --robot
-
-# Inspect capabilities
-askme runtime capabilities --profile voice --json
-askme runtime status --server http://127.0.0.1:8765
-
-# Inspect skills
-askme skills list
-askme skills show navigate --json
-askme skills openapi
-
-# One-shot agent interaction
-askme agent send "去机房巡检一圈"
-
-# MCP serving
-askme mcp serve --transport sse --host 0.0.0.0 --port 8080
+# edge_robot.py — voice_perception + 6 外部插件
+edge_robot = voice_perception + Control + LED + Proactive + Health + Executor + Tools
 ```
 
-`askme agent send` prefers a running local runtime at `http://127.0.0.1:8765` and falls back to local one-shot execution when that endpoint is unavailable.
+加功能 = 加一行。换实现 = config 改一词。拔掉任何一层 = 系统照跑。
 
-## Runtime Profiles
+## Three-Layer Boundary
 
-Profiles live in [askme/runtime/profiles.py](/D:/inovxio/tools/askme/askme/runtime/profiles.py).
+| 层 | 模块 | 拔掉后果 |
+|---|------|---------|
+| **核心**（必须） | LLM, Memory, Pipeline, Skill, Voice, Text | 不能工作 |
+| **感知**（可选） | Pulse, Perception, Safety, Reaction | 不能看，但能对话 |
+| **插件**（外部） | Control, LED, Proactive, Health, Executor, Tools | 不能控硬件，但能对话+看 |
 
-| Profile | Primary loop | Purpose |
-| --- | --- | --- |
-| `voice` | `voice` | Interactive voice runtime with health HTTP endpoints and proactive services |
-| `text` | `text` | Interactive text runtime with the same shared memory/skill stack |
-| `mcp` | `mcp` | MCP-only serving profile for tools/resources |
-| `edge_robot` | `voice` | Voice-first edge runtime with robot API, LED bridge, and event-driven perception |
+## Module System
 
-The legacy CLI now resolves flags into profiles instead of rebuilding the app by hand.
+```python
+# 声明模块
+class MyModule(Module):
+    data: In[SomeType]          # 自动从其他模块接
+    result: Out[OtherType]      # 自动暴露给其他模块
 
-## Composition Layout
+# 加功能 = 一行
+runtime = voice + Runtime.use(MyModule)
 
-The actual composition root is [askme/runtime/assembly.py](/D:/inovxio/tools/askme/askme/runtime/assembly.py).
-
-Key files:
-
-- [askme/app.py](/D:/inovxio/tools/askme/askme/app.py): thin legacy facade over the assembled runtime
-- [askme/runtime/components.py](/D:/inovxio/tools/askme/askme/runtime/components.py): uniform component lifecycle and introspection
-- [askme/runtime/profiles.py](/D:/inovxio/tools/askme/askme/runtime/profiles.py): named runtime profiles
-- [askme/skills/contracts.py](/D:/inovxio/tools/askme/askme/skills/contracts.py): code-defined skill contracts and OpenAPI generation
-- [askme/skills/contracts_builtin.py](/D:/inovxio/tools/askme/askme/skills/contracts_builtin.py): authoritative contracts for core built-in skills
-- [askme/skills/skill_manager.py](/D:/inovxio/tools/askme/askme/skills/skill_manager.py): merges code contracts with legacy markdown skill metadata
-
-High-level runtime view:
-
-```text
-mode
-  -> runtime assembly
-      -> operator_io
-      -> memory
-      -> vision
-      -> robot_io
-      -> executor
-      -> skills
-      -> optional diagnostics / supervisor / change_monitor / indicators
+# 换实现 = 一词
+runtime = runtime.replace(LLMModule, MockLLMModule)
 ```
 
-Runtime planes:
+- `In[T]` / `Out[T]` / `Required[T]` 类型化端口，自动匹配
+- 语义匹配：类型唯一时名字不同也能连
+- 拓扑校验：孤立端口、环路、必需依赖缺失 → 构建报错
 
-- `executive`: operator IO, memory, executor, skills
-- `platform`: telemetry, robot IO, vision, indicators
-- `diagnostics`: health, metrics, capabilities, HTTP endpoints
+## Plugin Architecture
 
-## Skill Contracts
+```python
+# 接口
+class LLMBackend(ABC):
+    async def chat_stream(self, messages, **kw) -> AsyncIterator: ...
 
-Legacy `SKILL.md` is no longer the only source of truth.
+# 注册
+@llm_registry.register("minimax")
+class MiniMaxLLM(LLMBackend): ...
 
-- Contract metadata comes from code via `SkillContract` and `@skill_contract`.
-- `SkillManager.get_contracts()` produces the structured catalog used by HTTP and MCP surfaces.
-- Markdown skills still provide prompt templates and fallback metadata while the migration is in progress.
-- OpenAPI is generated from loaded contracts through `SkillManager.openapi_document()`.
-
-Generated surfaces:
-
-- MCP catalog: `askme://skills`
-- MCP OpenAPI: `askme://skills/openapi`
-- HTTP capabilities: `/api/capabilities`
-
-## Health And Introspection
-
-The embedded health server lives in [askme/health_server.py](/D:/inovxio/tools/askme/askme/health_server.py).
-
-Available endpoints:
-
-- `/health`: compact runtime health snapshot
-- `/metrics`: Prometheus-style metrics output
-- `/api/status`: broader runtime status for monitoring UI
-- `/api/capabilities`: profile, component, skill contract, and OpenAPI summary
-- `/api/chat`: web chat entrypoint wired through the same dispatcher/runtime stack
-
-## Event-Driven Perception (V2)
-
-The perception pipeline transforms raw YOLO detections into structured events and scene state.
-
-```text
-frame_daemon (5Hz BPU YOLO)
-  → /tmp/askme_frame_detections.json
-    → ChangeDetector (1Hz IoU matching + N-frame debounce)
-      → ChangeEvent (person_appeared, person_left, object_appeared, ...)
-        → WorldState (live scene snapshot: tracked objects + Chinese summary)
-        → AttentionManager (cooldowns + importance thresholds → alert/investigate)
-        → ProactiveAgent._change_event_loop() (TTS alerts, episodic logging)
+# 使用（config.yaml）
+llm:
+  backend: minimax    # 改成 openai / ollama / local
 ```
 
-Key files:
+7 个接口：LLM, ASR, TTS, Detector, Navigator, Bus, Reaction
 
-- `askme/perception/change_detector.py`: greedy IoU matching, configurable debounce (3 frames appear, 5 frames disappear)
-- `askme/perception/world_state.py`: `TrackedObject` dict, `get_summary_sync()` → "当前场景：1名人（距离2.3米）、2个椅子。"
-- `askme/perception/attention_manager.py`: per-event-type cooldowns, `should_alert()` / `should_investigate()`
-- `askme/schemas/observation.py`: `Detection`, `Observation` dataclasses
-- `askme/schemas/events.py`: `ChangeEvent`, `ChangeEventType` enum
+## Data Bus — Pulse (CycloneDDS)
 
-## Terminal UI (TUI)
+```
+frame_daemon (5Hz YOLO) → DDS → Pulse (进程内) → asyncio 回调
+```
 
-Full-screen terminal dashboard: `python -m askme` or `askme tui --robot`
+- 零 ROS2 依赖，纯 CycloneDDS
+- 0.8ms P50 延迟（S100P 实测）
+- `PubSubBase` 抽象，`MockPulse` 测试用
 
-Features:
-- Header bar: THUNDER name, ESTOP state (red when active), profile, clock
-- Context bar: scene summary, mission state, LLM latency
-- Left panel: color-coded chat transcript (`[你]` cyan, `[askme]` green, `[系统]` yellow)
-- Right panel: component health (colored ● dots), event feed
-- `Ctrl+C` triggers ESTOP (not exit), `/estop` command
-- CJK-aware display width calculation
+## Performance (S100P)
+
+| 指标 | 数值 |
+|------|------|
+| LLM TTFT | 500-1800ms (MiniMax) |
+| ASR 识别 | 35-245ms |
+| TTS 合成 | 40ms (local) |
+| Pulse DDS | 0.8ms P50 |
+| 感知检测 | 0.04ms |
+| 语音全链路 | ~1-2s |
 
 ## Repository Layout
 
-```text
+```
 askme/
-  app.py                    # thin facade over runtime assembly
-  cli.py                    # CLI command tree (runtime/skills/agent/mcp/tui)
-  tui.py                    # full-screen terminal UI with color + ESTOP
-  health_server.py          # HTTP health/metrics/capabilities/chat
-  mcp_server.py             # MCP tool/resource server
-  runtime/
-    assembly.py             # DI composition root + component lifecycle
-    components.py           # CallableComponent lifecycle abstraction
-    profiles.py             # voice/text/mcp/edge_robot profiles
-  brain/
-    llm_client.py           # LLM with retry/timeout/fallback
-    conversation.py         # L1 sliding window, compression
-    intent_router.py        # ESTOP → quick_reply → voice_trigger → general
-    vision_bridge.py        # ROS2 camera + BPU YOLO + VLM (DashScope)
-    episodic_memory.py      # L3 robot experience + reflection
-  pipeline/
-    brain_pipeline.py       # streaming LLM → TTS orchestration
-    prompt_builder.py       # system prompt assembly + seed injection
-    tool_executor.py        # LLM tool call execution + approval flow
-    skill_dispatcher.py     # mission tracking + multi-step orchestration
-    voice_loop.py           # mic → intent → dispatch → TTS
-    text_loop.py            # stdin → intent → dispatch → stdout
-    proactive_agent.py      # autonomous patrol + anomaly detection
-  perception/
-    change_detector.py      # YOLO frame diff → debounced events
-    world_state.py          # live scene snapshot (tracked objects)
-    attention_manager.py    # alert fatigue prevention (cooldowns)
-  agent_shell/
-    thunder_agent_shell.py  # autonomous task execution (5 iterations, 120s)
-  skills/
-    builtin/                # SKILL.md definitions (41 skills)
-    contracts.py            # code-defined skill contracts + OpenAPI
-    skill_manager.py        # merge contracts + markdown metadata
-  tools/                    # LLM tool-calling (24 tools)
-  voice/                    # ASR/VAD/KWS/TTS/noise reduction
-  schemas/                  # Detection, Observation, ChangeEvent
-tests/                      # 1431 tests, 0 failures
+├── blueprints/           产品定义（voice / voice_perception / edge_robot / text）
+├── interfaces/           ABC 接口 + 注册表（LLM / ASR / TTS / Bus / Reaction）
+├── runtime/
+│   ├── module.py         Module + In/Out/Required + Runtime.use()
+│   ├── registry.py       BackendRegistry（插件架构）
+│   └── modules/          16 个声明式 Module
+├── llm/                  LLM 调用 + 对话管理 + 意图路由
+├── memory/               四层记忆（对话 / 会话 / 经验 / 向量）
+├── perception/           感知（YOLO 检测 → 事件 → 场景）
+├── pipeline/             对话管线 + 技能调度 + 反应引擎
+├── voice/                ASR / TTS / VAD / KWS
+├── robot/                Pulse + SafetyClient + ControlClient
+├── skills/               41 个技能定义
+├── tools/                24 个 LLM 工具
+├── schemas/              消息类型 + 反应类型
+├── mcp/                  MCP 服务
+├── main.py               启动入口
+├── cli.py                CLI
+└── tui.py                终端 UI
+tests/                    1718 tests
+docs/
+├── ARCHITECTURE.md       系统架构
+├── ASKME_BOUNDARY.md     边界定义
+├── PROACTIVE_INTELLIGENCE_PLAN.md  主动智能规划
+└── LAYER_GAPS.md         层级差距分析
 ```
 
 ## Test Suite
 
 ```bash
-python -m pytest tests/ -q    # ~2 min, 1431 tests
+python -m pytest tests/ -q    # ~2 min, 1718 tests
 ```
