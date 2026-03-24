@@ -96,11 +96,12 @@ class LLMClient(LLMBackend):
         tool_choice: str | None = None,
         model: str | None = None,
         temperature: float | None = None,
-        thinking: bool = True,
+        thinking: bool = False,
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Return an async streaming iterator of ``ChatCompletionChunk``.
 
         Retries on transient errors and falls back to alternate models.
+        ``thinking=False`` by default to skip <think> generation and reduce TTFT.
         """
         started_at = time.perf_counter()
         success = False
@@ -189,7 +190,7 @@ class LLMClient(LLMBackend):
         tool_choice: str | None = None,
         model: str | None = None,
         temperature: float | None = None,
-        thinking: bool = True,
+        thinking: bool = False,
     ) -> Any:
         """Return the raw non-streaming completion object with retry/fallback."""
         started_at = time.perf_counter()
