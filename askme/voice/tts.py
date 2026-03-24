@@ -525,13 +525,17 @@ class TTSEngine(TTSBackend):
             self._run_async(self._generate_edge(text, generation))
 
     def _run_async(self, coro) -> bool:
-        """Run an async coroutine in a new event loop. Returns True on success."""
+        """Run an async coroutine in a dedicated event loop on this worker thread.
+
+        Creates a fresh loop per call and does NOT call ``set_event_loop`` —
+        that would pollute the global state and conflict with the main asyncio
+        loop running in the parent thread (blueprint / RuntimeApp).
+        """
         loop = None
         try:
-            if sys.platform == "win32":
-                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            # Do NOT call asyncio.set_event_loop(loop) — the main thread
+            # already owns the process-wide event loop.
             loop.run_until_complete(coro)
             return True
         except Exception as exc:
@@ -539,9 +543,6 @@ class TTSEngine(TTSBackend):
             return False
         finally:
             if loop is not None:
-                # Properly close any lingering async generators before shutting
-                # down the loop, suppressing the "Task was destroyed but pending"
-                # warning that appears when httpx SSE generators are abandoned.
                 try:
                     loop.run_until_complete(loop.shutdown_asyncgens())
                 except Exception:
