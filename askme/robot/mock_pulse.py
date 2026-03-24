@@ -1,6 +1,6 @@
 """MockPulse — pure in-memory pub/sub for unit tests.
 
-No rclpy, no threads, no I/O.  Dict-based storage with synchronous callbacks.
+No CycloneDDS, no threads, no I/O.  Dict-based storage with synchronous callbacks.
 """
 
 from __future__ import annotations
@@ -8,13 +8,13 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-from askme.robot.pubsub import PubSubBase
+from askme.interfaces.bus import BusBackend
 
 
-class MockPulse(PubSubBase):
-    """Pure in-memory pub/sub -- for unit tests, no rclpy needed."""
+class MockPulse(BusBackend):
+    """Pure in-memory pub/sub -- for unit tests, no CycloneDDS needed."""
 
-    def __init__(self) -> None:
+    def __init__(self, cfg: dict | None = None) -> None:
         self._latest: dict[str, dict] = {}
         self._callbacks: dict[str, list[Callable]] = {}
         self._started = False

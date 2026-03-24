@@ -396,9 +396,9 @@ def _looks_like_mcp_request(raw_args: list[str]) -> bool:
 
 
 def _run_interactive_runtime(*, voice_mode: bool, robot_mode: bool) -> None:
-    from askme.main import run_legacy_app
+    from askme.main import run_app
 
-    asyncio.run(run_legacy_app(voice_mode=voice_mode, robot_mode=robot_mode))
+    asyncio.run(run_app(voice_mode=voice_mode, robot_mode=robot_mode))
 
 
 def _run_terminal_tui(*, robot_mode: bool) -> None:

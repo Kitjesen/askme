@@ -19,11 +19,6 @@ from askme.runtime.module import Module, ModuleRegistry
 logger = logging.getLogger(__name__)
 
 
-def _noop_health_provider() -> dict[str, Any]:
-    """Fallback health provider until the real one is wired."""
-    return {"status": "ok", "service": "askme"}
-
-
 class HealthModule(Module):
     """Provides the AskmeHealthServer to the runtime."""
 
@@ -35,10 +30,19 @@ class HealthModule(Module):
 
         health_cfg = cfg.get("health_server", {})
 
-        # Build with a no-op provider; real providers are set post-build
+        # Collect health from all registered modules in the runtime.
+        def _runtime_health_provider() -> dict[str, Any]:
+            result: dict[str, Any] = {"status": "ok", "service": "askme"}
+            for mod_name, mod in registry.items():
+                try:
+                    result[mod_name] = mod.health()
+                except Exception:
+                    result[mod_name] = {"status": "error"}
+            return result
+
         self.server = AskmeHealthServer(
             health_cfg,
-            snapshot_provider=_noop_health_provider,
+            snapshot_provider=_runtime_health_provider,
         )
 
         logger.info(

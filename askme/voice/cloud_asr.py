@@ -21,6 +21,8 @@ import time
 import uuid
 from typing import Any
 
+from askme.interfaces.asr import ASRBackend
+
 logger = logging.getLogger(__name__)
 
 # DashScope WebSocket endpoint
@@ -28,7 +30,7 @@ _WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 _DEFAULT_MODEL = "paraformer-realtime-v2"
 
 
-class CloudASR:
+class CloudASR(ASRBackend):
     """Alibaba DashScope Paraformer real-time ASR via WebSocket.
 
     Config keys (under ``voice.cloud_asr``)::

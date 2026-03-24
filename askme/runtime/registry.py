@@ -90,7 +90,11 @@ class BackendRegistry:
                 f"Unknown {self.name} backend: '{name}'. "
                 f"Available: {self.available()}"
             )
-        return cls(cfg)
+        # Try keyword expansion first, fall back to positional dict
+        try:
+            return cls(**cfg)
+        except TypeError:
+            return cls(cfg)
 
     def available(self) -> list[str]:
         """List registered backend names."""

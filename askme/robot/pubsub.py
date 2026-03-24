@@ -1,6 +1,6 @@
 """PubSubBase — abstract pub/sub interface for all transport backends.
 
-Any transport (DDS/rclpy, MQTT, in-memory mock) implements this ABC.
+Any transport (CycloneDDS, MQTT, in-memory mock) implements this ABC.
 Convenience methods for common Thunder topics are provided in the base class.
 """
 

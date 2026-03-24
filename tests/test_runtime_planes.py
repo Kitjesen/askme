@@ -1,12 +1,12 @@
-"""Tests for runtime plane builders and dependency resolution."""
+"""Tests for runtime profiles and module system dependency ordering."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
-from askme.runtime.components import CallableComponent, resolve_start_order
+from askme.runtime.module import Module, ModuleRegistry, Runtime, RuntimeApp
 from askme.runtime.profiles import (
     EDGE_ROBOT_MODE,
     EDGE_ROBOT_PROFILE,
@@ -24,76 +24,55 @@ from askme.runtime.profiles import (
 
 
 # ---------------------------------------------------------------------------
-# resolve_start_order
+# Minimal test modules for dependency ordering
 # ---------------------------------------------------------------------------
 
 
-class TestResolveStartOrder:
-    def test_empty_components(self) -> None:
-        assert resolve_start_order({}) == []
+class _ModuleA(Module):
+    name = "a"
+    provides = ()
 
-    def test_no_dependencies(self) -> None:
-        components = {
-            "a": CallableComponent(name="a", description="A"),
-            "b": CallableComponent(name="b", description="B"),
-        }
-        order = resolve_start_order(components)
-        assert set(order) == {"a", "b"}
+    def build(self, cfg, registry):
+        self._log = cfg.get("_log", [])
+        self._log.append(f"build:a")
 
-    def test_linear_dependency_chain(self) -> None:
-        components = {
-            "c": CallableComponent(name="c", description="C", depends_on=("b",)),
-            "b": CallableComponent(name="b", description="B", depends_on=("a",)),
-            "a": CallableComponent(name="a", description="A"),
-        }
-        order = resolve_start_order(components)
-        assert order.index("a") < order.index("b")
-        assert order.index("b") < order.index("c")
+    async def start(self):
+        self._log.append(f"start:a")
 
-    def test_diamond_dependency(self) -> None:
-        components = {
-            "d": CallableComponent(name="d", description="D", depends_on=("b", "c")),
-            "b": CallableComponent(name="b", description="B", depends_on=("a",)),
-            "c": CallableComponent(name="c", description="C", depends_on=("a",)),
-            "a": CallableComponent(name="a", description="A"),
-        }
-        order = resolve_start_order(components)
-        assert order.index("a") < order.index("b")
-        assert order.index("a") < order.index("c")
-        assert order.index("b") < order.index("d")
-        assert order.index("c") < order.index("d")
+    async def stop(self):
+        self._log.append(f"stop:a")
 
-    def test_missing_dependency_is_ignored(self) -> None:
-        components = {
-            "a": CallableComponent(name="a", description="A", depends_on=("missing",)),
-        }
-        order = resolve_start_order(components)
-        assert order == ["a"]
 
-    def test_cycle_raises_value_error(self) -> None:
-        components = {
-            "a": CallableComponent(name="a", description="A", depends_on=("b",)),
-            "b": CallableComponent(name="b", description="B", depends_on=("a",)),
-        }
-        with pytest.raises(ValueError, match="cycle"):
-            resolve_start_order(components)
+class _ModuleB(Module):
+    name = "b"
+    depends_on = ("a",)
+    provides = ()
 
-    def test_self_cycle_raises_value_error(self) -> None:
-        components = {
-            "a": CallableComponent(name="a", description="A", depends_on=("a",)),
-        }
-        with pytest.raises(ValueError, match="cycle"):
-            resolve_start_order(components)
+    def build(self, cfg, registry):
+        self._log = cfg.get("_log", [])
+        self._log.append(f"build:b")
 
-    def test_provides_and_profiles_stored(self) -> None:
-        comp = CallableComponent(
-            name="x",
-            description="X",
-            provides=("foo", "bar"),
-            profiles=("voice", "text"),
-        )
-        assert comp.provides == ("foo", "bar")
-        assert comp.profiles == ("voice", "text")
+    async def start(self):
+        self._log.append(f"start:b")
+
+    async def stop(self):
+        self._log.append(f"stop:b")
+
+
+class _ModuleC(Module):
+    name = "c"
+    depends_on = ("b",)
+    provides = ()
+
+    def build(self, cfg, registry):
+        self._log = cfg.get("_log", [])
+        self._log.append(f"build:c")
+
+    async def start(self):
+        self._log.append(f"start:c")
+
+    async def stop(self):
+        self._log.append(f"stop:c")
 
 
 # ---------------------------------------------------------------------------
@@ -176,91 +155,46 @@ class TestRuntimeProfileHas:
 
 
 class TestProfileComponentFiltering:
-    """Verify _build_components filters by profile.has()."""
-
-    def test_profile_components_match_runtime(self) -> None:
-        """Components built for a profile are a subset of profile.components."""
-        profile = VOICE_PROFILE
-        all_components = {
-            "memory": CallableComponent(name="memory", description="M"),
-            "skills": CallableComponent(name="skills", description="S"),
-            "executor": CallableComponent(name="executor", description="A"),
-            "operator_io": CallableComponent(name="operator_io", description="V"),
-            "telemetry": CallableComponent(name="telemetry", description="P"),
-            "diagnostics": CallableComponent(name="diagnostics", description="D"),
-            "robot_io": CallableComponent(name="robot_io", description="R"),
-            "vision": CallableComponent(name="vision", description="Vis"),
-            "supervisor": CallableComponent(name="supervisor", description="Sup"),
-            "change_monitor": CallableComponent(name="change_monitor", description="Mon"),
-            "indicators": CallableComponent(name="indicators", description="Ind"),
-        }
-        filtered = {k: v for k, v in all_components.items() if profile.has(k)}
-        assert set(filtered.keys()) <= set(profile.components)
+    """Verify profile.has() correctly filters component names."""
 
     def test_robot_io_excluded_from_voice_profile(self) -> None:
         """VOICE_PROFILE does not include robot_io."""
         assert VOICE_PROFILE.has("robot_io") is False
-        all_components = {
-            "memory": CallableComponent(name="memory", description="M"),
-            "robot_io": CallableComponent(name="robot_io", description="R"),
-        }
-        filtered = {k: v for k, v in all_components.items() if VOICE_PROFILE.has(k)}
+        all_names = {"memory", "robot_io"}
+        filtered = {k for k in all_names if VOICE_PROFILE.has(k)}
         assert "robot_io" not in filtered
         assert "memory" in filtered
 
 
 # ---------------------------------------------------------------------------
-# Stop order is reverse of start order
+# Stop order is reverse of start order (module system)
 # ---------------------------------------------------------------------------
 
 
 class TestStopOrderReversesStartOrder:
-    """Verify RuntimeAssembly stops components in reverse topological order."""
+    """Verify RuntimeApp stops modules in reverse topological order."""
 
     @pytest.mark.asyncio
     async def test_stop_order_is_reverse_start_order(self) -> None:
         """start() records order; stop() reverses it."""
-        from askme.runtime._assembly_legacy import RuntimeAssembly
-
         log: list[str] = []
 
-        def make_component(name: str, depends_on: tuple[str, ...] = ()) -> CallableComponent:
-            return CallableComponent(
-                name=name,
-                description=name,
-                start_hook=lambda n=name: log.append(f"start:{n}"),
-                stop_hook=lambda n=name: log.append(f"stop:{n}"),
-                depends_on=depends_on,
-            )
-
-        components = {
-            "a": make_component("a"),
-            "b": make_component("b", depends_on=("a",)),
-            "c": make_component("c", depends_on=("b",)),
-        }
-
-        services = MagicMock()
-        services.pipeline.shutdown = AsyncMock()
-        services.audio.shutdown = MagicMock()
-        services.arm_controller = None
-        services.qp_memory = None
-
-        runtime = RuntimeAssembly(
-            cfg={},
-            app_name="test",
-            app_version="0.0.0",
-            profile=TEXT_PROFILE,
-            services=services,
-            voice_mode=False,
-            robot_mode=False,
-            components=components,
+        runtime = (
+            Runtime.use(_ModuleA)
+            + Runtime.use(_ModuleB)
+            + Runtime.use(_ModuleC)
         )
+        app = await runtime.build({"_log": log})
 
-        await runtime.start()
-        start_log = [entry for entry in log if entry.startswith("start:")]
+        build_log = [e for e in log if e.startswith("build:")]
+        assert build_log == ["build:a", "build:b", "build:c"]
+
+        log.clear()
+        await app.start()
+        start_log = [e for e in log if e.startswith("start:")]
         assert start_log == ["start:a", "start:b", "start:c"]
-        assert runtime._start_order == ["a", "b", "c"]
 
-        await runtime.stop()
-        stop_log = [entry for entry in log if entry.startswith("stop:")]
+        log.clear()
+        await app.stop()
+        stop_log = [e for e in log if e.startswith("stop:")]
         assert stop_log == ["stop:c", "stop:b", "stop:a"]

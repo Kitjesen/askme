@@ -21,10 +21,12 @@ import sounddevice as sd
 if TYPE_CHECKING:
     from askme.voice.audio_router import AudioRouter
 
+from askme.interfaces.tts import TTSBackend
+
 logger = logging.getLogger(__name__)
 
 
-class TTSEngine:
+class TTSEngine(TTSBackend):
     """Text-to-speech engine with three backends:
 
     - **local** (default): sherpa-onnx VITS/MeloTTS — ~0.5-1s latency, no network.

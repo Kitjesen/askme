@@ -50,7 +50,10 @@ if __name__ == "__main__":
 
         stop = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            asyncio.get_running_loop().add_signal_handler(sig, stop.set)
+            try:
+                asyncio.get_running_loop().add_signal_handler(sig, stop.set)
+            except NotImplementedError:
+                pass  # Windows — falls back to KeyboardInterrupt
 
         await app.start()
         print(f"Text running — {len(app.modules)} modules")

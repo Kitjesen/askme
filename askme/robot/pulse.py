@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from askme.robot.pubsub import PubSubBase
+from askme.interfaces.bus import BusBackend
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +65,10 @@ _TOPIC_CONFIG = {
 }
 
 
-class Pulse(PubSubBase):
+class Pulse(BusBackend):
     """脉搏数据总线 — CycloneDDS 直连.
 
-    Same API as Pulse (rclpy version), implements PubSubBase.
+    Same API as previous Pulse implementation, now backed by CycloneDDS.
     """
 
     def __init__(self, cfg: dict[str, Any] | None = None) -> None:
@@ -190,8 +190,18 @@ class Pulse(PubSubBase):
             data = self._latest.get(topic)
             return dict(data) if data else None
 
+    # Topics that askme is allowed to publish to. Reject anything else to
+    # prevent accidental writes to sensor/safety topics owned by other processes.
+    _PUBLISH_WHITELIST: set[str] = {
+        "/thunder/cms_state",
+        "/thunder/heartbeat",
+    }
+
     def publish(self, topic: str, data: dict) -> None:
         if self._dp is None:
+            return
+        if topic not in self._PUBLISH_WHITELIST:
+            logger.warning("Pulse: publish rejected — topic %r not in whitelist", topic)
             return
         if topic not in self._writers:
             msg_type = StringMsg

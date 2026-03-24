@@ -3,32 +3,36 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from typing import Any
 
 from askme.runtime.registry import BackendRegistry
 
 
 class TTSBackend(ABC):
-    """Abstract TTS interface — text to audio."""
+    """Abstract TTS interface — text to audio.
+
+    Matches the public API of :class:`askme.voice.tts.TTSEngine`.
+    """
 
     @abstractmethod
-    def __init__(self, cfg: dict[str, Any]) -> None: ...
+    def speak(self, text: str) -> None:
+        """Queue text for speech synthesis and playback."""
 
     @abstractmethod
-    async def synthesize(self, text: str) -> bytes:
-        """Synthesize speech from text. Returns PCM audio bytes."""
+    def stop_immediately(self) -> None:
+        """Stop playback immediately and clear all queued audio."""
 
     @abstractmethod
-    async def stream(self, text: str) -> AsyncIterator[bytes]:
-        """Streaming synthesis. Yields audio chunks."""
+    def shutdown(self) -> None:
+        """Release all resources."""
 
     @property
     @abstractmethod
-    def voice_name(self) -> str:
-        """Current voice identifier."""
+    def backend(self) -> str:
+        """Current backend identifier (e.g. 'local', 'edge', 'minimax')."""
 
-    def supports_cloning(self) -> bool:
-        """Whether this backend supports voice cloning."""
+    def is_active(self) -> bool:
+        """Whether audio is currently being played."""
         return False
 
 

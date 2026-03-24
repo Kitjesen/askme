@@ -27,6 +27,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 from openai.types.chat import ChatCompletionChunk
 
 from askme.config import get_config
+from askme.interfaces.llm import LLMBackend
 from askme.robot.ota_bridge import OTABridgeMetrics
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_STATUS = {500, 502, 503, 504, 529}
 
 
-class LLMClient:
+class LLMClient(LLMBackend):
     """Async wrapper around ``AsyncOpenAI`` with timeout, retry, and fallback."""
 
     def __init__(

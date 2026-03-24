@@ -8,10 +8,12 @@ from typing import Any
 
 import sherpa_onnx
 
+from askme.interfaces.asr import ASRBackend
+
 logger = logging.getLogger(__name__)
 
 
-class ASREngine:
+class ASREngine(ASRBackend):
     """Automatic Speech Recognition engine backed by sherpa-onnx transducer models.
 
     Config dict expected keys (under voice.asr):

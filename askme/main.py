@@ -41,7 +41,7 @@ def _setup_logging(cfg: dict) -> None:
         logging.getLogger().addHandler(handler)
 
 
-async def run_legacy_app(*, voice_mode: bool, robot_mode: bool) -> None:
+async def run_app(*, voice_mode: bool, robot_mode: bool) -> None:
     """Run the interactive askme runtime."""
     cfg = get_config()
     _setup_logging(cfg)
@@ -64,3 +64,7 @@ async def run_legacy_app(*, voice_mode: bool, robot_mode: bool) -> None:
             await tl.run()
     finally:
         await app.stop()
+
+
+# Backward compatibility alias
+run_legacy_app = run_app

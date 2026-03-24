@@ -10,7 +10,7 @@ module layout.
 
 Four processes run on the S100P robot. Each owns a distinct concern; none share
 memory space. askme subscribes to DDS topics directly via **Pulse** (in-process
-rclpy node) — no bridge process needed.
+CycloneDDS node) — no bridge process needed.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -18,7 +18,7 @@ rclpy node) — no bridge process needed.
 │                                                                          │
 │  ┌──────────────────┐   /camera/color     ┌──────────────────────────┐  │
 │  │  LingTu          │   /camera/depth     │  frame_daemon            │  │
-│  │  (ROS2 native)   │◄────────────────────│  Python 3.10, rclpy      │  │
+│  │  (ROS2 native)   │◄────────────────────│  Python 3.10, CycloneDDS │  │
 │  │  Navigation+SLAM │                     │  Camera sub + BPU YOLO   │  │
 │  │  306 packages    │                     │  5Hz, publishes:         │  │
 │  │  gRPC server     │                     │  /thunder/detections     │  │
@@ -28,7 +28,7 @@ rclpy node) — no bridge process needed.
 │  ┌──────────────────┐                     ┌──────────▼───────────────┐  │
 │  │  nav-gateway     │   DDS topics        │  askme                   │  │
 │  │  (REST :8088)    │                     │  Python, asyncio          │  │
-│  │  Navigation      │                     │  Pulse (in-process rclpy) │  │
+│  │  Navigation      │                     │  Pulse (CycloneDDS)       │  │
 │  │  contract layer  │                     │  AI assistant runtime    │  │
 │  └──────────────────┘                     │  Health HTTP :8765       │  │
 │                                           │  MCP server              │  │
@@ -62,12 +62,12 @@ rclpy node) — no bridge process needed.
 ### Data Plane — Pulse (in-process DDS)
 
 High-frequency sensor and safety data flows over DDS topics. askme subscribes
-directly via **Pulse**, an in-process rclpy node running in a background thread.
+directly via **Pulse**, an in-process CycloneDDS participant running in a background thread.
 No bridge process, no socket, no serialization overhead.
 
 ```
 DDS publisher                        askme (Pulse)
-(frame_daemon / brainstem)           (rclpy node in background thread)
+(frame_daemon / brainstem)           (CycloneDDS in background thread)
      │                                      │
      │  DDS QoS (BEST_EFFORT/RELIABLE)      │
      │─────────────────────────────────────►│
@@ -141,7 +141,7 @@ askme/
 │
 ├── robot/
 │   ├── pubsub.py          — PubSubBase ABC + typed convenience methods
-│   ├── pulse.py           — Pulse: in-process DDS via rclpy (PubSubBase impl)
+│   ├── pulse.py           — Pulse: in-process DDS via CycloneDDS (PubSubBase impl)
 │   ├── mock_pulse.py      — MockPulse: in-memory test double (PubSubBase impl)
 │   ├── safety_client.py   — DogSafetyClient: E-STOP notify + state query (30s TTL cache)
 │   ├── control_client.py  — DogControlClient: capability dispatch
@@ -206,10 +206,10 @@ askme/
 
 ## 4. Pulse Architecture
 
-### In-process DDS via rclpy
+### In-process DDS via CycloneDDS
 
 askme subscribes to DDS topics directly using **Pulse** (`askme/robot/pulse.py`),
-which initialises an rclpy node and spins it in a daemon thread. Parsed messages
+which initialises a CycloneDDS DomainParticipant and polls it in a daemon thread. Parsed messages
 are forwarded to the asyncio event loop via `call_soon_threadsafe`.
 
 ```
@@ -220,8 +220,8 @@ askme process
   │    ├── ChangeDetector (Pulse push callbacks)     │
   │    └── DogSafetyClient (Pulse ESTOP reads)       │
   │                                                   │
-  │  Pulse spin thread (daemon)                       │
-  │    └── rclpy SingleThreadedExecutor               │
+  │  Pulse poll thread (daemon)                        │
+  │    └── CycloneDDS DataReader poll loop             │
   │        ├── sub /thunder/detections (String)       │
   │        ├── sub /thunder/estop (Bool)              │
   │        ├── sub /thunder/heartbeat (Bool)          │

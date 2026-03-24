@@ -3,29 +3,46 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Sequence
 
 from askme.runtime.registry import BackendRegistry
 
 
 class LLMBackend(ABC):
-    """Abstract LLM interface — chat, stream, tool calling."""
+    """Abstract LLM interface — chat, stream, tool calling.
+
+    Matches the public API of :class:`askme.llm.client.LLMClient`.
+    """
 
     @abstractmethod
-    def __init__(self, cfg: dict[str, Any]) -> None: ...
-
-    @abstractmethod
-    async def chat(self, messages: list[dict], **kwargs: Any) -> str:
+    async def chat(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        model: str | None = None,
+        temperature: float | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | None = None,
+    ) -> str:
         """Single-turn chat completion. Returns response text."""
 
     @abstractmethod
-    async def stream(self, messages: list[dict], **kwargs: Any) -> AsyncIterator[str]:
-        """Streaming chat completion. Yields tokens."""
+    async def chat_stream(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        tools: list[dict] | None = None,
+        tool_choice: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        thinking: bool = True,
+    ) -> AsyncIterator[Any]:
+        """Streaming chat completion. Yields ``ChatCompletionChunk``."""
 
     @property
-    @abstractmethod
     def model_name(self) -> str:
         """Current model identifier."""
+        return getattr(self, "model", "")
 
     def supports_tools(self) -> bool:
         """Whether this backend supports tool/function calling."""
