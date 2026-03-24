@@ -1,25 +1,20 @@
-"""LLMModule — wraps LLMClient construction as a declarative module.
-
-Mirrors the LLMClient creation logic from ``assembly.py`` lines 414-415::
-
-    ota_metrics = OTABridgeMetrics()
-    llm = LLMClient(metrics=ota_metrics)
-"""
+"""LLMModule — wraps LLMClient with background warmup on start."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from askme.runtime.module import Module, ModuleRegistry, Out
-from askme.llm.client import LLMClient  # TODO: migrate to llm_registry.create(cfg) when LLMClient inherits LLMBackend
+from askme.llm.client import LLMClient
 from askme.robot.ota_bridge import OTABridgeMetrics
 
 logger = logging.getLogger(__name__)
 
 
 class LLMModule(Module):
-    """Provides LLMClient and OTABridgeMetrics to the runtime."""
+    """Provides LLMClient with background warmup to eliminate cold-start latency."""
 
     name = "llm"
     provides = ("llm",)
@@ -29,17 +24,39 @@ class LLMModule(Module):
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         self.ota_metrics = OTABridgeMetrics()
         self.client = LLMClient(metrics=self.ota_metrics)
+        self._warmup_task: asyncio.Task | None = None
         logger.info("LLMModule: built (model=%s)", self.client.model)
+
+    async def start(self) -> None:
+        """Fire a background warmup request to pre-heat the LLM connection."""
+        self._warmup_task = asyncio.create_task(self._warmup())
+
+    async def stop(self) -> None:
+        if self._warmup_task and not self._warmup_task.done():
+            self._warmup_task.cancel()
+
+    async def _warmup(self) -> None:
+        """Silent background request to warm up API connection + model cache."""
+        try:
+            warmup_messages = [
+                {"role": "system", "content": "回答一个字。"},
+                {"role": "user", "content": "好"},
+            ]
+            t0 = asyncio.get_event_loop().time()
+            async for _ in self.client.chat_stream(warmup_messages):
+                break  # only need first token to warm connection
+            elapsed = (asyncio.get_event_loop().time() - t0) * 1000
+            logger.info("LLM warmup: %.0fms (connection pre-heated)", elapsed)
+        except Exception as e:
+            logger.debug("LLM warmup failed (non-critical): %s", e)
 
     # -- typed accessors ------------------------------------------------
     @property
     def llm_client(self) -> LLMClient:  # type: ignore[override]
-        """The LLM client instance."""
         return self.client
 
     @property
     def metrics(self) -> Any:
-        """OTA bridge metrics collector."""
         return self.ota_metrics
 
     def health(self) -> dict[str, Any]:
