@@ -1,7 +1,6 @@
-"""Voice — 语音巡检模式.
+"""Voice — 纯语音 AI 助手.
 
-The default Thunder blueprint: voice AI assistant with perception,
-safety gating, skill dispatch, and proactive patrol.
+核心能力：听、理解、回答、说。6 个模块。
 
 Usage::
 
@@ -10,37 +9,21 @@ Usage::
 
 from askme.runtime.module import Runtime
 from askme.runtime.modules import (
-    ExecutorModule,
-    HealthModule,
     LLMModule,
     MemoryModule,
-    PerceptionModule,
     PipelineModule,
-    ProactiveModule,
-    PulseModule,
-    ReactionModule,
-    SafetyModule,
     SkillModule,
     TextModule,
-    ToolsModule,
     VoiceModule,
 )
 
 voice = (
     Runtime.use(LLMModule)
-    + Runtime.use(ToolsModule)
-    + Runtime.use(PulseModule)
     + Runtime.use(MemoryModule)
-    + Runtime.use(PerceptionModule)
-    + Runtime.use(SafetyModule)
     + Runtime.use(PipelineModule)
     + Runtime.use(SkillModule)
-    + Runtime.use(ExecutorModule)
     + Runtime.use(VoiceModule)
     + Runtime.use(TextModule)
-    + Runtime.use(ProactiveModule)
-    + Runtime.use(ReactionModule)
-    + Runtime.use(HealthModule)
 )
 
 __all__ = ["voice"]

@@ -517,9 +517,14 @@ class TestHealthModule:
 
 class TestCompositions:
     def test_voice_runtime_builds(self):
-        """voice blueprint should compose without duplicate name errors."""
+        """voice blueprint = 6 core modules."""
         from askme.blueprints.voice import voice
-        assert len(voice._module_classes) == 14
+        assert len(voice._module_classes) == 6
+
+    def test_voice_perception_extends_voice(self):
+        """voice_perception = voice + 4 perception modules."""
+        from askme.blueprints.voice_perception import voice_perception
+        assert len(voice_perception._module_classes) == 10
 
     def test_text_runtime_has_no_voice(self):
         """text blueprint has no VoiceModule."""
@@ -527,11 +532,10 @@ class TestCompositions:
         names = [mc.name for mc in text._module_classes]
         assert "voice" not in names
         assert "text" in names
-        # text blueprint has 11 modules (voice has 13, minus Voice and Perception)
-        assert len(text._module_classes) == 11
+        assert len(text._module_classes) == 5
 
-    def test_edge_robot_adds_control_and_led(self):
-        """edge_robot blueprint extends voice with control + led."""
+    def test_edge_robot_adds_plugins(self):
+        """edge_robot = voice_perception + 6 external plugins."""
         from askme.blueprints.edge_robot import edge_robot
         names = [mc.name for mc in edge_robot._module_classes]
         assert "control" in names
@@ -542,31 +546,28 @@ class TestCompositions:
         """Replacing a module in a blueprint should work."""
         from askme.blueprints.voice import voice
 
-        class MockHealth(Module):
-            name = "health"
-            provides = ("health_http",)
+        class MockLLM(Module):
+            name = "llm"
+            provides = ("llm",)
             def build(self, cfg, registry): pass
 
         replaced = voice.replace(
-            type("HealthModule", (), {"name": "health"}),
-            MockHealth,
+            type("LLMModule", (), {"name": "llm"}),
+            MockLLM,
         )
-        names = [mc.name for mc in replaced._module_classes]
-        assert "health" in names
-        # The MockHealth should be the one in there
         for mc in replaced._module_classes:
-            if mc.name == "health":
-                assert mc is MockHealth
+            if mc.name == "llm":
+                assert mc is MockLLM
 
     def test_without_on_composition(self):
         """Removing a module from blueprint should work."""
         from askme.blueprints.voice import voice
-        from askme.runtime.modules.proactive_module import ProactiveModule
+        from askme.runtime.modules.text_module import TextModule
 
-        smaller = voice.without(ProactiveModule)
+        smaller = voice.without(TextModule)
         names = [mc.name for mc in smaller._module_classes]
-        assert "proactive" not in names
-        assert len(smaller._module_classes) == 13
+        assert "text" not in names
+        assert len(smaller._module_classes) == 5
 
 
 # ══════════════════════════════════════════════════════════════════════

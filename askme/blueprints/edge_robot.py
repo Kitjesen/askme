@@ -1,7 +1,6 @@
-"""Edge Robot — 全功能边缘机器人模式.
+"""Edge Robot — 完整边缘机器人.
 
-Extends voice with hardware control (motors, LED).
-Deploy on S100P with robot_mode=True.
+语音 + 感知 + 外部插件。14 个模块。
 
 Usage::
 
@@ -9,14 +8,25 @@ Usage::
 """
 
 from askme.runtime.module import Runtime
-from askme.runtime.modules import ControlModule, LEDModule
+from askme.runtime.modules import (
+    ControlModule,
+    ExecutorModule,
+    HealthModule,
+    LEDModule,
+    ProactiveModule,
+    ToolsModule,
+)
 
-from askme.blueprints.voice import voice
+from askme.blueprints.voice_perception import voice_perception
 
 edge_robot = (
-    voice
+    voice_perception
+    + Runtime.use(ToolsModule)
+    + Runtime.use(ExecutorModule)
     + Runtime.use(ControlModule)
     + Runtime.use(LEDModule)
+    + Runtime.use(ProactiveModule)
+    + Runtime.use(HealthModule)
 )
 
 __all__ = ["edge_robot"]

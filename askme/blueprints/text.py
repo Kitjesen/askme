@@ -1,6 +1,6 @@
-"""Text — 纯文本交互模式.
+"""Text — 纯文本交互.
 
-No voice IO, no audio hardware. For SSH sessions and development.
+核心能力，无语音硬件。SSH/开发用。5 个模块。
 
 Usage::
 
@@ -9,31 +9,19 @@ Usage::
 
 from askme.runtime.module import Runtime
 from askme.runtime.modules import (
-    ExecutorModule,
-    HealthModule,
     LLMModule,
     MemoryModule,
     PipelineModule,
-    ProactiveModule,
-    PulseModule,
-    SafetyModule,
     SkillModule,
     TextModule,
-    ToolsModule,
 )
 
 text = (
     Runtime.use(LLMModule)
-    + Runtime.use(ToolsModule)
-    + Runtime.use(PulseModule)
     + Runtime.use(MemoryModule)
-    + Runtime.use(SafetyModule)
     + Runtime.use(PipelineModule)
     + Runtime.use(SkillModule)
-    + Runtime.use(ExecutorModule)
     + Runtime.use(TextModule)
-    + Runtime.use(ProactiveModule)
-    + Runtime.use(HealthModule)
 )
 
 __all__ = ["text"]
