@@ -124,7 +124,15 @@ class BrainPipeline:
         vision: VisionBridge | None = None,
         session_memory: SessionMemory | None = None,
         episodic_memory: EpisodicMemory | None = None,
-        system_prompt: str = "你是一个有用的AI语音助手。用中文简洁口语化回答。",
+        system_prompt: str = (
+            "你是穹沛科技的机器人语音助手，搭载在巡检机器人上。"
+            "操作员是工程师和现场人员。"
+            "说话简洁口语化，像对讲机里的值班员。"
+            "短句为主，不超过80字。"
+            "不用markdown、emoji、英文。"
+            "不确定时说'不确定，需要确认'，不编造信息。"
+            "绝不说自己是AI助手或语言模型。"
+        ),
         prompt_seed: list[dict[str, str]] | None = None,
         user_prefix: str = "",
         voice_model: str | None = None,
@@ -847,9 +855,9 @@ class BrainPipeline:
         try:
             from openai import APIConnectionError, APITimeoutError
             if isinstance(exc, (asyncio.TimeoutError, APITimeoutError)):
-                return "响应超时，请再说一遍。"
+                return "想了一下没想出来，你再说一遍？"
             if isinstance(exc, APIConnectionError):
-                return "网络连接异常，请稍候重试。"
+                return "网络有点问题，基本功能还在。"
         except ImportError:
             pass
         if "timeout" in str(exc).lower():
@@ -861,10 +869,10 @@ class BrainPipeline:
     def _classify_skill_error_message(self, exc: Exception, skill_name: str) -> str:
         """Return a user-facing voice message for a skill execution error."""
         if isinstance(exc, asyncio.TimeoutError):
-            return f"{skill_name}执行超时，已跳过。"
+            return f"{skill_name}执行超时，跳过了。要不要换个方式？"
         if "connect" in str(exc).lower() or "network" in str(exc).lower():
-            return f"网络异常，{skill_name}执行失败。"
-        return f"{skill_name}执行失败，请重试。"
+            return f"网络有问题，{skill_name}暂时做不了。"
+        return f"{skill_name}执行失败，要不要重试？"
 
     def _prepare_agent_result(self, result: str) -> tuple[str, str]:
         """Prepare agent result for TTS + conversation storage."""

@@ -76,11 +76,11 @@ class TestClassifyErrorMessage:
         assert "网络" in result
 
     def test_classify_error_timeout(self):
-        """asyncio.TimeoutError → 返り値に '超时' を含む。"""
+        """asyncio.TimeoutError → friendly retry message."""
         pipeline = _make_pipeline()
         exc = asyncio.TimeoutError()
         result = pipeline._classify_error_message(exc)
-        assert "超时" in result
+        assert "再说一遍" in result or "超时" in result
 
     def test_classify_error_general(self):
         """RuntimeError → 返り値に '出错' を含む。"""
