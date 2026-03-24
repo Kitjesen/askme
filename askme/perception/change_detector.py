@@ -26,6 +26,7 @@ from askme.constants import (
     CHANGE_EVENTS_PATH, DAEMON_MAX_STALENESS,
 )
 from askme.schemas.events import ChangeEvent, ChangeEventType
+from askme.schemas.messages import DetectionFrame
 from askme.schemas.observation import Detection, Observation
 
 from typing import TYPE_CHECKING
@@ -122,8 +123,13 @@ class ChangeDetector:
         """Callback for Pulse detection messages (push mode).
 
         Called in the asyncio event loop by Pulse.
+        Parses through ``DetectionFrame.from_dict()`` for typed validation
+        before converting to the ``Observation`` used by the comparison engine.
         """
         try:
+            # Validate through typed message before building Observation
+            _frame = DetectionFrame.from_dict(data)
+            logger.debug("[ChangeDetector] Pulse frame: %d detections", len(_frame.detections))
             obs = Observation.from_daemon_json(data)
             self._active = True
             if self._prev_obs is not None:

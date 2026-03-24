@@ -59,6 +59,8 @@ class PipelineModule(Module):
     pipeline: Out[BrainPipeline]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
+        # TODO(GAP-FW-1): Migrate to In[T] ports when pipeline dependency count
+        # is reduced.  Currently needs 6 modules — too many for clean port wiring.
         # Pull dependencies from registry
         llm_mod = registry.get("llm")
         llm = getattr(llm_mod, "client", None) if llm_mod else None

@@ -68,7 +68,9 @@ class VoiceModule(Module):
             register_voice_tools(tools, self._audio)
             tools.register(SpeakProgressTool(self._audio))
 
-        # Wire audio into pipeline and shell
+        # Cross-link: pipeline, agent_shell, and dispatcher need the audio agent
+        # for TTS playback and voice state queries.  VoiceModule owns the AudioAgent
+        # so it is responsible for injecting it into objects built by earlier modules.
         if pipeline is not None:
             pipeline._audio = self._audio
         if agent_shell is not None:

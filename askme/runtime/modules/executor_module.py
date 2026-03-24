@@ -45,7 +45,8 @@ class ExecutorModule(Module):
         )
         self.shell._default_timeout = float(brain_cfg.get("agent_timeout", 120.0))
 
-        # Wire agent_shell into pipeline if available
+        # Cross-link: pipeline needs the agent shell for agent_task skill dispatch.
+        # ExecutorModule owns the shell, so it injects into the pipeline built earlier.
         pipeline_mod = registry.get("pipeline")
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
         if pipeline is not None:

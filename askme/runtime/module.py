@@ -426,6 +426,20 @@ class RuntimeApp:
     def health(self) -> dict[str, dict]:
         return {name: mod.health() for name, mod in self.modules.items()}
 
+    async def hot_swap(self, module_name: str, new_module_class: type[Module], cfg: dict | None = None) -> None:
+        """Hot-swap a running module. Not yet implemented.
+
+        Will stop the old module, re-wire In ports, build and start the new one.
+        """
+        raise NotImplementedError("Hot-swap coming in a future release")
+
+    def flow_stats(self) -> dict:
+        """Per-port message flow stats."""
+        return {
+            "wired_ports": len(self.wired_ports),
+            "note": "Detailed per-port stats coming soon",
+        }
+
     def get(self, name: str) -> Module | None:
         return self.modules.get(name)
 

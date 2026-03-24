@@ -60,7 +60,10 @@ class SkillModule(Module):
             metrics=ota_metrics,
         )
 
-        # Wire skill_manager and skill_executor into the pipeline
+        # Cross-link: pipeline needs skill refs for tool-calling and skill dispatch.
+        # SkillModule owns skill_manager/skill_executor, so it is responsible for
+        # injecting them into the pipeline that was built earlier (pipeline cannot
+        # depend on skill — that would create a cycle).
         if pipeline is not None:
             pipeline._skill_manager = self._skill_manager
             pipeline._skill_executor = self._skill_executor

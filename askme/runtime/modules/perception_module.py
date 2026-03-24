@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.runtime.module import Module, ModuleRegistry, Out
+from askme.runtime.module import In, Module, ModuleRegistry, Out
 from askme.perception.vision_bridge import VisionBridge
+from askme.schemas.messages import DetectionFrame
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +25,20 @@ class PerceptionModule(Module):
     depends_on = ("pulse",)
     provides = ("vision", "change_monitor")
 
+    # In port: auto-wired to PulseModule (which has Out[DetectionFrame])
+    detections: In[DetectionFrame]
+
     vision: Out[VisionBridge]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         self.vision_bridge = VisionBridge()
 
         self.change_detector = None
-        pulse_mod = registry.get("pulse")
+        # Use auto-wired In port when available; fallback to registry.get()
+        # getattr() needed because In ports are only set by _auto_wire() during
+        # Runtime.build(), not when modules are built standalone in tests.
+        wired_pulse = getattr(self, "detections", None)
+        pulse_mod = wired_pulse if wired_pulse is not None else registry.get("pulse")
         pulse_bus = getattr(pulse_mod, "bus", None) if pulse_mod else None
 
         try:
@@ -40,8 +48,9 @@ class PerceptionModule(Module):
             logger.debug("ChangeDetector not available: %s", exc)
 
         logger.info(
-            "PerceptionModule: built (change_detector=%s)",
+            "PerceptionModule: built (change_detector=%s, wired=%s)",
             "enabled" if self.change_detector else "disabled",
+            wired_pulse is not None,
         )
 
     # -- typed accessors ------------------------------------------------

@@ -13,8 +13,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.runtime.module import Module, ModuleRegistry, Out
+from askme.runtime.module import In, Module, ModuleRegistry, Out
 from askme.robot.safety_client import DogSafetyClient
+from askme.schemas.messages import EstopState
 
 logger = logging.getLogger(__name__)
 
@@ -26,17 +27,25 @@ class SafetyModule(Module):
     depends_on = ("pulse",)
     provides = ("dog_safety",)
 
+    # In port: auto-wired to PulseModule (which has Out[EstopState])
+    estop: In[EstopState]
+
     safety_client: Out[DogSafetyClient]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        pulse_mod = registry.get("pulse")
+        # Use auto-wired In port when available; fallback to registry.get()
+        # getattr() needed because In ports are only set by _auto_wire() during
+        # Runtime.build(), not when modules are built standalone in tests.
+        wired_pulse = getattr(self, "estop", None)
+        pulse_mod = wired_pulse if wired_pulse is not None else registry.get("pulse")
         pulse_bus = getattr(pulse_mod, "bus", None) if pulse_mod else None
 
         safety_cfg = cfg.get("runtime", {}).get("dog_safety", {})
         self.client = DogSafetyClient(safety_cfg, pulse=pulse_bus)
         logger.info(
-            "SafetyModule: built (configured=%s)",
+            "SafetyModule: built (configured=%s, wired=%s)",
             self.client.is_configured(),
+            wired_pulse is not None,
         )
 
     # -- typed accessors ------------------------------------------------

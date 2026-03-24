@@ -21,6 +21,8 @@ from uuid import uuid4
 
 import requests
 
+from askme.schemas.messages import EstopState
+
 if TYPE_CHECKING:
     from askme.robot.pubsub import PubSubBase
 
@@ -85,6 +87,10 @@ class DogSafetyClient:
         Returns None if the service is not configured or unreachable.
         This method blocks on network I/O — call via ``asyncio.to_thread()``
         from async contexts unless the cache is guaranteed warm.
+
+        Internally parses the response into an ``EstopState`` typed message
+        for validation, then returns the dict representation for backward
+        compatibility with existing callers.
         """
         if not self._base_url:
             return None
@@ -109,6 +115,9 @@ class DogSafetyClient:
             )
             resp.raise_for_status()
             data: dict[str, Any] = resp.json()
+            # Parse through typed message for validation
+            typed = EstopState.from_dict(data)
+            logger.debug("DogSafetyClient: estop state: active=%s", typed.active)
             with self._state_lock:
                 self._cached_estop = data
                 self._cache_ts = time.monotonic()
@@ -135,14 +144,15 @@ class DogSafetyClient:
             logger.debug("[Safety] ESTOP source: Pulse")
             return self._pulse.is_estop_active()
 
-        # Fallback: HTTP 30s TTL cache
+        # Fallback: HTTP 30s TTL cache — parse through EstopState for consistency
         logger.debug("[Safety] ESTOP source: HTTP cache")
         with self._state_lock:
             if self._cached_estop is None:
                 return False
             if (time.monotonic() - self._cache_ts) > _ESTOP_STATE_TTL:
                 return False  # stale — treat as unknown = safe
-            return bool(self._cached_estop.get("enabled", False))
+            typed = EstopState.from_dict(self._cached_estop)
+            return typed.active or bool(self._cached_estop.get("enabled", False))
 
     def notify_estop(self) -> None:
         """Fire E-STOP notification to dog-safety-service in a background thread.

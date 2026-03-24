@@ -1,4 +1,9 @@
-"""Brain pipeline — memory retrieval → LLM streaming → tool calls → TTS."""
+"""Brain pipeline — memory retrieval → LLM streaming → tool calls → TTS.
+
+TODO(GAP-CORE-1): Decompose into PromptAssembler + LLMTurnExecutor + SkillGate + StreamingTTSBridge.
+See docs/LAYER_GAPS.md for the decomposition plan.
+Current: ~1093 lines, target: <400 lines after decomposition.
+"""
 
 from __future__ import annotations
 

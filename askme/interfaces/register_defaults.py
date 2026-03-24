@@ -63,12 +63,22 @@ from askme.robot.mock_pulse import MockPulse  # noqa: E402
 bus_registry.register("mock")(MockPulse)
 
 # ---------------------------------------------------------------------------
-# Detector — no implementations yet (ChangeDetector is a perception processor,
-#             not a DetectorBackend).  BPU YOLO backend will be added when the
-#             on-device model wrapper is created.
+# Detector — ChangeDetector registered as a stub.  It does not implement the
+#            full DetectorBackend ABC (no detect()/model_name), but the soft
+#            type check allows registration for discovery purposes.
+#            A proper BPU YOLO backend will be added when the on-device model
+#            wrapper is created.
 # ---------------------------------------------------------------------------
+from askme.interfaces.detector import detector_registry  # noqa: E402
+
+try:
+    from askme.perception.change_detector import ChangeDetector  # noqa: E402
+
+    detector_registry.register("change_detector")(ChangeDetector)
+except ImportError:
+    logger.debug("ChangeDetector not available, skipping registration")
 
 # ---------------------------------------------------------------------------
-# Navigator — no implementations yet.  LingTu bridge wrapper will be added
-#             when the gRPC client is wrapped as a NavigatorBackend.
+# Navigator — no NavigatorBackend adapter exists yet.  LingTu gRPC bridge
+#             will be registered here when wrapped as a NavigatorBackend.
 # ---------------------------------------------------------------------------
