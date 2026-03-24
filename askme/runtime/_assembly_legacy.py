@@ -190,7 +190,7 @@ class RuntimeServices:
     change_detector: Any | None = None
 
     def bindings(self) -> dict[str, Any]:
-        """Expose compatibility aliases expected by AskmeApp."""
+        """Expose compatibility aliases for legacy runtime."""
         return {
             "ota_metrics": self.ota_metrics,
             "llm": self.llm,

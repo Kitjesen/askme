@@ -417,13 +417,67 @@ def _run_mcp_server(*, transport: str, host: str, port: int) -> None:
 
 
 def _load_local_capabilities(*, voice_mode: bool, robot_mode: bool) -> dict[str, Any]:
-    from askme.app import AskmeApp
+    return asyncio.run(
+        _load_local_capabilities_async(voice_mode=voice_mode, robot_mode=robot_mode)
+    )
 
-    app = AskmeApp(voice_mode=voice_mode, robot_mode=robot_mode)
-    try:
-        return app.capabilities_snapshot()
-    finally:
-        asyncio.run(app.shutdown())
+
+async def _load_local_capabilities_async(
+    *, voice_mode: bool, robot_mode: bool,
+) -> dict[str, Any]:
+    from askme.config import get_config
+    from askme.main import _select_blueprint
+    from askme.runtime.profiles import legacy_profile_for
+
+    cfg = get_config()
+    blueprint = _select_blueprint(voice_mode=voice_mode, robot_mode=robot_mode)
+    app = await blueprint.build(cfg)
+    profile = legacy_profile_for(voice_mode=voice_mode, robot_mode=robot_mode)
+
+    skill_mod = app.modules.get("skill")
+    sm = getattr(skill_mod, "skill_manager", None) if skill_mod else None
+    contracts = sm.get_contracts() if sm else []
+    openapi_doc = sm.openapi_document() if sm else {"info": {"title": "", "version": ""}, "paths": {}}
+
+    from askme import __version__ as ASKME_VERSION
+
+    app_name = cfg.get("app", {}).get("name", "askme")
+    app_version = cfg.get("app", {}).get("version") or ASKME_VERSION
+
+    components: dict[str, dict[str, Any]] = {}
+    for name, mod in app.modules.items():
+        components[name] = {
+            "health": mod.health(),
+            "capabilities": mod.capabilities(),
+        }
+
+    return {
+        "app": {
+            "name": app_name,
+            "version": app_version,
+            "voice_mode": voice_mode,
+            "robot_mode": robot_mode,
+        },
+        "profile": profile.snapshot(),
+        "components": components,
+        "skills": {
+            "count": len(sm.get_all()) if sm else 0,
+            "enabled_count": len(sm.get_enabled()) if sm else 0,
+            "contract_count": len(contracts),
+            "code_contract_count": sum(
+                1 for c in contracts if c.source == "code"
+            ),
+            "legacy_contract_count": sum(
+                1 for c in contracts if c.source != "code"
+            ),
+            "catalog": sm.get_contract_catalog() if sm else [],
+        },
+        "openapi": {
+            "title": openapi_doc["info"]["title"],
+            "version": openapi_doc["info"]["version"],
+            "path_count": len(openapi_doc["paths"]),
+        },
+    }
 
 
 def _run_local_agent_turn_sync(message: str, *, robot_mode: bool) -> dict[str, Any]:
@@ -431,19 +485,27 @@ def _run_local_agent_turn_sync(message: str, *, robot_mode: bool) -> dict[str, A
 
 
 async def _run_local_agent_turn(message: str, *, robot_mode: bool) -> dict[str, Any]:
-    from askme.app import AskmeApp
+    from askme.config import get_config
+    from askme.main import _select_blueprint
+    from askme.runtime.profiles import legacy_profile_for
 
-    app = AskmeApp(voice_mode=False, robot_mode=robot_mode)
+    cfg = get_config()
+    blueprint = _select_blueprint(voice_mode=False, robot_mode=robot_mode)
+    app = await blueprint.build(cfg)
+    profile = legacy_profile_for(voice_mode=False, robot_mode=robot_mode)
+    await app.start()
     try:
-        reply = await app._text_loop.process_turn(message)  # noqa: SLF001
+        text_mod = app.modules.get("text")
+        text_loop = getattr(text_mod, "text_loop", None) if text_mod else None
+        reply = await text_loop.process_turn(message) if text_loop else ""
         return {
             "mode": "local",
-            "profile": app.profile.name,
+            "profile": profile.name,
             "reply": reply,
             "message": message,
         }
     finally:
-        await app.shutdown()
+        await app.stop()
 
 
 def _send_agent_message_via_server(message: str, server: str) -> dict[str, Any]:

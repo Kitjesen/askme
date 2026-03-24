@@ -126,21 +126,37 @@ class WebAudio:
 
 def build_components() -> tuple[Any, Any, Any]:
     """Instantiate App (text mode) and replace audio with WebAudio mock."""
-    # Support both class names across versions
-    try:
-        from askme.app import App as _AppCls
-    except ImportError:
-        from askme.app import AskmeApp as _AppCls  # type: ignore[no-redef]
+    import asyncio
+    from askme.blueprints.text import text as text_blueprint
+    from askme.config import get_config
 
-    app_instance = _AppCls(voice_mode=False, robot_mode=False)
+    cfg = get_config()
+    app_instance = asyncio.get_event_loop().run_until_complete(
+        text_blueprint.build(cfg),
+    )
+
+    pipeline_mod = app_instance.modules.get("pipeline")
+    pipeline = getattr(pipeline_mod, "brain_pipeline", None)
+
+    skill_mod = app_instance.modules.get("skill")
+    dispatcher = getattr(skill_mod, "skill_dispatcher", None)
+    skill_manager = getattr(skill_mod, "skill_manager", None)
+
+    text_mod = app_instance.modules.get("text")
+    voice_mod = app_instance.modules.get("voice")
+    audio = getattr(voice_mod, "audio", None) if voice_mod else None
+    if audio is None:
+        audio = getattr(text_mod, "_text_audio", None) if text_mod else None
 
     # Replace the real AudioAgent with our WebAudio mock so TTS goes to
     # WebSocket instead of a speaker, and mic calls are safely no-ops.
-    web_audio = WebAudio(real_audio=app_instance.audio)
-    app_instance._pipeline._audio = web_audio  # noqa: SLF001
-    app_instance.dispatcher._audio = web_audio  # noqa: SLF001
+    web_audio = WebAudio(real_audio=audio)
+    if pipeline is not None:
+        pipeline._audio = web_audio  # noqa: SLF001
+    if dispatcher is not None:
+        dispatcher._audio = web_audio  # noqa: SLF001
 
-    return app_instance._pipeline, app_instance.dispatcher, app_instance.skill_manager
+    return pipeline, dispatcher, skill_manager
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────

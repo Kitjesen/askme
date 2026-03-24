@@ -54,7 +54,7 @@ def asr_on_wavfile(wav_path: str, asr) -> str:
 
 
 async def run_voice_loop_test():
-    from askme.app import AskmeApp
+    from askme.blueprints.voice import voice as voice_blueprint
     from askme.brain.intent_router import IntentType
     from askme.voice.asr import ASREngine
     from askme.config import get_config
@@ -66,7 +66,7 @@ async def run_voice_loop_test():
     print("=" * 55)
 
     # Init full app (loads SOUL.md, TTS, LLM, etc.)
-    app = AskmeApp(voice_mode=True)
+    app = await voice_blueprint.build(cfg)
 
     # Init ASR for wav file test
     asr_cfg = cfg.get("voice", {}).get("asr", {})
@@ -94,36 +94,42 @@ async def run_voice_loop_test():
     for query in INJECTED_QUERIES:
         print(f"\n  User: {query}")
 
-        intent = app.router.route(query)
+        voice_mod = app.modules.get("voice")
+        router = getattr(voice_mod, "router", None)
+        audio = getattr(voice_mod, "audio", None)
+        pipeline_mod = app.modules.get("pipeline")
+        pipeline = getattr(pipeline_mod, "brain_pipeline", None)
+
+        intent = router.route(query)
         print(f"  Intent: {intent.type.name}")
 
         if intent.type == IntentType.COMMAND and intent.command in ("quit", "exit", "/quit", "/exit"):
-            app.audio.speak("收到，结束巡检。")
-            app.audio.start_playback()
-            app.audio.wait_speaking_done()
-            app.audio.stop_playback()
+            audio.speak("收到，结束巡检。")
+            audio.start_playback()
+            audio.wait_speaking_done()
+            audio.stop_playback()
             print("  Thunder: 收到，结束巡检。")
             break
 
         if intent.type == IntentType.ESTOP:
-            app._pipeline.handle_estop()
+            pipeline.handle_estop()
             print("  [ESTOP triggered]")
             continue
 
         t0 = time.monotonic()
-        response = await app._pipeline.process(query)
+        response = await pipeline.process(query)
         elapsed = time.monotonic() - t0
 
         print(f"  Thunder: {response[:80]}")
         print(f"  ({elapsed:.1f}s total, waiting for TTS...)")
 
         # Wait for TTS to finish
-        app.audio.wait_speaking_done()
-        app.audio.stop_playback()
+        audio.wait_speaking_done()
+        audio.stop_playback()
         print(f"  TTS done.")
         await asyncio.sleep(0.5)
 
-    await app.shutdown()
+    await app.stop()
     print(f"\n{'=' * 55}")
     print("Voice loop test complete!")
     print("=" * 55)

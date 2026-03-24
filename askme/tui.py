@@ -15,7 +15,11 @@ from typing import Any
 
 from colorama import just_fix_windows_console
 
-from askme.app import AskmeApp
+import askme.interfaces.register_defaults  # noqa: F401 — register all backends
+
+from askme.config import get_config
+from askme.runtime.module import RuntimeApp
+from askme.runtime.profiles import legacy_profile_for
 
 logger = logging.getLogger(__name__)
 
@@ -133,16 +137,23 @@ class SilentAudio:
     async def speak_and_wait(self, *a: Any, **kw: Any) -> None: pass
 
 
+def _mod_attr(app: RuntimeApp, module_name: str, attr: str, default: Any = None) -> Any:
+    """Safely get a module attribute from a RuntimeApp."""
+    mod = app.modules.get(module_name)
+    return getattr(mod, attr, default) if mod else default
+
+
 class AskmeTerminalUI:
     """Full-screen chat UI with non-blocking 2Hz refresh.
 
-    Background thread reads stdin → asyncio.Queue.
-    Main loop polls queue with 0.5s timeout → re-renders on every tick.
+    Background thread reads stdin -> asyncio.Queue.
+    Main loop polls queue with 0.5s timeout -> re-renders on every tick.
     Events, status, and perception data update even while waiting for input.
     """
 
-    def __init__(self, app: AskmeApp) -> None:
+    def __init__(self, app: RuntimeApp, profile: Any) -> None:
         self.app = app
+        self.profile = profile
         self._entries: list[DisplayEntry] = []
         self._known_history_len = 0
         self._pending_user_input = ""
@@ -151,12 +162,41 @@ class AskmeTerminalUI:
         self._input_queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._processing = False
         self._quit = False
+        self._audio_override: Any = None
+
+        # Cache module references
+        self._conversation = _mod_attr(app, "memory", "conversation")
+        self._text_loop = _mod_attr(app, "text", "text_loop")
+        self._pipeline = _mod_attr(app, "pipeline", "brain_pipeline")
+        self._skill_manager = _mod_attr(app, "skill", "skill_manager")
+        self._dog_safety = _mod_attr(app, "safety", "client")
+        self._dispatcher = _mod_attr(app, "skill", "skill_dispatcher")
+
         self._sync_history()
         self._append_system("欢迎使用 askme。输入 /help 查看命令。")
 
+    @property
+    def _audio(self) -> Any:
+        """Get the current audio object (override or from voice/text module)."""
+        if self._audio_override is not None:
+            return self._audio_override
+        audio = _mod_attr(self.app, "voice", "audio")
+        if audio is not None:
+            return audio
+        return _mod_attr(self.app, "text", "_text_audio")
+
     async def run(self) -> None:
         """Run the terminal UI with non-blocking refresh."""
-        self.app.audio = SilentAudio()
+        # Replace audio with silent version
+        silent = SilentAudio()
+        self._audio_override = silent
+
+        # Patch audio into voice module and pipeline
+        voice_mod = self.app.modules.get("voice")
+        if voice_mod is not None:
+            voice_mod.audio = silent
+        if self._pipeline is not None:
+            self._pipeline._audio = silent
 
         # Start background stdin reader thread
         stdin_task = asyncio.create_task(self._stdin_reader())
@@ -219,7 +259,7 @@ class AskmeTerminalUI:
     def _handle_estop(self) -> None:
         """Trigger emergency stop via Ctrl+C."""
         try:
-            self.app.pipeline.handle_estop()
+            self._pipeline.handle_estop()
             self._append_system(f"{_C_RED}[ESTOP] 紧急停止已触发！{_C_RESET}")
         except Exception:
             self._append_system(f"{_C_RED}[ESTOP] 紧急停止（安全服务未连接）{_C_RESET}")
@@ -247,7 +287,7 @@ class AskmeTerminalUI:
             return False
 
         if user_text == "/clear":
-            self.app.conversation.clear()
+            self._conversation.clear()
             self._entries = []
             self._known_history_len = 0
             self._append_system("会话历史已清空。")
@@ -266,7 +306,7 @@ class AskmeTerminalUI:
             return False
 
         # Normal turn — process with periodic refresh
-        before_history_len = len(self.app.conversation.history)
+        before_history_len = len(self._conversation.history)
         self._pending_user_input = user_text
         self._status_text = "处理中..."
         self._processing = True
@@ -275,7 +315,7 @@ class AskmeTerminalUI:
         try:
             # Run LLM turn as a task so we can refresh while it processes
             turn_task = asyncio.create_task(
-                self.app._text_loop.process_turn(user_text)  # noqa: SLF001
+                self._text_loop.process_turn(user_text)
             )
 
             # Refresh loop during processing
@@ -311,7 +351,7 @@ class AskmeTerminalUI:
             self._processing = False
 
         self._sync_history()
-        if reply and len(self.app.conversation.history) == before_history_len:
+        if reply and len(self._conversation.history) == before_history_len:
             self._entries.append(DisplayEntry("user", user_text))
             self._entries.append(DisplayEntry("assistant", reply))
 
@@ -356,8 +396,8 @@ class AskmeTerminalUI:
 
         estop_active = False
         try:
-            if hasattr(self.app, '_dog_safety') and self.app._dog_safety:
-                estop_active = self.app._dog_safety.is_estop_active()
+            if self._dog_safety is not None:
+                estop_active = self._dog_safety.is_estop_active()
         except Exception:
             pass
 
@@ -375,8 +415,7 @@ class AskmeTerminalUI:
         else:
             status_colored = f"{_C_GREEN}{self._status_text}{_C_RESET}"
 
-        profile = getattr(self.app, 'profile', None)
-        profile_name = getattr(profile, 'name', 'text') if profile else 'text'
+        profile_name = getattr(self.profile, 'name', 'text')
 
         return (
             f" {_C_BOLD}THUNDER{_C_RESET}"
@@ -391,16 +430,8 @@ class AskmeTerminalUI:
         parts: list[str] = []
 
         try:
-            ws = getattr(self.app, '_world_state', None)
-            if ws:
-                parts.append(ws.get_summary_sync())
-        except Exception:
-            pass
-
-        try:
-            dispatcher = getattr(self.app, '_dispatcher', None)
-            if dispatcher:
-                mission = getattr(dispatcher, 'current_mission', None)
+            if self._dispatcher is not None:
+                mission = getattr(self._dispatcher, 'current_mission', None)
                 if mission:
                     state = getattr(mission, 'state', None)
                     steps = getattr(mission, 'steps', [])
@@ -410,7 +441,7 @@ class AskmeTerminalUI:
             pass
 
         try:
-            health = self.app.health_snapshot()
+            health = self._health_snapshot()
             lat = health.get('last_llm_latency_ms')
             if lat:
                 parts.append(f"LLM:{int(lat)}ms")
@@ -438,7 +469,7 @@ class AskmeTerminalUI:
 
     def _sync_history(self) -> None:
         """Append new conversation history entries into the local transcript."""
-        history = self.app.conversation.history
+        history = self._conversation.history
         if len(history) < self._known_history_len:
             self._entries = [self._from_history_entry(item) for item in history if item.get("content")]
             self._known_history_len = len(history)
@@ -476,9 +507,95 @@ class AskmeTerminalUI:
             lines.extend([""] * (height - len(lines)))
         return lines
 
+    def _health_snapshot(self) -> dict[str, Any]:
+        """Build a minimal health snapshot from module data."""
+        from askme.health_server import build_health_snapshot
+        from askme.robot.runtime_health import merge_voice_pipeline_status
+        from askme import __version__ as ASKME_VERSION
+
+        cfg = get_config()
+        app_name = cfg.get("app", {}).get("name", "askme")
+        app_version = cfg.get("app", {}).get("version") or ASKME_VERSION
+
+        llm_mod = self.app.modules.get("llm")
+        llm = getattr(llm_mod, "client", None) if llm_mod else None
+        ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else None
+        ota_snap = ota_metrics.snapshot() if ota_metrics else {}
+
+        audio_obj = self._audio
+        voice_status: dict[str, Any] = {}
+        if audio_obj is not None and hasattr(audio_obj, "status_snapshot"):
+            voice_status = audio_obj.status_snapshot()
+        voice_status = merge_voice_pipeline_status(
+            voice_status,
+            ota_snap.get("voice_pipeline", {}),
+        )
+
+        vrb = _mod_attr(self.app, "voice", "voice_runtime_bridge")
+        if vrb is None:
+            vrb = _mod_attr(self.app, "text", "_voice_runtime_bridge")
+
+        return build_health_snapshot(
+            app_name=app_name,
+            app_version=app_version,
+            model_name=llm.model if llm else "unknown",
+            metrics_snapshot=ota_snap,
+            active_skills=[s.name for s in self._skill_manager.get_enabled()] if self._skill_manager else [],
+            voice_status=voice_status,
+            ota_status=None,
+            voice_bridge=vrb.status_snapshot() if vrb else None,
+        )
+
+    def _capabilities_snapshot(self) -> dict[str, Any]:
+        """Build a capabilities snapshot from module data."""
+        from askme import __version__ as ASKME_VERSION
+
+        cfg = get_config()
+        app_name = cfg.get("app", {}).get("name", "askme")
+        app_version = cfg.get("app", {}).get("version") or ASKME_VERSION
+
+        sm = self._skill_manager
+        contracts = sm.get_contracts() if sm else []
+        openapi_doc = sm.openapi_document() if sm else {"info": {"title": "", "version": ""}, "paths": {}}
+
+        components: dict[str, dict[str, Any]] = {}
+        for name, mod in self.app.modules.items():
+            components[name] = {
+                "health": mod.health(),
+                "capabilities": mod.capabilities(),
+            }
+
+        return {
+            "app": {
+                "name": app_name,
+                "version": app_version,
+                "voice_mode": False,
+                "robot_mode": False,
+            },
+            "profile": self.profile.snapshot(),
+            "components": components,
+            "skills": {
+                "count": len(sm.get_all()) if sm else 0,
+                "enabled_count": len(sm.get_enabled()) if sm else 0,
+                "contract_count": len(contracts),
+                "code_contract_count": sum(
+                    1 for c in contracts if c.source == "code"
+                ),
+                "legacy_contract_count": sum(
+                    1 for c in contracts if c.source != "code"
+                ),
+                "catalog": sm.get_contract_catalog() if sm else [],
+            },
+            "openapi": {
+                "title": openapi_doc["info"]["title"],
+                "version": openapi_doc["info"]["version"],
+                "path_count": len(openapi_doc["paths"]),
+            },
+        }
+
     def _build_status_lines(self, width: int, height: int) -> list[str]:
-        capabilities = self.app.capabilities_snapshot()
-        health = self.app.health_snapshot()
+        capabilities = self._capabilities_snapshot()
+        health = self._health_snapshot()
         elapsed = int(time.monotonic() - self._started_at)
         enabled_skills = capabilities["skills"]["enabled_count"]
         total_skills = capabilities["skills"]["count"]
@@ -536,21 +653,6 @@ class AskmeTerminalUI:
 
     def _get_recent_events(self) -> list[str]:
         """Get recent perception events for the status panel."""
-        try:
-            ws = getattr(self.app, '_world_state', None)
-            if ws:
-                events = ws.event_history_sync()
-                result = []
-                for ev in events[-5:]:
-                    ts = time.strftime("%H:%M", time.localtime(ev.timestamp))
-                    desc = ev.description_zh()
-                    if ev.is_person_event:
-                        result.append(f"{_C_YELLOW}{ts}{_C_RESET} {desc}")
-                    else:
-                        result.append(f"{_C_DIM}{ts}{_C_RESET} {desc}")
-                return result
-        except Exception:
-            pass
         return []
 
     def _wrap_entry(self, entry: DisplayEntry, width: int) -> list[str]:
@@ -591,7 +693,7 @@ class AskmeTerminalUI:
         return [_truncate_to_width(line, width) for line in (wrapped or [""])]
 
     def _skills_summary(self) -> str:
-        skills = self.app.skill_manager.get_enabled()
+        skills = self._skill_manager.get_enabled() if self._skill_manager else []
         if not skills:
             return "当前没有启用技能。"
         summary = ", ".join(skill.name for skill in skills[:12])
@@ -600,7 +702,7 @@ class AskmeTerminalUI:
         return f"已启用技能: {summary}"
 
     def _status_summary(self) -> str:
-        health = self.app.health_snapshot()
+        health = self._health_snapshot()
         return (
             f"状态={health.get('status', 'unknown')} "
             f"会话={health.get('total_conversations', 0)} "
@@ -609,7 +711,7 @@ class AskmeTerminalUI:
         )
 
     def _capability_summary(self) -> str:
-        capabilities = self.app.capabilities_snapshot()
+        capabilities = self._capabilities_snapshot()
         parts = [
             f"profile={capabilities['profile']['name']}",
         ]
@@ -620,10 +722,17 @@ class AskmeTerminalUI:
 
 async def run_terminal_ui(*, robot_mode: bool = False) -> None:
     """Run askme inside the full-screen terminal UI."""
-    app = AskmeApp(voice_mode=False, robot_mode=robot_mode)
-    await app.runtime.start()
-    ui = AskmeTerminalUI(app)
+    from askme.main import _select_blueprint, _setup_logging
+
+    cfg = get_config()
+    _setup_logging(cfg)
+
+    blueprint = _select_blueprint(voice_mode=False, robot_mode=robot_mode)
+    app = await blueprint.build(cfg)
+    profile = legacy_profile_for(voice_mode=False, robot_mode=robot_mode)
+    await app.start()
+    ui = AskmeTerminalUI(app, profile)
     try:
         await ui.run()
     finally:
-        await app.shutdown()
+        await app.stop()
