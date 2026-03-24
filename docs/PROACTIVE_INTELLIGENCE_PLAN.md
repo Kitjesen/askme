@@ -214,3 +214,479 @@ Phase D: 机器人自己决定巡检路线、复查时机、待命还是行动
 [自动导航 → 检查 → 返回]
 [askme] 3号点一切正常。
 ```
+
+---
+
+## Appendix: ReactionEngine Design
+
+## Summary
+
+The askme codebase already has a solid perception-to-alert pipeline (ChangeDetector -> ChangeEvent -> ProactiveAgent -> AlertDispatcher), but the reaction logic is a single if-branch at `proactive_agent.py:469` that speaks a fixed template for every person event. The design below introduces a **ReactionEngine** -- a rule-first, LLM-second decision layer that sits between the existing ChangeEvent stream and the existing AlertDispatcher/SkillDispatcher outputs. It reuses every existing component (WorldState, AttentionManager, EpisodicMemory, SiteKnowledge, AlertDispatcher, SkillDispatcher) and adds exactly one new class plus one config section.
+
+## Analysis
+
+### What Exists Today (with file:line references)
+
+**Perception pipeline (working):**
+- `askme/perception/change_detector.py:56` -- ChangeDetector compares consecutive YOLO frames via greedy IoU matching, emits debounced ChangeEvents
+- `askme/perception/world_state.py:77` -- WorldState tracks all visible objects with track_id, class_id, bbox, distance_m, first_seen, last_seen, duration_s
+- `askme/perception/attention_manager.py:64` -- AttentionManager enforces per-event-type cooldowns and importance thresholds
+
+**Current reaction logic (the bottleneck):**
+- `askme/pipeline/proactive_agent.py:459-487` -- `_handle_change_event()` is the sole reaction handler. It does three things: (1) log to episodic memory, (2) if `event.is_person_event` speak the fixed template, (3) if importance >= 0.7 trigger auto-solve
+- `askme/schemas/events.py:98-112` -- `description_zh()` produces hardcoded strings like "检测到有人出现" -- no context, no scene understanding
+
+**Available context signals (already computed, not used for decisions):**
+- `askme/perception/world_state.py:45-59` -- TrackedObject has `distance_m`, `duration_s`, `first_seen`, `last_seen`, `bbox`
+- `askme/memory/site_knowledge.py:88` -- SiteKnowledge has Location with coords, tags, anomaly_count, visit_count
+- `askme/memory/episodic_memory.py:227-245` -- `retrieve(query)` does Park 2023-style scoring (recency + importance + keyword relevance)
+- `askme/memory/episodic_memory.py:378-406` -- `get_recent_digest()` returns Chinese-language recent experience summary
+
+**Output channels (already working):**
+- `askme/pipeline/alert_dispatcher.py:62` -- AlertDispatcher with severity routing to voice/webhook/wecom/dingtalk/feishu
+- `askme/pipeline/skill_dispatcher.py:1-10` -- SkillDispatcher with MissionContext for multi-step skill execution
+- `askme/pipeline/proactive_agent.py:162` -- `set_solve_callback()` already wires ProactiveAgent to SkillDispatcher
+
+**Module system:**
+- `askme/runtime/module.py:252` -- Module base class with In/Out typed ports, auto-wiring, topo-sort
+- `askme/runtime/modules/proactive_module.py:25` -- ProactiveModule wraps ProactiveAgent, depends on (pipeline, memory)
+
+### The Gap
+
+The gap is between `_handle_change_event()` receiving a ChangeEvent and choosing a reaction. Currently that decision is one if-statement (`if event.is_person_event: speak`). There is no consideration of:
+- Person distance or movement direction
+- How long the person has been in scene
+- Time of day
+- Location/zone context
+- Whether this person was seen recently
+- What the robot is currently doing (in a mission? idle?)
+
+### Design Constraints (from hardware reality)
+
+- **S100P**: 4GB RAM, aarch64, BPU handles YOLO at 5Hz -- CPU budget is tight
+- **LLM latency**: MiniMax M2.7 ~1-2s TTFT, relay Opus ~5s -- cannot call LLM for every frame
+- **TTS latency**: MiniMax TTS ~0.5-1s -- fast enough for real-time reactions
+- **YOLO output**: class_id, confidence, bbox, distance_m -- no pose, no face recognition, no gaze direction
+
+---
+
+## Design: Reaction Engine
+
+### Architecture Overview
+
+```
+ChangeEvent (from ChangeDetector)
+     |
+     v
++------------------+
+| ReactionEngine   |  <-- NEW: the only new class
+|                  |
+|  1. Build        |  WorldState.get_objects_sync() -> scene signals
+|     SceneContext  |  SiteKnowledge.get_location() -> zone context
+|                  |  EpisodicMemory.retrieve() -> recent memory
+|                  |  time.localtime() -> time context
+|                  |  robot_state (idle/mission) -> activity context
+|                  |
+|  2. Rule-based   |  SceneContext -> ReactionType (fast, <1ms)
+|     Decision     |  (deterministic matrix, no LLM)
+|                  |
+|  3. Content      |  if needs_content: LLM generates spoken text
+|     Generation   |  if rule-only: use template (fast)
+|     (optional)   |
+|                  |
+|  4. Execute      |  AlertDispatcher.dispatch() for speak/alert
+|     Reaction     |  SkillDispatcher.dispatch() for ACT
+|                  |  EpisodicMemory.log() for all
++------------------+
+```
+
+### 1. SceneContext -- signals available for decision-making
+
+Every signal below is already computed by existing code. No new sensors needed.
+
+```python
+@dataclass
+class SceneContext:
+    """All signals available for reaction decisions. Built from existing data."""
+
+    # From ChangeEvent
+    event: ChangeEvent                          # the triggering event
+    
+    # From WorldState (already tracked)
+    person_count: int                           # how many persons visible right now
+    person_distance_m: float | None             # nearest person distance (TrackedObject.distance_m)
+    person_duration_s: float                    # how long this person has been in scene (TrackedObject.duration_s)
+    person_bbox_position: str                   # "left" / "center" / "right" (from bbox center_x)
+    total_objects: int                          # total tracked objects
+    
+    # Derived from consecutive WorldState snapshots (2-frame delta)
+    person_approaching: bool                    # distance decreasing over last 2 readings
+    person_stationary: bool                     # bbox center moved < 5% of frame width
+    
+    # From time
+    hour: int                                   # 0-23
+    is_business_hours: bool                     # configurable, default 08:00-18:00
+    
+    # From SiteKnowledge (if robot knows its position)
+    zone_name: str                              # "" if unknown
+    zone_tags: list[str]                        # ["restricted"], ["entrance"], ["work_area"], []
+    
+    # From EpisodicMemory
+    seen_person_recently: bool                  # person_appeared event in last N minutes
+    minutes_since_last_person: float            # time since last person_appeared event
+    
+    # From robot state
+    robot_busy: bool                            # currently executing a mission
+    wake_word_heard: bool                       # wake word detected (from VoiceModule)
+```
+
+**Where each signal comes from:**
+
+| Signal | Source | Cost |
+|--------|--------|------|
+| `person_count` | `WorldState.get_persons_sync()` at `world_state.py:201` | O(n), ~0 |
+| `person_distance_m` | `TrackedObject.distance_m` at `world_state.py:55` | Already computed |
+| `person_duration_s` | `TrackedObject.duration_s` property at `world_state.py:58-59` | Already computed |
+| `person_approaching` | Compare current distance_m vs previous (store in ReactionEngine) | 1 float comparison |
+| `person_stationary` | Compare bbox center vs previous | 1 float comparison |
+| `hour` | `datetime.now().hour` | ~0 |
+| `zone_name/tags` | `SiteKnowledge.find_nearby()` at `site_knowledge.py:166` | O(locations), <1ms |
+| `seen_person_recently` | `EpisodicMemory.retrieve("person")` at `episodic_memory.py:227` | O(buffer), <5ms |
+| `robot_busy` | Check if `SkillDispatcher.current_mission` is RUNNING | 1 attribute read |
+
+**Key design decision**: `person_approaching` requires storing the previous distance reading. ReactionEngine holds a `_prev_distance: dict[str, float]` keyed by track_id. This is a single dict, not a new sensor.
+
+### 2. Reaction Types
+
+```python
+class ReactionType(Enum):
+    IGNORE = "ignore"         # log only, no output
+    OBSERVE = "observe"       # update WorldState, log, no output
+    GREET = "greet"           # short TTS greeting
+    INFORM = "inform"         # provide information
+    WARN = "warn"             # security/safety warning
+    ASSIST = "assist"         # offer help after delay
+    ALERT = "alert"           # escalate to operator (webhook + IM)
+    ACT = "act"               # trigger a skill/mission
+```
+
+### 3. Decision Matrix (rule-based, no LLM)
+
+The matrix is evaluated top-to-bottom; first match wins. Each row is a pure function of SceneContext fields, evaluated in <1ms.
+
+```python
+# Priority-ordered rules. First match wins.
+_REACTION_RULES: list[tuple[str, Callable[[SceneContext], bool], ReactionType, dict]] = [
+    # ---- Safety / Security (highest priority) ----
+    
+    ("restricted_zone_person",
+     lambda ctx: ctx.event.is_person_event 
+                 and ctx.event.event_type == ChangeEventType.PERSON_APPEARED
+                 and "restricted" in ctx.zone_tags,
+     ReactionType.WARN,
+     {"severity": "warning", "template": "请注意，此区域需要授权进入。"}),
+    
+    ("after_hours_unknown",
+     lambda ctx: ctx.event.is_person_event
+                 and ctx.event.event_type == ChangeEventType.PERSON_APPEARED
+                 and not ctx.is_business_hours,
+     ReactionType.ALERT,
+     {"severity": "warning", "template": "非工作时间检测到人员，已通知管理人员。",
+      "escalate": True}),
+    
+    # ---- Wake word (always respond) ----
+    
+    ("wake_word",
+     lambda ctx: ctx.wake_word_heard,
+     ReactionType.ACT,
+     {"action": "enter_conversation"}),
+    
+    # ---- Robot busy (suppress most reactions) ----
+    
+    ("busy_ignore",
+     lambda ctx: ctx.robot_busy and ctx.event.is_person_event
+                 and "restricted" not in ctx.zone_tags,
+     ReactionType.OBSERVE,
+     {}),
+    
+    # ---- Person passing through (IGNORE) ----
+    
+    ("person_passing",
+     lambda ctx: ctx.event.event_type == ChangeEventType.PERSON_APPEARED
+                 and ctx.person_duration_s < 3.0
+                 and not ctx.person_approaching,
+     ReactionType.IGNORE,
+     {}),
+    
+    # ---- Recently seen (suppress duplicate greetings) ----
+    
+    ("person_seen_recently",
+     lambda ctx: ctx.event.event_type == ChangeEventType.PERSON_APPEARED
+                 and ctx.seen_person_recently
+                 and ctx.minutes_since_last_person < 10.0,
+     ReactionType.OBSERVE,
+     {}),
+    
+    # ---- Person approaching and stops (GREET) ----
+    
+    ("person_approaching_greet",
+     lambda ctx: ctx.event.event_type == ChangeEventType.PERSON_APPEARED
+                 and ctx.person_approaching
+                 and ctx.person_distance_m is not None
+                 and ctx.person_distance_m < 4.0,
+     ReactionType.GREET,
+     {"use_llm": True}),
+    
+    # ---- Person standing a long time (ASSIST) ----
+    
+    ("person_lingering",
+     lambda ctx: ctx.event.event_type != ChangeEventType.PERSON_LEFT
+                 and ctx.person_duration_s > 120.0  # 2 minutes
+                 and ctx.person_stationary,
+     ReactionType.ASSIST,
+     {"use_llm": True, "template_fallback": "你好，需要帮助吗？"}),
+    
+    # ---- Person appeared at entrance (GREET with template) ----
+    
+    ("entrance_greet",
+     lambda ctx: ctx.event.event_type == ChangeEventType.PERSON_APPEARED
+                 and "entrance" in ctx.zone_tags,
+     ReactionType.GREET,
+     {"template": "你好，欢迎。"}),
+    
+    # ---- Person appeared, generic (OBSERVE only) ----
+    
+    ("person_appeared_default",
+     lambda ctx: ctx.event.event_type == ChangeEventType.PERSON_APPEARED,
+     ReactionType.OBSERVE,
+     {}),
+    
+    # ---- Person left ----
+    
+    ("person_left",
+     lambda ctx: ctx.event.event_type == ChangeEventType.PERSON_LEFT,
+     ReactionType.IGNORE,
+     {}),
+    
+    # ---- Non-person events (existing anomaly logic handles these) ----
+    
+    ("object_change_default",
+     lambda ctx: True,
+     ReactionType.OBSERVE,
+     {}),
+]
+```
+
+**Critical change from current behavior**: The default for `PERSON_APPEARED` is now `OBSERVE` (silent), not speak. Only specific conditions trigger speech. This directly addresses the requirement "not everyone wants to hear a response."
+
+### 4. LLM vs Rules -- the Hybrid Split
+
+| Phase | Method | Latency | When Used |
+|-------|--------|---------|-----------|
+| **Decision** (WHAT to do) | Rule matrix | <1ms | Always |
+| **Content** (WHAT to say) | LLM or template | 0ms or ~2s | Only when reaction requires speech |
+| **Execution** (DO it) | AlertDispatcher / SkillDispatcher | varies | Only when reaction is not IGNORE/OBSERVE |
+
+The LLM is called **only** when the rule metadata includes `"use_llm": True`. This means:
+- `IGNORE`, `OBSERVE`: zero LLM calls (most events)
+- `WARN`, `ALERT` with template: zero LLM calls (safety-critical = fast + deterministic)
+- `GREET`, `ASSIST` with `use_llm: True`: one LLM call to generate contextual response
+
+**LLM prompt for content generation** (called after rule decision, only for GREET/ASSIST/INFORM):
+
+```
+你是巡检机器人Thunder。根据以下场景信息，用一句简短的中文回应。
+不超过30字。语气友好但专业。
+
+场景: {world_state_summary}
+时间: {time_str}
+地点: {zone_name}
+记忆: {recent_digest}
+反应类型: {reaction_type}
+
+回应:
+```
+
+This prompt is ~150 tokens input, ~20 tokens output. At MiniMax M2.7 speed, total latency ~1-2s, acceptable for a greeting.
+
+### 5. Integration with Existing Code
+
+**Where ReactionEngine lives**: New file `askme/pipeline/reaction_engine.py`. Not a new Module -- it is a component owned by ProactiveModule, same as how ProactiveAgent is owned today.
+
+**Minimal changes to existing code:**
+
+**(a) `proactive_agent.py:459` -- replace `_handle_change_event()`**
+
+The current method:
+```python
+async def _handle_change_event(self, event):
+    description = event.description_zh()
+    if event.is_person_event:
+        await self._speak_alert(description, ...)
+    if event.importance >= 0.7 and self._auto_solve:
+        await self._solve_callback(...)
+```
+
+Becomes:
+```python
+async def _handle_change_event(self, event):
+    reaction = await self._reaction_engine.decide(event)
+    await self._reaction_engine.execute(reaction)
+```
+
+**(b) `proactive_module.py:32` -- inject dependencies into ReactionEngine**
+
+ReactionEngine needs: WorldState, EpisodicMemory, SiteKnowledge, AttentionManager, LLMClient, AlertDispatcher, SkillDispatcher. All of these are already accessible via the ModuleRegistry during `build()`. No new In/Out ports needed.
+
+```python
+# In ProactiveModule.build():
+self.reaction_engine = ReactionEngine(
+    world_state=world_state,          # from PerceptionModule (new attribute to expose)
+    episodic=episodic,                # from MemoryModule
+    site_knowledge=site_knowledge,    # from MemoryModule
+    attention=AttentionManager(cfg),  # already exists, just instantiate
+    llm=llm,                          # from LLMModule
+    alert_dispatcher=self.agent._alert_dispatcher,  # from ProactiveAgent
+    skill_dispatcher=skill_dispatcher, # from SkillModule
+    config=cfg,
+)
+self.agent._reaction_engine = self.reaction_engine
+```
+
+**(c) WorldState needs to be accessible from PerceptionModule**
+
+Currently `PerceptionModule` at `perception_module.py:21` does not instantiate WorldState. The WorldState needs to be created and populated by ChangeDetector events. Two options:
+
+- **Option A**: PerceptionModule creates WorldState, ChangeDetector feeds it. ProactiveModule reads it via registry.
+- **Option B**: ReactionEngine creates its own WorldState and subscribes to the same event stream.
+
+**Recommendation**: Option A. Add `self.world_state = WorldState()` to `PerceptionModule.build()` and have ChangeDetector call `world_state.apply_event_sync()` in its `_emit_events()`. This keeps WorldState as a shared singleton that any module can read.
+
+**(d) Config addition (under `proactive:`):**
+
+```yaml
+proactive:
+  reaction:
+    enabled: true
+    business_hours: [8, 18]           # start, end hour
+    greet_cooldown: 600               # seconds before re-greeting same zone
+    llm_content_model: "MiniMax-M2.7-highspeed"
+    llm_content_timeout: 5.0
+    zones:                            # optional zone definitions
+      - name: "仓库A入口"
+        tags: ["entrance"]
+        coords: [2.5, 1.0]
+      - name: "仓库B"
+        tags: ["restricted"]
+        coords: [10.0, 5.0]
+```
+
+**No new In/Out ports needed**. The ReactionEngine is a plain class composed inside ProactiveModule, not a separate Module. This avoids adding complexity to the module topology.
+
+### 6. Data flow diagram (with existing components highlighted)
+
+```
+YOLO (5Hz, BPU)
+     |
+     v
+ChangeDetector [EXISTING, change_detector.py]
+     |  ChangeEvent
+     v
+AttentionManager.should_alert() [EXISTING, attention_manager.py]
+     |  (filters low-importance / cooldown)
+     v
+ReactionEngine.decide() [NEW, reaction_engine.py]
+     |
+     +-- reads WorldState [EXISTING, world_state.py] -- person_count, distance, duration
+     +-- reads SiteKnowledge [EXISTING, site_knowledge.py] -- zone_name, zone_tags
+     +-- reads EpisodicMemory [EXISTING, episodic_memory.py] -- seen_person_recently
+     +-- reads robot_state (SkillDispatcher.current_mission)
+     +-- reads time-of-day
+     |
+     v  (rule matrix, <1ms)
+ReactionDecision {type: ReactionType, metadata: dict}
+     |
+     v
+ReactionEngine.execute()
+     |
+     +-- IGNORE → EpisodicMemory.log() only
+     +-- OBSERVE → EpisodicMemory.log() + WorldState update
+     +-- GREET/ASSIST → LLM content gen (optional) → AlertDispatcher.dispatch()
+     +-- WARN → template → AlertDispatcher.dispatch(severity="warning")
+     +-- ALERT → template → AlertDispatcher.dispatch(severity="error") + webhook/IM
+     +-- ACT → SkillDispatcher.dispatch_skill()
+```
+
+### 7. The "person_approaching" problem -- YOLO gives bbox, not velocity
+
+YOLO does not output velocity. But we can derive approach/retreat from consecutive frames:
+
+**Method**: ReactionEngine stores `_prev_distances: dict[str, float]` (track_id -> last distance_m). On each event, compare current distance to stored distance. If current < previous by >0.3m, person is approaching. If current > previous by >0.3m, person is retreating. Otherwise stationary.
+
+**Limitation**: distance_m comes from depth estimation, which may be None on S100P if depth sensor is not wired. When distance_m is None, `person_approaching` defaults to False and the robot falls back to bbox-size heuristic: if bbox area increased by >15%, person is likely approaching.
+
+### 8. The "lingering person" detection
+
+This is not a new event type -- it is a **timed re-evaluation** of an existing tracked object. ReactionEngine runs a lightweight tick every ~10s (piggybacking on the existing ChangeDetector read interval) that checks:
+
+```python
+for person in world_state.get_persons_sync():
+    if person.duration_s > 120 and self._not_already_assisted(person.track_id):
+        # Synthesize an ASSIST reaction without a new ChangeEvent
+        ctx = self._build_context_for_tracked(person)
+        reaction = self._evaluate_rules(ctx)
+        await self._execute(reaction)
+```
+
+This reuses WorldState's `TrackedObject.duration_s` at `world_state.py:58` which is already computing the value.
+
+## Root Cause
+
+The fundamental issue is that `_handle_change_event()` at `proactive_agent.py:459` treats all person events identically -- no scene context, no rule differentiation, no memory recall. The fix is not more if-statements in that method, but a separate decision engine that receives the full SceneContext.
+
+## Recommendations
+
+1. **Create `askme/pipeline/reaction_engine.py`** with `ReactionEngine` class, `SceneContext` dataclass, `ReactionType` enum, and the rule matrix. -- Medium effort, high impact. This is the core new work.
+
+2. **Expose WorldState from PerceptionModule** by adding `self.world_state = WorldState()` and feeding it from ChangeDetector. Wire `apply_event_sync()` calls in `ChangeDetector._emit_events()`. -- Low effort, enables all WorldState-based decisions.
+
+3. **Replace `ProactiveAgent._handle_change_event()`** with a two-line delegation to ReactionEngine. Keep existing `_patrol_tick()` and `_event_monitor_loop()` untouched. -- Low effort, surgical change.
+
+4. **Add zone config** under `proactive.reaction.zones` in config.yaml. On S100P, populate from LingTu waypoint names. -- Low effort, enables location-aware decisions.
+
+5. **Add lingering-person tick** as a periodic check in ReactionEngine (every 10s, scan WorldState for persons with duration_s > threshold). -- Low effort, addresses the "standing 5 minutes" use case.
+
+6. **Wire LLM content generation** for GREET/ASSIST reactions only, using MiniMax M2.7 with a 150-token prompt. Template fallback when LLM is unavailable or times out. -- Medium effort, makes greetings contextual.
+
+## Trade-offs
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Rule-first (this design)** | Deterministic, <1ms decision, no LLM cost for 80% of events, works offline, debuggable | Cannot handle truly novel situations; rule maintenance as scenarios grow |
+| **LLM-first (call LLM for every event)** | Maximum flexibility, handles edge cases | 1-3s latency per event, ~$0.001/event cost, 4GB RAM pressure on S100P, fails when LLM unavailable |
+| **Hybrid (this design: rules decide, LLM speaks)** | Best of both: fast decision + contextual speech | Two codepaths to maintain; LLM fallback needed when content gen fails |
+| **No WorldState dependency (pure event-based)** | Simpler, no shared mutable state | Cannot detect lingering, cannot check person count, loses rich context |
+| **New Module vs component in ProactiveModule** | Module: cleaner separation, own In/Out ports | Module: heavier, adds topology complexity for what is a single-consumer component |
+
+The recommended path is the **hybrid approach as a component inside ProactiveModule**, not a separate Module. This keeps the topology unchanged (no new wiring), minimizes risk, and the ReactionEngine can be promoted to a full Module later if other modules need to consume reaction decisions.
+
+## References
+
+- `askme/pipeline/proactive_agent.py:459-487` -- current `_handle_change_event()`, the method to replace
+- `askme/pipeline/proactive_agent.py:365-381` -- `_speak_alert()`, reused via AlertDispatcher
+- `askme/perception/world_state.py:45-59` -- TrackedObject with distance_m, duration_s, bbox
+- `askme/perception/world_state.py:195-202` -- `get_persons_sync()`, key accessor for reaction decisions
+- `askme/perception/change_detector.py:260-324` -- debounce logic, confirm_frames/disappear_frames
+- `askme/perception/attention_manager.py:90-120` -- `should_alert()`, already does cooldown + threshold
+- `askme/schemas/events.py:15-20` -- ChangeEventType enum, the 5 event types
+- `askme/schemas/events.py:98-112` -- `description_zh()`, the hardcoded templates to be replaced
+- `askme/memory/episodic_memory.py:227-245` -- `retrieve(query)` for "seen_person_recently" check
+- `askme/memory/episodic_memory.py:378-406` -- `get_recent_digest()` for LLM content generation context
+- `askme/memory/site_knowledge.py:88-177` -- SiteKnowledge with Location, find_nearby(), zone support
+- `askme/pipeline/alert_dispatcher.py:62` -- AlertDispatcher, reused as-is for all output channels
+- `askme/pipeline/skill_dispatcher.py:40-79` -- MissionContext/MissionState, reused for ACT reactions
+- `askme/runtime/modules/proactive_module.py:32-58` -- build(), where ReactionEngine gets wired
+- `askme/runtime/modules/perception_module.py:33-53` -- build(), where WorldState should be added
+- `askme/schemas/observation.py:13-28` -- Detection with bbox, distance_m, center property
+- `config.yaml:297-310` -- existing proactive config section to extend
+- `docs/PROACTIVE_INTELLIGENCE_PLAN.md:46-78` -- Layer 2 plan, which this design implements
