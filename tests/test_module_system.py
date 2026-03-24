@@ -167,7 +167,7 @@ async def test_replace_swaps_implementation():
 
 async def test_config_passed_to_build():
     rt = Runtime.use(Standalone)
-    app = await rt.build({"standalone": {"key": "hello"}})
+    app = await rt.build({"key": "hello"})
     assert app.modules["standalone"].cfg_val == "hello"
 
 

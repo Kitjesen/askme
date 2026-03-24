@@ -384,7 +384,7 @@ class Runtime:
         for name in order:
             mod = instances[name]
             registry.register(mod)
-            mod.build(cfg.get(name, cfg), registry)
+            mod.build(cfg, registry)
             logger.debug("Module built: %s", name)
 
         return RuntimeApp(
