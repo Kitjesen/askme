@@ -10,6 +10,7 @@ from askme.interfaces.tts import TTSBackend, tts_registry
 from askme.interfaces.detector import DetectorBackend, detector_registry
 from askme.interfaces.navigator import NavigatorBackend, navigator_registry
 from askme.interfaces.bus import BusBackend, bus_registry
+from askme.interfaces.reaction import ReactionBackend, reaction_registry
 
 __all__ = [
     "LLMBackend", "llm_registry",
@@ -18,4 +19,5 @@ __all__ = [
     "DetectorBackend", "detector_registry",
     "NavigatorBackend", "navigator_registry",
     "BusBackend", "bus_registry",
+    "ReactionBackend", "reaction_registry",
 ]

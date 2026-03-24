@@ -18,6 +18,7 @@ from askme.runtime.modules import (
     PipelineModule,
     ProactiveModule,
     PulseModule,
+    ReactionModule,
     SafetyModule,
     SkillModule,
     TextModule,
@@ -38,6 +39,7 @@ voice = (
     + Runtime.use(VoiceModule)
     + Runtime.use(TextModule)
     + Runtime.use(ProactiveModule)
+    + Runtime.use(ReactionModule)
     + Runtime.use(HealthModule)
 )
 

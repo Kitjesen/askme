@@ -519,7 +519,7 @@ class TestCompositions:
     def test_voice_runtime_builds(self):
         """voice blueprint should compose without duplicate name errors."""
         from askme.blueprints.voice import voice
-        assert len(voice._module_classes) == 13
+        assert len(voice._module_classes) == 14
 
     def test_text_runtime_has_no_voice(self):
         """text blueprint has no VoiceModule."""
@@ -536,7 +536,7 @@ class TestCompositions:
         names = [mc.name for mc in edge_robot._module_classes]
         assert "control" in names
         assert "led" in names
-        assert len(edge_robot._module_classes) == 15
+        assert len(edge_robot._module_classes) == 16
 
     def test_replace_on_composition(self):
         """Replacing a module in a blueprint should work."""
@@ -566,7 +566,7 @@ class TestCompositions:
         smaller = voice.without(ProactiveModule)
         names = [mc.name for mc in smaller._module_classes]
         assert "proactive" not in names
-        assert len(smaller._module_classes) == 12
+        assert len(smaller._module_classes) == 13
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -575,8 +575,8 @@ class TestCompositions:
 
 
 class TestModuleExports:
-    def test_all_15_modules_importable(self):
-        """All 15 modules should be importable from the package."""
+    def test_all_16_modules_importable(self):
+        """All 16 modules should be importable from the package."""
         from askme.runtime.modules import (
             LLMModule,
             ToolsModule,
@@ -592,23 +592,24 @@ class TestModuleExports:
             ControlModule,
             LEDModule,
             ProactiveModule,
+            ReactionModule,
             HealthModule,
         )
         modules = [
             LLMModule, ToolsModule, PulseModule, MemoryModule,
             PerceptionModule, SafetyModule, PipelineModule, SkillModule,
             ExecutorModule, VoiceModule, TextModule, ControlModule,
-            LEDModule, ProactiveModule, HealthModule,
+            LEDModule, ProactiveModule, ReactionModule, HealthModule,
         ]
-        assert len(modules) == 15
+        assert len(modules) == 16
         for mod_cls in modules:
             assert hasattr(mod_cls, "name")
             assert hasattr(mod_cls, "build")
 
     def test_all_in_dunder_all(self):
-        """__all__ should list all 15 module classes."""
+        """__all__ should list all 16 module classes."""
         import askme.runtime.modules as pkg
-        assert len(pkg.__all__) == 15
+        assert len(pkg.__all__) == 16
 
 
 # ══════════════════════════════════════════════════════════════════════

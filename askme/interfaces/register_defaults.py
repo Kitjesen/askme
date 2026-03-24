@@ -79,6 +79,16 @@ except ImportError:
     logger.debug("ChangeDetector not available, skipping registration")
 
 # ---------------------------------------------------------------------------
+# Reaction
+# ---------------------------------------------------------------------------
+from askme.interfaces.reaction import reaction_registry  # noqa: E402
+
+from askme.pipeline.reaction_engine import HybridReaction, RuleBasedReaction  # noqa: E402
+
+reaction_registry.register("hybrid")(HybridReaction)
+reaction_registry.register("rules")(RuleBasedReaction)
+
+# ---------------------------------------------------------------------------
 # Navigator — no NavigatorBackend adapter exists yet.  LingTu gRPC bridge
 #             will be registered here when wrapped as a NavigatorBackend.
 # ---------------------------------------------------------------------------
