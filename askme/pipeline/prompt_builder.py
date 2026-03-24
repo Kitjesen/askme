@@ -133,9 +133,10 @@ class PromptBuilder:
                 "当用户提问涉及时间、文件、目录等信息时，主动调用对应工具获取真实数据再回答。"
             )
 
-        skill_catalog = self._skill_manager.get_skill_catalog()
-        if skill_catalog != "none":
-            prompt += f"\n可用技能: {skill_catalog}"
+        if self._skill_manager:
+            skill_catalog = self._skill_manager.get_skill_catalog()
+            if skill_catalog != "none":
+                prompt += f"\n可用技能: {skill_catalog}"
 
         return prompt
 
