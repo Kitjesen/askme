@@ -62,13 +62,6 @@ from askme.robot.mock_pulse import MockPulse  # noqa: E402
 
 bus_registry.register("mock")(MockPulse)
 
-try:
-    from askme.robot.cyclone_pulse import CyclonePulse  # noqa: E402
-
-    bus_registry.register("cyclonedds")(CyclonePulse)
-except ImportError:
-    logger.debug("CyclonePulse not available (missing cyclonedds), skipping")
-
 # ---------------------------------------------------------------------------
 # Detector — no implementations yet (ChangeDetector is a perception processor,
 #             not a DetectorBackend).  BPU YOLO backend will be added when the

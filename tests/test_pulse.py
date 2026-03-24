@@ -8,21 +8,21 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from askme.robot.pulse import Pulse, _PUBLISH_REGISTRY
+from askme.robot.pulse import Pulse
 
 
 # ── Construction ─────────────────────────────────────
 
 
 def test_default_disabled_without_rclpy():
-    with patch("askme.robot.pulse._RCLPY_AVAILABLE", False):
+    with patch("askme.robot.pulse._CYCLONE_AVAILABLE", False):
         bus = Pulse()
         assert not bus.available
 
 
 def test_enabled_with_config():
     bus = Pulse({"enabled": True})
-    # available depends on _RCLPY_AVAILABLE at import time
+    # available depends on _CYCLONE_AVAILABLE at import time
     assert isinstance(bus.available, bool)
 
 
@@ -330,26 +330,17 @@ def test_health_no_message_type_for_unknown_topic():
 # ── Publish registry ────────────────────────────────
 
 
-def test_publish_rejects_unregistered_topic():
-    """Publishing to an unregistered topic should be a no-op (logged warning)."""
+def test_publish_without_dp_is_noop_for_any_topic():
+    """Publishing without DomainParticipant is a no-op."""
     bus = Pulse({"enabled": False})
-    bus._started = True
-    bus._node = MagicMock()
-    initial_count = bus._msg_count
-    bus.publish("/unregistered/topic", {"data": 1})
-    # Should not have created any publisher
-    assert not hasattr(bus, "_publishers") or "/unregistered/topic" not in getattr(bus, "_publishers", {})
-    assert bus._msg_count == initial_count
+    bus._dp = None
+    bus.publish("/any/topic", {"data": 1})
+    assert "/any/topic" not in bus._writers
 
 
-def test_publish_registry_is_empty_without_rclpy():
-    """Without rclpy, _PUBLISH_REGISTRY should be empty."""
-    with patch("askme.robot.pulse._RCLPY_AVAILABLE", False):
-        # The registry is set at module level; if rclpy not available, it stays empty
-        # We test the guard in publish() instead
-        bus = Pulse({"enabled": False})
-        bus._started = True
-        bus._node = MagicMock()
-        bus.publish("/thunder/world_state", {"test": True})
-        # Should be rejected since _PUBLISH_REGISTRY may be empty or topic not in it
-        # Either way, no crash
+def test_publish_without_dp_is_noop():
+    """Publish without DomainParticipant does nothing (no crash)."""
+    bus = Pulse({"enabled": False})
+    bus._dp = None
+    bus.publish("/thunder/world_state", {"test": True})
+    # No crash, no writer created

@@ -1,15 +1,13 @@
 """Pulse — 脉搏数据总线.
 
-在 askme 进程内直接订阅 ROS2 DDS 话题，后台线程 spin。
-不需要 bridge 进程、socket、systemd service。
+穹沛机器人统一数据总线。底层用 CycloneDDS，不依赖 ROS2。
+只需要 libddsc.so + CYCLONEDDS_HOME。
 
 Usage::
 
     bus = Pulse(cfg)
     bus.on("/thunder/detections", my_callback)
     await bus.start()
-    ...
-    await bus.stop()
 """
 
 from __future__ import annotations
@@ -26,189 +24,154 @@ from askme.robot.pubsub import PubSubBase
 logger = logging.getLogger(__name__)
 
 try:
-    import rclpy
-    from rclpy.executors import SingleThreadedExecutor
-    from rclpy.node import Node
-    from rclpy.qos import (
-        QoSDurabilityPolicy,
-        QoSHistoryPolicy,
-        QoSProfile,
-        QoSReliabilityPolicy,
-    )
-    from sensor_msgs.msg import Imu, JointState
-    from std_msgs.msg import Bool, String
+    from cyclonedds.domain import DomainParticipant
+    from cyclonedds.topic import Topic
+    from cyclonedds.sub import DataReader
+    from cyclonedds.pub import DataWriter
+    from cyclonedds.idl import IdlStruct
+    from cyclonedds.core import Listener, ReadCondition, WaitSet
+    from cyclonedds.qos import Qos, Policy
+    from cyclonedds.util import duration
+    from dataclasses import dataclass as _dc
 
-    _RCLPY_AVAILABLE = True
+    _CYCLONE_AVAILABLE = True
 except ImportError:
-    _RCLPY_AVAILABLE = False
+    _CYCLONE_AVAILABLE = False
 
-_QOS_SENSOR = None
-_QOS_LATCHED = None
 
-if _RCLPY_AVAILABLE:
-    _QOS_SENSOR = QoSProfile(
-        reliability=QoSReliabilityPolicy.BEST_EFFORT,
-        durability=QoSDurabilityPolicy.VOLATILE,
-        history=QoSHistoryPolicy.KEEP_LAST,
-        depth=1,
-    )
-    _QOS_LATCHED = QoSProfile(
-        reliability=QoSReliabilityPolicy.RELIABLE,
-        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-        history=QoSHistoryPolicy.KEEP_LAST,
-        depth=1,
-    )
+# ── IDL message type for string topics ───────────────
 
-# Topic → (msg_type, qos_key, parser)
-_TOPIC_REGISTRY: dict[str, tuple] = {}
+if _CYCLONE_AVAILABLE:
+    @_dc
+    class StringMsg(IdlStruct):
+        """Generic string message for JSON-encoded topics."""
+        data: str
 
-if _RCLPY_AVAILABLE:
-    _TOPIC_REGISTRY = {
-        "/thunder/detections": (String, "sensor", lambda m: json.loads(m.data)),
-        "/thunder/estop": (Bool, "latched", lambda m: {"active": m.data}),
-        "/thunder/heartbeat": (Bool, "sensor", lambda m: {"alive": m.data}),
-        "/thunder/joint_states": (JointState, "sensor", lambda m: {
-            "name": list(m.name),
-            "position": list(m.position),
-            "velocity": list(m.velocity),
-            "effort": list(m.effort),
-        }),
-        "/thunder/imu": (Imu, "sensor", lambda m: {
-            "angular_velocity": {"x": m.angular_velocity.x, "y": m.angular_velocity.y, "z": m.angular_velocity.z},
-            "orientation": {"x": m.orientation.x, "y": m.orientation.y, "z": m.orientation.z, "w": m.orientation.w},
-        }),
-        "/thunder/cms_state": (String, "latched", lambda m: json.loads(m.data) if m.data.startswith("{") else {"state": m.data}),
-    }
+    @_dc
+    class BoolMsg(IdlStruct):
+        """Generic bool message for ESTOP/heartbeat topics."""
+        data: bool
 
-# Publish registry: topic → (msg_type, encoder).
-# Only topics listed here may be published via Pulse.publish().
-_PUBLISH_REGISTRY: dict[str, tuple] = {}
 
-if _RCLPY_AVAILABLE:
-    _PUBLISH_REGISTRY = {
-        "/thunder/world_state": (String, lambda d: String(data=json.dumps(d))),
-        "/thunder/askme_status": (String, lambda d: String(data=json.dumps(d))),
-    }
+# ── Topic config ─────────────────────────────────────
+
+_TOPIC_CONFIG = {
+    "/thunder/detections": ("string", lambda m: json.loads(m.data)),
+    "/thunder/estop": ("bool", lambda m: {"active": m.data}),
+    "/thunder/heartbeat": ("bool", lambda m: {"alive": m.data}),
+    "/thunder/joint_states": ("string", lambda m: json.loads(m.data)),
+    "/thunder/imu": ("string", lambda m: json.loads(m.data)),
+    "/thunder/cms_state": ("string", lambda m: json.loads(m.data)),
+}
 
 
 class Pulse(PubSubBase):
-    """脉搏数据总线 — 进程内直连 DDS.
+    """脉搏数据总线 — CycloneDDS 直连.
 
-    rclpy 在后台线程 spin，回调通过 ``call_soon_threadsafe`` 推到 asyncio。
-    没有 bridge 进程、没有 socket、没有 reconnect 逻辑。
+    Same API as Pulse (rclpy version), implements PubSubBase.
     """
 
     def __init__(self, cfg: dict[str, Any] | None = None) -> None:
         cfg = cfg or {}
-        self._enabled = cfg.get("enabled", _RCLPY_AVAILABLE)
+        self._enabled = cfg.get("enabled", _CYCLONE_AVAILABLE)
         self._node_name = cfg.get("node_name", "askme")
 
-        self._node: Any = None
-        self._executor: Any = None
-        self._spin_thread: threading.Thread | None = None
+        self._dp: Any = None  # DomainParticipant
+        self._readers: dict[str, Any] = {}
+        self._writers: dict[str, Any] = {}
+        self._topics: dict[str, Any] = {}
+        self._poll_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
 
-        # Topic data
         self._latest: dict[str, dict] = {}
         self._latest_lock = threading.Lock()
         self._callbacks: dict[str, list[Callable]] = {}
         self._msg_count = 0
         self._started = False
 
-        # Per-topic freshness tracking (from PubSubBase)
         self._init_topic_tracking()
 
     @property
     def available(self) -> bool:
-        return _RCLPY_AVAILABLE and self._enabled
+        return _CYCLONE_AVAILABLE and self._enabled
 
     @property
     def connected(self) -> bool:
-        return self._started and self._spin_thread is not None and self._spin_thread.is_alive()
+        return self._started and self._dp is not None
 
     @property
     def msg_count(self) -> int:
         return self._msg_count
 
     async def start(self) -> None:
-        """Start the bus — init rclpy, subscribe to all topics, spin in background thread."""
         if self._started:
             return
         if not self.available:
-            logger.info("Pulse: disabled (rclpy not available)")
+            logger.info("Pulse: disabled (cyclonedds not available)")
             return
 
         self._loop = asyncio.get_running_loop()
+        self._dp = DomainParticipant()
 
-        if not rclpy.ok():
-            rclpy.init()
+        # Create readers for all registered topics
+        for topic_name, (msg_kind, parser) in _TOPIC_CONFIG.items():
+            msg_type = BoolMsg if msg_kind == "bool" else StringMsg
+            topic = Topic(self._dp, topic_name, msg_type)
+            reader = DataReader(self._dp, topic)
+            self._readers[topic_name] = (reader, parser)
+            self._topics[topic_name] = topic
 
-        self._node = Node(self._node_name)
-        self._executor = SingleThreadedExecutor()
-        self._executor.add_node(self._node)
-
-        # Subscribe to all registered topics
-        for topic, (msg_type, qos_key, parser) in _TOPIC_REGISTRY.items():
-            qos = _QOS_LATCHED if qos_key == "latched" else _QOS_SENSOR
-            self._node.create_subscription(
-                msg_type, topic,
-                lambda msg, t=topic, p=parser: self._on_message(t, p, msg),
-                qos,
-            )
-
-        # Spin in background thread
+        # Poll in background thread
         self._stop_event.clear()
-        self._spin_thread = threading.Thread(
-            target=self._spin, name="pulse_spin", daemon=True,
+        self._poll_thread = threading.Thread(
+            target=self._poll_loop, name="pulse_poll", daemon=True,
         )
-        self._spin_thread.start()
+        self._poll_thread.start()
         self._started = True
-        logger.info("Pulse: started (node=%s, topics=%d)", self._node_name, len(_TOPIC_REGISTRY))
+        logger.info("Pulse: started (node=%s, topics=%d, NO ROS2)",
+                     self._node_name, len(self._readers))
 
     async def stop(self) -> None:
-        """Stop the bus — shutdown rclpy executor and join thread."""
         if not self._started:
             return
         self._stop_event.set()
-        if self._executor is not None:
-            self._executor.shutdown()
-        if self._spin_thread is not None:
-            self._spin_thread.join(timeout=5.0)
-            self._spin_thread = None
-        if self._node is not None:
-            self._node.destroy_node()
-            self._node = None
+        if self._poll_thread is not None:
+            self._poll_thread.join(timeout=5.0)
+            self._poll_thread = None
+        self._readers.clear()
+        self._writers.clear()
+        self._topics.clear()
+        self._dp = None
         self._started = False
         logger.info("Pulse: stopped (total_msgs=%d)", self._msg_count)
 
-    def _spin(self) -> None:
-        """Background thread: spin rclpy executor until stop."""
-        try:
-            while not self._stop_event.is_set() and rclpy.ok():
-                self._executor.spin_once(timeout_sec=0.1)
-        except Exception as e:
-            logger.warning("Pulse spin error: %s", e)
+    def _poll_loop(self) -> None:
+        """Background thread: poll all readers at ~100Hz."""
+        while not self._stop_event.is_set():
+            for topic_name, (reader, parser) in self._readers.items():
+                try:
+                    samples = reader.take(N=10)
+                    for sample in samples:
+                        self._on_message(topic_name, parser, sample)
+                except Exception:
+                    pass
+            self._stop_event.wait(timeout=0.01)  # ~100Hz
 
     def _on_message(self, topic: str, parser: Callable, raw_msg: Any) -> None:
-        """Called from rclpy thread — parse and dispatch."""
         try:
             data = parser(raw_msg)
         except Exception:
             return
 
-        ts = time.time()
-        data["_ts"] = ts
+        data["_ts"] = time.time()
         self._msg_count += 1
 
-        # Per-topic freshness tracking
-        self._record_topic_msg(topic, ts)
-
-        # Update latest cache (thread-safe)
         with self._latest_lock:
             self._latest[topic] = data
 
-        # Dispatch callbacks to asyncio loop
+        self._record_topic_msg(topic, data["_ts"])
+
         cbs = self._callbacks.get(topic)
         if cbs and self._loop is not None:
             for cb in cbs:
@@ -219,48 +182,30 @@ class Pulse(PubSubBase):
                 else:
                     self._loop.call_soon_threadsafe(cb, topic, data)
 
-    # ── Public API ──────────────────────────────────────
-
     def on(self, topic: str, callback: Callable) -> None:
-        """Register a callback for a topic."""
         self._callbacks.setdefault(topic, []).append(callback)
 
     def get_latest(self, topic: str) -> dict | None:
-        """Get the most recent message for a topic (thread-safe)."""
         with self._latest_lock:
             data = self._latest.get(topic)
             return dict(data) if data else None
 
     def publish(self, topic: str, data: dict) -> None:
-        """Publish a message to a DDS topic.
-
-        Only topics in ``_PUBLISH_REGISTRY`` are allowed. Unregistered topics
-        are logged as a warning and rejected.
-        """
-        if not self._started or self._node is None:
+        if self._dp is None:
             return
-
-        if topic not in _PUBLISH_REGISTRY:
-            logger.warning("Pulse.publish: rejected unregistered topic %r", topic)
-            return
-
-        if not hasattr(self, "_publishers"):
-            self._publishers: dict[str, Any] = {}
-
-        msg_type, encoder = _PUBLISH_REGISTRY[topic]
-        if topic not in self._publishers:
-            qos = _QOS_LATCHED if topic.endswith("/estop") else _QOS_SENSOR
-            self._publishers[topic] = self._node.create_publisher(msg_type, topic, qos)
-
-        msg = encoder(data)
-        self._publishers[topic].publish(msg)
+        if topic not in self._writers:
+            msg_type = StringMsg
+            t = Topic(self._dp, topic, msg_type)
+            self._writers[topic] = DataWriter(self._dp, t)
+        self._writers[topic].write(StringMsg(data=json.dumps(data, ensure_ascii=False)))
 
     def health(self) -> dict[str, Any]:
-        """Health snapshot for runtime introspection with per-topic freshness."""
-        return {
+        h = {
             "status": "ok" if self.connected else ("disabled" if not self.available else "disconnected"),
             "available": self.available,
             "connected": self.connected,
             "msg_count": self._msg_count,
+            "backend": "cyclonedds",
             "topics": self._build_topics_health(list(self._latest.keys())),
         }
+        return h
