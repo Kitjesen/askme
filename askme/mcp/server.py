@@ -172,6 +172,7 @@ import askme.mcp.resources.skill_resources as _sr  # noqa: E402, F401
 import askme.mcp.resources.health_resources as _hr  # noqa: E402, F401
 import askme.mcp.tools.vision_tools as _vit  # noqa: E402, F401
 import askme.mcp.resources.perception_resources as _pr  # noqa: E402, F401
+import askme.mcp.tools.memory_tools as _mt  # noqa: E402, F401
 
 
 def main() -> None:
