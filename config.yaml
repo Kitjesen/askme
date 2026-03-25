@@ -59,6 +59,11 @@ memory:
   # Set true to enable; requires sentence-transformers package (pip install askme[embed]).
   # Gracefully degrades to no-op when sentence-transformers is not installed.
   enabled: true
+  # Backend: "mem0" (default), "robotmem", or "vector"
+  #   mem0     — Mem0 + Qdrant (pip install mem0ai)
+  #   robotmem — robotmem SDK, SQLite + hybrid search (pip install robotmem)
+  #   vector   — local VectorStore with sentence-transformers (no server)
+  backend: mem0
   embed_model: paraphrase-multilingual-MiniLM-L12-v2
   # Timeout (seconds) for embedding server reachability check
   health_check_timeout: 1
@@ -66,6 +71,9 @@ memory:
   retrieve_timeout: 3.0
   retrieve_method: rag
   user_id: user_1
+  # RobotMem settings (used when backend: robotmem)
+  robotmem_collection: askme
+  # robotmem_db_path: null  # default: ~/.robotmem/memory.db
   episodic:
     importance_threshold: 5.0
     reflect_min_events: 5

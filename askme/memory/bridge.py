@@ -1,9 +1,15 @@
 """
-Memory bridge — L4 vector memory via Mem0 (primary) or local VectorStore (fallback).
+Memory bridge — L4 vector memory with pluggable backends.
 
-Lazy initialization: Mem0 is only instantiated on first use. If Mem0 is
-unavailable (import error, config error, etc.), falls back to the local
-``VectorStore`` that runs sentence-transformers in-process.
+Supported backends (``memory.backend`` in config.yaml):
+
+- ``"mem0"``      — Mem0 (default, backward-compatible)
+- ``"robotmem"``  — robotmem SDK (pip install robotmem)
+- ``"vector"``    — local VectorStore (sentence-transformers, no server)
+
+Lazy initialization: the selected backend is only instantiated on first
+use.  If it is unavailable (import error, config error, etc.), the bridge
+falls back to the local ``VectorStore``.
 
 Graceful degradation: all operations return empty / no-op on failure.
 
@@ -29,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryBridge:
-    """L4 vector memory — Mem0 primary, VectorStore fallback."""
+    """L4 vector memory — pluggable backend with VectorStore fallback."""
 
     def __init__(self) -> None:
         cfg = get_config()
@@ -41,9 +47,16 @@ class MemoryBridge:
         )
         self._retrieve_timeout: float = self._mem_cfg.get("retrieve_timeout", 2.0)
 
+        # Backend selection: "mem0" (default), "robotmem", "vector"
+        self._backend: str = self._mem_cfg.get("backend", "mem0")
+
         # Mem0 instance — lazy init via _ensure_mem0()
         self._mem0: Any = None
         self._mem0_failed: bool = False  # True after init failure, skip retries
+
+        # RobotMem backend — lazy init via _ensure_robotmem()
+        self._robotmem: Any = None  # RobotMemBackend instance
+        self._robotmem_failed: bool = False
 
         # Fallback: local VectorStore
         data_dir = cfg.get("app", {}).get("data_dir", "data")
@@ -60,7 +73,10 @@ class MemoryBridge:
         if not self._enabled:
             logger.info("[Memory] Memory disabled in config.")
         else:
-            logger.info("[Memory] MemoryBridge ready (Mem0 lazy init, fallback VectorStore).")
+            logger.info(
+                "[Memory] MemoryBridge ready (backend=%s, fallback VectorStore).",
+                self._backend,
+            )
 
     # ------------------------------------------------------------------
     # Mem0 lazy initialization
@@ -108,6 +124,33 @@ class MemoryBridge:
             return False
 
     # ------------------------------------------------------------------
+    # RobotMem lazy initialization
+    # ------------------------------------------------------------------
+
+    def _ensure_robotmem(self) -> bool:
+        """Try to initialise the RobotMem backend. Returns True if ready."""
+        if self._robotmem is not None and self._robotmem.available:
+            return True
+        if not self._enabled or self._robotmem_failed:
+            return False
+        try:
+            from askme.memory.robotmem_backend import RobotMemBackend
+
+            brain_cfg = get_config().get("brain", {})
+            self._robotmem = RobotMemBackend(self._mem_cfg, brain_cfg)
+            inited = self._robotmem._ensure_robotmem()
+            if not inited:
+                self._robotmem_failed = True
+                self._robotmem = None
+                return False
+            logger.info("[Memory] RobotMem backend ready.")
+            return True
+        except Exception as e:
+            logger.warning("[Memory] RobotMem init failed, falling back: %s", e)
+            self._robotmem_failed = True
+            return False
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
@@ -115,14 +158,27 @@ class MemoryBridge:
         """Pre-load the embedding model in a background thread."""
         if not self._enabled:
             return
-        # Try Mem0 init first (warms up qdrant + embedder)
-        try:
-            inited = await asyncio.to_thread(self._ensure_mem0)
-            if inited:
-                logger.info("[Memory] Mem0 warmup complete.")
-                return
-        except Exception:
-            logger.debug("[Memory] Mem0 warmup failed, trying VectorStore.")
+
+        # Warm up the configured backend
+        if self._backend == "robotmem":
+            try:
+                inited = await asyncio.to_thread(self._ensure_robotmem)
+                if inited:
+                    await self._robotmem.warmup()
+                    logger.info("[Memory] RobotMem warmup complete.")
+                    return
+            except Exception:
+                logger.debug("[Memory] RobotMem warmup failed, trying fallback.")
+
+        if self._backend in ("mem0", "robotmem"):
+            # Try Mem0 (primary for mem0 backend, fallback for robotmem)
+            try:
+                inited = await asyncio.to_thread(self._ensure_mem0)
+                if inited:
+                    logger.info("[Memory] Mem0 warmup complete.")
+                    return
+            except Exception:
+                logger.debug("[Memory] Mem0 warmup failed, trying VectorStore.")
 
         # Fallback: warm up VectorStore
         if self._store.available:
@@ -145,8 +201,11 @@ class MemoryBridge:
         if not self._enabled:
             return ""
 
-        # Try Mem0 first
-        if self._ensure_mem0():
+        # Try configured backend first
+        if self._backend == "robotmem" and self._ensure_robotmem():
+            return await self._robotmem.retrieve(text)
+
+        if self._backend in ("mem0", "robotmem") and self._ensure_mem0():
             return await self._retrieve_mem0(text)
 
         # Fallback to VectorStore
@@ -160,8 +219,12 @@ class MemoryBridge:
         if not self._enabled:
             return
 
-        # Try Mem0 first
-        if self._ensure_mem0():
+        # Try configured backend first
+        if self._backend == "robotmem" and self._ensure_robotmem():
+            await self._robotmem.save(user_text, assistant_text)
+            return
+
+        if self._backend in ("mem0", "robotmem") and self._ensure_mem0():
             await self._save_mem0(user_text, assistant_text)
             return
 
@@ -221,6 +284,8 @@ class MemoryBridge:
         """Whether the memory service is initialised and usable."""
         if not self._enabled:
             return False
+        if self._robotmem is not None and self._robotmem.available:
+            return True
         if self._mem0 is not None:
             return True
         return self._store.available
