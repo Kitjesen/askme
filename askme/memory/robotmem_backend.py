@@ -150,6 +150,85 @@ class RobotMemBackend:
         except Exception as exc:
             logger.debug("[Memory] RobotMem save failed: %s", exc)
 
+    # ------------------------------------------------------------------
+    # Memory consolidation (background, requires LLM)
+    # ------------------------------------------------------------------
+
+    async def consolidate(self, llm_client: Any, batch_size: int = 20) -> int:
+        """Consolidate raw memories into structured facts via LLM.
+
+        Reads recent raw conversation entries, sends them to the LLM for
+        fact extraction / dedup / merge, then stores the consolidated
+        facts back with ``type=consolidated``.
+
+        Args:
+            llm_client: LLMClient with ``async_chat_completion(messages)``
+            batch_size: Number of recent raw memories to process.
+
+        Returns:
+            Number of consolidated facts stored.
+        """
+        if not self._ensure_robotmem():
+            return 0
+
+        try:
+            # 1. Read recent raw memories
+            raw = await asyncio.to_thread(
+                self._rm.recall, "用户", n=batch_size, min_confidence=0.0,
+            )
+            if not raw:
+                logger.debug("[Memory] Consolidate: no raw memories to process.")
+                return 0
+
+            raw_texts = [m.get("content", "") for m in raw if m.get("content")]
+            if not raw_texts:
+                return 0
+
+            # 2. LLM extracts structured facts
+            prompt = (
+                "你是记忆整理助手。请从以下对话记录中提取关键事实，"
+                "去除重复，合并相关内容，输出精简的事实列表。\n"
+                "每条事实一行，用 - 开头。只输出事实，不要解释。\n\n"
+                "对话记录：\n" + "\n".join(raw_texts[:batch_size])
+            )
+            messages = [
+                {"role": "system", "content": "你是记忆整理助手，负责提炼和归档。"},
+                {"role": "user", "content": prompt},
+            ]
+
+            response = await llm_client.async_chat_completion(messages)
+            if not response:
+                logger.debug("[Memory] Consolidate: LLM returned empty.")
+                return 0
+
+            # 3. Parse facts and store back
+            facts = [
+                line.lstrip("- ").strip()
+                for line in response.splitlines()
+                if line.strip().startswith("-")
+            ]
+
+            stored = 0
+            for fact in facts:
+                if not fact:
+                    continue
+                await asyncio.to_thread(
+                    self._rm.learn,
+                    fact,
+                    context={"source": "consolidated", "robot": "thunder"},
+                )
+                stored += 1
+
+            logger.info(
+                "[Memory] Consolidated %d facts from %d raw memories.",
+                stored, len(raw_texts),
+            )
+            return stored
+
+        except Exception as exc:
+            logger.warning("[Memory] Consolidate failed: %s", exc)
+            return 0
+
     def close(self) -> None:
         """Close the robotmem SDK (release DB connection)."""
         if self._rm is not None:
