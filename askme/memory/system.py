@@ -28,6 +28,7 @@ from askme.memory.trend_analyzer import TrendAnalyzer
 from askme.memory.association import AssociationGraph
 from askme.memory.strategy import StrategyGenerator, Suggestion
 from askme.memory.semantic_index import SemanticIndex
+from askme.memory.policies import PolicyStore
 
 if TYPE_CHECKING:
     from askme.llm.conversation import ConversationManager
@@ -75,6 +76,13 @@ class MemorySystem:
             pass
         self._semantic = SemanticIndex(mem_cfg)
 
+        # L6: Policies & Templates
+        try:
+            self._policies = PolicyStore()
+        except Exception as e:
+            logger.debug("PolicyStore init failed: %s", e)
+            self._policies = None
+
         # Barrier capabilities: trend analysis, association, strategy
         self._trend_analyzer = TrendAnalyzer()
         vs = vector_memory.vector_store if vector_memory else None
@@ -121,6 +129,11 @@ class MemorySystem:
             session_ctx = self._session.get_recent_summaries()
             if session_ctx:
                 parts.append(session_ctx)
+        # L6: inject policy rules into context
+        if self._policies:
+            policy_ctx = self._policies.get_policy_prompt()
+            if policy_ctx:
+                parts.append(f"行为规则:\n{policy_ctx}")
         return "\n".join(parts)
 
     def start_prefetch(self, user_text: str) -> asyncio.Task[str] | None:
@@ -231,6 +244,11 @@ class MemorySystem:
     def has_episodic(self) -> bool:
         """Whether episodic memory is available."""
         return self._episodic is not None
+
+    @property
+    def policies(self) -> PolicyStore | None:
+        """L6 policies and templates."""
+        return self._policies
 
     @property
     def semantic(self) -> SemanticIndex:

@@ -1,0 +1,23 @@
+[Unit]
+Description=Askme Voice AI Assistant
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=sunrise
+Group=sunrise
+WorkingDirectory=/home/sunrise/askme
+EnvironmentFile=/home/sunrise/askme/.env
+ExecStart=/home/sunrise/askme/.venv/bin/python -m askme.blueprints.voice
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits
+LimitNOFILE=4096
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target

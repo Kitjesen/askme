@@ -88,10 +88,12 @@ class TestGetMemoryContext:
         assert "world knowledge" in ctx
         assert "session context" not in ctx
 
-    def test_empty_when_nothing(self):
+    def test_no_episodic_session_context(self):
         ms, _, _, _, _, _ = _make_system(has_episodic=False, has_session=False)
         ctx = ms.get_memory_context("test")
-        assert ctx == ""
+        # No episodic/session content, but L6 policy rules may be present
+        assert "world knowledge" not in ctx
+        assert "session context" not in ctx
 
 
 class TestReflection:
