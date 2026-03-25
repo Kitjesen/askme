@@ -88,6 +88,20 @@ class MemoryModule(Module):
         """Unified memory system."""
         return self._memory_system
 
+    async def stop(self) -> None:
+        """Consolidate memories on shutdown (best-effort, non-blocking)."""
+        try:
+            robotmem = getattr(self._memory_bridge, "_robotmem", None)
+            if robotmem and robotmem.available:
+                llm_mod = self.llm_client
+                llm = getattr(llm_mod, "client", None) if llm_mod else None
+                if llm:
+                    n = await robotmem.consolidate(llm, batch_size=20)
+                    if n:
+                        logger.info("MemoryModule: consolidated %d facts on shutdown.", n)
+        except Exception as exc:
+            logger.debug("MemoryModule: consolidation on shutdown failed: %s", exc)
+
     def health(self) -> dict[str, Any]:
         return {
             "status": "ok",

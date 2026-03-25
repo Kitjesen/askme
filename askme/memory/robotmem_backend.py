@@ -157,9 +157,9 @@ class RobotMemBackend:
     async def consolidate(self, llm_client: Any, batch_size: int = 20) -> int:
         """Consolidate raw memories into structured facts via LLM.
 
-        Reads recent raw conversation entries, sends them to the LLM for
-        fact extraction / dedup / merge, then stores the consolidated
-        facts back with ``type=consolidated``.
+        Reads recent raw conversation entries (``source=conversation``),
+        sends them to the LLM for fact extraction / dedup / merge, then
+        stores the consolidated facts back with ``source=consolidated``.
 
         Args:
             llm_client: LLMClient with ``async_chat_completion(messages)``
@@ -172,7 +172,7 @@ class RobotMemBackend:
             return 0
 
         try:
-            # 1. Read recent raw memories
+            # 1. Read recent raw memories (only conversation, skip consolidated)
             raw = await asyncio.to_thread(
                 self._rm.recall, "用户", n=batch_size, min_confidence=0.0,
             )
@@ -180,19 +180,30 @@ class RobotMemBackend:
                 logger.debug("[Memory] Consolidate: no raw memories to process.")
                 return 0
 
-            raw_texts = [m.get("content", "") for m in raw if m.get("content")]
+            raw_texts = []
+            raw_ids = []
+            for m in raw:
+                content = m.get("content", "")
+                ctx = m.get("context", "")
+                # Skip already-consolidated entries
+                if "consolidated" in str(ctx):
+                    continue
+                if content:
+                    raw_texts.append(content)
+                    raw_ids.append(m.get("id"))
             if not raw_texts:
+                logger.debug("[Memory] Consolidate: all memories already consolidated.")
                 return 0
 
             # 2. LLM extracts structured facts
             prompt = (
-                "你是记忆整理助手。请从以下对话记录中提取关键事实，"
-                "去除重复，合并相关内容，输出精简的事实列表。\n"
-                "每条事实一行，用 - 开头。只输出事实，不要解释。\n\n"
-                "对话记录：\n" + "\n".join(raw_texts[:batch_size])
+                "从以下对话记录中提取关键事实。\n"
+                "每条事实独立一行，用 - 开头。合并重复信息。\n"
+                "只输出事实本身，不要输出规则、编号、解释或评价。\n\n"
+                + "\n".join(raw_texts[:batch_size])
             )
             messages = [
-                {"role": "system", "content": "你是记忆整理助手，负责提炼和归档。"},
+                {"role": "system", "content": "你是记忆归档系统。输入对话记录，输出精简事实列表。不要输出任何非事实内容。"},
                 {"role": "user", "content": prompt},
             ]
 
@@ -201,16 +212,38 @@ class RobotMemBackend:
                 logger.debug("[Memory] Consolidate: LLM returned empty.")
                 return 0
 
-            # 3. Parse facts and store back
-            facts = [
-                line.lstrip("- ").strip()
-                for line in response.splitlines()
-                if line.strip().startswith("-")
-            ]
+            # 3. Parse facts, filter noise, deduplicate, and store back
+            _noise = {"事实", "规则", "编号", "自包含", "输出", "以下", "如下"}
+            facts = []
+            for line in response.splitlines():
+                line = line.strip()
+                if not line.startswith("-"):
+                    continue
+                fact = line.lstrip("- ").strip()
+                if not fact or len(fact) < 6:
+                    continue
+                # Skip lines that look like meta-instructions, not facts
+                if any(w in fact[:10] for w in _noise):
+                    continue
+                facts.append(fact)
+
+            # Deduplicate against existing consolidated memories
+            if facts:
+                existing = await asyncio.to_thread(
+                    self._rm.recall, facts[0], n=20, min_confidence=0.0,
+                )
+                existing_texts = {
+                    m.get("content", "")
+                    for m in (existing or [])
+                    if "consolidated" in str(m.get("context", ""))
+                }
+            else:
+                existing_texts = set()
 
             stored = 0
             for fact in facts:
-                if not fact:
+                # Skip if an identical or near-identical fact already exists
+                if fact in existing_texts:
                     continue
                 await asyncio.to_thread(
                     self._rm.learn,
