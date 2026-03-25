@@ -61,9 +61,9 @@ memory:
   enabled: true
   # Backend: "mem0" (default), "robotmem", or "vector"
   #   mem0     — Mem0 + Qdrant (pip install mem0ai)
-  #   robotmem — robotmem SDK, SQLite + hybrid search (pip install robotmem)
+  #   robotmem — robotmem SDK, SQLite + hybrid search (pip install robotmem jieba)
   #   vector   — local VectorStore with sentence-transformers (no server)
-  backend: mem0
+  backend: robotmem
   embed_model: paraphrase-multilingual-MiniLM-L12-v2
   # Timeout (seconds) for embedding server reachability check
   health_check_timeout: 1

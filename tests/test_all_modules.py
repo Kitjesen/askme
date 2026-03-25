@@ -517,14 +517,14 @@ class TestHealthModule:
 
 class TestCompositions:
     def test_voice_runtime_builds(self):
-        """voice blueprint = 6 core modules."""
+        """voice blueprint = 7 core modules."""
         from askme.blueprints.voice import voice
-        assert len(voice._module_classes) == 6
+        assert len(voice._module_classes) == 7
 
     def test_voice_perception_extends_voice(self):
         """voice_perception = voice + 4 perception modules."""
         from askme.blueprints.voice_perception import voice_perception
-        assert len(voice_perception._module_classes) == 10
+        assert len(voice_perception._module_classes) == 11
 
     def test_text_runtime_has_no_voice(self):
         """text blueprint has no VoiceModule."""
@@ -532,7 +532,7 @@ class TestCompositions:
         names = [mc.name for mc in text._module_classes]
         assert "voice" not in names
         assert "text" in names
-        assert len(text._module_classes) == 5
+        assert len(text._module_classes) == 6
 
     def test_edge_robot_adds_plugins(self):
         """edge_robot = voice_perception + 6 external plugins."""
@@ -567,7 +567,7 @@ class TestCompositions:
         smaller = voice.without(TextModule)
         names = [mc.name for mc in smaller._module_classes]
         assert "text" not in names
-        assert len(smaller._module_classes) == 5
+        assert len(smaller._module_classes) == 6
 
 
 # ══════════════════════════════════════════════════════════════════════

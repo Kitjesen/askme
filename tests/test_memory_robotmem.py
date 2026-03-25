@@ -203,9 +203,9 @@ class TestSave:
 
         await backend.save("你好", "你好，有什么任务？")
         mock_rm.learn.assert_called_once()
-        call_kwargs = mock_rm.learn.call_args[1]
-        assert "你好" in call_kwargs["insight"]
-        assert call_kwargs["collection"] == "test"
+        call_args = mock_rm.learn.call_args
+        text_arg = call_args[0][0]  # positional arg
+        assert "你好" in text_arg
 
     @pytest.mark.asyncio
     async def test_save_truncates_reply(self):
@@ -215,9 +215,10 @@ class TestSave:
 
         long_reply = "x" * 500
         await backend.save("q", long_reply)
-        call_kwargs = mock_rm.learn.call_args[1]
+        call_args = mock_rm.learn.call_args
+        text_arg = call_args[0][0]  # positional arg
         # Reply should be truncated to 200 chars
-        assert len(call_kwargs["insight"]) < 250
+        assert len(text_arg) < 250
 
     @pytest.mark.asyncio
     async def test_save_exception_swallowed(self):
@@ -237,8 +238,8 @@ class TestSave:
         await backend.save("测试", "回复")
         call_kwargs = mock_rm.learn.call_args[1]
         context = call_kwargs["context"]
-        assert context["robot"]["id"] == "thunder"
-        assert context["task"]["type"] == "conversation"
+        assert context["robot"] == "thunder"
+        assert context["source"] == "conversation"
 
 
 # ---------------------------------------------------------------------------

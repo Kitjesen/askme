@@ -55,7 +55,10 @@ class RobotMemBackend:
         try:
             from robotmem.sdk import RobotMemory
 
-            kwargs: dict[str, Any] = {"collection": self._collection}
+            kwargs: dict[str, Any] = {
+                "collection": self._collection,
+                "embed_backend": "onnx",
+            }
             if self._db_path:
                 kwargs["db_path"] = self._db_path
 
@@ -133,16 +136,15 @@ class RobotMemBackend:
         if not self._ensure_robotmem():
             return
         try:
-            insight = f"用户: {user_text}\n回复: {assistant_text[:200]}"
+            text = f"用户: {user_text}\n回复: {assistant_text[:200]}"
             context = {
-                "robot": {"id": "thunder", "type": "quadruped"},
-                "task": {"type": "conversation"},
+                "source": "conversation",
+                "robot": "thunder",
             }
             await asyncio.to_thread(
                 self._rm.learn,
-                insight=insight,
+                text,
                 context=context,
-                collection=self._collection,
             )
             logger.debug("[Memory] RobotMem saved conversation turn.")
         except Exception as exc:

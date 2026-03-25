@@ -39,6 +39,10 @@ robot = [
 memory = [
     "mem0ai>=0.1.0",
 ]
+robotmem = [
+    "robotmem>=0.3.0",
+    "jieba>=0.42.1",
+]
 vision = [
     "qp-perception>=0.1.0",
 ]
