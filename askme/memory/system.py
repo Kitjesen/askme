@@ -27,6 +27,7 @@ from typing import Any, TYPE_CHECKING
 from askme.memory.trend_analyzer import TrendAnalyzer
 from askme.memory.association import AssociationGraph
 from askme.memory.strategy import StrategyGenerator, Suggestion
+from askme.memory.semantic_index import SemanticIndex
 
 if TYPE_CHECKING:
     from askme.llm.conversation import ConversationManager
@@ -64,6 +65,15 @@ class MemorySystem:
         self._vector = vector_memory
         self._site = site_knowledge
         self._procedural = procedural
+
+        # L5: Semantic Index (unified search across L2+L3+L4)
+        mem_cfg = {}
+        try:
+            from askme.config import get_config
+            mem_cfg = get_config().get("memory", {})
+        except Exception:
+            pass
+        self._semantic = SemanticIndex(mem_cfg)
 
         # Barrier capabilities: trend analysis, association, strategy
         self._trend_analyzer = TrendAnalyzer()
@@ -133,16 +143,37 @@ class MemorySystem:
         return bool(self._episodic and self._episodic.should_reflect())
 
     async def reflect(self) -> str | None:
-        """Run L3 reflection if conditions met."""
+        """Run L3 reflection if conditions met, then sync L5 index."""
         if not self._episodic or not self._episodic.should_reflect():
             return None
         try:
             result = await self._episodic.reflect()
             self._episodic.cleanup_old_episodes()
+            # Sync new knowledge into L5 semantic index
+            if result:
+                await self.sync_semantic_index()
             return result
         except Exception as e:
             logger.warning("Reflection failed: %s", e)
             return None
+
+    # -- L5: Semantic Index --
+
+    async def semantic_search(
+        self,
+        query: str,
+        n: int = 10,
+        source_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Unified semantic search across all memory layers (L5)."""
+        return await self._semantic.search(query, n=n, source_filter=source_filter)
+
+    async def sync_semantic_index(self) -> int:
+        """Re-index L2+L3 content into L5 semantic store."""
+        return await self._semantic.sync(
+            episodic=self._episodic,
+            session=self._session,
+        )
 
     # -- Barrier capabilities: trends, associations, strategy --
 
@@ -200,6 +231,11 @@ class MemorySystem:
     def has_episodic(self) -> bool:
         """Whether episodic memory is available."""
         return self._episodic is not None
+
+    @property
+    def semantic(self) -> SemanticIndex:
+        """L5 semantic index."""
+        return self._semantic
 
     @property
     def site_knowledge(self) -> SiteKnowledge | None:
