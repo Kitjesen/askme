@@ -343,10 +343,10 @@ class EpisodicMemory:
         try:
             response = await asyncio.wait_for(
                 self._llm.chat([
-                    {"role": "system", "content": "你是一个机器人的认知反思系统。用中文回答。"},
+                    {"role": "system", "content": "你是一个机器人的认知反思系统。用中文回答，直接输出JSON，不要思考过程。"},
                     {"role": "user", "content": prompt},
                 ]),
-                timeout=15.0,
+                timeout=30.0,
             )
 
             reflection = self._parse_reflection(response)
@@ -725,6 +725,11 @@ class EpisodicMemory:
 
     def _parse_reflection(self, response: str) -> dict[str, Any] | None:
         """Extract JSON from LLM reflection response using balanced brace matching."""
+        # Strip <think>...</think> blocks (MiniMax thinking mode)
+        cleaned = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL)
+        # Strip markdown code fences
+        cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
+        response = cleaned
         start = response.find("{")
         if start < 0:
             return None
