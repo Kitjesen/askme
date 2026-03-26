@@ -88,11 +88,11 @@ class VoiceModule(Module):
         # for TTS playback and voice state queries.  VoiceModule owns the AudioAgent
         # so it is responsible for injecting it into objects built by earlier modules.
         if pipeline is not None:
-            pipeline._audio = self._audio
+            pipeline.set_audio(self._audio)
         if agent_shell is not None:
-            agent_shell._audio = self._audio
+            agent_shell._audio = self._audio  # TODO: add setter to ThunderAgentShell
         if dispatcher is not None:
-            dispatcher._audio = self._audio
+            dispatcher._audio = self._audio  # TODO: add setter to SkillDispatcher
 
         # VoiceRuntimeBridge
         self._voice_runtime_bridge = VoiceRuntimeBridge(

@@ -59,7 +59,7 @@ class ExecutorModule(Module):
         pipeline_mod = getattr(self, "pipeline_in", None)
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
         if pipeline is not None:
-            pipeline._agent_shell = self.shell
+            pipeline.set_agent_shell(self.shell)
 
         logger.info("ExecutorModule: built")
 

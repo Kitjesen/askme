@@ -210,6 +210,24 @@ class BrainPipeline:
         """The most recent text spoken via TTS. Used by repeat_last skill."""
         return self._last_spoken_text
 
+    # ── Late-binding setters (called by modules built after Pipeline) ──
+
+    def set_audio(self, audio: Any) -> None:
+        """Late-bind AudioAgent (set by VoiceModule/TextModule after build)."""
+        self._audio = audio
+
+    def set_skill_manager(self, manager: Any) -> None:
+        """Late-bind SkillManager (set by SkillModule after build)."""
+        self._skill_manager = manager
+
+    def set_skill_executor(self, executor: Any) -> None:
+        """Late-bind SkillExecutor (set by SkillModule after build)."""
+        self._skill_executor = executor
+
+    def set_agent_shell(self, shell: Any) -> None:
+        """Late-bind ThunderAgentShell (set by ExecutorModule after build)."""
+        self._agent_shell = shell
+
     def start_idle_reflection(self, idle_seconds: float = 300.0) -> asyncio.Task[None] | None:
         """Start an idle-time reflection background task (dream consolidation)."""
         _ep = (self._mem.episodic if self._mem is not None else self._episodic)

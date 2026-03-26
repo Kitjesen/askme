@@ -75,8 +75,8 @@ class SkillModule(Module):
         # injecting them into the pipeline that was built earlier (pipeline cannot
         # depend on skill — that would create a cycle).
         if pipeline is not None:
-            pipeline._skill_manager = self._skill_manager
-            pipeline._skill_executor = self._skill_executor
+            pipeline.set_skill_manager(self._skill_manager)
+            pipeline.set_skill_executor(self._skill_executor)
 
         # Build planner
         self._planner = PlannerAgent(

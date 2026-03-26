@@ -72,7 +72,7 @@ class TextModule(Module):
 
         # Wire audio into pipeline if not already done by VoiceModule
         if pipeline is not None and getattr(pipeline, "_audio", None) is None:
-            pipeline._audio = audio
+            pipeline.set_audio(audio)
 
         # CommandHandler
         self._commands = CommandHandler(
