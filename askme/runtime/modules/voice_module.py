@@ -90,9 +90,9 @@ class VoiceModule(Module):
         if pipeline is not None:
             pipeline.set_audio(self._audio)
         if agent_shell is not None:
-            agent_shell._audio = self._audio  # TODO: add setter to ThunderAgentShell
+            agent_shell.set_audio(self._audio)
         if dispatcher is not None:
-            dispatcher._audio = self._audio  # TODO: add setter to SkillDispatcher
+            dispatcher.set_audio(self._audio)
 
         # VoiceRuntimeBridge
         self._voice_runtime_bridge = VoiceRuntimeBridge(

@@ -137,6 +137,10 @@ class SkillDispatcher:
         self._skill_manager = skill_manager
         self._audio = audio
         self._planner = planner
+
+    def set_audio(self, audio: Any) -> None:
+        """Late-bind AudioAgent (set by VoiceModule after build)."""
+        self._audio = audio
         self._current_mission: MissionContext | None = None
         self._last_mission: MissionContext | None = None  # preserved after complete_mission()
         # Captured lazily on first async dispatch — used by execute_skill_sync

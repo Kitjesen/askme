@@ -125,6 +125,10 @@ class ThunderAgentShell:
         self._tools = tool_registry
         self._audio = audio
         self._model = model or os.environ.get("AGENT_MODEL", _DEFAULT_AGENT_MODEL)
+
+    def set_audio(self, audio: Any) -> None:
+        """Late-bind AudioAgent (set by VoiceModule after build)."""
+        self._audio = audio
         self._workspace = workspace or (
             Path(__file__).parent.parent.parent / "data" / "agent_workspace"
         )
