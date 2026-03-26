@@ -14,11 +14,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from askme.llm.client import LLMClient
+from askme.pipeline.brain_pipeline import BrainPipeline
 from askme.pipeline.planner_agent import PlannerAgent
 from askme.pipeline.skill_dispatcher import SkillDispatcher
-from askme.runtime.module import Module, ModuleRegistry, Out
+from askme.runtime.module import In, Module, ModuleRegistry, Out
 from askme.skills.skill_executor import SkillExecutor
 from askme.skills.skill_manager import SkillManager
+from askme.tools.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -27,20 +30,27 @@ class SkillModule(Module):
     """Provides SkillManager, SkillExecutor, PlannerAgent, and SkillDispatcher."""
 
     name = "skill"
-    depends_on = ("pipeline", "llm", "tools")
+    depends_on = ("llm", "tools", "pipeline")
     provides = ("skills", "openapi", "mcp_catalog")
 
     dispatcher: Out[SkillDispatcher]
+    skill_manager_out: Out[SkillManager]
+
+    # In ports — auto-wired by runtime before build() is called
+    llm_in: In[LLMClient]
+    tool_registry_in: In[ToolRegistry]
+    pipeline_in: In[BrainPipeline]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        llm_mod = registry.get("llm")
+        llm_mod = getattr(self, "llm_in", None)
         llm = getattr(llm_mod, "client", None) if llm_mod else None
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else None
 
-        tools_mod = registry.get("tools")
+        tools_mod = getattr(self, "tool_registry_in", None)
         tools = getattr(tools_mod, "registry", None) if tools_mod else None
 
-        pipeline_mod = registry.get("pipeline")
+        # In port set by auto-wire; fall back to registry for standalone test compat.
+        pipeline_mod = getattr(self, "pipeline_in", None)
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
 
         brain_cfg = cfg.get("brain", {})
@@ -104,6 +114,11 @@ class SkillModule(Module):
         )
 
     # -- typed accessors ------------------------------------------------
+    @property
+    def skill_manager_out(self) -> SkillManager:
+        """The SkillManager instance (Out port)."""
+        return self._skill_manager
+
     @property
     def skill_manager(self) -> SkillManager:
         """The skill manager."""

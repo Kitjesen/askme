@@ -16,8 +16,13 @@ import asyncio
 import logging
 from typing import Any
 
+from askme.llm.client import LLMClient
+from askme.perception.vision_bridge import VisionBridge
+from askme.pipeline.brain_pipeline import BrainPipeline
 from askme.pipeline.proactive_agent import ProactiveAgent
-from askme.runtime.module import Module, ModuleRegistry
+from askme.runtime.module import In, Module, ModuleRegistry
+from askme.schemas.messages import MemoryContext
+from askme.voice.audio_agent import AudioAgent
 
 logger = logging.getLogger(__name__)
 
@@ -26,23 +31,30 @@ class ProactiveModule(Module):
     """Provides the ProactiveAgent to the runtime."""
 
     name = "proactive"
-    depends_on = ("pipeline", "memory")
+    depends_on = ("llm", "memory", "pipeline")
     provides = ("supervision",)
 
+    llm_in: In[LLMClient]
+    memory_in: In[MemoryContext]
+    perception_in: In[VisionBridge]
+    voice_in: In[AudioAgent]
+    pipeline_in: In[BrainPipeline]
+
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        llm_mod = registry.get("llm")
+        # Get dependencies via In[T] ports (auto-wired; getattr for standalone test compat)
+        llm_mod = getattr(self, "llm_in", None)
         llm = getattr(llm_mod, "client", None) if llm_mod else None
 
-        mem_mod = registry.get("memory")
+        mem_mod = getattr(self, "memory_in", None)
         episodic = getattr(mem_mod, "episodic", None) if mem_mod else None
 
-        perception_mod = registry.get("perception")
+        perception_mod = getattr(self, "perception_in", None)
         vision = getattr(perception_mod, "vision_bridge", None) if perception_mod else None
 
-        voice_mod = registry.get("voice")
+        voice_mod = getattr(self, "voice_in", None)
         audio = getattr(voice_mod, "audio", None) if voice_mod else None
 
-        pipeline_mod = registry.get("pipeline")
+        pipeline_mod = getattr(self, "pipeline_in", None)
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
 
         self.agent = ProactiveAgent(

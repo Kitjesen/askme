@@ -404,6 +404,6 @@ class TestReactionModule:
         from askme.runtime.modules.reaction_module import ReactionModule
 
         assert ReactionModule.name == "reaction"
-        assert "perception" in ReactionModule.depends_on
+        assert "llm" in ReactionModule.depends_on
         assert "memory" in ReactionModule.depends_on
 

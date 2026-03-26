@@ -11,7 +11,10 @@ import asyncio
 import logging
 from typing import Any
 
-from askme.runtime.module import Module, ModuleRegistry
+from askme.llm.client import LLMClient
+from askme.runtime.module import In, Module, ModuleRegistry
+from askme.schemas.messages import MemoryContext
+from askme.voice.audio_agent import AudioAgent
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +28,12 @@ class ReactionModule(Module):
     """
 
     name = "reaction"
-    depends_on = ("pulse", "memory", "perception", "pipeline", "skill")
+    depends_on = ("llm", "memory")
+
+    # In ports (auto-wired from provider modules)
+    llm_in: In[LLMClient]
+    memory_in: In[MemoryContext]
+    voice_in: In[AudioAgent]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         from askme.pipeline.reaction_engine import (
@@ -34,14 +42,14 @@ class ReactionModule(Module):
             RuleBasedReaction,
         )
 
-        # Gather dependencies from registry
-        llm_mod = registry.get("llm")
+        # Gather dependencies via In ports
+        llm_mod = getattr(self, "llm_in", None)
         llm = getattr(llm_mod, "client", None) if llm_mod else None
 
-        mem_mod = registry.get("memory")
+        mem_mod = getattr(self, "memory_in", None)
         episodic = getattr(mem_mod, "episodic", None) if mem_mod else None
 
-        voice_mod = registry.get("voice")
+        voice_mod = getattr(self, "voice_in", None)
         audio = getattr(voice_mod, "audio", None) if voice_mod else None
 
         # Create our own AlertDispatcher

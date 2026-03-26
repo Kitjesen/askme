@@ -11,7 +11,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.runtime.module import Module, ModuleRegistry
+from askme.llm.client import LLMClient
+from askme.pipeline.brain_pipeline import BrainPipeline
+from askme.pipeline.skill_dispatcher import SkillDispatcher
+from askme.runtime.module import In, Module, ModuleRegistry
+from askme.schemas.messages import MemoryContext
+from askme.voice.audio_agent import AudioAgent
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +25,15 @@ class TextModule(Module):
     """Provides TextLoop and CommandHandler to the runtime."""
 
     name = "text"
-    depends_on = ("pipeline", "skill")
+    depends_on = ("llm", "memory", "skill", "pipeline")
     provides = ("text_io",)
+
+    # In ports (auto-wired from provider modules)
+    llm_in: In[LLMClient]
+    memory_in: In[MemoryContext]
+    skill_in: In[SkillDispatcher]
+    pipeline_in: In[BrainPipeline]
+    voice_in: In[AudioAgent]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         from askme.llm.intent_router import IntentRouter
@@ -31,21 +43,21 @@ class TextModule(Module):
         from askme.voice.audio_agent import AudioAgent
         from askme.voice.runtime_bridge import VoiceRuntimeBridge
 
-        llm_mod = registry.get("llm")
+        llm_mod = getattr(self, "llm_in", None)
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else OTABridgeMetrics()
 
-        mem_mod = registry.get("memory")
+        mem_mod = getattr(self, "memory_in", None)
         conversation = getattr(mem_mod, "conversation", None) if mem_mod else None
 
-        skill_mod = registry.get("skill")
+        skill_mod = getattr(self, "skill_in", None)
         skill_manager = getattr(skill_mod, "skill_manager", None) if skill_mod else None
         dispatcher = getattr(skill_mod, "skill_dispatcher", None) if skill_mod else None
 
-        pipeline_mod = registry.get("pipeline")
+        pipeline_mod = getattr(self, "pipeline_in", None)
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
 
         # Reuse voice module's audio if available, else create text-only AudioAgent
-        voice_mod = registry.get("voice")
+        voice_mod = getattr(self, "voice_in", None)
         if voice_mod is not None:
             audio = getattr(voice_mod, "audio", None)
             router = getattr(voice_mod, "router", None)

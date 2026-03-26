@@ -13,7 +13,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.runtime.module import Module, ModuleRegistry
+from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
+from askme.llm.client import LLMClient
+from askme.pipeline.brain_pipeline import BrainPipeline
+from askme.pipeline.skill_dispatcher import SkillDispatcher
+from askme.runtime.module import In, Module, ModuleRegistry, Out
+from askme.tools.tool_registry import ToolRegistry
+from askme.voice.audio_agent import AudioAgent
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +28,18 @@ class VoiceModule(Module):
     """Provides AudioAgent, IntentRouter, VoiceLoop, and AddressDetector."""
 
     name = "voice"
-    depends_on = ("pipeline", "skill")
+    depends_on = ("llm", "tools", "skill", "pipeline")
     provides = ("voice", "tts", "asr")
+
+    # In ports (auto-wired from provider modules)
+    llm_in: In[LLMClient]
+    tool_registry_in: In[ToolRegistry]
+    skill_in: In[SkillDispatcher]
+    pipeline_in: In[BrainPipeline]
+    executor_in: In[ThunderAgentShell]
+
+    # Out port
+    audio_out: Out[AudioAgent]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         from askme.llm.intent_router import IntentRouter
@@ -36,20 +52,20 @@ class VoiceModule(Module):
         from askme.voice.audio_router import AudioRouter
         from askme.voice.runtime_bridge import VoiceRuntimeBridge
 
-        llm_mod = registry.get("llm")
+        llm_mod = getattr(self, "llm_in", None)
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else OTABridgeMetrics()
 
-        tools_mod = registry.get("tools")
+        tools_mod = getattr(self, "tool_registry_in", None)
         tools = getattr(tools_mod, "registry", None) if tools_mod else None
 
-        skill_mod = registry.get("skill")
+        skill_mod = getattr(self, "skill_in", None)
         skill_manager = getattr(skill_mod, "skill_manager", None) if skill_mod else None
         dispatcher = getattr(skill_mod, "skill_dispatcher", None) if skill_mod else None
 
-        pipeline_mod = registry.get("pipeline")
+        pipeline_mod = getattr(self, "pipeline_in", None)
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
 
-        executor_mod = registry.get("executor")
+        executor_mod = getattr(self, "executor_in", None)
         agent_shell = getattr(executor_mod, "shell", None) if executor_mod else None
 
         # AudioRouter
@@ -106,6 +122,11 @@ class VoiceModule(Module):
         logger.info("VoiceModule: built")
 
     # -- typed accessors ------------------------------------------------
+    @property
+    def audio_out(self) -> AudioAgent:
+        """The AudioAgent instance (Out port)."""
+        return self._audio
+
     @property
     def audio(self) -> Any:
         """The AudioAgent instance."""

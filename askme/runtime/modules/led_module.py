@@ -12,7 +12,10 @@ import asyncio
 import logging
 from typing import Any
 
-from askme.runtime.module import Module, ModuleRegistry
+from askme.pipeline.skill_dispatcher import SkillDispatcher
+from askme.robot.safety_client import DogSafetyClient
+from askme.runtime.module import In, Module, ModuleRegistry
+from askme.voice.audio_agent import AudioAgent
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +24,12 @@ class LEDModule(Module):
     """Provides StateLedBridge and LedController to the runtime."""
 
     name = "led"
-    depends_on = ("safety", "skill")
+    depends_on = ("voice", "skill", "safety")
     provides = ("indicators",)
+
+    voice_in: In[AudioAgent]
+    skill_in: In[SkillDispatcher]
+    safety_in: In[DogSafetyClient]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         from askme.robot.led_controller import HttpLedController, NullLedController
@@ -37,14 +44,14 @@ class LEDModule(Module):
             else NullLedController()
         )
 
-        # Get dependencies from registry
-        voice_mod = registry.get("voice")
+        # Get dependencies via In[T] ports (auto-wired; getattr for standalone test compat)
+        voice_mod = getattr(self, "voice_in", None)
         audio = getattr(voice_mod, "audio", None) if voice_mod else None
 
-        skill_mod = registry.get("skill")
+        skill_mod = getattr(self, "skill_in", None)
         dispatcher = getattr(skill_mod, "skill_dispatcher", None) if skill_mod else None
 
-        safety_mod = registry.get("safety")
+        safety_mod = getattr(self, "safety_in", None)
         dog_safety = getattr(safety_mod, "client", None) if safety_mod else None
 
         self.led_bridge = StateLedBridge(

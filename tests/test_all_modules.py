@@ -278,6 +278,7 @@ class TestExecutorModule:
         pipeline.build(_cfg(), registry)
 
         mod = ExecutorModule()
+        mod.pipeline_in = pipeline  # simulate auto-wire
         mod.build(_cfg(), registry)
         assert pipeline.brain_pipeline._agent_shell is mod.shell
 

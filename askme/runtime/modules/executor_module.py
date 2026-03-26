@@ -14,7 +14,10 @@ import logging
 from typing import Any
 
 from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
-from askme.runtime.module import Module, ModuleRegistry, Out
+from askme.llm.client import LLMClient
+from askme.pipeline.brain_pipeline import BrainPipeline
+from askme.runtime.module import In, Module, ModuleRegistry, Out
+from askme.tools.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +26,21 @@ class ExecutorModule(Module):
     """Provides the ThunderAgentShell to the runtime."""
 
     name = "executor"
-    depends_on = ("llm", "tools")
+    depends_on = ("llm", "tools", "pipeline")
     provides = ("executor",)
 
     agent_shell: Out[ThunderAgentShell]
 
+    # In ports — auto-wired by runtime before build() is called
+    llm_in: In[LLMClient]
+    tool_registry_in: In[ToolRegistry]
+    pipeline_in: In[BrainPipeline]
+
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        llm_mod = registry.get("llm")
+        llm_mod = getattr(self, "llm_in", None)
         llm = getattr(llm_mod, "client", None) if llm_mod else None
 
-        tools_mod = registry.get("tools")
+        tools_mod = getattr(self, "tool_registry_in", None)
         tools = getattr(tools_mod, "registry", None) if tools_mod else None
 
         brain_cfg = cfg.get("brain", {})
@@ -47,7 +55,8 @@ class ExecutorModule(Module):
 
         # Cross-link: pipeline needs the agent shell for agent_task skill dispatch.
         # ExecutorModule owns the shell, so it injects into the pipeline built earlier.
-        pipeline_mod = registry.get("pipeline")
+        # In port is set by auto-wire; fall back to registry for standalone test compat.
+        pipeline_mod = getattr(self, "pipeline_in", None)
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
         if pipeline is not None:
             pipeline._agent_shell = self.shell
