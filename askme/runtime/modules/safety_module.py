@@ -33,19 +33,16 @@ class SafetyModule(Module):
     safety_client: Out[DogSafetyClient]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        # Use auto-wired In port when available; fallback to registry.get()
-        # getattr() needed because In ports are only set by _auto_wire() during
-        # Runtime.build(), not when modules are built standalone in tests.
-        wired_pulse = getattr(self, "estop", None)
-        pulse_mod = wired_pulse if wired_pulse is not None else registry.get("pulse")
+        # In[EstopState] auto-wired to PulseModule by _auto_wire()
+        pulse_mod = getattr(self, "estop", None)  # None if not wired or standalone
         pulse_bus = getattr(pulse_mod, "bus", None) if pulse_mod else None
 
         safety_cfg = cfg.get("runtime", {}).get("dog_safety", {})
         self.client = DogSafetyClient(safety_cfg, pulse=pulse_bus)
         logger.info(
-            "SafetyModule: built (configured=%s, wired=%s)",
+            "SafetyModule: built (configured=%s, pulse=%s)",
             self.client.is_configured(),
-            wired_pulse is not None,
+            pulse_mod is not None,
         )
 
     # -- typed accessors ------------------------------------------------

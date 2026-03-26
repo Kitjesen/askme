@@ -34,11 +34,8 @@ class PerceptionModule(Module):
         self.vision_bridge = VisionBridge()
 
         self.change_detector = None
-        # Use auto-wired In port when available; fallback to registry.get()
-        # getattr() needed because In ports are only set by _auto_wire() during
-        # Runtime.build(), not when modules are built standalone in tests.
-        wired_pulse = getattr(self, "detections", None)
-        pulse_mod = wired_pulse if wired_pulse is not None else registry.get("pulse")
+        # In[DetectionFrame] auto-wired to PulseModule by _auto_wire()
+        pulse_mod = getattr(self, "detections", None)  # None if not wired or standalone
         pulse_bus = getattr(pulse_mod, "bus", None) if pulse_mod else None
 
         try:
@@ -48,9 +45,9 @@ class PerceptionModule(Module):
             logger.debug("ChangeDetector not available: %s", exc)
 
         logger.info(
-            "PerceptionModule: built (change_detector=%s, wired=%s)",
+            "PerceptionModule: built (change_detector=%s, pulse=%s)",
             "enabled" if self.change_detector else "disabled",
-            wired_pulse is not None,
+            pulse_mod is not None,
         )
 
     # -- typed accessors ------------------------------------------------
