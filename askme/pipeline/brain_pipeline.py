@@ -98,7 +98,7 @@ class BrainPipeline:
 
         # Shared dependencies
         self._tools = tools
-        self._audio = audio
+        self._audio_ref = audio  # use dunder to avoid shadowing property
         self._conversation = conversation
         self._arm = arm_controller
         self._dog_safety = dog_safety_client
@@ -207,7 +207,7 @@ class BrainPipeline:
         gate = SkillGate(
             skill_manager=self._skill_manager,
             skill_executor=self._skill_executor,
-            audio=self._audio,
+            audio=getattr(self, "_audio_ref", getattr(self, "_audio", None)),
             conversation=self._conversation,
             dog_safety=getattr(self, "_dog_safety", None),
             dog_control=getattr(self, "_dog_control", None),
@@ -242,23 +242,26 @@ class BrainPipeline:
 
     async def handle_pending_tool_response(self, user_text: str) -> str | None:
         return await self._tool_executor.handle_pending_tool_response(
-            user_text, audio=self._audio,
+            user_text, audio=self._audio_ref,
         )
 
     async def _respond_without_llm(
         self, user_text: str, assistant_text: str, *, source: str = "voice"
     ) -> str:
         return await self._tool_executor.respond_without_llm(
-            user_text, assistant_text, audio=self._audio, source=source,
+            user_text, assistant_text, audio=self._audio_ref, source=source,
         )
 
     # ── Late-binding setters ─────────────────────────────────
 
     def set_audio(self, audio: Any) -> None:
-        self._audio = audio
-        self._stream_processor.set_audio(audio)
-        self._skill_gate.set_audio(audio)
-        self._turn_executor.set_audio(audio)
+        self._audio_ref = audio
+        if hasattr(self, "_stream_processor"):
+            self._stream_processor.set_audio(audio)
+        if hasattr(self, "_skill_gate"):
+            self._skill_gate.set_audio(audio)
+        if hasattr(self, "_turn_executor"):
+            self._turn_executor.set_audio(audio)
 
     def set_skill_manager(self, manager: Any) -> None:
         self._skill_manager = manager
