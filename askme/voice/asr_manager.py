@@ -96,6 +96,15 @@ class ASRManager:
     # Session lifecycle
     # ------------------------------------------------------------------
 
+    def preconnect_cloud(self) -> None:
+        """Pre-establish Cloud ASR WebSocket before speech starts.
+
+        Called at listen-start so the connection is warm when speech arrives.
+        Audio fed before start_session() is silently accepted by the cloud.
+        """
+        if self._cloud.available and not self._cloud_active:
+            self._cloud_active = self._cloud.start_session()
+
     def start_session(self) -> None:
         """Start a new recognition session (both local + cloud if available)."""
         self._recognition_active = True
@@ -105,11 +114,18 @@ class ASRManager:
         self._asr.reset(self._stream)
         self._stream = self._asr.create_stream()
 
-        # Start cloud session if available
-        if self._cloud.available:
+        # Start cloud session if not already pre-connected
+        if self._cloud.available and not self._cloud_active:
             self._cloud_active = self._cloud.start_session()
-        else:
-            self._cloud_active = False
+        # If preconnect already opened, just keep it
+
+    def feed_cloud_only(self, samples_int16: np.ndarray) -> None:
+        """Feed audio to cloud ASR only (during silence, keeps connection warm)."""
+        if self._cloud_active:
+            try:
+                self._cloud.feed(samples_int16.tobytes())
+            except Exception:
+                pass
 
     def feed_audio(
         self,

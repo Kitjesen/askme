@@ -97,8 +97,14 @@ conversation:
 # ----------------------------------------------------------
 voice:
   # Input device index for microphone (see startup log for available devices)
-  # null = system default. On sunrise: 0 = MCP01 USB Audio (hw:1,0)
+  # null = system default. On sunrise: 0 = HK-MIC (hw:0,0), 1 = MCP01 (hw:1,0, mic dead)
   input_device: 0
+  # HK-MIC native rate is 48kHz 2ch — MicInput resamples to 16kHz mono
+  mic_native_rate: 48000
+  mic_channels: 2
+  mic_channel_select: 0
+  mic_highpass_hz: 80
+  mic_agc_target_rms: 0.1
 
   asr:
     # 2025-06 model: much better accuracy than 2023-02 bilingual
@@ -120,6 +126,8 @@ voice:
     # The MIC's low SNR means VAD must be sensitive. Noise triggers are handled by
     # the _NOISE_UTTERANCES filter + address_detector instead.
     threshold: 0.5
+    # 0.3s: restored original value. The alternating-zero-chunk issue was
+    # caused by soxr ResampleStream, now fixed by switching to scipy.
     min_silence_duration: 0.3
     # Raised from 0.25 to filter out noise blips
     min_speech_duration: 0.4
@@ -129,9 +137,9 @@ voice:
   # Noise gate: skip VAD when mic peak is below threshold (not in active speech).
   # Prevents USB mic noise floor from triggering Silero VAD continuously.
   # On sunrise MCP01: noise floor ~100-200, speech ~1000+. Set 0 to disable.
-  # Disabled: sunrise MIC speech peak (270-340) is too close to noise floor (250).
-  # Peak-based gating can't separate them. VAD=0.6 alone handles speech detection.
-  noise_gate_peak: 0
+  # HKMIC: noise floor peak=12-17, speech peak=5000+. Gate at 200 cleanly separates.
+  # (Old MCP01 had noise~250/speech~340, too close. HKMIC has huge margin.)
+  noise_gate_peak: 50
 
   # Echo gate: suppress mic during TTS playback when peak < threshold
   # Enables barge-in (user can interrupt) while blocking speaker echo
@@ -142,7 +150,7 @@ voice:
   # Much higher accuracy than local sherpa-onnx (CER 1.68% vs ~15%).
   # Falls back to local ASR when API key not set or network fails.
   cloud_asr:
-    enabled: false
+    enabled: true
     api_key: ${DASHSCOPE_API_KEY}
     model: paraformer-realtime-v2
     sample_rate: 16000
@@ -157,17 +165,16 @@ voice:
   # Audio input filter: DC removal + high-pass before VAD/ASR.
   # Removes low-frequency noise (motor hum, HVAC, ground loop).
   audio_filter:
-    enabled: true
-    # High-pass cutoff — removes everything below this frequency
+    # Disabled: MicInput pipeline already applies HPF@80Hz for HKMIC
+    enabled: false
     highpass_freq: 80
-    # Mode: "highpass" (default, gentle) or "bandpass" (aggressive, 300-3400Hz speech only)
     mode: highpass
 
   # Noise reduction: spectral subtraction for steady-state noise removal.
-  # Calibrates from ambient silence at startup. Off by default.
-  # For industrial environments, upgrade to RNNoise/Krisp (Phase 4).
+  # Disabled for HKMIC: alpha=2.0 too aggressive, strips speech signal.
+  # MicInput HPF already handles DC/low-freq noise.
   noise_reduction:
-    enabled: true
+    enabled: false
     # Subtraction strength (higher = more aggressive, risk of artifacts)
     alpha: 2.0
     # Spectral floor (prevents musical noise artifacts)

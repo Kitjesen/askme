@@ -10,6 +10,7 @@ Mirrors the voice wiring from ``assembly.py`` lines 466-575::
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -119,7 +120,26 @@ class VoiceModule(Module):
         )
         self._voice_loop.set_address_detector(self._address_detector)
 
+        self._task: asyncio.Task[None] | None = None
         logger.info("VoiceModule: built")
+
+    async def start(self) -> None:
+        """Open mic persistently, then start the VoiceLoop."""
+        self._audio._mic.start()  # mic stays open across listen/speak cycles
+        self._task = asyncio.create_task(self._voice_loop.run(), name="voice-loop")
+        logger.info("VoiceModule: voice loop started (mic persistent)")
+
+    async def stop(self) -> None:
+        """Cancel the voice loop task and close mic."""
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        self._audio._mic.stop()
+        self._audio.shutdown()
+        logger.info("VoiceModule: stopped")
 
     # -- typed accessors ------------------------------------------------
     @property

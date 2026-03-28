@@ -316,6 +316,10 @@ class AudioAgent:
         asr = self._asr_mgr
 
         try:
+            # Mic is persistently open (started by VoiceModule).
+            # Flush stale audio that accumulated during LLM+TTS processing.
+            mic._flush_queue()
+
             with mic.open() as mic_ctx:
                 # Phase 1: Wake word detection (if KWS available)
                 if self.kws and self.kws.available and self.kws_stream:
@@ -337,7 +341,26 @@ class AudioAgent:
                         self._play_chime("wake")
 
                 # Phase 2: VAD-gated ASR
+                # Play beep in background (non-blocking)
+                try:
+                    import subprocess as _sp, threading as _th
+                    _out_dev = getattr(self.tts, "_output_device", None)
+                    _beep_cmd = ["aplay", "-r", "44100", "-f", "S16_LE", "-c", "1", "-q"]
+                    if _out_dev:
+                        _beep_cmd += ["-D", str(_out_dev)]
+                    _beep_sr = 44100
+                    _beep_t = np.linspace(0, 0.15, int(_beep_sr * 0.15))
+                    _beep_pcm = (np.sin(2 * np.pi * 880 * _beep_t) * 20000).astype(np.int16).tobytes()
+                    def _play_beep():
+                        try:
+                            _sp.run(_beep_cmd, input=_beep_pcm, capture_output=True, timeout=2)
+                        except Exception:
+                            pass
+                    _th.Thread(target=_play_beep, daemon=True).start()
+                except Exception:
+                    pass
                 logger.info("Listening for speech...")
+                asr.preconnect_cloud()  # warm up WebSocket (fast, ~100ms)
                 deadline = time.monotonic() + self._asr_timeout
                 vad.reset()
                 _vol_log_interval = 0.5
@@ -373,10 +396,21 @@ class AudioAgent:
                         mic_ctx.buffer_pre_roll(raw)
                         continue
 
+                    # Noise gate: skip VAD when peak below threshold AND not in speech.
+                    # HKMIC noise floor ~15, quiet speech moments ~74-164, gate at 50.
+                    # Only gates silence→speech transition; during speech all audio passes
+                    # to keep Cloud ASR stream continuous.
+                    if proc.is_noise_gated(peak) and not vad.speech_active:
+                        mic_ctx.buffer_pre_roll(raw)
+                        continue
+
                     event = vad.feed(samples_i16, peak, tts_active=tts_active)
 
                     if event == VADEvent.SILENCE:
                         mic_ctx.buffer_pre_roll(raw)
+                        # Keep cloud ASR warm with silence audio
+                        if asr._cloud_active:
+                            asr.feed_cloud_only(samples_i16)
 
                     elif event == VADEvent.SPEECH_START:
                         deadline = time.monotonic() + self._asr_timeout
@@ -429,7 +463,11 @@ class AudioAgent:
                     # Check local ASR endpoint (runs every iteration during speech)
                     ep_result = asr.check_endpoint()
                     if ep_result:
-                        # Apply noise filter from ASRManager
+                        # Finish cloud session and prefer cloud result over local
+                        cloud_result = asr.finish_and_get_result(self.awaiting_confirmation)
+                        if cloud_result and not cloud_result.is_noise:
+                            return self._accept_result(cloud_result.text)
+                        # Fall back to local ASR result
                         is_noise = self._asr_mgr.is_noise(
                             ep_result.text, self.awaiting_confirmation
                         )
