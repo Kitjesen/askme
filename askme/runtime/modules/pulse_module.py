@@ -11,7 +11,7 @@ import logging
 from typing import Any
 
 from askme.runtime.module import Module, ModuleRegistry, Out
-from askme.robot.pulse import Pulse  # TODO: migrate to bus_registry.create(cfg) when Pulse inherits BusBackend
+from askme.robot.pulse import Pulse
 from askme.schemas.messages import (
     CmsState,
     DetectionFrame,
