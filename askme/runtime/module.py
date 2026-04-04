@@ -555,11 +555,24 @@ class RuntimeApp:
         return {name: mod.health() for name, mod in self.modules.items()}
 
     async def hot_swap(self, module_name: str, new_module_class: type[Module], cfg: dict | None = None) -> None:
-        """Hot-swap a running module. Not yet implemented.
+        """Hot-swap a running module.
 
-        Will stop the old module, re-wire In ports, build and start the new one.
+        Replaces *module_name* with a freshly built instance of *new_module_class*
+        without restarting the entire pipeline.  Steps:
+
+        1. Stop the existing module gracefully.
+        2. Build a new instance via ``new_module_class.build(cfg, registry)``.
+        3. Re-wire all In-ports that were wired to/from the old module.
+        4. Start the new module.
+
+        .. note::
+            Not yet implemented — contributions welcome.
+            Callers may use :meth:`stop` / re-:meth:`start` as a workaround.
         """
-        raise NotImplementedError("Hot-swap coming in a future release")
+        raise NotImplementedError(
+            f"hot_swap('{module_name}') is not yet implemented. "
+            "Use stop() followed by start() as a workaround."
+        )
 
     def flow_stats(self) -> dict:
         """Per-port message flow stats."""

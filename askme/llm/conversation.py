@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # Sliding window compression constants
 COMPRESS_THRESHOLD = 30   # Start compressing when history exceeds this
 KEEP_RECENT = 10          # Keep this many recent messages verbatim
+HARD_LIMIT = 80           # Absolute max messages — truncate even if compression failed
 SUMMARY_TAG = "[对话摘要]"
 
 COMPRESS_PROMPT = """\
@@ -135,10 +136,28 @@ class ConversationManager:
           - Summarize them (including any existing summary) into a single message
           - Keep the most recent KEEP_RECENT messages verbatim
 
+        If HARD_LIMIT is reached (compression keeps failing), the oldest messages
+        are dropped without LLM summarization to prevent unbounded memory growth.
+
         Called by BrainPipeline at the start of each turn. A lock ensures that
         concurrent invocations (background task vs. new turn) never clobber each
         other's in-flight history rebuild.
         """
+        # Hard limit: drop oldest messages immediately if compression keeps failing.
+        regular = [
+            m for m in self.history
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        ]
+        if len(regular) > HARD_LIMIT:
+            dropped_count = len(regular) - HARD_LIMIT
+            logger.warning(
+                "[Conversation] Hard limit %d exceeded (%d messages) — "
+                "dropping %d oldest messages without compression",
+                HARD_LIMIT, len(regular), dropped_count,
+            )
+            self.history = regular[-HARD_LIMIT:]
+            self._save()
+
         if time.monotonic() < self._compress_backoff_until:
             return
 

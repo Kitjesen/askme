@@ -11,6 +11,7 @@ import time as _time
 from typing import Any, TYPE_CHECKING
 
 from askme.pipeline.hooks import PipelineHooks, ToolCallRecord, _PROCEED
+from askme.pipeline.trace import get_tracer
 from askme.pipeline.utils import classify_skill_error, strip_think_blocks
 
 if TYPE_CHECKING:
@@ -272,17 +273,18 @@ class SkillGate:
                         pass  # No running loop — hooks can't fire here
 
             t0 = _time.perf_counter()
-            raw_result = await self._skill_executor.execute(
-                skill, context, prompt_seed=self._prompt_seed or None,
-                on_tool_call=_on_tool_call,
-            )
+            with get_tracer().span(f"skill.{skill_name}", skill=skill_name):
+                raw_result = await self._skill_executor.execute(
+                    skill, context, prompt_seed=self._prompt_seed or None,
+                    on_tool_call=_on_tool_call,
+                )
             elapsed_ms = (_time.perf_counter() - t0) * 1000
 
             if thinking_task is not None:
                 thinking_task.cancel()
                 thinking_task = None
             result = strip_think_blocks(raw_result)
-            logger.info("Skill result: %s", result[:100])
+            logger.info("Skill result [%.0fms]: %s", elapsed_ms, result[:100])
 
             # post_tool hook — may transform the skill result
             if self._hooks and self._hooks.post_tool:
