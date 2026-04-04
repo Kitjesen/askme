@@ -10,7 +10,22 @@ from enum import Enum
 from typing import Any
 
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except ModuleNotFoundError:
+    # Minimal stub so tests can patch sd.play / sd.InputStream without needing hardware
+    class _SoundDeviceStub:
+        InputStream = None
+        @staticmethod
+        def play(*args: object, **kwargs: object) -> None: ...
+        @staticmethod
+        def stop() -> None: ...
+        @staticmethod
+        def wait() -> None: ...
+        @staticmethod
+        def query_devices(device: object = None, kind: object = None) -> object:
+            return {}
+    sd = _SoundDeviceStub()  # type: ignore[assignment]
 
 from askme.robot.ota_bridge import OTABridgeMetrics, get_ota_runtime_metrics
 

@@ -27,7 +27,15 @@ from contextlib import contextmanager
 from typing import Any, Generator
 
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except ModuleNotFoundError:
+    class _SoundDeviceStub:
+        InputStream = None
+        @staticmethod
+        def query_devices(device: object = None, kind: object = None) -> object:
+            return {}
+    sd = _SoundDeviceStub()  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +232,10 @@ class MicInput:
         stream.start()
         self._stream = stream
         self.pre_roll.clear()
+
+        if self._audio_router is not None:
+            self._audio_router.wait_for_input_ready(timeout=10.0)
+
         logger.info("MicInput: started (persistent)")
 
     def stop(self) -> None:

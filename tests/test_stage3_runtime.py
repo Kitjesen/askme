@@ -106,31 +106,19 @@ class TestIsEstopActive:
 # ── BrainPipeline L0 block ───────────────────────────────────────────────────
 
 
-def _make_pipeline(dog_safety=None):
-    """Build a minimal BrainPipeline-like object for L0 tests."""
-    from askme.pipeline.brain_pipeline import BrainPipeline
+def _make_prompt_builder(dog_safety=None):
+    """Build a minimal PromptBuilder for L0 tests."""
     from askme.pipeline.prompt_builder import PromptBuilder
-    pipeline = object.__new__(BrainPipeline)
-    pipeline._dog_safety = dog_safety
-    pipeline._dog_control = None
-    pipeline._base_prompt = "你是Thunder巡检机器人。"
-    pipeline._episodic = None
-    pipeline._session_memory = None
-    pipeline._memory = None
-    pipeline._mem = None
-    pipeline._vision = None
-    pipeline._tools = MagicMock()
-    pipeline._tools.get_definitions.return_value = []
-    pipeline._skill_manager = MagicMock()
-    pipeline._skill_manager.get_skill_catalog.return_value = "none"
-    pipeline._general_tool_max_safety_level = "normal"
-    pipeline._qp_memory = None
-    pipeline._prompt_builder = PromptBuilder(
-        base_prompt=pipeline._base_prompt,
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    sm = MagicMock()
+    sm.get_skill_catalog.return_value = "none"
+    return PromptBuilder(
+        base_prompt="你是Thunder巡检机器人。",
         prompt_seed=[],
         user_prefix="",
-        tools=pipeline._tools,
-        skill_manager=pipeline._skill_manager,
+        tools=tools,
+        skill_manager=sm,
         general_tool_max_safety_level="normal",
         dog_safety=dog_safety,
         episodic=None,
@@ -138,25 +126,24 @@ def _make_pipeline(dog_safety=None):
         vision=None,
         qp_memory=None,
     )
-    return pipeline
 
 
 class TestBuildL0RuntimeBlock:
     def test_empty_when_no_safety_client(self):
-        pipeline = _make_pipeline(dog_safety=None)
-        assert pipeline._build_l0_runtime_block() == ""
+        pb = _make_prompt_builder(dog_safety=None)
+        assert pb.build_l0_runtime_block() == ""
 
     def test_empty_when_safety_not_configured(self):
         safety = DogSafetyClient({})  # no URL = not configured
-        pipeline = _make_pipeline(dog_safety=safety)
-        assert pipeline._build_l0_runtime_block() == ""
+        pb = _make_prompt_builder(dog_safety=safety)
+        assert pb.build_l0_runtime_block() == ""
 
     def test_shows_normal_when_no_estop(self):
         safety = DogSafetyClient({"base_url": "http://fake:5070"})
         safety._cached_estop = {"enabled": False}
         safety._cache_ts = time.monotonic()
-        pipeline = _make_pipeline(dog_safety=safety)
-        block = pipeline._build_l0_runtime_block()
+        pb = _make_prompt_builder(dog_safety=safety)
+        block = pb.build_l0_runtime_block()
         assert "运行时状态" in block
         assert "正常" in block
 
@@ -164,8 +151,8 @@ class TestBuildL0RuntimeBlock:
         safety = DogSafetyClient({"base_url": "http://fake:5070"})
         safety._cached_estop = {"enabled": True}
         safety._cache_ts = time.monotonic()
-        pipeline = _make_pipeline(dog_safety=safety)
-        block = pipeline._build_l0_runtime_block()
+        pb = _make_prompt_builder(dog_safety=safety)
+        block = pb.build_l0_runtime_block()
         assert "已激活" in block
         assert "禁止" in block
 
@@ -175,16 +162,16 @@ class TestBuildSystemPromptL0Injection:
         safety = DogSafetyClient({"base_url": "http://fake:5070"})
         safety._cached_estop = {"enabled": True}
         safety._cache_ts = time.monotonic()
-        pipeline = _make_pipeline(dog_safety=safety)
-        prompt = pipeline._build_system_prompt(None)
+        pb = _make_prompt_builder(dog_safety=safety)
+        prompt = pb.build_system_prompt(None)
         # L0 block should come BEFORE the base prompt
         l0_pos = prompt.find("运行时状态")
         base_pos = prompt.find("Thunder")
         assert l0_pos < base_pos
 
     def test_no_l0_when_no_safety_configured(self):
-        pipeline = _make_pipeline(dog_safety=None)
-        prompt = pipeline._build_system_prompt(None)
+        pb = _make_prompt_builder(dog_safety=None)
+        prompt = pb.build_system_prompt(None)
         assert "运行时状态" not in prompt
         assert prompt.startswith("你是Thunder")
 
@@ -193,88 +180,84 @@ class TestBuildSystemPromptL0Injection:
 
 
 class TestExecuteSkillSafetyGate:
-    def _make_full_pipeline(self, estop_state):
-        """Return a BrainPipeline mock where execute_skill can be called."""
-        from askme.pipeline.brain_pipeline import BrainPipeline
-        pipeline = object.__new__(BrainPipeline)
+    """Tests for the estop safety gate in SkillGate.execute_skill."""
 
-        # Safety client
+    def _make_gate(self, estop_state):
+        """Build a SkillGate with a mocked safety client."""
+        from askme.pipeline.skill_gate import SkillGate
+
         safety = MagicMock(spec=DogSafetyClient)
         safety.is_configured.return_value = True
-        # query_estop_state is called via asyncio.to_thread — patch as sync
         safety.query_estop_state.return_value = estop_state
-        pipeline._dog_safety = safety
 
-        # Skill manager
+        skill_executor = MagicMock()
+        skill_executor.run = AsyncMock(return_value="skill executed")
+
         sm = MagicMock()
         skill = MagicMock()
         skill.depends = []
         skill.timeout = 30
         sm.get.return_value = skill
-        pipeline._skill_manager = sm
 
-        # Minimal stubs
-        pipeline._dog_control = None
-        pipeline._episodic = None
-        pipeline._arm = None
-        pipeline._audio = MagicMock()
-        pipeline._audio.drain_buffers = MagicMock()
-        pipeline._audio.start_playback = MagicMock()
-        pipeline._audio.stop_playback = MagicMock()
-        pipeline._audio.speak = MagicMock()
-        pipeline._skill_executor = MagicMock()
-        pipeline._skill_executor.run = AsyncMock(return_value="skill executed")
-        pipeline._conversation = MagicMock()
-        pipeline._memory = None
-        pipeline._pending_tasks = set()
-        pipeline._splitter = MagicMock()
-        pipeline._max_response_chars = 0
+        audio = MagicMock()
+        audio.drain_buffers = MagicMock()
+        audio.start_playback = MagicMock()
+        audio.stop_playback = MagicMock()
+        audio.speak = MagicMock()
 
-        return pipeline
+        gate = SkillGate(
+            skill_manager=sm,
+            skill_executor=skill_executor,
+            audio=audio,
+            conversation=MagicMock(),
+            dog_safety=safety,
+        )
+        return gate, safety, skill_executor
 
     async def test_estop_active_blocks_skill(self):
-        pipeline = self._make_full_pipeline({"enabled": True})
-        result = await pipeline.execute_skill("navigate", "去仓库")
+        gate, safety, skill_executor = self._make_gate({"enabled": True})
+        result = await gate.execute_skill("navigate", "去仓库")
         assert "[安全锁定]" in result
         assert "急停" in result
-        # Skill executor should NOT have been called
-        pipeline._skill_executor.run.assert_not_called()
+        skill_executor.run.assert_not_called()
 
     async def test_estop_inactive_allows_skill(self):
-        pipeline = self._make_full_pipeline({"enabled": False})
-        # execute_skill will hit skill_executor.run — stub the rest of the method
-        # by catching the AttributeError that happens after the gate
+        gate, safety, skill_executor = self._make_gate({"enabled": False})
         try:
-            await pipeline.execute_skill("navigate", "去仓库")
+            await gate.execute_skill("navigate", "去仓库")
         except (AttributeError, TypeError):
-            pass  # expected — pipeline stubs incomplete after the gate
-        # Key assertion: the gate did NOT block (safety.query_estop_state was called)
-        pipeline._dog_safety.query_estop_state.assert_called_once()
+            pass
+        safety.query_estop_state.assert_called_once()
 
     async def test_estop_state_none_allows_skill(self):
         """When estop service is unreachable (returns None), do not block."""
-        pipeline = self._make_full_pipeline(None)
+        gate, safety, _ = self._make_gate(None)
         try:
-            await pipeline.execute_skill("navigate", "去仓库")
+            await gate.execute_skill("navigate", "去仓库")
         except (AttributeError, TypeError):
             pass
-        # Gate should not have blocked (no safety lock message)
-        pipeline._dog_safety.query_estop_state.assert_called_once()
+        safety.query_estop_state.assert_called_once()
 
     async def test_no_safety_client_allows_skill(self):
-        pipeline = self._make_full_pipeline({"enabled": True})
-        pipeline._dog_safety = None  # No client wired
+        from askme.pipeline.skill_gate import SkillGate
+        gate = SkillGate(
+            skill_manager=MagicMock(),
+            skill_executor=MagicMock(),
+            audio=MagicMock(),
+            conversation=MagicMock(),
+            dog_safety=None,
+        )
         try:
-            await pipeline.execute_skill("navigate", "去仓库")
+            await gate.execute_skill("navigate", "去仓库")
         except (AttributeError, TypeError):
             pass
         # No blocking — no client means no gate
 
     async def test_safety_not_configured_allows_skill(self):
-        pipeline = self._make_full_pipeline({"enabled": True})
-        pipeline._dog_safety.is_configured.return_value = False
+        gate, safety, _ = self._make_gate({"enabled": True})
+        safety.is_configured.return_value = False
         try:
-            await pipeline.execute_skill("navigate", "去仓库")
+            await gate.execute_skill("navigate", "去仓库")
         except (AttributeError, TypeError):
             pass
-        pipeline._dog_safety.query_estop_state.assert_not_called()
+        safety.query_estop_state.assert_not_called()

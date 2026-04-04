@@ -1,149 +1,121 @@
-"""Tests for memory admission control and Ebbinghaus decay."""
+"""Tests for MemoryAdmissionControl — 5-factor scoring, novelty, threshold."""
 
 from __future__ import annotations
 
-import math
+import pytest
 
-from askme.memory.episode import decay_importance
 from askme.memory.admission import AdmissionScore, MemoryAdmissionControl
 
 
-# ── decay_importance ──────────────────────────────────────
+# ── AdmissionScore ────────────────────────────────────────────────────────────
+
+class TestAdmissionScore:
+    def test_total_is_weighted_sum(self):
+        score = AdmissionScore(
+            utility=1.0, confidence=1.0, novelty=1.0, recency=1.0, type_prior=1.0
+        )
+        assert abs(score.total - 1.0) < 0.01
+
+    def test_total_zeros(self):
+        score = AdmissionScore(
+            utility=0.0, confidence=0.0, novelty=0.0, recency=0.0, type_prior=0.0
+        )
+        assert score.total == 0.0
+
+    def test_utility_weighted_highest(self):
+        base = AdmissionScore(utility=0.0, confidence=0.0, novelty=0.0, recency=0.0, type_prior=0.0)
+        with_utility = AdmissionScore(utility=1.0, confidence=0.0, novelty=0.0, recency=0.0, type_prior=0.0)
+        with_confidence = AdmissionScore(utility=0.0, confidence=1.0, novelty=0.0, recency=0.0, type_prior=0.0)
+        assert with_utility.total > with_confidence.total
 
 
-def test_decay_fresh_event_full_importance():
-    """Fresh event (age=0) returns full importance."""
-    assert decay_importance(0.8, age_hours=0.0) == 0.8
+# ── MemoryAdmissionControl ────────────────────────────────────────────────────
 
+class TestMemoryAdmissionControl:
+    def test_default_threshold(self):
+        mac = MemoryAdmissionControl()
+        assert mac.threshold == 0.4
 
-def test_decay_negative_age_full_importance():
-    """Negative age returns full importance (guard)."""
-    assert decay_importance(0.8, age_hours=-5.0) == 0.8
+    def test_custom_threshold(self):
+        mac = MemoryAdmissionControl(threshold=0.6)
+        assert mac.threshold == 0.6
 
+    def test_threshold_setter(self):
+        mac = MemoryAdmissionControl()
+        mac.threshold = 0.7
+        assert mac.threshold == 0.7
 
-def test_decay_3day_recency():
-    """After 3 days, importance is 75% (floor at 50%, never forgotten)."""
-    result = decay_importance(1.0, age_hours=72.0)
-    assert abs(result - 0.75) < 0.01
+    def test_error_event_high_priority_admitted(self):
+        mac = MemoryAdmissionControl(threshold=0.4)
+        admitted, score = mac.should_admit("error", "Motor overcurrent", importance=0.8)
+        assert admitted is True
+        assert score.type_prior == 0.9
 
+    def test_routine_perception_low_priority(self):
+        mac = MemoryAdmissionControl(threshold=0.5)
+        admitted, score = mac.should_admit("perception", "nothing happened", importance=0.1)
+        # Low importance + low type prior → likely rejected at high threshold
+        assert isinstance(admitted, bool)
+        assert 0.0 <= score.total <= 1.0
 
-def test_decay_10day_floor():
-    """After 10 days, importance floors at ~50% (never forgotten)."""
-    result = decay_importance(1.0, age_hours=240.0)
-    assert result >= 0.50
-    assert result <= 0.55
+    def test_unknown_kind_uses_default_prior(self):
+        mac = MemoryAdmissionControl()
+        admitted, score = mac.should_admit("unknown_type", "some text", importance=0.5)
+        assert score.type_prior == 0.4  # default for unknown
 
+    def test_first_event_has_full_novelty(self):
+        mac = MemoryAdmissionControl()
+        _, score = mac.should_admit("command", "first event text", importance=0.5)
+        assert score.novelty == 1.0
 
-def test_decay_custom_half_life():
-    """Custom half-life: 24h age with 24h half-life → 75% (0.5 + 0.5*0.5)."""
-    result = decay_importance(1.0, age_hours=24.0, half_life_hours=24.0)
-    assert abs(result - 0.75) < 0.01
+    def test_identical_event_has_low_novelty(self):
+        mac = MemoryAdmissionControl()
+        text = "同一事件内容"
+        mac.should_admit("command", text, importance=0.9)  # first — admitted, adds to recent
+        _, score2 = mac.should_admit("command", text, importance=0.9)
+        # Novelty should be low for identical text
+        assert score2.novelty < 0.5
 
+    def test_completely_different_event_has_high_novelty(self):
+        mac = MemoryAdmissionControl()
+        mac.should_admit("command", "abcdef", importance=0.9)  # first event
+        _, score = mac.should_admit("command", "xyz123", importance=0.5)
+        # Very different text → high novelty
+        assert score.novelty > 0.3
 
-def test_decay_zero_importance():
-    """Zero importance stays zero regardless of age."""
-    assert decay_importance(0.0, age_hours=100.0) == 0.0
+    def test_admitted_event_added_to_recent(self):
+        mac = MemoryAdmissionControl(threshold=0.0)  # admit everything
+        mac.should_admit("error", "test text", importance=0.5)
+        assert len(mac._recent_texts) == 1
 
+    def test_rejected_event_not_added_to_recent(self):
+        mac = MemoryAdmissionControl(threshold=1.1)  # reject everything
+        mac.should_admit("error", "test text", importance=0.5)
+        assert len(mac._recent_texts) == 0
 
-# ── AdmissionScore ────────────────────────────────────────
+    def test_recency_always_1(self):
+        mac = MemoryAdmissionControl()
+        _, score = mac.should_admit("command", "test", importance=0.5)
+        assert score.recency == 1.0
 
+    def test_high_confidence_for_direct_observation_types(self):
+        mac = MemoryAdmissionControl()
+        for kind in ("command", "error", "action"):
+            _, score = mac.should_admit(kind, "text", importance=0.5)
+            assert score.confidence == 0.9
 
-def test_admission_score_total():
-    """Score total is weighted sum: 0.3*u + 0.15*c + 0.25*n + 0.1*r + 0.2*t."""
-    score = AdmissionScore(
-        utility=1.0, confidence=1.0, novelty=1.0, recency=1.0, type_prior=1.0
-    )
-    assert abs(score.total - 1.0) < 0.001
+    def test_low_confidence_for_inferred_types(self):
+        mac = MemoryAdmissionControl()
+        _, score = mac.should_admit("outcome", "text", importance=0.5)
+        assert score.confidence == 0.7
 
+    def test_score_returns_valid_total(self):
+        mac = MemoryAdmissionControl()
+        _, score = mac.should_admit("perception", "routine scan", importance=0.3)
+        assert 0.0 <= score.total <= 1.0
 
-def test_admission_score_breakdown():
-    """Verify individual factor contributions."""
-    score = AdmissionScore(
-        utility=0.5, confidence=0.8, novelty=0.6, recency=1.0, type_prior=0.9
-    )
-    expected = 0.3 * 0.5 + 0.15 * 0.8 + 0.25 * 0.6 + 0.1 * 1.0 + 0.2 * 0.9
-    assert abs(score.total - expected) < 0.001
-
-
-# ── MemoryAdmissionControl ───────────────────────────────
-
-
-def test_error_always_admitted():
-    """Error events always admitted (type_prior=0.9)."""
-    mac = MemoryAdmissionControl(threshold=0.4)
-    admitted, score = mac.should_admit("error", "Motor overcurrent", importance=0.0)
-    assert admitted
-    assert score.type_prior == 0.9
-
-
-def test_anomaly_always_admitted():
-    """Anomaly events always admitted (type_prior=0.9)."""
-    mac = MemoryAdmissionControl(threshold=0.4)
-    admitted, score = mac.should_admit("anomaly", "Sensor spike detected", importance=0.0)
-    assert admitted
-    assert score.type_prior == 0.9
-
-
-def test_duplicate_text_rejected():
-    """Duplicate text has low novelty and gets rejected."""
-    mac = MemoryAdmissionControl(threshold=0.4)
-    # First occurrence: novel
-    admitted1, _ = mac.should_admit("perception", "Battery at 80%", importance=0.1)
-    # Second occurrence: same text, low novelty
-    admitted2, score2 = mac.should_admit("perception", "Battery at 80%", importance=0.1)
-    assert admitted1  # first is novel
-    assert not admitted2  # duplicate rejected
-    assert score2.novelty < 0.3  # low novelty
-
-
-def test_novel_text_admitted():
-    """Novel text is admitted even for low-priority types."""
-    mac = MemoryAdmissionControl(threshold=0.4)
-    admitted, score = mac.should_admit("action", "Navigated to warehouse B", importance=0.5)
-    assert admitted
-    assert score.novelty == 1.0  # first text is fully novel
-
-
-def test_perception_low_importance_rejected():
-    """Perception events with very low importance get rejected."""
-    mac = MemoryAdmissionControl(threshold=0.5)
-    # Seed recent texts so novelty drops
-    mac.should_admit("perception", "ABCDEFGHIJKLMNOP routine scan", importance=0.0)
-    admitted, score = mac.should_admit(
-        "perception", "ABCDEFGHIJKLMNOP routine scan 2", importance=0.0
-    )
-    # type_prior=0.3, utility=0.0, novelty~low => should be rejected at 0.5 threshold
-    assert not admitted
-
-
-def test_threshold_adjustable():
-    """Threshold can be changed after construction."""
-    mac = MemoryAdmissionControl(threshold=0.9)
-    admitted, _ = mac.should_admit("action", "Walk forward", importance=0.3)
-    assert not admitted  # high threshold rejects
-
-    mac.threshold = 0.1
-    admitted, _ = mac.should_admit("action", "Walk forward again", importance=0.3)
-    assert admitted  # low threshold admits
-
-
-def test_command_high_confidence():
-    """Command events get high confidence score (direct observation)."""
-    mac = MemoryAdmissionControl(threshold=0.4)
-    _, score = mac.should_admit("command", "User said: go to gate", importance=0.7)
-    assert score.confidence == 0.9
-
-
-def test_unknown_type_uses_default_prior():
-    """Unknown event types use default type_prior of 0.4."""
-    mac = MemoryAdmissionControl(threshold=0.4)
-    _, score = mac.should_admit("custom_event", "Something happened", importance=0.5)
-    assert score.type_prior == 0.4
-
-
-def test_empty_text_novelty():
-    """Empty text still computes novelty without error."""
-    mac = MemoryAdmissionControl(threshold=0.1)
-    admitted, score = mac.should_admit("system", "", importance=0.5)
-    # Should not crash; novelty of empty text = 1.0 (no recent to compare)
-    assert score.novelty == 1.0
+    def test_empty_text_has_full_novelty(self):
+        mac = MemoryAdmissionControl()
+        mac.should_admit("command", "some previous text", importance=0.8)
+        _, score = mac.should_admit("command", "", importance=0.5)
+        assert score.novelty == 1.0

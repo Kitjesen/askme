@@ -122,7 +122,7 @@ REFLECT_PROMPT = """\
 }}"""
 
 
-_RE_NORMALIZE = re.compile(r"[\s\-\—\·、，。！？：；""''（）()\[\]「」.,!?:;]+")
+_RE_NORMALIZE = re.compile(r"[\s\-—·、，。！？：；\u201c\u201d\u2018\u2019（）()\[\]「」.,!?:;]+")
 
 
 def _normalize_for_dedup(text: str) -> str:
@@ -166,13 +166,31 @@ class EpisodicMemory:
     Reflection trigger: cumulative importance > IMPORTANCE_THRESHOLD (Park 2023)
     """
 
-    def __init__(self, *, llm: LLMClient | None = None, vector_store: Any = None) -> None:
-        cfg = get_config()
-        data_dir = cfg.get("app", {}).get("data_dir", "data")
+    def __init__(
+        self,
+        *,
+        llm: "LLMClient | None" = None,
+        vector_store: Any = None,
+        config: dict | None = None,
+        data_dir: "str | Path | None" = None,
+    ) -> None:
+        """Create an EpisodicMemory.
+
+        Args:
+            llm: LLMClient for reflection summarization.
+            vector_store: Optional vector store for trend persistence.
+            config: Full config dict.  If None, read via get_config().
+            data_dir: Override the data directory.  If None, read from config.
+        """
+        cfg = config if config is not None else get_config()
         episodic_cfg = cfg.get("memory", {}).get("episodic", {})
-        resolved = Path(data_dir)
-        if not resolved.is_absolute():
-            resolved = project_root() / resolved
+        if data_dir is not None:
+            resolved = Path(data_dir)
+        else:
+            raw = cfg.get("app", {}).get("data_dir", "data")
+            resolved = Path(raw)
+            if not resolved.is_absolute():
+                resolved = project_root() / resolved
 
         self._data_dir = resolved / "memory"
         self._episodes_dir = self._data_dir / "episodes"
@@ -258,6 +276,25 @@ class EpisodicMemory:
             return Episode(event_type, description, context, importance=importance)
 
         episode = Episode(event_type, description, context, importance=importance)
+
+        # Drop-by-importance: if the buffer is at maxlen and the new episode is
+        # more important than the least important existing one, evict the weakest
+        # entry rather than silently dropping the new high-value event.
+        if len(self._buffer) == self._buffer.maxlen and self._buffer.maxlen:
+            min_ep = min(self._buffer, key=lambda e: e.importance)
+            if episode.importance > min_ep.importance:
+                try:
+                    self._buffer.remove(min_ep)
+                    self._cumulative_importance = max(
+                        0.0, self._cumulative_importance - min_ep.importance
+                    )
+                    logger.debug(
+                        "[EpisodicMemory] Evicted low-importance episode (%.2f) for new one (%.2f)",
+                        min_ep.importance, importance,
+                    )
+                except ValueError:
+                    pass  # Already removed (concurrent access guard)
+
         self._buffer.append(episode)
         self._total_logged += 1
         self._cumulative_importance += importance

@@ -71,6 +71,7 @@ def _make_agent() -> AudioAgent:
     agent._mic = MagicMock()
     agent._mic.sample_rate = _SAMPLE_RATE
     agent._audio_proc = MagicMock()
+    agent._audio_proc.is_noise_gated.return_value = False
     agent._vad_ctrl = MagicMock()
     agent._vad_ctrl.speech_active = False
     agent._vad_ctrl.barge_in_buffer = []
