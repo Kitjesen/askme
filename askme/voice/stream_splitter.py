@@ -136,3 +136,25 @@ class StreamSplitter:
         """Clear all internal state."""
         self._buffer = ""
         self._total_chars = 0
+
+    def configure(
+        self,
+        *,
+        first_sentence_threshold: int | None = None,
+        first_sentence_min_len: int | None = None,
+        normal_comma_min_len: int | None = None,
+        emergency_max_len: int | None = None,
+    ) -> None:
+        """Update thresholds at runtime without reconstructing the splitter.
+
+        Only the provided keyword arguments are updated; others remain unchanged.
+        Useful for adapting to different voice styles or languages mid-session.
+        """
+        if first_sentence_threshold is not None:
+            self._first_threshold = first_sentence_threshold
+        if first_sentence_min_len is not None:
+            self._first_min = first_sentence_min_len
+        if normal_comma_min_len is not None:
+            self._comma_min = normal_comma_min_len
+        if emergency_max_len is not None:
+            self._emergency_max = emergency_max_len
