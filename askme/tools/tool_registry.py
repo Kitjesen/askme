@@ -62,6 +62,28 @@ _DEFAULT_CONFIRMATION_BYPASS_TOOLS: set[str] = set()
 # which is a separate, confirmation-free path for genuine emergencies.
 
 
+def _json_type_matches(value: object, expected: str) -> bool:
+    """Return True if *value* matches the JSON Schema *expected* type string."""
+    _MAP = {
+        "string": str,
+        "number": (int, float),
+        "integer": int,
+        "boolean": bool,
+        "array": list,
+        "object": dict,
+        "null": type(None),
+    }
+    py_type = _MAP.get(expected)
+    if py_type is None:
+        return True  # Unknown type — don't block
+    # JSON numbers: Python bools are subclasses of int; distinguish them.
+    if expected == "integer" and isinstance(value, bool):
+        return False
+    if expected == "number" and isinstance(value, bool):
+        return False
+    return isinstance(value, py_type)
+
+
 def _normalize_safety_level(level: str | None) -> str:
     if level in _SAFETY_ORDER:
         return level
@@ -353,6 +375,16 @@ class ToolRegistry:
         if not isinstance(kwargs, dict):
             return "[Error] Tool arguments must decode to an object."
 
+        # Schema validation: check required fields declared in parameters schema
+        schema = getattr(tool, "parameters", None)
+        if schema and isinstance(schema, dict):
+            validation_error = self._validate_args(tool.name, kwargs, schema)
+            if validation_error:
+                logger.warning(
+                    "Tool '%s' argument validation failed: %s", tool.name, validation_error
+                )
+                return f"[Error] {validation_error}"
+
         if self._requires_confirmation(tool):
             self._expire_pending_approval()
             if self._pending_approval is not None:
@@ -429,6 +461,40 @@ class ToolRegistry:
         except Exception as exc:
             logger.exception("Tool execution failed: %s", tool.name)
             return f"[Error] Tool '{tool.name}' execution failed: {exc}"
+
+    @staticmethod
+    def _validate_args(tool_name: str, kwargs: dict[str, Any], schema: dict[str, Any]) -> str | None:
+        """Lightweight schema validation — checks required fields and basic types.
+
+        Returns an error message string on failure, or None if valid.
+
+        Uses the ``required`` and ``properties`` fields of the JSON Schema.
+        Does NOT perform deep nested validation — that would require jsonschema.
+        """
+        required = schema.get("required", [])
+        missing = [k for k in required if k not in kwargs]
+        if missing:
+            return (
+                f"Tool '{tool_name}' missing required argument(s): "
+                + ", ".join(f"'{m}'" for m in missing)
+            )
+
+        properties = schema.get("properties", {})
+        for key, value in kwargs.items():
+            if key not in properties:
+                # Extra keys are allowed unless additionalProperties: false
+                if schema.get("additionalProperties") is False:
+                    return f"Tool '{tool_name}' received unexpected argument '{key}'"
+                continue
+            prop_schema = properties[key]
+            expected_type = prop_schema.get("type")
+            if expected_type and not _json_type_matches(value, expected_type):
+                return (
+                    f"Tool '{tool_name}' argument '{key}' expected type "
+                    f"'{expected_type}', got '{type(value).__name__}'"
+                )
+
+        return None
 
     def _get_access_error(
         self,
