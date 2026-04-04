@@ -75,39 +75,32 @@ class PipelineModule(Module):
     control_in: In[DogControlClient]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        # In ports are set by auto-wire; fall back to registry for compat
-        llm_mod = getattr(self, "llm_in", None)
-        mem_mod = getattr(self, "memory_context", None)
-        tools_mod = getattr(self, "tool_registry_in", None)
-        safety_mod = getattr(self, "safety_client", None)
-        perception_mod = getattr(self, "vision", None)
-        control_mod = getattr(self, "control_in", None)
+        # Helper: safely extract a named attribute from a wired In-port module.
+        # In-ports are set to the provider Module by auto-wire; they may be None
+        # if the optional dependency wasn't wired.
+        def _from(mod: Any, attr: str) -> Any:
+            return getattr(mod, attr, None) if mod is not None else None
 
-        llm = getattr(llm_mod, "client", None) if llm_mod else None
-        ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else None
+        llm_mod: Any = getattr(self, "llm_in", None)
+        mem_mod: Any = getattr(self, "memory_context", None)
+        tools_mod: Any = getattr(self, "tool_registry_in", None)
+        safety_mod: Any = getattr(self, "safety_client", None)
+        perception_mod: Any = getattr(self, "vision", None)
+        control_mod: Any = getattr(self, "control_in", None)
 
-        conversation = getattr(mem_mod, "conversation", None) if mem_mod else None
-        memory_bridge = getattr(mem_mod, "memory_bridge", None) if mem_mod else None
-        session_memory = getattr(mem_mod, "session_memory", None) if mem_mod else None
-        episodic = getattr(mem_mod, "episodic", None) if mem_mod else None
-        memory_system = getattr(mem_mod, "memory_system", None) if mem_mod else None
-
-        tools = getattr(tools_mod, "registry", None) if tools_mod else None
-
-        dog_safety = getattr(safety_mod, "client", None) if safety_mod else None
-
-        vision = getattr(perception_mod, "vision_bridge", None) if perception_mod else None
+        # Unpack wired module attributes into typed locals.
+        llm = _from(llm_mod, "client")
+        conversation = _from(mem_mod, "conversation")
+        memory_bridge = _from(mem_mod, "memory_bridge")
+        session_memory = _from(mem_mod, "session_memory")
+        episodic = _from(mem_mod, "episodic")
+        memory_system = _from(mem_mod, "memory_system")
+        tools = _from(tools_mod, "registry")
+        dog_safety = _from(safety_mod, "client")
+        vision = _from(perception_mod, "vision_bridge")
+        dog_control = _from(control_mod, "client")
 
         brain_cfg = cfg.get("brain", {})
-
-        # Skill manager + executor from skill module (may not be built yet)
-        # These are set post-build via the registry in SkillModule
-        skill_manager = None
-        skill_executor = None
-
-        # Control client
-        dog_control = getattr(control_mod, "client", None) if control_mod else None
-
         prompt_seed = _load_soul_seed(cfg) or brain_cfg.get("prompt_seed", [])
 
         self._pipeline = BrainPipeline(
@@ -115,20 +108,17 @@ class PipelineModule(Module):
             conversation=conversation,
             memory=memory_bridge,
             tools=tools,
-            skill_manager=skill_manager,
-            skill_executor=skill_executor,
+            # Skill manager + executor set post-build by SkillModule.
+            skill_manager=None,
+            skill_executor=None,
             audio=None,  # set post-build by VoiceModule/TextModule
             splitter=StreamSplitter(),
-            arm_controller=None,
             dog_safety_client=dog_safety,
             dog_control_client=dog_control,
             vision=vision,
             session_memory=session_memory,
             episodic_memory=episodic,
-            system_prompt=brain_cfg.get(
-                "system_prompt",
-                "You are Thunder, an industrial inspection AI.",
-            ),
+            system_prompt=brain_cfg.get("system_prompt", ""),
             prompt_seed=prompt_seed,
             user_prefix=brain_cfg.get("user_prefix", ""),
             voice_model=brain_cfg.get("voice_model"),

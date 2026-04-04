@@ -43,18 +43,39 @@ SUMMARIZE_PROMPT = """\
 class SessionMemory:
     """Manages session summary .md files for medium-term memory."""
 
-    def __init__(self, *, llm: LLMClient | None = None) -> None:
-        cfg = get_config()
-        data_dir = cfg.get("app", {}).get("data_dir", "data")
-        resolved = Path(data_dir)
-        if not resolved.is_absolute():
-            resolved = project_root() / resolved
-        self._sessions_dir: Path = resolved / "sessions"
+    def __init__(
+        self,
+        *,
+        llm: "LLMClient | None" = None,
+        config: "dict | None" = None,
+        sessions_dir: "str | Path | None" = None,
+    ) -> None:
+        """Create a SessionMemory.
+
+        Args:
+            llm: LLMClient for summarization.  May be set later via set_llm().
+            config: Full config dict.  If None, read via get_config().
+            sessions_dir: Override the directory for session .md files.  If
+                None, read from ``config["app"]["data_dir"]`` + "/sessions".
+        """
+        if sessions_dir is not None:
+            self._sessions_dir = Path(sessions_dir)
+        else:
+            cfg = config if config is not None else get_config()
+            data_dir = cfg.get("app", {}).get("data_dir", "data")
+            resolved = Path(data_dir)
+            if not resolved.is_absolute():
+                resolved = project_root() / resolved
+            self._sessions_dir = resolved / "sessions"
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         self._llm = llm
         # Cache for get_recent_summaries() — avoids glob on every LLM turn
         self._summary_cache: str = ""
         self._summary_cache_time: float = 0.0
+
+    def set_llm(self, llm: "LLMClient") -> None:
+        """Late-bind the LLM client (e.g. after dependency injection)."""
+        self._llm = llm
 
     # ------------------------------------------------------------------
     # Public API

@@ -14,7 +14,10 @@ from typing import Any
 
 import numpy as np
 
-from .asr import ASREngine
+try:
+    from .asr import ASREngine
+except ModuleNotFoundError:
+    ASREngine = None  # type: ignore[assignment,misc]
 from .cloud_asr import CloudASR
 from .punctuation import PunctuationRestorer
 

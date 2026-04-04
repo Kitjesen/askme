@@ -7,14 +7,12 @@ import datetime
 import json
 import logging
 import re
+import time as _time
 from typing import Any, TYPE_CHECKING
 
-_RE_THINK = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
-
-
-def strip_think_blocks(text: str) -> str:
-    """Remove all ``<think>...</think>`` blocks from a complete string."""
-    return _RE_THINK.sub("", text).strip()
+from askme.pipeline.hooks import PipelineHooks, ToolCallRecord, _PROCEED
+from askme.pipeline.trace import get_tracer
+from askme.pipeline.utils import classify_skill_error, strip_think_blocks
 
 if TYPE_CHECKING:
     from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
@@ -47,8 +45,10 @@ class SkillGate:
         episodic: EpisodicMemory | None = None,
         memory_system: MemorySystem | None = None,
         agent_shell: ThunderAgentShell | None = None,
-        prompt_seed: str | None = None,
+        prompt_seed: list[dict[str, str]] | None = None,
         max_response_chars: int = 500,
+        cancel_token: asyncio.Event | None = None,
+        hooks: PipelineHooks | None = None,
     ) -> None:
         self._skill_manager = skill_manager
         self._skill_executor = skill_executor
@@ -63,6 +63,8 @@ class SkillGate:
         self._prompt_seed = prompt_seed
         self._max_response_chars = max_response_chars
         self._last_spoken_text = ""
+        self._cancel_token = cancel_token
+        self._hooks = hooks
 
     # ── Helpers ───────────────────────────────────────────────
 
@@ -92,7 +94,12 @@ class SkillGate:
             workspace = self._agent_shell._workspace if self._agent_shell else None
             if workspace:
                 workspace.mkdir(parents=True, exist_ok=True)
-                (workspace / "last_result.txt").write_text(result, encoding="utf-8")
+                # Resolve and contain: prevent path traversal via crafted result text
+                target = (workspace / "last_result.txt").resolve()
+                if target.parent.resolve() == workspace.resolve():
+                    target.write_text(result, encoding="utf-8")
+                else:
+                    logger.warning("[SkillGate] Path traversal blocked for last_result.txt")
         except Exception:
             pass
 
@@ -117,11 +124,7 @@ class SkillGate:
 
     def _classify_skill_error_message(self, exc: Exception, skill_name: str) -> str:
         """Return a user-facing voice message for a skill execution error."""
-        if isinstance(exc, asyncio.TimeoutError):
-            return f"{skill_name}执行超时，跳过了。要不要换个方式？"
-        if "connect" in str(exc).lower() or "network" in str(exc).lower():
-            return f"网络有问题，{skill_name}暂时做不了。"
-        return f"{skill_name}执行失败，要不要重试？"
+        return classify_skill_error(exc, skill_name)
 
     def _create_thinking_task(self) -> tuple[asyncio.Task[None], None]:
         async def _thinking_indicator() -> None:
@@ -136,6 +139,10 @@ class SkillGate:
         source: str = "voice",
     ) -> str:
         """Execute a named skill and speak the result."""
+        if self._cancel_token is not None and self._cancel_token.is_set():
+            logger.warning("[SkillGate] cancel_token set — skipping skill '%s'", skill_name)
+            return ""
+
         skill = self._skill_manager.get(skill_name)
         if not skill:
             return f"[Skill] Not found: {skill_name}"
@@ -205,8 +212,9 @@ class SkillGate:
         if extra_context:
             context["mission_context"] = extra_context
         if self._arm:
+            # arm.get_state() may call hardware registers — run in thread pool
             context["robot_state"] = json.dumps(
-                self._arm.get_state(), ensure_ascii=False
+                await asyncio.to_thread(self._arm.get_state), ensure_ascii=False
             )
 
         if skill_name == "dog_control" and self._dog_control and self._dog_control.is_configured():
@@ -246,18 +254,48 @@ class SkillGate:
         try:
             thinking_task, _ = self._create_thinking_task()
 
-            def _on_tool_call(tool_name: str) -> None:
-                pass
+            _hooks = self._hooks
 
-            raw_result = await self._skill_executor.execute(
-                skill, context, prompt_seed=self._prompt_seed or None,
-                on_tool_call=_on_tool_call,
-            )
+            def _on_tool_call(tool_name: str) -> None:
+                """Called synchronously when a sub-tool fires within the skill."""
+                logger.debug("[SkillGate] sub-tool invoked: %s", tool_name)
+                if _hooks and _hooks.pre_tool:
+                    # Fire pre_tool hooks as a fire-and-forget task so the
+                    # synchronous callback doesn't block the skill executor.
+                    probe = ToolCallRecord(
+                        call_id="", tool_name=tool_name,
+                        arguments="", result="",
+                        elapsed_ms=0.0,
+                    )
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(_hooks.fire_pre_tool(probe))
+                    except RuntimeError:
+                        pass  # No running loop — hooks can't fire here
+
+            t0 = _time.perf_counter()
+            with get_tracer().span(f"skill.{skill_name}", skill=skill_name):
+                raw_result = await self._skill_executor.execute(
+                    skill, context, prompt_seed=self._prompt_seed or None,
+                    on_tool_call=_on_tool_call,
+                )
+            elapsed_ms = (_time.perf_counter() - t0) * 1000
+
             if thinking_task is not None:
                 thinking_task.cancel()
                 thinking_task = None
             result = strip_think_blocks(raw_result)
-            logger.info("Skill result: %s", result[:100])
+            logger.info("Skill result [%.0fms]: %s", elapsed_ms, result[:100])
+
+            # post_tool hook — may transform the skill result
+            if self._hooks and self._hooks.post_tool:
+                record = ToolCallRecord(
+                    call_id="", tool_name=skill_name,
+                    arguments=user_text, result=result,
+                    elapsed_ms=elapsed_ms,
+                )
+                result = await self._hooks.fire_post_tool(record)
+
             self._audio.speak(result)
             self._last_spoken_text = result
             self._conversation.add_user_message(user_text)

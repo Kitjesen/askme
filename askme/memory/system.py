@@ -58,6 +58,7 @@ class MemorySystem:
         vector_memory: MemoryBridge | None,
         site_knowledge: SiteKnowledge | None = None,
         procedural: ProceduralMemory | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         self._llm = llm
         self._conversation = conversation
@@ -67,18 +68,21 @@ class MemorySystem:
         self._site = site_knowledge
         self._procedural = procedural
 
+        # Resolve config once — injectable for tests, fall back to global get_config()
+        if config is None:
+            try:
+                from askme.config import get_config
+                config = get_config()
+            except Exception:
+                config = {}
+
         # L5: Semantic Index (unified search across L2+L3+L4)
-        mem_cfg = {}
-        try:
-            from askme.config import get_config
-            mem_cfg = get_config().get("memory", {})
-        except Exception:
-            pass
+        mem_cfg = config.get("memory", {})
         self._semantic = SemanticIndex(mem_cfg)
 
         # L6: Policies & Templates
         try:
-            self._policies = PolicyStore()
+            self._policies = PolicyStore(config=config)
         except Exception as e:
             logger.debug("PolicyStore init failed: %s", e)
             self._policies = None

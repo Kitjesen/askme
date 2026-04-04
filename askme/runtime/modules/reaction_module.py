@@ -14,7 +14,10 @@ from typing import Any
 from askme.llm.client import LLMClient
 from askme.runtime.module import In, Module, ModuleRegistry
 from askme.schemas.messages import MemoryContext
-from askme.voice.audio_agent import AudioAgent
+try:
+    from askme.voice.audio_agent import AudioAgent
+except ModuleNotFoundError:
+    AudioAgent = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 

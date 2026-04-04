@@ -6,7 +6,12 @@ import logging
 import os
 from typing import Any
 
-import sherpa_onnx
+try:
+    import sherpa_onnx
+except ModuleNotFoundError:
+    class _SherpaOnnxStub:
+        OnlineRecognizer = None
+    sherpa_onnx = _SherpaOnnxStub()  # type: ignore[assignment]
 
 from askme.interfaces.asr import ASRBackend
 
@@ -32,6 +37,12 @@ class ASREngine(ASRBackend):
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
+        if sherpa_onnx.OnlineRecognizer is None:
+            self.recognizer = None
+            self.sample_rate = int(config.get("sample_rate", 16000))
+            logger.warning("ASR unavailable — sherpa_onnx not installed")
+            return
+
         model_dir: str = config.get(
             "model_dir",
             "models/asr/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20",
@@ -92,26 +103,38 @@ class ASREngine(ASRBackend):
         # Fallback to first candidate (will fail at init with clear error)
         return os.path.join(model_dir, candidates[0])
 
-    def create_stream(self) -> sherpa_onnx.OnlineStream:
-        """Create and return a new ASR stream."""
+    def create_stream(self) -> Any:
+        """Create and return a new ASR stream (None if unavailable)."""
+        if self.recognizer is None:
+            return None
         return self.recognizer.create_stream()
 
-    def is_ready(self, stream: sherpa_onnx.OnlineStream) -> bool:
+    def is_ready(self, stream: Any) -> bool:
         """Check if the recognizer is ready to decode the given stream."""
+        if self.recognizer is None or stream is None:
+            return False
         return self.recognizer.is_ready(stream)
 
-    def decode_stream(self, stream: sherpa_onnx.OnlineStream) -> None:
+    def decode_stream(self, stream: Any) -> None:
         """Decode one step on the given stream."""
+        if self.recognizer is None or stream is None:
+            return
         self.recognizer.decode_stream(stream)
 
-    def is_endpoint(self, stream: sherpa_onnx.OnlineStream) -> bool:
+    def is_endpoint(self, stream: Any) -> bool:
         """Check if an endpoint has been detected in the stream."""
+        if self.recognizer is None or stream is None:
+            return False
         return self.recognizer.is_endpoint(stream)
 
-    def get_result(self, stream: sherpa_onnx.OnlineStream) -> str:
+    def get_result(self, stream: Any) -> str:
         """Get the current recognition result text from the stream."""
+        if self.recognizer is None or stream is None:
+            return ""
         return self.recognizer.get_result(stream)
 
-    def reset(self, stream: sherpa_onnx.OnlineStream) -> None:
+    def reset(self, stream: Any) -> None:
         """Reset the given stream."""
+        if self.recognizer is None or stream is None:
+            return
         self.recognizer.reset(stream)

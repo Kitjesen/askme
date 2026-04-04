@@ -15,7 +15,10 @@ from typing import Any
 from askme.pipeline.skill_dispatcher import SkillDispatcher
 from askme.robot.safety_client import DogSafetyClient
 from askme.runtime.module import In, Module, ModuleRegistry
-from askme.voice.audio_agent import AudioAgent
+try:
+    from askme.voice.audio_agent import AudioAgent
+except ModuleNotFoundError:
+    AudioAgent = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 

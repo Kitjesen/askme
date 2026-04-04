@@ -41,8 +41,8 @@ class PolicyStore:
         └── templates.yaml    # response templates
     """
 
-    def __init__(self) -> None:
-        cfg = get_config()
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        cfg = config if config is not None else get_config()
         data_dir = cfg.get("app", {}).get("data_dir", "data")
         resolved = Path(data_dir)
         if not resolved.is_absolute():

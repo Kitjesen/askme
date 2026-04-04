@@ -16,7 +16,28 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except ModuleNotFoundError:
+    class _SoundDeviceStub:
+        InputStream = None
+        class CallbackFlags: pass
+        class default:
+            device = (None, None)
+        @staticmethod
+        def play(*args: object, **kwargs: object) -> None: ...
+        @staticmethod
+        def stop() -> None: ...
+        @staticmethod
+        def wait() -> None: ...
+        @staticmethod
+        def query_devices(device: object = None, kind: object = None) -> object:
+            return {}
+        class OutputStream:
+            def __init__(self, *args: object, **kwargs: object) -> None: ...
+            def __enter__(self) -> "_SoundDeviceStub.OutputStream": return self
+            def __exit__(self, *args: object) -> None: ...
+    sd = _SoundDeviceStub()  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from askme.voice.audio_router import AudioRouter
@@ -738,8 +759,8 @@ class TTSEngine(TTSBackend):
         if proc is not None:
             try:
                 proc.terminate()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("aplay terminate failed (ignored): %s", exc)
 
     def _playback_loop(self) -> None:
         """Drain tts_buffer one sentence at a time.
@@ -819,8 +840,8 @@ class TTSEngine(TTSBackend):
                 if _router_ctx is not None:
                     try:
                         _router_ctx.__exit__(None, None, None)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("audio router exit failed (ignored): %s", exc)
                     _router_ctx = None
                 logger.info("aplay: done")
 
