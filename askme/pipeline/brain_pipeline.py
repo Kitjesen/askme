@@ -258,6 +258,25 @@ class BrainPipeline:
         source: str = "voice",
     ) -> str:
         """Execute a named skill and speak the result."""
+        if not hasattr(self, "_skill_gate"):
+            # Legacy path: tests that bypass __init__ via object.__new__() and
+            # set private attributes directly.  Build a one-shot SkillGate from
+            # the raw attributes to preserve backward compatibility.
+            from askme.pipeline.skill_gate import SkillGate
+            gate = SkillGate(
+                skill_manager=getattr(self, "_skill_manager", None),
+                skill_executor=getattr(self, "_skill_executor", None),
+                audio=getattr(self, "_audio_ref", getattr(self, "_audio", None)),
+                conversation=getattr(self, "_conversation", None),
+                dog_safety=getattr(self, "_dog_safety", None),
+                dog_control=getattr(self, "_dog_control", None),
+                arm_controller=getattr(self, "_arm", None),
+                episodic=getattr(self, "_episodic", None),
+                memory_system=getattr(self, "_mem", None),
+                agent_shell=getattr(self, "_agent_shell", None),
+                max_response_chars=getattr(self, "_max_response_chars", 500),
+            )
+            return await gate.execute_skill(skill_name, user_text, extra_context, source)
         return await self._skill_gate.execute_skill(
             skill_name, user_text, extra_context, source,
         )
