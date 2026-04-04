@@ -161,7 +161,7 @@ class PipelineHooks:
                     logger.info("[hooks.pre_turn] Hook requested turn skip: %s", hook.__name__)
                     return True
             except Exception as exc:
-                logger.warning("[hooks.pre_turn] Hook %s raised: %s", hook.__name__, exc)
+                logger.warning("[hooks.pre_turn] Hook %s raised: %s", getattr(hook, "__name__", repr(hook)), exc)
         return False
 
     async def fire_post_turn(self, ctx: TurnContext, response: str) -> None:
@@ -170,7 +170,7 @@ class PipelineHooks:
             try:
                 await hook(ctx, response)
             except Exception as exc:
-                logger.warning("[hooks.post_turn] Hook %s raised: %s", hook.__name__, exc)
+                logger.warning("[hooks.post_turn] Hook %s raised: %s", getattr(hook, "__name__", repr(hook)), exc)
 
     async def fire_pre_tool(self, record: ToolCallRecord) -> "_ProceedType | str":
         """Fire all pre_tool hooks.
@@ -184,7 +184,7 @@ class PipelineHooks:
                 if override is not None:
                     return override
             except Exception as exc:
-                logger.warning("[hooks.pre_tool] Hook %s raised: %s", hook.__name__, exc)
+                logger.warning("[hooks.pre_tool] Hook %s raised: %s", getattr(hook, "__name__", repr(hook)), exc)
         return _PROCEED  # sentinel: no override
 
     async def fire_post_tool(self, record: ToolCallRecord) -> str:
@@ -194,7 +194,7 @@ class PipelineHooks:
             try:
                 result = await hook(dataclasses_replace(record, result=result))
             except Exception as exc:
-                logger.warning("[hooks.post_tool] Hook %s raised: %s", hook.__name__, exc)
+                logger.warning("[hooks.post_tool] Hook %s raised: %s", getattr(hook, "__name__", repr(hook)), exc)
         return result
 
     def fire_estop(self) -> None:
@@ -203,7 +203,7 @@ class PipelineHooks:
             try:
                 hook()
             except Exception as exc:
-                logger.warning("[hooks.estop] Hook %s raised: %s", hook.__name__, exc)
+                logger.warning("[hooks.estop] Hook %s raised: %s", getattr(hook, "__name__", repr(hook)), exc)
 
 
 # Sentinel returned by fire_pre_tool when no hook overrides the result.
