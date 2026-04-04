@@ -15,7 +15,10 @@ from enum import Enum
 
 import numpy as np
 
-from .vad import VADEngine
+try:
+    from .vad import VADEngine
+except ModuleNotFoundError:
+    VADEngine = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 

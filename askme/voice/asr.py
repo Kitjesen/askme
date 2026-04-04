@@ -6,7 +6,10 @@ import logging
 import os
 from typing import Any
 
-import sherpa_onnx
+try:
+    import sherpa_onnx
+except ModuleNotFoundError:
+    sherpa_onnx = None  # type: ignore[assignment]
 
 from askme.interfaces.asr import ASRBackend
 

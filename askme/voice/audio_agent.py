@@ -10,7 +10,10 @@ from enum import Enum
 from typing import Any
 
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except ModuleNotFoundError:
+    sd = None  # type: ignore[assignment]
 
 from askme.robot.ota_bridge import OTABridgeMetrics, get_ota_runtime_metrics
 

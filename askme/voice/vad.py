@@ -6,7 +6,10 @@ import logging
 from typing import Any
 
 import numpy as np
-import sherpa_onnx
+try:
+    import sherpa_onnx
+except ModuleNotFoundError:
+    sherpa_onnx = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 

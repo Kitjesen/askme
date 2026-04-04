@@ -16,7 +16,10 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except ModuleNotFoundError:
+    sd = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from askme.voice.audio_router import AudioRouter

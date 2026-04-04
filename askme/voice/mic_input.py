@@ -27,7 +27,10 @@ from contextlib import contextmanager
 from typing import Any, Generator
 
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except ModuleNotFoundError:
+    sd = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 

@@ -20,7 +20,10 @@ from askme.pipeline.brain_pipeline import BrainPipeline
 from askme.pipeline.skill_dispatcher import SkillDispatcher
 from askme.runtime.module import In, Module, ModuleRegistry, Out
 from askme.tools.tool_registry import ToolRegistry
-from askme.voice.audio_agent import AudioAgent
+try:
+    from askme.voice.audio_agent import AudioAgent
+except ModuleNotFoundError:
+    AudioAgent = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
