@@ -216,11 +216,12 @@ class MemoryBridge:
         if not self._enabled:
             return ""
 
-        # Try configured backend first
-        if self._backend == "robotmem" and self._ensure_robotmem():
+        # Try configured backend first — use to_thread so lazy init (ONNX load)
+        # never blocks the event loop on cold start.
+        if self._backend == "robotmem" and await asyncio.to_thread(self._ensure_robotmem):
             return await self._robotmem.retrieve(text)
 
-        if self._backend in ("mem0", "robotmem") and self._ensure_mem0():
+        if self._backend in ("mem0", "robotmem") and await asyncio.to_thread(self._ensure_mem0):
             return await self._retrieve_mem0(text)
 
         # Fallback to VectorStore
@@ -234,12 +235,12 @@ class MemoryBridge:
         if not self._enabled:
             return
 
-        # Try configured backend first
-        if self._backend == "robotmem" and self._ensure_robotmem():
+        # Try configured backend first — use to_thread so lazy init never blocks.
+        if self._backend == "robotmem" and await asyncio.to_thread(self._ensure_robotmem):
             await self._robotmem.save(user_text, assistant_text)
             return
 
-        if self._backend in ("mem0", "robotmem") and self._ensure_mem0():
+        if self._backend in ("mem0", "robotmem") and await asyncio.to_thread(self._ensure_mem0):
             await self._save_mem0(user_text, assistant_text)
             return
 

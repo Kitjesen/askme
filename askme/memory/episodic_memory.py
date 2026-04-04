@@ -311,26 +311,26 @@ class EpisodicMemory:
         """
         if not self._llm:
             return None
-        # Atomic check-and-set via asyncio.Lock to prevent concurrent reflections
         if self._reflect_lock is None:
             self._reflect_lock = asyncio.Lock()
-        if self._reflecting:
-            logger.debug("Reflection skipped: already running")
-            return None
+        async with self._reflect_lock:
+            if self._reflecting:
+                logger.debug("Reflection skipped: already running")
+                return None
 
-        # Check cooldown
-        now = time.time()
-        if not force and (now - self._last_reflect_time) < self._reflect_cooldown_s:
-            logger.debug("Reflection skipped: cooldown (%.0fs remaining)",
-                         self._reflect_cooldown_s - (now - self._last_reflect_time))
-            return None
+            # Check cooldown
+            now = time.time()
+            if not force and (now - self._last_reflect_time) < self._reflect_cooldown_s:
+                logger.debug("Reflection skipped: cooldown (%.0fs remaining)",
+                             self._reflect_cooldown_s - (now - self._last_reflect_time))
+                return None
 
-        # Check minimum events
-        if not force and len(self._buffer) < self._reflect_min_events:
-            logger.debug("Reflection skipped: only %d events", len(self._buffer))
-            return None
+            # Check minimum events
+            if not force and len(self._buffer) < self._reflect_min_events:
+                logger.debug("Reflection skipped: only %d events", len(self._buffer))
+                return None
 
-        self._reflecting = True
+            self._reflecting = True
         buffer_snapshot = list(self._buffer)  # snapshot before async LLM call
         episodes_text = "\n".join(ep.to_log_line() for ep in buffer_snapshot)
         existing_knowledge = self._load_all_knowledge()
@@ -362,9 +362,9 @@ class EpisodicMemory:
                 # call, the deque's left end may no longer contain the snapshot items.
                 self._flush_to_disk()
                 snapshot_ids = {id(ep) for ep in buffer_snapshot}
-                importance_reflected = sum(
-                    ep.importance for ep in self._buffer if id(ep) in snapshot_ids
-                )
+                # Use snapshot (not current buffer) — episodes may have been evicted
+                # by maxlen during the LLM await, making id() lookups unreliable.
+                importance_reflected = sum(ep.importance for ep in buffer_snapshot)
                 self._buffer = deque(
                     (ep for ep in self._buffer if id(ep) not in snapshot_ids),
                     maxlen=MAX_BUFFER_SIZE,

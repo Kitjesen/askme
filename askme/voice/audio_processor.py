@@ -97,7 +97,7 @@ class AudioProcessor:
             samples = self._filter.process(samples)
 
         # Step 2: float32 -> int16 + peak
-        samples_int16 = (samples * 32768).astype(np.int16)
+        samples_int16 = (samples * 32767).clip(-32768, 32767).astype(np.int16)
         peak = int(np.max(np.abs(samples_int16)))
 
         # Step 3: Spectral subtraction (operates on int16, returns int16)

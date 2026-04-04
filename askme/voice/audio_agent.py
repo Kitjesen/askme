@@ -184,8 +184,8 @@ class AudioAgent:
         self._agent_state = AgentState.IDLE
         self._refresh_voice_metrics()
 
-    def wait_speaking_done(self) -> None:
-        self.tts.wait_done()
+    def wait_speaking_done(self, timeout: float = 30.0) -> None:
+        self.tts.wait_done(timeout=timeout)
         self._refresh_voice_metrics()
 
     async def speak_and_wait(self, text: str) -> None:

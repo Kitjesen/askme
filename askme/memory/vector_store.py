@@ -165,8 +165,13 @@ class VectorStore:
             }
         try:
             self._store_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._store_path, "w", encoding="utf-8") as f:
+            tmp_path = self._store_path.with_suffix(".json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
+                f.flush()
+                import os as _os
+                _os.fsync(f.fileno())
+            tmp_path.replace(self._store_path)
             logger.debug("[VectorStore] Saved %d entries to %s", len(self._texts), self._store_path)
         except Exception as exc:
             logger.warning("[VectorStore] Save failed: %s", exc)

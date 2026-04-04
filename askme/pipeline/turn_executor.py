@@ -139,16 +139,6 @@ class TurnExecutor:
             self._pending_tasks.add(_estop_t)
             _estop_t.add_done_callback(self._pending_tasks.discard)
 
-        async def _compress_bg() -> None:
-            try:
-                await self._conversation.maybe_compress(self._llm)
-            except Exception as _e:
-                logger.warning("Conversation compression failed (non-critical): %s", _e)
-
-        _ct = asyncio.create_task(_compress_bg(), name="conv_compress")
-        self._pending_tasks.add(_ct)
-        _ct.add_done_callback(self._pending_tasks.discard)
-
         if not memory_task:
             memory_task = asyncio.create_task(self._memory.retrieve(user_text))
         vision_task = self._start_vision_capture()
@@ -177,6 +167,18 @@ class TurnExecutor:
         )
 
         self._conversation.add_user_message(user_text)
+
+        # Start compress AFTER add_user_message so the new user message is always
+        # included in maybe_compress's recent[-KEEP_RECENT:] snapshot and never lost.
+        async def _compress_bg() -> None:
+            try:
+                await self._conversation.maybe_compress(self._llm)
+            except Exception as _e:
+                logger.warning("Conversation compression failed (non-critical): %s", _e)
+
+        _ct = asyncio.create_task(_compress_bg(), name="conv_compress")
+        self._pending_tasks.add(_ct)
+        _ct.add_done_callback(self._pending_tasks.discard)
         messages = self._prompt_builder.prepare_messages(
             self._conversation.get_messages(system_prompt)
         )
@@ -190,27 +192,34 @@ class TurnExecutor:
                     messages, system_prompt, model=self._voice_model,
                     source=source,
                 )
-            if self._SILENT_MARKER in full_response:
+            if full_response.lstrip().startswith(self._SILENT_MARKER):
                 logger.info("[SILENT] Not addressed to robot, suppressing output")
                 self._audio.drain_buffers()
-                if (
-                    self._conversation.history
-                    and self._conversation.history[-1].get("role") == "user"
-                ):
-                    self._conversation.history.pop()
+                # Remove exactly the user message we added — match by content to
+                # avoid popping the wrong message if compress ran concurrently.
+                for i in range(len(self._conversation.history) - 1, -1, -1):
+                    m = self._conversation.history[i]
+                    if m.get("role") == "user" and m.get("content") == user_text:
+                        self._conversation.history.pop(i)
+                        break
                 return ""
 
             self._conversation.add_assistant_message(full_response)
             self._last_spoken_text = full_response
 
+            def _on_save_done(task: asyncio.Task) -> None:
+                self._pending_tasks.discard(task)
+                if not task.cancelled() and task.exception():
+                    logger.warning("Memory save failed (non-critical): %s", task.exception())
+
             if self._mem is not None:
                 _mt = asyncio.create_task(self._mem.save_to_vector(user_text, full_response))
                 self._pending_tasks.add(_mt)
-                _mt.add_done_callback(self._pending_tasks.discard)
+                _mt.add_done_callback(_on_save_done)
             elif self._memory is not None:
                 _mt = asyncio.create_task(self._memory.save(user_text, full_response))
                 self._pending_tasks.add(_mt)
-                _mt.add_done_callback(self._pending_tasks.discard)
+                _mt.add_done_callback(_on_save_done)
 
             if source == "voice":
                 await asyncio.to_thread(self._audio.wait_speaking_done)

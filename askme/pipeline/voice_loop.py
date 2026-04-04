@@ -151,6 +151,20 @@ class VoiceLoop:
                     await self._audio.speak_and_wait("已紧急停止。")
                     continue
 
+                # ── Quick reply — zero LLM, instant response ─────────────────
+                if intent.type == IntentType.QUICK_REPLY:
+                    if memory_task and not memory_task.done():
+                        memory_task.cancel()
+                        memory_task = None
+                    _quick_text = intent.skill_name or "好的。"
+                    self._audio.drain_buffers()
+                    await self._audio.speak_and_wait(_quick_text)
+                    self._pipeline._turn_executor._last_spoken_text = _quick_text
+                    if idle_task and not idle_task.done():
+                        idle_task.cancel()
+                    idle_task = self._pipeline.start_idle_reflection()
+                    continue
+
                 # ── Stop speaking — also cancels any active agent task ────────
                 if (
                     intent.type == IntentType.VOICE_TRIGGER
