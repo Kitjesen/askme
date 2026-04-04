@@ -135,11 +135,6 @@ class AddressDetector:
             logger.debug("[Address] YES: short text, default addressed")
             return True
 
-        # Rule 8: Longer text with no command signals → likely casual
-        if len(text_lower) > 6:
-            logger.info("[Address] NO: long text with no command signals: '%s'", text[:30])
-            return False
-
         # Default: addressed (safe — better to respond than miss a command)
         logger.debug("[Address] YES: default (uncertain)")
         return True
