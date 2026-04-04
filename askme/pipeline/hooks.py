@@ -36,7 +36,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
+
+if TYPE_CHECKING:
+    from askme.pipeline.protocols import TurnContext
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +73,10 @@ class ToolCallRecord:
 # ---------------------------------------------------------------------------
 
 # pre_turn(ctx) → bool | None  (False / None = proceed; True = skip this turn)
-PreTurnHook = Callable[["TurnContext"], Awaitable[bool | None]]  # type: ignore[name-defined]
+PreTurnHook = Callable[["TurnContext"], Awaitable[bool | None]]
 
 # post_turn(ctx, response) → None
-PostTurnHook = Callable[["TurnContext", str], Awaitable[None]]  # type: ignore[name-defined]
+PostTurnHook = Callable[["TurnContext", str], Awaitable[None]]
 
 # pre_tool(record_without_result) → str | None  (None = skip & use empty result)
 PreToolHook = Callable[[ToolCallRecord], Awaitable[str | None]]
@@ -149,7 +152,7 @@ class PipelineHooks:
 
     # ── Async firing helpers ───────────────────────────────────────────────
 
-    async def fire_pre_turn(self, ctx: "TurnContext") -> bool:  # type: ignore[name-defined]
+    async def fire_pre_turn(self, ctx: TurnContext) -> bool:
         """Fire all pre_turn hooks. Returns True if any hook says to skip."""
         for hook in self.pre_turn:
             try:
@@ -161,7 +164,7 @@ class PipelineHooks:
                 logger.warning("[hooks.pre_turn] Hook %s raised: %s", hook.__name__, exc)
         return False
 
-    async def fire_post_turn(self, ctx: "TurnContext", response: str) -> None:  # type: ignore[name-defined]
+    async def fire_post_turn(self, ctx: TurnContext, response: str) -> None:
         """Fire all post_turn hooks."""
         for hook in self.post_turn:
             try:
