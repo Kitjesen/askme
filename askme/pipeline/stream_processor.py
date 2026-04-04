@@ -83,6 +83,7 @@ class StreamProcessor:
         general_tool_max_safety_level: int,
         max_response_chars: int,
         voice_model: str | None = None,
+        cancel_token: asyncio.Event | None = None,
     ) -> None:
         self._llm = llm
         self._audio = audio
@@ -93,6 +94,7 @@ class StreamProcessor:
         self._max_response_chars = max_response_chars
         self._voice_model = voice_model
         self._think_filter = _ThinkFilter()
+        self._cancel_token = cancel_token
 
     def set_audio(self, audio: AudioAgent) -> None:
         self._audio = audio
@@ -224,6 +226,7 @@ class StreamProcessor:
                 nonlocal ttft_logged, thinking_task, slow_network_task
                 async for chunk in self._llm.chat_stream(
                     messages, tools=tool_definitions, tool_choice="auto", model=model,
+                    cancel_token=self._cancel_token,
                 ):
                     if not ttft_logged:
                         ttft_logged = True
@@ -263,7 +266,8 @@ class StreamProcessor:
         self._splitter.reset()
         self._think_filter.reset()
         full_response, _ = await self.consume_llm_stream(
-            self._llm.chat_stream(messages, model=model), source=source,
+            self._llm.chat_stream(messages, model=model, cancel_token=self._cancel_token),
+            source=source,
         )
         return full_response
 

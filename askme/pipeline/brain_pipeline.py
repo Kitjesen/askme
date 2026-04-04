@@ -2,6 +2,12 @@
 
 Decomposed from the original 1093-line monolith (GAP-CORE-1).
 Public API is unchanged: process(), execute_skill(), shutdown().
+
+Decoupling improvements:
+  - Constructor accepts StreamProcessorProtocol / SkillGateProtocol /
+    TurnExecutorProtocol — tests pass mocks directly, no private-attr access.
+  - cancel_token (asyncio.Event) is injected externally; handle_estop() calls
+    cancel_token.set() and each sub-component stops autonomously.
 """
 
 from __future__ import annotations
@@ -12,6 +18,11 @@ import re
 from typing import Any, TYPE_CHECKING
 
 from askme.pipeline.prompt_builder import PromptBuilder
+from askme.pipeline.protocols import (
+    SkillGateProtocol,
+    StreamProcessorProtocol,
+    TurnExecutorProtocol,
+)
 from askme.pipeline.skill_gate import SkillGate
 from askme.pipeline.stream_processor import StreamProcessor
 from askme.pipeline.tool_executor import ToolExecutor
@@ -90,88 +101,124 @@ class BrainPipeline:
         agent_shell: ThunderAgentShell | None = None,
         memory_system: MemorySystem | None = None,
         qp_memory: Any = None,
+        # ── Decoupled sub-component injection (Protocol types) ────────────
+        # Pass pre-built instances for testing or custom implementations.
+        # When None (default) the components are constructed from the raw args above.
+        cancel_token: asyncio.Event | None = None,
+        stream_processor: StreamProcessorProtocol | None = None,
+        skill_gate: SkillGateProtocol | None = None,
+        turn_executor: TurnExecutorProtocol | None = None,
     ) -> None:
         max_chars = (
             max_response_chars if max_response_chars > 0
             else self._DEFAULT_MAX_RESPONSE_CHARS
         )
 
-        # Shared dependencies
+        # Shared state
         self._tools = tools
         self._audio_ref = audio  # use dunder to avoid shadowing property
         self._conversation = conversation
         self._arm = arm_controller
         self._dog_safety = dog_safety_client
 
-        # PromptBuilder (already extracted)
-        self._prompt_builder = PromptBuilder(
-            base_prompt=system_prompt,
-            prompt_seed=prompt_seed or [],
-            user_prefix=user_prefix,
-            tools=tools,
-            skill_manager=skill_manager,
-            general_tool_max_safety_level=general_tool_max_safety_level,
-            dog_safety=dog_safety_client,
-            episodic=episodic_memory,
-            session_memory=session_memory,
-            vision=vision,
-            qp_memory=qp_memory,
-            memory_system=memory_system,
-        )
+        # cancel_token — shared across all sub-components.
+        # handle_estop() calls cancel_token.set(); each component stops autonomously.
+        self._cancel_token: asyncio.Event = cancel_token if cancel_token is not None else asyncio.Event()
 
-        # StreamProcessor (LLM streaming + TTS)
-        self._tool_executor = ToolExecutor(
-            tools=tools,
-            conversation=conversation,
-            episodic=episodic_memory,
-            general_tool_max_safety_level=general_tool_max_safety_level,
-            prompt_builder=self._prompt_builder,
-            stream_and_speak=None,  # patched below
-        )
-        self._stream_processor = StreamProcessor(
-            llm=llm,
-            audio=audio,
-            tools=tools,
-            tool_executor=self._tool_executor,
-            splitter=splitter,
-            general_tool_max_safety_level=general_tool_max_safety_level,
-            max_response_chars=max_chars,
-            voice_model=voice_model,
-        )
-        # Patch ToolExecutor callback to StreamProcessor
-        self._tool_executor._stream_and_speak = self._stream_processor.stream_and_speak
+        if stream_processor is not None and skill_gate is not None and turn_executor is not None:
+            # ── Injection path (tests / custom implementations) ───────────
+            # All three protocol objects provided; skip internal construction.
+            self._stream_processor: StreamProcessorProtocol = stream_processor
+            self._skill_gate: SkillGateProtocol = skill_gate
+            self._turn_executor: TurnExecutorProtocol = turn_executor
+            # PromptBuilder not needed when sub-components are injected
+            self._prompt_builder = None
+            self._tool_executor = None
+        else:
+            # ── Default construction path ─────────────────────────────────
+            # PromptBuilder (already extracted)
+            self._prompt_builder = PromptBuilder(
+                base_prompt=system_prompt,
+                prompt_seed=prompt_seed or [],
+                user_prefix=user_prefix,
+                tools=tools,
+                skill_manager=skill_manager,
+                general_tool_max_safety_level=general_tool_max_safety_level,
+                dog_safety=dog_safety_client,
+                episodic=episodic_memory,
+                session_memory=session_memory,
+                vision=vision,
+                qp_memory=qp_memory,
+                memory_system=memory_system,
+            )
 
-        # SkillGate (skill execution + safety)
-        self._skill_gate = SkillGate(
-            skill_manager=skill_manager,
-            skill_executor=skill_executor,
-            audio=audio,
-            conversation=conversation,
-            dog_safety=dog_safety_client,
-            dog_control=dog_control_client,
-            arm_controller=arm_controller,
-            episodic=episodic_memory,
-            memory_system=memory_system,
-            agent_shell=agent_shell,
-            prompt_seed=prompt_seed,
-            max_response_chars=max_chars,
-        )
+            # StreamProcessor (LLM streaming + TTS)
+            self._tool_executor = ToolExecutor(
+                tools=tools,
+                conversation=conversation,
+                episodic=episodic_memory,
+                general_tool_max_safety_level=general_tool_max_safety_level,
+                prompt_builder=self._prompt_builder,
+                stream_and_speak=None,  # patched below
+            )
+            self._stream_processor = (
+                stream_processor
+                if stream_processor is not None
+                else StreamProcessor(
+                    llm=llm,
+                    audio=audio,
+                    tools=tools,
+                    tool_executor=self._tool_executor,
+                    splitter=splitter,
+                    general_tool_max_safety_level=general_tool_max_safety_level,
+                    max_response_chars=max_chars,
+                    voice_model=voice_model,
+                    cancel_token=self._cancel_token,
+                )
+            )
+            # Patch ToolExecutor callback to StreamProcessor
+            self._tool_executor._stream_and_speak = self._stream_processor.stream_and_speak
 
-        # TurnExecutor (full turn orchestration)
-        self._turn_executor = TurnExecutor(
-            llm=llm,
-            conversation=conversation,
-            memory=memory,
-            audio=audio,
-            prompt_builder=self._prompt_builder,
-            stream_processor=self._stream_processor,
-            dog_safety=dog_safety_client,
-            vision=vision,
-            episodic=episodic_memory,
-            memory_system=memory_system,
-            qp_memory=qp_memory,
-            voice_model=voice_model,
-        )
+            # SkillGate (skill execution + safety)
+            self._skill_gate = (
+                skill_gate
+                if skill_gate is not None
+                else SkillGate(
+                    skill_manager=skill_manager,
+                    skill_executor=skill_executor,
+                    audio=audio,
+                    conversation=conversation,
+                    dog_safety=dog_safety_client,
+                    dog_control=dog_control_client,
+                    arm_controller=arm_controller,
+                    episodic=episodic_memory,
+                    memory_system=memory_system,
+                    agent_shell=agent_shell,
+                    prompt_seed=prompt_seed,
+                    max_response_chars=max_chars,
+                )
+            )
+
+            # TurnExecutor (full turn orchestration)
+            self._turn_executor = (
+                turn_executor
+                if turn_executor is not None
+                else TurnExecutor(
+                    llm=llm,
+                    conversation=conversation,
+                    memory=memory,
+                    audio=audio,
+                    prompt_builder=self._prompt_builder,
+                    stream_processor=self._stream_processor,
+                    dog_safety=dog_safety_client,
+                    vision=vision,
+                    episodic=episodic_memory,
+                    memory_system=memory_system,
+                    qp_memory=qp_memory,
+                    voice_model=voice_model,
+                    cancel_token=self._cancel_token,
+                )
+            )
 
         # Store for direct access (backward compat)
         self._skill_manager = skill_manager
@@ -229,13 +276,21 @@ class BrainPipeline:
         await self._turn_executor.shutdown()
 
     def handle_estop(self) -> None:
+        """Trigger an emergency stop.
+
+        Sets cancel_token so all sub-components (StreamProcessor, TurnExecutor,
+        SkillGate) stop autonomously via their own cancel checks — no manual
+        per-component coordination required.  Hardware stop is also issued here.
+        """
         logger.warning("E-STOP triggered!")
+        # Signal all sub-components to stop — each checks cancel_token independently.
+        self._cancel_token.set()
         if self._arm:
             self._arm.emergency_stop()
         if self._dog_safety and self._dog_safety.is_configured():
             self._dog_safety.notify_estop()
             logger.warning("E-STOP: notified dog-safety-service")
-        logger.warning("E-STOP: local motion halted.")
+        logger.warning("E-STOP: cancel_token set, local motion halted.")
 
     def has_pending_tool_approval(self) -> bool:
         return self._tools.has_pending_approval()

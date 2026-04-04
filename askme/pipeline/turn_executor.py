@@ -43,6 +43,7 @@ class TurnExecutor:
         memory_system: MemorySystem | None = None,
         qp_memory: Any = None,
         voice_model: str | None = None,
+        cancel_token: asyncio.Event | None = None,
     ) -> None:
         self._llm = llm
         self._conversation = conversation
@@ -56,6 +57,7 @@ class TurnExecutor:
         self._mem = memory_system
         self._qp_memory = qp_memory
         self._voice_model = voice_model
+        self._cancel_token = cancel_token
 
         self._qp_turn_count = 0
         self._last_spoken_text: str = ""
@@ -125,6 +127,10 @@ class TurnExecutor:
     ) -> str:
         """Run the full brain pipeline for *user_text*. Returns assistant reply."""
         logger.info("Processing: %s", user_text[:60])
+
+        if self._cancel_token is not None and self._cancel_token.is_set():
+            logger.warning("[TurnExecutor] cancel_token set — skipping turn")
+            return ""
 
         if self._llm_semaphore is None:
             self._llm_semaphore = asyncio.Semaphore(1)

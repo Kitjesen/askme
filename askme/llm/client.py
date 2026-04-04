@@ -5,12 +5,16 @@ Features:
   - Configurable timeout on all API calls
   - Automatic retry with exponential backoff for transient errors
   - Model fallback chain (e.g. Opus -> Sonnet -> Haiku)
+  - cancel_token support: pass an asyncio.Event to chat_stream() for E-STOP
 
 Usage::
 
     from askme.brain import LLMClient
+    from askme.llm.config import LLMConfig
 
-    client = LLMClient()                       # reads config automatically
+    cfg = LLMConfig(api_key="sk-...", model="MiniMax-M2.7-highspeed")
+    client = LLMClient(llm_config=cfg)          # explicit config (preferred)
+    client = LLMClient()                        # reads config.yaml (legacy)
     stream = client.chat_stream(messages)       # async generator
     response = await client.chat(messages)      # full response string
 """
@@ -26,8 +30,8 @@ from typing import Any, AsyncIterator, Sequence
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from openai.types.chat import ChatCompletionChunk
 
-from askme.config import get_config
 from askme.interfaces.llm import LLMBackend
+from askme.llm.config import LLMConfig
 from askme.robot.ota_bridge import OTABridgeMetrics
 
 logger = logging.getLogger(__name__)
@@ -37,28 +41,65 @@ _RETRYABLE_STATUS = {500, 502, 503, 504, 529}
 
 
 class LLMClient(LLMBackend):
-    """Async wrapper around ``AsyncOpenAI`` with timeout, retry, and fallback."""
+    """Async wrapper around ``AsyncOpenAI`` with timeout, retry, and fallback.
+
+    Preferred construction (dependency-inverted)::
+
+        cfg = LLMConfig.from_cfg(brain_section)
+        client = LLMClient(llm_config=cfg, metrics=ota_metrics)
+
+    Legacy construction (reads config.yaml — kept for backward-compat)::
+
+        client = LLMClient(api_key=..., model=...)
+    """
 
     def __init__(
         self,
         *,
+        llm_config: LLMConfig | None = None,
+        # Legacy keyword overrides — used when llm_config is None
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
         metrics: OTABridgeMetrics | None = None,
     ) -> None:
-        cfg = get_config().get("brain", {})
+        if llm_config is not None:
+            # Clean path: all config comes from LLMConfig; no config.yaml read.
+            resolved_api_key = llm_config.api_key
+            resolved_base_url = llm_config.base_url
+            resolved_model = llm_config.model
+            max_tokens = llm_config.max_tokens
+            temperature = llm_config.temperature
+            timeout = llm_config.timeout
+            max_retries = llm_config.max_retries
+            fallback_models = llm_config.fallback_models
+            minimax_key = llm_config.minimax_api_key
+            minimax_url = llm_config.minimax_base_url
+        else:
+            # Legacy path: read config.yaml, allow per-call keyword overrides.
+            from askme.config import get_config
+            cfg = get_config().get("brain", {})
+            resolved_api_key = api_key or cfg.get("api_key", "")
+            resolved_base_url = base_url or cfg.get("base_url", "https://api.minimax.chat/v1")
+            resolved_model = model or cfg.get("model", "MiniMax-M2.7-highspeed")
+            max_tokens = cfg.get("max_tokens", 0)
+            temperature = cfg.get("temperature", 0.7)
+            timeout = cfg.get("timeout", 30.0)
+            max_retries = cfg.get("max_retries", 2)
+            fallback_models = cfg.get("fallback_models", [])
+            minimax_key = cfg.get("minimax_api_key", "")
+            minimax_url = cfg.get("minimax_base_url", "https://api.minimax.chat/v1")
 
-        self.api_key: str = api_key or cfg.get("api_key", "")
-        self.base_url: str = base_url or cfg.get("base_url", "https://api.minimax.chat/v1")
-        self.model: str = model or cfg.get("model", "MiniMax-M2.7-highspeed")
-        self.max_tokens: int = cfg.get("max_tokens", 0)
-        self.temperature: float = cfg.get("temperature", 0.7)
+        self.api_key: str = resolved_api_key
+        self.base_url: str = resolved_base_url
+        self.model: str = resolved_model
+        self.max_tokens: int = max_tokens
+        self.temperature: float = temperature
 
         # Retry / resilience config
-        self._timeout: float = cfg.get("timeout", 30.0)
-        self._max_retries: int = cfg.get("max_retries", 2)
-        self._fallback_models: list[str] = cfg.get("fallback_models", [])
+        self._timeout: float = timeout
+        self._max_retries: int = max_retries
+        self._fallback_models: list[str] = fallback_models
         self._metrics = metrics
 
         # Disable SDK internal retry — we handle retry + model fallback ourselves
@@ -73,8 +114,6 @@ class LLMClient(LLMBackend):
         self._client = create_async_openai_client(_cfg)
 
         # MiniMax client (optional — enabled when minimax_api_key is set)
-        minimax_key = cfg.get("minimax_api_key", "")
-        minimax_url = cfg.get("minimax_base_url", "https://api.minimax.chat/v1")
         self._minimax_client: AsyncOpenAI | None = None
         if minimax_key:
             _mm_cfg = LLMClientConfig(
@@ -97,11 +136,15 @@ class LLMClient(LLMBackend):
         model: str | None = None,
         temperature: float | None = None,
         thinking: bool = False,
+        cancel_token: asyncio.Event | None = None,
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Return an async streaming iterator of ``ChatCompletionChunk``.
 
         Retries on transient errors and falls back to alternate models.
         ``thinking=False`` by default to skip <think> generation and reduce TTFT.
+
+        Pass ``cancel_token`` (an asyncio.Event) to support mid-stream E-STOP.
+        When the event is set the generator stops yielding and returns cleanly.
         """
         started_at = time.perf_counter()
         success = False
@@ -130,7 +173,7 @@ class LLMClient(LLMBackend):
                 kwargs["model"] = model_name
                 streaming_started = False
                 try:
-                    async for chunk in self._stream_with_retry(kwargs):
+                    async for chunk in self._stream_with_retry(kwargs, cancel_token=cancel_token):
                         streaming_started = True
                         yield chunk
                     success = True
@@ -282,16 +325,24 @@ class LLMClient(LLMBackend):
     async def _stream_with_retry(
         self,
         kwargs: dict[str, Any],
+        cancel_token: asyncio.Event | None = None,
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Retry streaming call up to ``_max_retries`` times with backoff.
 
         Only the connection phase is retried. Once chunks start flowing,
         mid-stream errors propagate to the caller because retrying would replay
         already-spoken audio.
+
+        If ``cancel_token`` is set before or during streaming the generator
+        stops yielding and returns cleanly — callers see a normal end-of-stream.
         """
         last_exc: Exception | None = None
 
         for attempt in range(self._max_retries + 1):
+            if cancel_token is not None and cancel_token.is_set():
+                logger.info("[LLM] cancel_token set — aborting before attempt %d", attempt)
+                return
+
             try:
                 client = self._client_for_model(kwargs.get("model", ""))
                 response = await client.chat.completions.create(**kwargs)
@@ -324,6 +375,9 @@ class LLMClient(LLMBackend):
                 raise
 
             async for chunk in response:
+                if cancel_token is not None and cancel_token.is_set():
+                    logger.info("[LLM] cancel_token set — stopping mid-stream")
+                    return
                 yield chunk
             return
 

@@ -40,7 +40,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Generic, TypeVar, get_args, get_origin, get_type_hints
 
 logger = logging.getLogger(__name__)
 
@@ -82,14 +82,71 @@ class Required(Generic[T]):
     """
 
 
+class AmbiguousPortError(Exception):
+    """Raised when a type has multiple Out providers and no Alias is used.
+
+    When two or more modules declare ``Out[SomeType]`` and a third module
+    declares ``In[SomeType]``, type-only (semantic) wiring cannot choose one
+    provider without guessing.  Decorate the In port with ``Alias`` to pick
+    the intended provider explicitly::
+
+        class MyModule(Module):
+            # Ambiguous — raises AmbiguousPortError at build time:
+            client: In[LLMClient]
+
+            # Explicit — wires to the module named "primary_llm":
+            client: Alias[LLMClient, "primary_llm"]
+    """
+
+
+@dataclass
+class _AliasMarker:
+    """Internal metadata attached to Alias[T, 'name'] annotations."""
+    provider_name: str
+
+
+class Alias:
+    """Explicitly select a named provider when multiple Out[T] exist.
+
+    Usage::
+
+        class MyModule(Module):
+            # Two LLMClient providers exist → use the one from "fast_llm" module:
+            fast_client: Alias[LLMClient, "fast_llm"]
+            slow_client: Alias[LLMClient, "slow_llm"]
+
+    ``Alias[T, "name"]`` produces ``Annotated[T, _AliasMarker("name")]`` so
+    standard type-checking tools see the base type ``T``.
+
+    Wiring rules:
+      - Finds the module named *name* that exposes ``Out[T]``.
+      - Raises ``ValueError`` if no such module/port exists.
+      - Raises ``AmbiguousPortError`` if there are multiple providers of T and
+        an ``In[T]`` (without Alias) is used anywhere in the runtime.
+    """
+
+    def __class_getitem__(cls, params: tuple) -> Any:  # type: ignore[override]
+        if not isinstance(params, tuple) or len(params) != 2:
+            raise TypeError(
+                f"Alias requires exactly two parameters: Alias[Type, 'name'], got {params!r}"
+            )
+        t, name = params
+        if not isinstance(name, str):
+            raise TypeError(
+                f"Alias provider name must be a string literal, got {name!r}"
+            )
+        return Annotated[t, _AliasMarker(name)]
+
+
 @dataclass(frozen=True)
 class PortInfo:
     """Metadata about a declared port on a module."""
 
     name: str
-    direction: str  # "in", "out", or "required_in"
+    direction: str  # "in", "out", "required_in", or "alias_in"
     data_type: type
     module_name: str
+    alias_name: str | None = None  # set for Alias[T, "name"] ports
 
 
 def _scan_ports(module_class: type[Module]) -> list[PortInfo]:
@@ -100,12 +157,29 @@ def _scan_ports(module_class: type[Module]) -> list[PortInfo]:
         for c in reversed(module_class.__mro__):
             if c.__module__ in sys.modules:
                 globalns.update(sys.modules[c.__module__].__dict__)
-        hints = get_type_hints(module_class, globalns=globalns)
+        # include_extras=True preserves Annotated[T, metadata] so Alias markers
+        # are not stripped; without it Annotated[T, ...] collapses to T.
+        hints = get_type_hints(module_class, globalns=globalns, include_extras=True)
     except Exception:
         hints = getattr(module_class, "__annotations__", {})
 
     for attr_name, annotation in hints.items():
         origin = get_origin(annotation)
+
+        # Alias[T, "name"] is encoded as Annotated[T, _AliasMarker("name")]
+        if origin is Annotated:
+            ann_args = get_args(annotation)
+            base_type = ann_args[0] if ann_args else Any
+            alias_marker = next(
+                (a for a in ann_args[1:] if isinstance(a, _AliasMarker)), None
+            )
+            if alias_marker is not None:
+                ports.append(
+                    PortInfo(attr_name, "alias_in", base_type, module_class.name,
+                             alias_name=alias_marker.provider_name)
+                )
+                continue
+
         if origin is Out:
             args = get_args(annotation)
             data_type = args[0] if args else Any
@@ -132,58 +206,95 @@ class WireResult:
 
 
 def _auto_wire(instances: dict[str, Module]) -> WireResult:
-    """Match In/Required ports to Out ports. Supports:
+    """Match In/Required/Alias ports to Out ports. Supports:
 
-    1. **Exact match**: name + type both match (highest priority)
-    2. **Semantic match**: type matches but name differs — only when the type has
-       exactly one Out and one In across all modules (unambiguous)
-    3. **Required enforcement**: Required[T] ports with no match raise ValueError
-    4. **Orphan detection**: Out ports with no subscriber are flagged
+    1. **Exact match**: name + type both match (highest priority).
+       Raises ``AmbiguousPortError`` when two modules share the same Out port
+       name and type — use ``Alias`` to select one.
+    2. **Semantic match**: type matches but name differs — only when exactly one
+       Out[T] provider exists (unambiguous).
+    3. **Alias match**: ``Alias[T, "module_name"]`` — explicitly selects Out[T]
+       from the named module; safe when multiple providers exist.
+    4. **Ambiguity guard**: ``In[T]`` / ``Required[T]`` when ≥2 providers exist
+       raises ``AmbiguousPortError`` instead of silently doing nothing.
+    5. **Required enforcement**: ``Required[T]`` with no match raises ValueError.
+    6. **Orphan detection**: Out ports with no subscriber are flagged.
     """
-    # Collect all Out ports
-    out_by_name_type: dict[tuple[str, type], tuple[str, Module]] = {}
-    out_by_type: dict[type, list[tuple[str, str, Module]]] = {}  # type → [(port_name, mod_name, mod)]
+    # Index Out ports by (port_name, data_type) → list[(mod_name, mod)]
+    # Allows multiple providers; ambiguity is flagged at wiring time, not here.
+    out_by_name_type: dict[tuple[str, type], list[tuple[str, Module]]] = {}
+    # Index by data_type → list[(port_name, mod_name, mod)] for semantic match
+    out_by_type: dict[type, list[tuple[str, str, Module]]] = {}
+    # Index by (module_name, data_type) → (port_name, mod) for Alias lookup
+    out_by_mod_type: dict[tuple[str, type], tuple[str, Module]] = {}
 
     for mod_name, mod in instances.items():
         for port in _scan_ports(type(mod)):
             if port.direction == "out":
                 key = (port.name, port.data_type)
-                if key in out_by_name_type:
-                    raise ValueError(
-                        f"Ambiguous Out port '{port.name}' ({port.data_type.__name__}): "
-                        f"provided by both '{out_by_name_type[key][0]}' and '{mod_name}'"
-                    )
-                out_by_name_type[key] = (mod_name, mod)
+                out_by_name_type.setdefault(key, []).append((mod_name, mod))
                 out_by_type.setdefault(port.data_type, []).append(
                     (port.name, mod_name, mod)
                 )
+                out_by_mod_type[(mod_name, port.data_type)] = (port.name, mod)
 
     wired: list[tuple[str, str, str]] = []
     unwired_optional: list[tuple[str, str, str]] = []
     semantic_matches: list[tuple[str, str, str, str]] = []
     consumed_outs: set[tuple[str, type]] = set()
 
-    # Collect all In/Required ports
+    # Collect all In/Required/Alias ports
     in_ports: list[tuple[str, Module, PortInfo]] = []
     for mod_name, mod in instances.items():
         for port in _scan_ports(type(mod)):
-            if port.direction in ("in", "required_in"):
+            if port.direction in ("in", "required_in", "alias_in"):
                 in_ports.append((mod_name, mod, port))
 
     for mod_name, mod, port in in_ports:
-        # 1. Try exact match (name + type)
-        key = (port.name, port.data_type)
-        match = out_by_name_type.get(key)
 
-        if match:
-            out_mod_name, out_mod = match
+        # ── 0. Alias[T, "provider_name"] — explicit named lookup ──────────
+        if port.direction == "alias_in":
+            provider_name = port.alias_name  # guaranteed non-None for alias_in
+            alias_match = out_by_mod_type.get((provider_name, port.data_type))
+            if alias_match:
+                out_port_name, out_mod = alias_match
+                setattr(mod, port.name, out_mod)
+                wired.append((mod_name, port.name, provider_name))
+                consumed_outs.add((out_port_name, port.data_type))
+                logger.debug(
+                    "Wired (alias): %s.%s ← %s.%s (%s)",
+                    mod_name, port.name, provider_name, out_port_name,
+                    port.data_type.__name__,
+                )
+            else:
+                raise ValueError(
+                    f"Alias port '{mod_name}.{port.name}' ({port.data_type.__name__}) "
+                    f"references provider '{provider_name}' but no matching "
+                    f"Out[{port.data_type.__name__}] was found on that module — cannot build"
+                )
+            continue
+
+        # ── 1. Exact match (name + type) ──────────────────────────────────
+        key = (port.name, port.data_type)
+        exact_providers = out_by_name_type.get(key, [])
+
+        if len(exact_providers) == 1:
+            out_mod_name, out_mod = exact_providers[0]
             setattr(mod, port.name, out_mod)
             wired.append((mod_name, port.name, out_mod_name))
             consumed_outs.add(key)
             logger.debug("Wired (exact): %s.%s ← %s.%s", mod_name, port.name, out_mod_name, port.name)
             continue
 
-        # 2. Try semantic match (same type, different name, unambiguous)
+        if len(exact_providers) > 1:
+            provider_list = ", ".join(f"'{mn}'" for mn, _ in exact_providers)
+            raise AmbiguousPortError(
+                f"Port '{mod_name}.{port.name}' ({port.data_type.__name__}) matches "
+                f"Out ports on {len(exact_providers)} modules: {provider_list}. "
+                f"Use Alias[{port.data_type.__name__}, 'module_name'] to select one explicitly."
+            )
+
+        # ── 2. Semantic match (same type, unambiguous) ────────────────────
         type_providers = out_by_type.get(port.data_type, [])
         if len(type_providers) == 1:
             out_port_name, out_mod_name, out_mod = type_providers[0]
@@ -198,7 +309,20 @@ def _auto_wire(instances: dict[str, Module]) -> WireResult:
             )
             continue
 
-        # 3. No match
+        # ── 3. Ambiguity guard ────────────────────────────────────────────
+        # Multiple providers exist for this type but no Alias was used.
+        # Silently skipping would break when a new module is added later.
+        if len(type_providers) > 1:
+            provider_list = ", ".join(
+                f"'{mn}.{pn}'" for pn, mn, _ in type_providers
+            )
+            raise AmbiguousPortError(
+                f"Port '{mod_name}.{port.name}' ({port.data_type.__name__}) has "
+                f"{len(type_providers)} Out providers: {provider_list}. "
+                f"Use Alias[{port.data_type.__name__}, 'module_name'] to select one explicitly."
+            )
+
+        # ── 4. No match ───────────────────────────────────────────────────
         if port.direction == "required_in":
             raise ValueError(
                 f"Required port '{mod_name}.{port.name}' ({port.data_type.__name__}) "
@@ -209,12 +333,16 @@ def _auto_wire(instances: dict[str, Module]) -> WireResult:
         unwired_optional.append((mod_name, port.name, port.data_type.__name__))
         logger.debug("Unwired (optional): %s.%s (%s)", mod_name, port.name, port.data_type.__name__)
 
-    # 4. Detect orphan Outs (no subscriber)
+    # ── 5. Detect orphan Outs (no subscriber) ────────────────────────────
     orphan_outs: list[tuple[str, str, str]] = []
-    for (port_name, data_type), (mod_name, _) in out_by_name_type.items():
-        if (port_name, data_type) not in consumed_outs:
-            orphan_outs.append((mod_name, port_name, data_type.__name__))
-            logger.warning("Orphan Out: %s.%s (%s) — no subscriber", mod_name, port_name, data_type.__name__)
+    for (port_name, data_type), providers in out_by_name_type.items():
+        for mod_name, _ in providers:
+            if (port_name, data_type) not in consumed_outs:
+                orphan_outs.append((mod_name, port_name, data_type.__name__))
+                logger.warning(
+                    "Orphan Out: %s.%s (%s) — no subscriber",
+                    mod_name, port_name, data_type.__name__,
+                )
 
     return WireResult(
         wired=wired,

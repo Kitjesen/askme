@@ -8,13 +8,19 @@ from typing import Any
 
 from askme.runtime.module import Module, ModuleRegistry, Out
 from askme.llm.client import LLMClient
+from askme.llm.config import LLMConfig
 from askme.robot.ota_bridge import OTABridgeMetrics
 
 logger = logging.getLogger(__name__)
 
 
 class LLMModule(Module):
-    """Provides LLMClient with background warmup to eliminate cold-start latency."""
+    """Provides LLMClient with background warmup to eliminate cold-start latency.
+
+    Reads the ``brain:`` section of config.yaml here — the only place in the
+    system that should know about config.yaml layout.  Passes an LLMConfig to
+    LLMClient so the client itself stays config-file-agnostic.
+    """
 
     name = "llm"
     provides = ("llm",)
@@ -23,7 +29,8 @@ class LLMModule(Module):
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         self.ota_metrics = OTABridgeMetrics()
-        self.client = LLMClient(metrics=self.ota_metrics)
+        llm_config = LLMConfig.from_cfg(cfg.get("brain", {}))
+        self.client = LLMClient(llm_config=llm_config, metrics=self.ota_metrics)
         self._warmup_task: asyncio.Task | None = None
         logger.info("LLMModule: built (model=%s)", self.client.model)
 
