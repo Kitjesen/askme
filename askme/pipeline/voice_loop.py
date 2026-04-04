@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from askme.llm.intent_router import IntentRouter
     from askme.pipeline.brain_pipeline import BrainPipeline
     from askme.pipeline.skill_dispatcher import SkillDispatcher
+    from askme.skills.skill_model import SkillDefinition
     from askme.voice.audio_agent import AudioAgent
     from askme.voice.runtime_bridge import VoiceRuntimeBridge
 
@@ -448,7 +449,7 @@ class VoiceLoop:
 
         logger.info("Bye!")
 
-    def _slot_present(self, skill: "SkillDefinition", user_text: str) -> bool:  # type: ignore[name-defined]
+    def _slot_present(self, skill: SkillDefinition, user_text: str) -> bool:
         """Proxy to slot_utils.slot_present — kept for backward compatibility with tests."""
         from askme.pipeline.proactive.slot_utils import slot_present
         return slot_present(skill, user_text, self._pipeline)

@@ -53,6 +53,7 @@ class MemoryBridge:
                 If None, read from ``config["app"]["data_dir"]``.
         """
         cfg = config if config is not None else get_config()
+        self._brain_cfg: dict[str, Any] = cfg.get("brain", {})
         self._mem_cfg: dict[str, Any] = cfg.get("memory", {})
 
         self._enabled: bool = self._mem_cfg.get("enabled", True)
@@ -122,7 +123,7 @@ class MemoryBridge:
         try:
             from mem0 import Memory
 
-            brain_cfg = get_config().get("brain", {})
+            brain_cfg = self._brain_cfg
             config = {
                 "vector_store": {
                     "provider": "qdrant",
@@ -167,8 +168,7 @@ class MemoryBridge:
         try:
             from askme.memory.robotmem_backend import RobotMemBackend
 
-            brain_cfg = get_config().get("brain", {})
-            self._robotmem = RobotMemBackend(self._mem_cfg, brain_cfg)
+            self._robotmem = RobotMemBackend(self._mem_cfg, self._brain_cfg)
             inited = self._robotmem._ensure_robotmem()
             if not inited:
                 self._robotmem_failed = True
@@ -274,12 +274,8 @@ class MemoryBridge:
         if not self._enabled or not store or not store.available:
             return 0
 
-        cfg = get_config()
-        data_dir = cfg.get("app", {}).get("data_dir", "data")
-        resolved = Path(data_dir)
-        if not resolved.is_absolute():
-            resolved = project_root() / resolved
-        memory_dir = resolved / "memory"
+        # _store_path = <data_dir>/memory/vectors/store.json → parent.parent = <data_dir>/memory
+        memory_dir = self._store_path.parent.parent
 
         imported = 0
 
