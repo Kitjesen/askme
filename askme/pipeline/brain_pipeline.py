@@ -60,6 +60,19 @@ class BrainPipeline:
     """
 
     _DEFAULT_MAX_RESPONSE_CHARS = 500
+    # Default system prompt used when none is provided via config.yaml.
+    # Override by setting ``brain.system_prompt`` in config.yaml or passing
+    # ``system_prompt=`` to the constructor. The prompt is intentionally kept
+    # in the source as a self-documenting default, not buried in a data file.
+    _DEFAULT_SYSTEM_PROMPT = (
+        "你是穹沛科技的机器人语音助手，搭载在巡检机器人上。"
+        "操作员是工程师和现场人员。"
+        "说话简洁口语化，像对讲机里的值班员。"
+        "短句为主，不超过80字。"
+        "不用markdown、emoji、英文。"
+        "不确定时说'不确定，需要确认'，不编造信息。"
+        "绝不说自己是AI助手或语言模型。"
+    )
 
     def __init__(
         self,
@@ -78,15 +91,7 @@ class BrainPipeline:
         vision: VisionBridge | None = None,
         session_memory: SessionMemory | None = None,
         episodic_memory: EpisodicMemory | None = None,
-        system_prompt: str = (
-            "你是穹沛科技的机器人语音助手，搭载在巡检机器人上。"
-            "操作员是工程师和现场人员。"
-            "说话简洁口语化，像对讲机里的值班员。"
-            "短句为主，不超过80字。"
-            "不用markdown、emoji、英文。"
-            "不确定时说'不确定，需要确认'，不编造信息。"
-            "绝不说自己是AI助手或语言模型。"
-        ),
+        system_prompt: str = "",
         prompt_seed: list[dict[str, str]] | None = None,
         user_prefix: str = "",
         voice_model: str | None = None,
@@ -112,6 +117,10 @@ class BrainPipeline:
             max_response_chars if max_response_chars > 0
             else self._DEFAULT_MAX_RESPONSE_CHARS
         )
+
+        # Apply default system prompt when none provided.
+        if not system_prompt:
+            system_prompt = self._DEFAULT_SYSTEM_PROMPT
 
         # Shared state
         self._tools = tools

@@ -3,7 +3,49 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import logging
 import re
+
+# ---------------------------------------------------------------------------
+# Structured logging context (item 21)
+# ---------------------------------------------------------------------------
+
+# Context vars for structured log fields injected per-turn.
+# Set at the start of TurnExecutor.process() so all log records within a turn
+# automatically carry trace_id and session_id without manual thread-local tricks.
+_log_trace_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "log_trace_id", default="-"
+)
+_log_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "log_session_id", default="-"
+)
+
+
+class PipelineLogFilter(logging.Filter):
+    """Inject ``trace_id`` and ``session_id`` from context vars into every record.
+
+    Install once at startup::
+
+        import logging
+        from askme.pipeline.utils import PipelineLogFilter
+
+        for handler in logging.root.handlers:
+            handler.addFilter(PipelineLogFilter())
+        # or add to specific logger:
+        logging.getLogger("askme").addFilter(PipelineLogFilter())
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.trace_id = _log_trace_id.get()
+        record.session_id = _log_session_id.get()
+        return True
+
+
+def set_log_context(*, trace_id: str = "-", session_id: str = "-") -> None:
+    """Set structured logging context for the current asyncio task/thread."""
+    _log_trace_id.set(trace_id)
+    _log_session_id.set(session_id)
 
 # Compiled once; shared across StreamProcessor, SkillGate, BrainPipeline, etc.
 _RE_THINK = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)

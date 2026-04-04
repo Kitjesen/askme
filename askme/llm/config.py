@@ -11,7 +11,10 @@ environment.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -42,6 +45,34 @@ class LLMConfig:
     # Optional secondary MiniMax client (enabled when minimax_api_key is set)
     minimax_api_key: str = ""
     minimax_base_url: str = "https://api.minimax.chat/v1"
+
+    def validate(self) -> list[str]:
+        """Return a list of validation error messages (empty = valid).
+
+        Call at startup (e.g. in LLMModule.build()) to surface misconfiguration
+        early rather than at the first user turn.
+        """
+        errors: list[str] = []
+        if not self.api_key:
+            errors.append("LLMConfig.api_key is empty — LLM calls will fail")
+        if not self.model:
+            errors.append("LLMConfig.model is empty")
+        if self.temperature < 0.0 or self.temperature > 2.0:
+            errors.append(f"LLMConfig.temperature={self.temperature} is outside [0, 2]")
+        if self.timeout <= 0:
+            errors.append(f"LLMConfig.timeout={self.timeout} must be positive")
+        if self.max_retries < 0:
+            errors.append(f"LLMConfig.max_retries={self.max_retries} must be >= 0")
+        if not self.base_url:
+            errors.append("LLMConfig.base_url is empty")
+        return errors
+
+    def validate_and_warn(self) -> bool:
+        """Validate and log warnings for each error. Returns True if valid."""
+        errors = self.validate()
+        for err in errors:
+            logger.warning("[LLMConfig] %s", err)
+        return len(errors) == 0
 
     @classmethod
     def from_cfg(cls, brain_cfg: dict) -> "LLMConfig":

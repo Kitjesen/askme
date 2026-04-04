@@ -9,7 +9,7 @@ from typing import Any, TYPE_CHECKING
 from askme.pipeline.hooks import PipelineHooks
 from askme.pipeline.protocols import TurnContext
 from askme.pipeline.trace import get_tracer
-from askme.pipeline.utils import classify_llm_error
+from askme.pipeline.utils import classify_llm_error, set_log_context
 
 if TYPE_CHECKING:
     from askme.llm.client import LLMClient
@@ -150,6 +150,11 @@ class TurnExecutor:
         source: str = "voice",
     ) -> str:
         """Run the full brain pipeline for *user_text*. Returns assistant reply."""
+        # Set structured log context for this turn so all log records carry
+        # the trace ID and source without manual argument threading.
+        _tracer = get_tracer()
+        _trace = _tracer.start_trace("voice_turn" if source == "voice" else "text_turn")
+        set_log_context(trace_id=_trace.id, session_id=source)
         logger.info("Processing: %s", user_text[:60])
 
         if self._cancel_token is not None and self._cancel_token.is_set():
@@ -184,7 +189,6 @@ class TurnExecutor:
             memory_task = asyncio.create_task(self._memory.retrieve(user_text))
         vision_task = self._start_vision_capture()
 
-        _tracer = get_tracer()
         try:
             with _tracer.span("memory_retrieve"):
                 context_str = await memory_task
@@ -319,6 +323,7 @@ class TurnExecutor:
             return error_msg
         finally:
             self._audio.stop_playback()
+            _tracer.finish_trace()
 
     async def shutdown(self) -> None:
         """Cancel all in-flight background tasks (delayed reflections, etc.)."""

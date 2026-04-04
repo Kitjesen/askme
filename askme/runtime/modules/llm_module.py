@@ -31,6 +31,8 @@ class LLMModule(Module):
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         self.ota_metrics = OTABridgeMetrics()
         self._llm_config = LLMConfig.from_cfg(cfg.get("brain", {}))
+        # Validate config at startup so misconfigurations surface immediately.
+        self._llm_config.validate_and_warn()
         self.client = LLMClient(llm_config=self._llm_config, metrics=self.ota_metrics)
         self._warmup_task: asyncio.Task | None = None
         logger.info("LLMModule: built (model=%s)", self.client.model)
