@@ -26,11 +26,12 @@ class LLMModule(Module):
     provides = ("llm",)
 
     llm_client: Out[LLMClient]
+    llm_config_out: Out[LLMConfig]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         self.ota_metrics = OTABridgeMetrics()
-        llm_config = LLMConfig.from_cfg(cfg.get("brain", {}))
-        self.client = LLMClient(llm_config=llm_config, metrics=self.ota_metrics)
+        self._llm_config = LLMConfig.from_cfg(cfg.get("brain", {}))
+        self.client = LLMClient(llm_config=self._llm_config, metrics=self.ota_metrics)
         self._warmup_task: asyncio.Task | None = None
         logger.info("LLMModule: built (model=%s)", self.client.model)
 
@@ -61,6 +62,11 @@ class LLMModule(Module):
     @property
     def llm_client(self) -> LLMClient:  # type: ignore[override]
         return self.client
+
+    @property
+    def llm_config_out(self) -> LLMConfig:  # type: ignore[override]
+        """Expose the resolved LLMConfig so downstream modules can read it."""
+        return self._llm_config
 
     @property
     def metrics(self) -> Any:

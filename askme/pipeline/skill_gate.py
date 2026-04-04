@@ -212,8 +212,9 @@ class SkillGate:
         if extra_context:
             context["mission_context"] = extra_context
         if self._arm:
+            # arm.get_state() may call hardware registers — run in thread pool
             context["robot_state"] = json.dumps(
-                self._arm.get_state(), ensure_ascii=False
+                await asyncio.to_thread(self._arm.get_state), ensure_ascii=False
             )
 
         if skill_name == "dog_control" and self._dog_control and self._dog_control.is_configured():
