@@ -27,6 +27,11 @@ class VADEngine:
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
+        if sherpa_onnx is None:
+            self.detector = None
+            logger.warning("VAD unavailable — sherpa_onnx not installed")
+            return
+
         vad_config = sherpa_onnx.VadModelConfig()
         vad_config.silero_vad.model = config.get("model", "models/vad/silero_vad.onnx")
         vad_config.silero_vad.threshold = float(config.get("threshold", 0.5))

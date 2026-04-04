@@ -29,6 +29,11 @@ class KWSEngine:
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
+        if sherpa_onnx is None:
+            self.spotter = None
+            logger.warning("KWS unavailable — sherpa_onnx not installed")
+            return
+
         model_dir: str = config.get(
             "model_dir",
             "models/kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
@@ -36,7 +41,7 @@ class KWSEngine:
 
         if not os.path.exists(model_dir):
             logger.warning("KWS model directory not found: %s, skipping.", model_dir)
-            self.spotter: sherpa_onnx.KeywordSpotter | None = None
+            self.spotter = None
             return
 
         tokens = os.path.join(model_dir, config.get("tokens", "tokens.txt"))
