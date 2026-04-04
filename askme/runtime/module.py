@@ -82,7 +82,7 @@ class Required(Generic[T]):
     """
 
 
-class AmbiguousPortError(Exception):
+class AmbiguousPortError(ValueError):
     """Raised when a type has multiple Out providers and no Alias is used.
 
     When two or more modules declare ``Out[SomeType]`` and a third module
@@ -289,8 +289,8 @@ def _auto_wire(instances: dict[str, Module]) -> WireResult:
         if len(exact_providers) > 1:
             provider_list = ", ".join(f"'{mn}'" for mn, _ in exact_providers)
             raise AmbiguousPortError(
-                f"Port '{mod_name}.{port.name}' ({port.data_type.__name__}) matches "
-                f"Out ports on {len(exact_providers)} modules: {provider_list}. "
+                f"Ambiguous port '{mod_name}.{port.name}' ({port.data_type.__name__}): "
+                f"{len(exact_providers)} modules export the same port name: {provider_list}. "
                 f"Use Alias[{port.data_type.__name__}, 'module_name'] to select one explicitly."
             )
 
@@ -310,17 +310,20 @@ def _auto_wire(instances: dict[str, Module]) -> WireResult:
             continue
 
         # ── 3. Ambiguity guard ────────────────────────────────────────────
-        # Multiple providers exist for this type but no Alias was used.
-        # Silently skipping would break when a new module is added later.
+        # Multiple type-only (semantic) providers exist with NO matching name.
+        # Unlike exact-name conflicts, we skip rather than raise: the In port
+        # simply stays None.  Log a warning so developers know to use Alias.
         if len(type_providers) > 1:
             provider_list = ", ".join(
                 f"'{mn}.{pn}'" for pn, mn, _ in type_providers
             )
-            raise AmbiguousPortError(
-                f"Port '{mod_name}.{port.name}' ({port.data_type.__name__}) has "
-                f"{len(type_providers)} Out providers: {provider_list}. "
-                f"Use Alias[{port.data_type.__name__}, 'module_name'] to select one explicitly."
+            logger.warning(
+                "[autowire] Ambiguous semantic match for %s.%s (%s): %d providers [%s]. "
+                "Port left unset — use Alias[%s, 'module_name'] to wire explicitly.",
+                mod_name, port.name, port.data_type.__name__,
+                len(type_providers), provider_list, port.data_type.__name__,
             )
+            # Fall through to "No match" path — port stays None
 
         # ── 4. No match ───────────────────────────────────────────────────
         if port.direction == "required_in":
