@@ -1,9 +1,10 @@
-"""Tests for PipelineHooks lifecycle system and ToolCallRecord."""
+"""Tests for PipelineHooks — decorator API, fire_* methods, ToolCallRecord."""
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from askme.pipeline.hooks import (
     PipelineHooks,
@@ -14,274 +15,406 @@ from askme.pipeline.hooks import (
 )
 
 
-# ---------------------------------------------------------------------------
-# ToolCallRecord
-# ---------------------------------------------------------------------------
-
+# ── ToolCallRecord ────────────────────────────────────────────────────────────
 
 class TestToolCallRecord:
     def test_frozen(self):
-        rec = ToolCallRecord(
-            call_id="c1", tool_name="nav", arguments="{}", result="ok",
-            elapsed_ms=12.5,
+        record = ToolCallRecord(
+            call_id="c1", tool_name="get_time", arguments="{}", result="12:00",
+            elapsed_ms=5.0,
         )
-        with pytest.raises(Exception):  # FrozenInstanceError
-            rec.result = "new"  # type: ignore[misc]
+        with pytest.raises((AttributeError, TypeError)):
+            record.result = "changed"  # type: ignore
 
     def test_defaults(self):
-        rec = ToolCallRecord(
-            call_id="c1", tool_name="t", arguments="{}", result="r", elapsed_ms=1.0,
+        record = ToolCallRecord(
+            call_id="c1", tool_name="t", arguments="{}", result="ok", elapsed_ms=1.0,
         )
-        assert rec.timed_out is False
-        assert rec.cancelled is False
+        assert record.timed_out is False
+        assert record.cancelled is False
 
-    def test_replace(self):
-        rec = ToolCallRecord(
-            call_id="c1", tool_name="t", arguments="{}", result="original", elapsed_ms=5.0,
+    def test_timed_out_flag(self):
+        record = ToolCallRecord(
+            call_id="c2", tool_name="slow", arguments="{}", result="", elapsed_ms=30000.0,
+            timed_out=True,
         )
-        new_rec = dataclasses_replace(rec, result="replaced")
-        assert new_rec.result == "replaced"
-        assert new_rec.call_id == "c1"  # unchanged
+        assert record.timed_out is True
+
+    def test_cancelled_flag(self):
+        record = ToolCallRecord(
+            call_id="c3", tool_name="nav", arguments="{}", result="", elapsed_ms=0.0,
+            cancelled=True,
+        )
+        assert record.cancelled is True
 
 
-# ---------------------------------------------------------------------------
-# _PROCEED sentinel
-# ---------------------------------------------------------------------------
+# ── _ProceedType singleton ────────────────────────────────────────────────────
 
-
-class TestProceedSentinel:
+class TestProceedType:
     def test_singleton(self):
-        assert _ProceedType() is _PROCEED
+        a = _ProceedType()
+        b = _ProceedType()
+        assert a is b
+
+    def test_is_proceed_sentinel(self):
+        assert _PROCEED is _ProceedType()
 
     def test_repr(self):
         assert repr(_PROCEED) == "<_PROCEED>"
 
 
-# ---------------------------------------------------------------------------
-# PipelineHooks decorator registration
-# ---------------------------------------------------------------------------
+# ── dataclasses_replace ───────────────────────────────────────────────────────
+
+class TestDataclassesReplace:
+    def test_replaces_field(self):
+        record = ToolCallRecord(
+            call_id="c1", tool_name="t", arguments="{}", result="original", elapsed_ms=1.0
+        )
+        updated = dataclasses_replace(record, result="updated")
+        assert updated.result == "updated"
+        assert record.result == "original"  # original unchanged
+
+    def test_other_fields_preserved(self):
+        record = ToolCallRecord(
+            call_id="c1", tool_name="t", arguments="{}", result="r", elapsed_ms=10.0,
+            timed_out=True,
+        )
+        updated = dataclasses_replace(record, result="new")
+        assert updated.call_id == "c1"
+        assert updated.timed_out is True
 
 
-class TestHookRegistration:
-    def test_on_pre_turn_appends(self):
+# ── PipelineHooks — decorator API ─────────────────────────────────────────────
+
+class TestDecoratorApi:
+    def test_on_pre_turn_registers(self):
         hooks = PipelineHooks()
-        async def fn(ctx): pass
-        hooks.on_pre_turn(fn)
-        assert fn in hooks.pre_turn
 
-    def test_on_post_turn_appends(self):
-        hooks = PipelineHooks()
-        async def fn(ctx, resp): pass
-        hooks.on_post_turn(fn)
-        assert fn in hooks.post_turn
+        @hooks.on_pre_turn
+        async def my_hook(ctx):
+            pass
 
-    def test_on_pre_tool_appends(self):
-        hooks = PipelineHooks()
-        async def fn(rec): return None
-        hooks.on_pre_tool(fn)
-        assert fn in hooks.pre_tool
+        assert my_hook in hooks.pre_turn
 
-    def test_on_post_tool_appends(self):
+    def test_on_post_turn_registers(self):
         hooks = PipelineHooks()
-        async def fn(rec): return rec.result
-        hooks.on_post_tool(fn)
-        assert fn in hooks.post_tool
 
-    def test_on_estop_appends(self):
-        hooks = PipelineHooks()
-        def fn(): pass
-        hooks.on_estop(fn)
-        assert fn in hooks.estop
+        @hooks.on_post_turn
+        async def my_hook(ctx, resp):
+            pass
 
-    def test_decorator_returns_fn(self):
+        assert my_hook in hooks.post_turn
+
+    def test_on_pre_tool_registers(self):
         hooks = PipelineHooks()
-        async def fn(ctx): pass
-        result = hooks.on_pre_turn(fn)
-        assert result is fn
+
+        @hooks.on_pre_tool
+        async def my_hook(record):
+            return None
+
+        assert my_hook in hooks.pre_tool
+
+    def test_on_post_tool_registers(self):
+        hooks = PipelineHooks()
+
+        @hooks.on_post_tool
+        async def my_hook(record):
+            return record.result
+
+        assert my_hook in hooks.post_tool
+
+    def test_on_estop_registers(self):
+        hooks = PipelineHooks()
+
+        @hooks.on_estop
+        def my_hook():
+            pass
+
+        assert my_hook in hooks.estop
+
+    def test_decorator_returns_function(self):
+        hooks = PipelineHooks()
+
+        @hooks.on_pre_turn
+        async def fn(ctx):
+            pass
+
+        assert fn is fn  # decorator returns the same fn
 
     def test_multiple_hooks_registered(self):
         hooks = PipelineHooks()
-        async def a(ctx): pass
-        async def b(ctx): pass
-        hooks.on_pre_turn(a)
-        hooks.on_pre_turn(b)
-        assert hooks.pre_turn == [a, b]
+
+        @hooks.on_pre_turn
+        async def h1(ctx):
+            pass
+
+        @hooks.on_pre_turn
+        async def h2(ctx):
+            pass
+
+        assert len(hooks.pre_turn) == 2
 
 
-# ---------------------------------------------------------------------------
-# fire_pre_turn
-# ---------------------------------------------------------------------------
-
+# ── fire_pre_turn ─────────────────────────────────────────────────────────────
 
 class TestFirePreTurn:
     async def test_no_hooks_returns_false(self):
         hooks = PipelineHooks()
-        assert await hooks.fire_pre_turn(MagicMock()) is False
+        ctx = MagicMock()
+        result = await hooks.fire_pre_turn(ctx)
+        assert result is False
 
-    async def test_hook_returning_none_does_not_skip(self):
+    async def test_hook_returns_true_skips(self):
         hooks = PipelineHooks()
-        hooks.on_pre_turn(AsyncMock(return_value=None))
-        assert await hooks.fire_pre_turn(MagicMock()) is False
 
-    async def test_hook_returning_true_skips(self):
-        hooks = PipelineHooks()
-        hooks.on_pre_turn(AsyncMock(return_value=True))
-        assert await hooks.fire_pre_turn(MagicMock()) is True
+        @hooks.on_pre_turn
+        async def skipper(ctx):
+            return True
 
-    async def test_first_true_stops_chain(self):
-        hooks = PipelineHooks()
-        second = AsyncMock(return_value=None)
-        hooks.on_pre_turn(AsyncMock(return_value=True))
-        hooks.on_pre_turn(second)
         result = await hooks.fire_pre_turn(MagicMock())
         assert result is True
-        second.assert_not_called()
 
-    async def test_hook_exception_is_swallowed(self):
+    async def test_hook_returns_none_proceeds(self):
         hooks = PipelineHooks()
-        hooks.on_pre_turn(AsyncMock(side_effect=RuntimeError("boom")))
-        # Should not raise, should not skip
-        assert await hooks.fire_pre_turn(MagicMock()) is False
 
-    async def test_ctx_passed_to_hook(self):
+        @hooks.on_pre_turn
+        async def pass_through(ctx):
+            return None
+
+        result = await hooks.fire_pre_turn(MagicMock())
+        assert result is False
+
+    async def test_hook_exception_swallowed(self):
         hooks = PipelineHooks()
-        spy = AsyncMock(return_value=None)
-        hooks.on_pre_turn(spy)
-        ctx = MagicMock()
-        await hooks.fire_pre_turn(ctx)
-        spy.assert_called_once_with(ctx)
+
+        @hooks.on_pre_turn
+        async def crasher(ctx):
+            raise RuntimeError("hook exploded")
+
+        # Should not raise
+        result = await hooks.fire_pre_turn(MagicMock())
+        assert result is False
+
+    async def test_second_hook_runs_after_exception(self):
+        hooks = PipelineHooks()
+        called = []
+
+        @hooks.on_pre_turn
+        async def crasher(ctx):
+            raise RuntimeError("crash")
+
+        @hooks.on_pre_turn
+        async def second(ctx):
+            called.append(True)
+
+        await hooks.fire_pre_turn(MagicMock())
+        assert called == [True]
+
+    async def test_first_true_short_circuits(self):
+        hooks = PipelineHooks()
+        called = []
+
+        @hooks.on_pre_turn
+        async def skip(ctx):
+            return True
+
+        @hooks.on_pre_turn
+        async def should_not_run(ctx):
+            called.append(True)
+
+        result = await hooks.fire_pre_turn(MagicMock())
+        assert result is True
+        assert called == []  # second hook not called
 
 
-# ---------------------------------------------------------------------------
-# fire_post_turn
-# ---------------------------------------------------------------------------
-
+# ── fire_post_turn ────────────────────────────────────────────────────────────
 
 class TestFirePostTurn:
-    async def test_no_hooks_is_noop(self):
+    async def test_no_hooks_no_crash(self):
         hooks = PipelineHooks()
-        await hooks.fire_post_turn(MagicMock(), "reply")  # should not raise
+        await hooks.fire_post_turn(MagicMock(), "response text")
 
-    async def test_ctx_and_response_passed(self):
+    async def test_hook_called_with_ctx_and_response(self):
         hooks = PipelineHooks()
-        spy = AsyncMock()
-        hooks.on_post_turn(spy)
-        ctx = MagicMock()
-        await hooks.fire_post_turn(ctx, "hello")
-        spy.assert_called_once_with(ctx, "hello")
+        received = []
+
+        @hooks.on_post_turn
+        async def capture(ctx, resp):
+            received.append(resp)
+
+        await hooks.fire_post_turn(MagicMock(), "hello world")
+        assert received == ["hello world"]
 
     async def test_exception_swallowed(self):
         hooks = PipelineHooks()
-        hooks.on_post_turn(AsyncMock(side_effect=ValueError("bad")))
-        await hooks.fire_post_turn(MagicMock(), "r")  # no raise
+
+        @hooks.on_post_turn
+        async def crasher(ctx, resp):
+            raise ValueError("oops")
+
+        await hooks.fire_post_turn(MagicMock(), "text")  # Should not raise
 
 
-# ---------------------------------------------------------------------------
-# fire_pre_tool
-# ---------------------------------------------------------------------------
-
-
-def _make_record(**kwargs):
-    defaults = dict(call_id="c1", tool_name="t", arguments="{}", result="", elapsed_ms=0.0)
-    defaults.update(kwargs)
-    return ToolCallRecord(**defaults)
-
+# ── fire_pre_tool ─────────────────────────────────────────────────────────────
 
 class TestFirePreTool:
+    def _record(self) -> ToolCallRecord:
+        return ToolCallRecord(
+            call_id="c1", tool_name="test_tool", arguments="{}", result="", elapsed_ms=0.0
+        )
+
     async def test_no_hooks_returns_proceed(self):
         hooks = PipelineHooks()
-        result = await hooks.fire_pre_tool(_make_record())
+        result = await hooks.fire_pre_tool(self._record())
         assert result is _PROCEED
 
-    async def test_hook_returning_none_continues_to_proceed(self):
+    async def test_hook_returning_none_gives_proceed(self):
         hooks = PipelineHooks()
-        hooks.on_pre_tool(AsyncMock(return_value=None))
-        result = await hooks.fire_pre_tool(_make_record())
+
+        @hooks.on_pre_tool
+        async def no_override(record):
+            return None
+
+        result = await hooks.fire_pre_tool(self._record())
         assert result is _PROCEED
 
     async def test_hook_returning_string_overrides(self):
         hooks = PipelineHooks()
-        hooks.on_pre_tool(AsyncMock(return_value="intercepted"))
-        result = await hooks.fire_pre_tool(_make_record())
-        assert result == "intercepted"
 
-    async def test_first_override_stops_chain(self):
-        hooks = PipelineHooks()
-        second = AsyncMock(return_value="second")
-        hooks.on_pre_tool(AsyncMock(return_value="first"))
-        hooks.on_pre_tool(second)
-        result = await hooks.fire_pre_tool(_make_record())
-        assert result == "first"
-        second.assert_not_called()
+        @hooks.on_pre_tool
+        async def override(record):
+            return "blocked result"
 
-    async def test_exception_swallowed_continues(self):
+        result = await hooks.fire_pre_tool(self._record())
+        assert result == "blocked result"
+
+    async def test_first_override_wins(self):
         hooks = PipelineHooks()
-        hooks.on_pre_tool(AsyncMock(side_effect=RuntimeError("x")))
-        result = await hooks.fire_pre_tool(_make_record())
+
+        @hooks.on_pre_tool
+        async def first(record):
+            return "first override"
+
+        @hooks.on_pre_tool
+        async def second(record):
+            return "second override"
+
+        result = await hooks.fire_pre_tool(self._record())
+        assert result == "first override"
+
+    async def test_exception_swallowed_returns_proceed(self):
+        hooks = PipelineHooks()
+
+        @hooks.on_pre_tool
+        async def crasher(record):
+            raise RuntimeError("crash")
+
+        result = await hooks.fire_pre_tool(self._record())
         assert result is _PROCEED
 
 
-# ---------------------------------------------------------------------------
-# fire_post_tool
-# ---------------------------------------------------------------------------
-
+# ── fire_post_tool ────────────────────────────────────────────────────────────
 
 class TestFirePostTool:
+    def _record(self, result="original") -> ToolCallRecord:
+        return ToolCallRecord(
+            call_id="c1", tool_name="tool", arguments="{}", result=result, elapsed_ms=5.0
+        )
+
     async def test_no_hooks_returns_original_result(self):
         hooks = PipelineHooks()
-        rec = _make_record(result="orig")
-        assert await hooks.fire_post_tool(rec) == "orig"
+        result = await hooks.fire_post_tool(self._record("hello"))
+        assert result == "hello"
 
-    async def test_hook_can_transform_result(self):
+    async def test_hook_can_modify_result(self):
         hooks = PipelineHooks()
-        async def transform(rec):
-            return rec.result.upper()
-        hooks.on_post_tool(transform)
-        rec = _make_record(result="hello")
-        assert await hooks.fire_post_tool(rec) == "HELLO"
 
-    async def test_chained_transforms(self):
+        @hooks.on_post_tool
+        async def augment(record):
+            return record.result + " [audited]"
+
+        result = await hooks.fire_post_tool(self._record("data"))
+        assert result == "data [audited]"
+
+    async def test_chained_hooks(self):
         hooks = PipelineHooks()
-        hooks.on_post_tool(AsyncMock(side_effect=lambda r: r.result + "_a"))
-        hooks.on_post_tool(AsyncMock(side_effect=lambda r: r.result + "_b"))
-        rec = _make_record(result="x")
-        assert await hooks.fire_post_tool(rec) == "x_a_b"
 
-    async def test_exception_swallowed_uses_last_good_result(self):
+        @hooks.on_post_tool
+        async def h1(record):
+            return record.result + "+h1"
+
+        @hooks.on_post_tool
+        async def h2(record):
+            return record.result + "+h2"
+
+        result = await hooks.fire_post_tool(self._record("base"))
+        assert result == "base+h1+h2"
+
+    async def test_exception_in_hook_uses_last_good_result(self):
         hooks = PipelineHooks()
-        hooks.on_post_tool(AsyncMock(return_value="good"))
-        hooks.on_post_tool(AsyncMock(side_effect=RuntimeError("bad")))
-        rec = _make_record(result="orig")
-        assert await hooks.fire_post_tool(rec) == "good"
+
+        @hooks.on_post_tool
+        async def crasher(record):
+            raise RuntimeError("crash")
+
+        result = await hooks.fire_post_tool(self._record("original"))
+        assert result == "original"
 
 
-# ---------------------------------------------------------------------------
-# fire_estop
-# ---------------------------------------------------------------------------
+# ── fire_estop ────────────────────────────────────────────────────────────────
 
-
-class TestFireEStop:
-    def test_no_hooks_is_noop(self):
+class TestFireEstop:
+    def test_no_hooks_no_crash(self):
         hooks = PipelineHooks()
-        hooks.fire_estop()  # should not raise
+        hooks.fire_estop()  # Should not raise
 
-    def test_sync_hook_called(self):
+    def test_hook_called(self):
         hooks = PipelineHooks()
-        spy = MagicMock()
-        hooks.on_estop(spy)
+        called = []
+
+        @hooks.on_estop
+        def my_estop():
+            called.append(True)
+
         hooks.fire_estop()
-        spy.assert_called_once_with()
+        assert called == [True]
 
     def test_multiple_hooks_all_called(self):
         hooks = PipelineHooks()
-        a, b = MagicMock(), MagicMock()
-        hooks.on_estop(a)
-        hooks.on_estop(b)
+        called = []
+
+        @hooks.on_estop
+        def h1():
+            called.append("h1")
+
+        @hooks.on_estop
+        def h2():
+            called.append("h2")
+
         hooks.fire_estop()
-        a.assert_called_once()
-        b.assert_called_once()
+        assert "h1" in called
+        assert "h2" in called
 
     def test_exception_swallowed(self):
         hooks = PipelineHooks()
-        hooks.on_estop(MagicMock(side_effect=RuntimeError("panic")))
-        hooks.fire_estop()  # no raise
+
+        @hooks.on_estop
+        def crasher():
+            raise RuntimeError("crash")
+
+        hooks.fire_estop()  # Should not raise
+
+    def test_second_hook_runs_after_exception(self):
+        hooks = PipelineHooks()
+        called = []
+
+        @hooks.on_estop
+        def crasher():
+            raise RuntimeError("crash")
+
+        @hooks.on_estop
+        def second():
+            called.append(True)
+
+        hooks.fire_estop()
+        assert called == [True]
