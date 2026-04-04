@@ -277,16 +277,24 @@ class ToolRegistry:
         return self._pending_approval is not None
 
     def matches_confirmation(self, text: str) -> bool:
-        """Return True when *text* confirms the pending dangerous action."""
+        """Return True when *text* confirms the pending dangerous action.
+
+        Matching rules (ordered by specificity):
+        1. Exact match after normalization (strips punctuation/spaces).
+        2. Multi-character phrases (>=2 chars) may appear anywhere inside the
+           normalized text — handles "好的，确认执行" matching "确认执行".
+        Single-character phrases ("是", "好") require exact match to avoid
+        false-positive on negations ("不是", "不好").
+        """
         if not self.has_pending_approval():
             return False
-        return self._normalize_phrase(text) in self._confirmation_phrases
+        return self._phrase_set_matches(text, self._confirmation_phrases)
 
     def matches_rejection(self, text: str) -> bool:
         """Return True when *text* rejects the pending dangerous action."""
         if not self.has_pending_approval():
             return False
-        return self._normalize_phrase(text) in self._rejection_phrases
+        return self._phrase_set_matches(text, self._rejection_phrases)
 
     def handle_pending_input(self, text: str) -> str | None:
         """Resolve or restate the pending high-risk action for arbitrary operator input."""
@@ -298,10 +306,9 @@ class ToolRegistry:
         if pending is None:
             return None
 
-        normalized = self._normalize_phrase(text)
-        if normalized in self._confirmation_phrases:
+        if self._phrase_set_matches(text, self._confirmation_phrases):
             return self.approve_pending()
-        if normalized in self._rejection_phrases:
+        if self._phrase_set_matches(text, self._rejection_phrases):
             return self.reject_pending()
         return self._format_approval_pending(pending)
 
@@ -634,6 +641,26 @@ class ToolRegistry:
         if not kwargs:
             return ""
         return json.dumps(kwargs, ensure_ascii=False, separators=(", ", ": "))
+
+    def _phrase_set_matches(self, text: str, phrase_set: set[str]) -> bool:
+        """Return True if *text* matches any phrase in *phrase_set*.
+
+        Rules (item 22 — word-boundary safe):
+        - Exact match: normalized text equals any phrase (always checked).
+        - Embedded match: a multi-char phrase (len >= 2) appears anywhere in the
+          normalized text — "好的，确认执行" → finds "确认执行".
+        - Single-char phrases ("是", "好") are EXACT-ONLY to prevent matching
+          within negations like "不是" or "不好".
+        """
+        normalized = self._normalize_phrase(text)
+        # 1. Exact match (covers all lengths)
+        if normalized in phrase_set:
+            return True
+        # 2. Multi-char phrase embedded in input (graceful for verbose voice input)
+        for phrase in phrase_set:
+            if len(phrase) >= 2 and phrase in normalized:
+                return True
+        return False
 
     @staticmethod
     def _normalize_phrase(text: str) -> str:

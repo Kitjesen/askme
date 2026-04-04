@@ -35,7 +35,14 @@ class TurnExecutor:
     def _track_task(
         self, coro: "asyncio.Coroutine[Any, Any, Any]", *, name: str | None = None
     ) -> "asyncio.Task[Any]":
-        """Create a background task, track it in _pending_tasks, log any exception."""
+        """Create a background task, track it in _pending_tasks, log any exception.
+
+        Python 3.7+ asyncio.create_task() copies the *current* contextvars.Context
+        into the new task at creation time (PEP 567).  Because set_log_context() is
+        called before all _track_task() calls inside process(), background tasks
+        automatically inherit the turn's trace_id and session_id (item 19).
+        """
+        # create_task() propagates the current context — no manual copy needed.
         t = asyncio.create_task(coro, name=name)
         self._pending_tasks.add(t)
 

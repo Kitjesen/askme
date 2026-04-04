@@ -382,6 +382,9 @@ class BrainPipeline:
         return self._skill_gate._prepare_agent_result(result)
 
     # ── Backward compat properties (tests access _private attrs) ───
+    # TODO(item-15): Remove after all tests are updated to inject mocks via
+    # the Protocol injection path (stream_processor/skill_gate/turn_executor
+    # constructor params) instead of mutating private attributes post-build.
 
     @property
     def _episodic(self):

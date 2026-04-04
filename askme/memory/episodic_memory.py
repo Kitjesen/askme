@@ -122,7 +122,7 @@ REFLECT_PROMPT = """\
 }}"""
 
 
-_RE_NORMALIZE = re.compile(r"[\s\-\—\·、，。！？：；""''（）()\[\]「」.,!?:;]+")
+_RE_NORMALIZE = re.compile(r"[\s\-—·、，。！？：；\u201c\u201d\u2018\u2019（）()\[\]「」.,!?:;]+")
 
 
 def _normalize_for_dedup(text: str) -> str:
@@ -166,13 +166,31 @@ class EpisodicMemory:
     Reflection trigger: cumulative importance > IMPORTANCE_THRESHOLD (Park 2023)
     """
 
-    def __init__(self, *, llm: LLMClient | None = None, vector_store: Any = None) -> None:
-        cfg = get_config()
-        data_dir = cfg.get("app", {}).get("data_dir", "data")
+    def __init__(
+        self,
+        *,
+        llm: "LLMClient | None" = None,
+        vector_store: Any = None,
+        config: dict | None = None,
+        data_dir: "str | Path | None" = None,
+    ) -> None:
+        """Create an EpisodicMemory.
+
+        Args:
+            llm: LLMClient for reflection summarization.
+            vector_store: Optional vector store for trend persistence.
+            config: Full config dict.  If None, read via get_config().
+            data_dir: Override the data directory.  If None, read from config.
+        """
+        cfg = config if config is not None else get_config()
         episodic_cfg = cfg.get("memory", {}).get("episodic", {})
-        resolved = Path(data_dir)
-        if not resolved.is_absolute():
-            resolved = project_root() / resolved
+        if data_dir is not None:
+            resolved = Path(data_dir)
+        else:
+            raw = cfg.get("app", {}).get("data_dir", "data")
+            resolved = Path(raw)
+            if not resolved.is_absolute():
+                resolved = project_root() / resolved
 
         self._data_dir = resolved / "memory"
         self._episodes_dir = self._data_dir / "episodes"
