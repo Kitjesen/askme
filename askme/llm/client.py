@@ -30,6 +30,7 @@ from typing import Any, AsyncIterator, Sequence
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from openai.types.chat import ChatCompletionChunk
 
+from askme.config import get_config
 from askme.interfaces.llm import LLMBackend
 from askme.llm.config import LLMConfig
 from askme.robot.ota_bridge import OTABridgeMetrics
@@ -77,7 +78,6 @@ class LLMClient(LLMBackend):
             minimax_url = llm_config.minimax_base_url
         else:
             # Legacy path: read config.yaml, allow per-call keyword overrides.
-            from askme.config import get_config
             cfg = get_config().get("brain", {})
             resolved_api_key = api_key or cfg.get("api_key", "")
             resolved_base_url = base_url or cfg.get("base_url", "https://api.minimax.chat/v1")
@@ -105,22 +105,39 @@ class LLMClient(LLMBackend):
         # Disable SDK internal retry — we handle retry + model fallback ourselves
         # in _stream_with_retry / _completion_with_retry.  SDK retry just wastes
         # time retrying the same model instead of falling back to a faster one.
-        from inovxio_llm import LLMClientConfig, create_async_openai_client
+        try:
+            from inovxio_llm import LLMClientConfig, create_async_openai_client
 
-        _cfg = LLMClientConfig(
-            api_key=self.api_key, base_url=self.base_url,
-            model=self.model, timeout=self._timeout,
-        )
-        self._client = create_async_openai_client(_cfg)
+            _cfg = LLMClientConfig(
+                api_key=self.api_key, base_url=self.base_url,
+                model=self.model, timeout=self._timeout,
+            )
+            self._client = create_async_openai_client(_cfg)
+        except ModuleNotFoundError:
+            self._client = AsyncOpenAI(
+                api_key=self.api_key or "dummy",
+                base_url=self.base_url,
+                timeout=self._timeout,
+                max_retries=0,
+            )
 
         # MiniMax client (optional — enabled when minimax_api_key is set)
         self._minimax_client: AsyncOpenAI | None = None
         if minimax_key:
-            _mm_cfg = LLMClientConfig(
-                api_key=minimax_key, base_url=minimax_url,
-                model="MiniMax-M2.5-highspeed", timeout=self._timeout,
-            )
-            self._minimax_client = create_async_openai_client(_mm_cfg)
+            try:
+                from inovxio_llm import LLMClientConfig, create_async_openai_client
+                _mm_cfg = LLMClientConfig(
+                    api_key=minimax_key, base_url=minimax_url,
+                    model="MiniMax-M2.5-highspeed", timeout=self._timeout,
+                )
+                self._minimax_client = create_async_openai_client(_mm_cfg)
+            except ModuleNotFoundError:
+                self._minimax_client = AsyncOpenAI(
+                    api_key=minimax_key,
+                    base_url=minimax_url,
+                    timeout=self._timeout,
+                    max_retries=0,
+                )
             logger.info("MiniMax LLM client enabled: %s", minimax_url)
 
     # ------------------------------------------------------------------

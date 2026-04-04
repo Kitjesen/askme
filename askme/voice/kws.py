@@ -9,7 +9,10 @@ from typing import Any
 try:
     import sherpa_onnx
 except ModuleNotFoundError:
-    sherpa_onnx = None  # type: ignore[assignment]
+    class _SherpaOnnxStub:
+        KeywordSpotter = None
+        OnlineStream = None
+    sherpa_onnx = _SherpaOnnxStub()  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +32,7 @@ class KWSEngine:
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
-        if sherpa_onnx is None:
+        if sherpa_onnx.KeywordSpotter is None:
             self.spotter = None
             logger.warning("KWS unavailable — sherpa_onnx not installed")
             return

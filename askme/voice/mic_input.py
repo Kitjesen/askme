@@ -232,6 +232,10 @@ class MicInput:
         stream.start()
         self._stream = stream
         self.pre_roll.clear()
+
+        if self._audio_router is not None:
+            self._audio_router.wait_for_input_ready(timeout=10.0)
+
         logger.info("MicInput: started (persistent)")
 
     def stop(self) -> None:

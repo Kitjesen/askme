@@ -9,7 +9,11 @@ import numpy as np
 try:
     import sherpa_onnx
 except ModuleNotFoundError:
-    sherpa_onnx = None  # type: ignore[assignment]
+    class _SherpaOnnxStub:
+        VadModelConfig = None
+        SileroVadModelConfig = None
+        VoiceActivityDetector = None
+    sherpa_onnx = _SherpaOnnxStub()  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +31,7 @@ class VADEngine:
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
-        if sherpa_onnx is None:
+        if sherpa_onnx.VadModelConfig is None:
             self.detector = None
             logger.warning("VAD unavailable — sherpa_onnx not installed")
             return

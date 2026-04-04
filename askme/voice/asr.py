@@ -9,7 +9,9 @@ from typing import Any
 try:
     import sherpa_onnx
 except ModuleNotFoundError:
-    sherpa_onnx = None  # type: ignore[assignment]
+    class _SherpaOnnxStub:
+        OnlineRecognizer = None
+    sherpa_onnx = _SherpaOnnxStub()  # type: ignore[assignment]
 
 from askme.interfaces.asr import ASRBackend
 
@@ -35,7 +37,7 @@ class ASREngine(ASRBackend):
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
-        if sherpa_onnx is None:
+        if sherpa_onnx.OnlineRecognizer is None:
             self.recognizer = None
             self.sample_rate = int(config.get("sample_rate", 16000))
             logger.warning("ASR unavailable — sherpa_onnx not installed")
