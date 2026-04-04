@@ -56,8 +56,9 @@ class ConversationManager:
         max_history: int | None = None,
         session_memory: SessionMemory | None = None,
         metrics: OTABridgeMetrics | None = None,
+        config: dict | None = None,
     ) -> None:
-        cfg = get_config().get("conversation", {})
+        cfg = (config if config is not None else get_config()).get("conversation", {})
 
         # Resolve history file path relative to project root
         raw_path = history_file or cfg.get("history_file", "data/conversation_history.json")
