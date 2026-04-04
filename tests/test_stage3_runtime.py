@@ -193,88 +193,84 @@ class TestBuildSystemPromptL0Injection:
 
 
 class TestExecuteSkillSafetyGate:
-    def _make_full_pipeline(self, estop_state):
-        """Return a BrainPipeline mock where execute_skill can be called."""
-        from askme.pipeline.brain_pipeline import BrainPipeline
-        pipeline = object.__new__(BrainPipeline)
+    """Tests for the estop safety gate in SkillGate.execute_skill."""
 
-        # Safety client
+    def _make_gate(self, estop_state):
+        """Build a SkillGate with a mocked safety client."""
+        from askme.pipeline.skill_gate import SkillGate
+
         safety = MagicMock(spec=DogSafetyClient)
         safety.is_configured.return_value = True
-        # query_estop_state is called via asyncio.to_thread — patch as sync
         safety.query_estop_state.return_value = estop_state
-        pipeline._dog_safety = safety
 
-        # Skill manager
+        skill_executor = MagicMock()
+        skill_executor.run = AsyncMock(return_value="skill executed")
+
         sm = MagicMock()
         skill = MagicMock()
         skill.depends = []
         skill.timeout = 30
         sm.get.return_value = skill
-        pipeline._skill_manager = sm
 
-        # Minimal stubs
-        pipeline._dog_control = None
-        pipeline._episodic = None
-        pipeline._arm = None
-        pipeline._audio = MagicMock()
-        pipeline._audio.drain_buffers = MagicMock()
-        pipeline._audio.start_playback = MagicMock()
-        pipeline._audio.stop_playback = MagicMock()
-        pipeline._audio.speak = MagicMock()
-        pipeline._skill_executor = MagicMock()
-        pipeline._skill_executor.run = AsyncMock(return_value="skill executed")
-        pipeline._conversation = MagicMock()
-        pipeline._memory = None
-        pipeline._pending_tasks = set()
-        pipeline._splitter = MagicMock()
-        pipeline._max_response_chars = 0
+        audio = MagicMock()
+        audio.drain_buffers = MagicMock()
+        audio.start_playback = MagicMock()
+        audio.stop_playback = MagicMock()
+        audio.speak = MagicMock()
 
-        return pipeline
+        gate = SkillGate(
+            skill_manager=sm,
+            skill_executor=skill_executor,
+            audio=audio,
+            conversation=MagicMock(),
+            dog_safety=safety,
+        )
+        return gate, safety, skill_executor
 
     async def test_estop_active_blocks_skill(self):
-        pipeline = self._make_full_pipeline({"enabled": True})
-        result = await pipeline.execute_skill("navigate", "去仓库")
+        gate, safety, skill_executor = self._make_gate({"enabled": True})
+        result = await gate.execute_skill("navigate", "去仓库")
         assert "[安全锁定]" in result
         assert "急停" in result
-        # Skill executor should NOT have been called
-        pipeline._skill_executor.run.assert_not_called()
+        skill_executor.run.assert_not_called()
 
     async def test_estop_inactive_allows_skill(self):
-        pipeline = self._make_full_pipeline({"enabled": False})
-        # execute_skill will hit skill_executor.run — stub the rest of the method
-        # by catching the AttributeError that happens after the gate
+        gate, safety, skill_executor = self._make_gate({"enabled": False})
         try:
-            await pipeline.execute_skill("navigate", "去仓库")
+            await gate.execute_skill("navigate", "去仓库")
         except (AttributeError, TypeError):
-            pass  # expected — pipeline stubs incomplete after the gate
-        # Key assertion: the gate did NOT block (safety.query_estop_state was called)
-        pipeline._dog_safety.query_estop_state.assert_called_once()
+            pass
+        safety.query_estop_state.assert_called_once()
 
     async def test_estop_state_none_allows_skill(self):
         """When estop service is unreachable (returns None), do not block."""
-        pipeline = self._make_full_pipeline(None)
+        gate, safety, _ = self._make_gate(None)
         try:
-            await pipeline.execute_skill("navigate", "去仓库")
+            await gate.execute_skill("navigate", "去仓库")
         except (AttributeError, TypeError):
             pass
-        # Gate should not have blocked (no safety lock message)
-        pipeline._dog_safety.query_estop_state.assert_called_once()
+        safety.query_estop_state.assert_called_once()
 
     async def test_no_safety_client_allows_skill(self):
-        pipeline = self._make_full_pipeline({"enabled": True})
-        pipeline._dog_safety = None  # No client wired
+        from askme.pipeline.skill_gate import SkillGate
+        gate = SkillGate(
+            skill_manager=MagicMock(),
+            skill_executor=MagicMock(),
+            audio=MagicMock(),
+            conversation=MagicMock(),
+            dog_safety=None,
+        )
         try:
-            await pipeline.execute_skill("navigate", "去仓库")
+            await gate.execute_skill("navigate", "去仓库")
         except (AttributeError, TypeError):
             pass
         # No blocking — no client means no gate
 
     async def test_safety_not_configured_allows_skill(self):
-        pipeline = self._make_full_pipeline({"enabled": True})
-        pipeline._dog_safety.is_configured.return_value = False
+        gate, safety, _ = self._make_gate({"enabled": True})
+        safety.is_configured.return_value = False
         try:
-            await pipeline.execute_skill("navigate", "去仓库")
+            await gate.execute_skill("navigate", "去仓库")
         except (AttributeError, TypeError):
             pass
-        pipeline._dog_safety.query_estop_state.assert_not_called()
+        safety.query_estop_state.assert_not_called()

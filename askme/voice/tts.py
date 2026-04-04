@@ -759,8 +759,8 @@ class TTSEngine(TTSBackend):
         if proc is not None:
             try:
                 proc.terminate()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("aplay terminate failed (ignored): %s", exc)
 
     def _playback_loop(self) -> None:
         """Drain tts_buffer one sentence at a time.
@@ -840,8 +840,8 @@ class TTSEngine(TTSBackend):
                 if _router_ctx is not None:
                     try:
                         _router_ctx.__exit__(None, None, None)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("audio router exit failed (ignored): %s", exc)
                     _router_ctx = None
                 logger.info("aplay: done")
 
