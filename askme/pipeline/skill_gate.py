@@ -7,7 +7,10 @@ import datetime
 import json
 import logging
 import re
+import time as _time
 from typing import Any, TYPE_CHECKING
+
+from askme.pipeline.hooks import PipelineHooks, ToolCallRecord, _PROCEED
 
 _RE_THINK = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
 
@@ -49,6 +52,8 @@ class SkillGate:
         agent_shell: ThunderAgentShell | None = None,
         prompt_seed: str | None = None,
         max_response_chars: int = 500,
+        cancel_token: asyncio.Event | None = None,
+        hooks: PipelineHooks | None = None,
     ) -> None:
         self._skill_manager = skill_manager
         self._skill_executor = skill_executor
@@ -63,6 +68,8 @@ class SkillGate:
         self._prompt_seed = prompt_seed
         self._max_response_chars = max_response_chars
         self._last_spoken_text = ""
+        self._cancel_token = cancel_token
+        self._hooks = hooks
 
     # ── Helpers ───────────────────────────────────────────────
 
@@ -136,6 +143,10 @@ class SkillGate:
         source: str = "voice",
     ) -> str:
         """Execute a named skill and speak the result."""
+        if self._cancel_token is not None and self._cancel_token.is_set():
+            logger.warning("[SkillGate] cancel_token set — skipping skill '%s'", skill_name)
+            return ""
+
         skill = self._skill_manager.get(skill_name)
         if not skill:
             return f"[Skill] Not found: {skill_name}"
@@ -249,15 +260,28 @@ class SkillGate:
             def _on_tool_call(tool_name: str) -> None:
                 pass
 
+            t0 = _time.perf_counter()
             raw_result = await self._skill_executor.execute(
                 skill, context, prompt_seed=self._prompt_seed or None,
                 on_tool_call=_on_tool_call,
             )
+            elapsed_ms = (_time.perf_counter() - t0) * 1000
+
             if thinking_task is not None:
                 thinking_task.cancel()
                 thinking_task = None
             result = strip_think_blocks(raw_result)
             logger.info("Skill result: %s", result[:100])
+
+            # post_tool hook — may transform the skill result
+            if self._hooks and self._hooks.post_tool:
+                record = ToolCallRecord(
+                    call_id="", tool_name=skill_name,
+                    arguments=user_text, result=result,
+                    elapsed_ms=elapsed_ms,
+                )
+                result = await self._hooks.fire_post_tool(record)
+
             self._audio.speak(result)
             self._last_spoken_text = result
             self._conversation.add_user_message(user_text)

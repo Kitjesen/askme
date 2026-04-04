@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
+
+from askme.pipeline.hooks import PipelineHooks, ToolCallRecord, _PROCEED
 
 if TYPE_CHECKING:
     from askme.llm.conversation import ConversationManager
@@ -20,7 +23,13 @@ _StreamAndSpeakFn = Callable[[list[dict[str, Any]], str | None, str], Awaitable[
 
 
 class ToolExecutor:
-    """Executes tool calls returned by the LLM and handles approval flows."""
+    """Executes tool calls returned by the LLM and handles approval flows.
+
+    Supports PipelineHooks for pre/post-tool interception (inspired by Claude
+    Code's PreToolUse/PostToolUse hook types):
+      - ``pre_tool``  : may short-circuit a call and return an override result
+      - ``post_tool`` : may transform the result before it enters conversation
+    """
 
     _TOOL_TIMEOUT = 30.0
 
@@ -33,6 +42,7 @@ class ToolExecutor:
         general_tool_max_safety_level: str,
         prompt_builder: PromptBuilder,
         stream_and_speak: _StreamAndSpeakFn,
+        hooks: PipelineHooks | None = None,
     ) -> None:
         self._tools = tools
         self._conversation = conversation
@@ -40,6 +50,7 @@ class ToolExecutor:
         self._general_tool_max_safety_level = general_tool_max_safety_level
         self._prompt_builder = prompt_builder
         self._stream_and_speak = stream_and_speak
+        self._hooks = hooks
 
     async def execute_tools(
         self,
@@ -48,42 +59,94 @@ class ToolExecutor:
         model: str | None = None,
         source: str = "voice",
     ) -> str:
-        """Execute accumulated tool calls and get follow-up LLM response."""
+        """Execute accumulated tool calls and get follow-up LLM response.
+
+        For each tool call:
+          1. Fire ``pre_tool`` hooks — any hook can short-circuit by returning a
+             string result, skipping the actual tool execution (like Claude Code's
+             PreToolUse hook blocking a dangerous command).
+          2. Execute the tool (with timeout).
+          3. Fire ``post_tool`` hooks — hooks may transform the result before it
+             enters the conversation (like Claude Code's PostToolUse hook).
+          4. Produce an immutable ``ToolCallRecord`` for hook context.
+        """
         logger.info("Tool calls: %d detected", len(tool_calls_acc))
 
         tool_call_objs = []
         tool_results = []
         approval_response: str | None = None
+
         for idx in sorted(tool_calls_acc.keys()):
             tc = tool_calls_acc[idx]
-            logger.info("  -> %s(%s)", tc["name"], tc["arguments"])
+            tool_name = tc["name"]
+            tool_args = tc["arguments"]
+            call_id = tc["id"]
+            logger.info("  -> %s(%s)", tool_name, tool_args)
             if self._episodic:
-                self._episodic.log("action", f"调用工具: {tc['name']}")
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._tools.execute,
-                        tc["name"],
-                        tc["arguments"],
-                        max_safety_level=self._general_tool_max_safety_level,
-                    ),
-                    timeout=self._TOOL_TIMEOUT,
+                self._episodic.log("action", f"调用工具: {tool_name}")
+
+            timed_out = False
+
+            # ── pre_tool hook (Claude Code: PreToolUse) ────────────────────
+            hook_override: str | None = None
+            if self._hooks and self._hooks.pre_tool:
+                probe = ToolCallRecord(
+                    call_id=call_id, tool_name=tool_name,
+                    arguments=tool_args, result="",
+                    elapsed_ms=0.0,
                 )
-            except asyncio.TimeoutError:
-                logger.error(
-                    "Tool '%s' timed out after %.0fs", tc["name"], self._TOOL_TIMEOUT
-                )
-                result = f"[Error] 工具 {tc['name']} 执行超时（超过 {int(self._TOOL_TIMEOUT)} 秒）"
+                override = await self._hooks.fire_pre_tool(probe)
+                if override is not _PROCEED:
+                    hook_override = override or ""
+                    logger.info(
+                        "  [pre_tool hook] %s intercepted by hook, result overridden", tool_name
+                    )
+
+            if hook_override is not None:
+                result = hook_override
+                elapsed_ms = 0.0
+            else:
+                t0 = _time.perf_counter()
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._tools.execute,
+                            tool_name,
+                            tool_args,
+                            max_safety_level=self._general_tool_max_safety_level,
+                        ),
+                        timeout=self._TOOL_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "Tool '%s' timed out after %.0fs", tool_name, self._TOOL_TIMEOUT
+                    )
+                    result = (
+                        f"[Error] 工具 {tool_name} 执行超时"
+                        f"（超过 {int(self._TOOL_TIMEOUT)} 秒）"
+                    )
+                    timed_out = True
+                elapsed_ms = (_time.perf_counter() - t0) * 1000
+
             logger.info("  <- %s", result)
             if self._episodic:
-                self._episodic.log("outcome", f"工具结果 {tc['name']}: {str(result)[:100]}")
+                self._episodic.log("outcome", f"工具结果 {tool_name}: {str(result)[:100]}")
+
+            # ── post_tool hook (Claude Code: PostToolUse) ──────────────────
+            if self._hooks and self._hooks.post_tool:
+                record = ToolCallRecord(
+                    call_id=call_id, tool_name=tool_name,
+                    arguments=tool_args, result=str(result),
+                    elapsed_ms=elapsed_ms, timed_out=timed_out,
+                )
+                result = await self._hooks.fire_post_tool(record)
 
             tool_call_objs.append({
-                "id": tc["id"],
+                "id": call_id,
                 "type": "function",
-                "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                "function": {"name": tool_name, "arguments": tool_args},
             })
-            tool_results.append({"tool_call_id": tc["id"], "content": str(result)})
+            tool_results.append({"tool_call_id": call_id, "content": str(result)})
             if self._tools.has_pending_approval():
                 approval_response = str(result)
                 break

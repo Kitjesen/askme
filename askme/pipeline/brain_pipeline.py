@@ -17,6 +17,7 @@ import logging
 import re
 from typing import Any, TYPE_CHECKING
 
+from askme.pipeline.hooks import PipelineHooks
 from askme.pipeline.prompt_builder import PromptBuilder
 from askme.pipeline.protocols import (
     SkillGateProtocol,
@@ -108,6 +109,11 @@ class BrainPipeline:
         stream_processor: StreamProcessorProtocol | None = None,
         skill_gate: SkillGateProtocol | None = None,
         turn_executor: TurnExecutorProtocol | None = None,
+        # ── Lifecycle hooks (Claude Code-style) ───────────────────────────
+        # PipelineHooks provides pre/post callbacks for turns and tool calls.
+        # If None, no hooks are fired. Build a PipelineHooks and register
+        # callbacks via decorator syntax or direct list append.
+        hooks: PipelineHooks | None = None,
     ) -> None:
         max_chars = (
             max_response_chars if max_response_chars > 0
@@ -124,6 +130,7 @@ class BrainPipeline:
         # cancel_token — shared across all sub-components.
         # handle_estop() calls cancel_token.set(); each component stops autonomously.
         self._cancel_token: asyncio.Event = cancel_token if cancel_token is not None else asyncio.Event()
+        self._hooks = hooks
 
         if stream_processor is not None and skill_gate is not None and turn_executor is not None:
             # ── Injection path (tests / custom implementations) ───────────
@@ -160,6 +167,7 @@ class BrainPipeline:
                 general_tool_max_safety_level=general_tool_max_safety_level,
                 prompt_builder=self._prompt_builder,
                 stream_and_speak=None,  # patched below
+                hooks=hooks,
             )
             self._stream_processor = (
                 stream_processor
@@ -196,6 +204,8 @@ class BrainPipeline:
                     agent_shell=agent_shell,
                     prompt_seed=prompt_seed,
                     max_response_chars=max_chars,
+                    cancel_token=self._cancel_token,
+                    hooks=hooks,
                 )
             )
 
@@ -217,6 +227,7 @@ class BrainPipeline:
                     qp_memory=qp_memory,
                     voice_model=voice_model,
                     cancel_token=self._cancel_token,
+                    hooks=hooks,
                 )
             )
 
@@ -280,7 +291,7 @@ class BrainPipeline:
 
         Sets cancel_token so all sub-components (StreamProcessor, TurnExecutor,
         SkillGate) stop autonomously via their own cancel checks — no manual
-        per-component coordination required.  Hardware stop is also issued here.
+        per-component coordination required.  Hardware stop and hooks follow.
         """
         logger.warning("E-STOP triggered!")
         # Signal all sub-components to stop — each checks cancel_token independently.
@@ -290,6 +301,9 @@ class BrainPipeline:
         if self._dog_safety and self._dog_safety.is_configured():
             self._dog_safety.notify_estop()
             logger.warning("E-STOP: notified dog-safety-service")
+        # Fire E-STOP hooks synchronously (Claude Code: Stop hook).
+        if self._hooks:
+            self._hooks.fire_estop()
         logger.warning("E-STOP: cancel_token set, local motion halted.")
 
     def has_pending_tool_approval(self) -> bool:

@@ -1,14 +1,18 @@
-"""Protocol contracts for BrainPipeline sub-components.
+"""Protocol contracts and shared types for BrainPipeline sub-components.
 
-Defines three structural interfaces (typing.Protocol) so that:
-  - Tests can inject plain mock objects without touching private attributes.
-  - BrainPipeline's constructor accepts any conforming implementation.
-  - Sub-components can be swapped independently.
+Public surface:
+  - ``StreamProcessorProtocol``, ``SkillGateProtocol``, ``TurnExecutorProtocol``
+    — structural (typing.Protocol) contracts; tests inject mocks directly.
+  - ``TurnContext`` — immutable per-turn snapshot; cancel_token shared across
+    all sub-components; set by handle_estop() for autonomous E-STOP.
+  - ``PipelineHooks`` re-exported for convenience (defined in hooks.py).
+  - ``ToolCallRecord`` re-exported for convenience.
 
-Also exports TurnContext — an immutable per-turn snapshot inspired by
-Claude Code's context-passing pattern.  cancel_token is set by
-BrainPipeline.handle_estop(); each sub-component checks it autonomously
-so E-STOP coordination requires no manual per-component calls.
+Inspired by Claude Code's patterns:
+  - Context objects propagated immutably through the pipeline.
+  - AbortSignal equivalent (cancel_token asyncio.Event).
+  - Hook system (PipelineHooks) for lifecycle callbacks.
+  - Structured tool results (ToolCallRecord).
 """
 
 from __future__ import annotations
@@ -16,6 +20,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
+
+# Re-export hook types for one-stop import convenience
+from askme.pipeline.hooks import PipelineHooks, ToolCallRecord  # noqa: F401
 
 
 @runtime_checkable

@@ -6,6 +6,8 @@ import asyncio
 import logging
 from typing import Any, TYPE_CHECKING
 
+from askme.pipeline.hooks import PipelineHooks
+from askme.pipeline.protocols import TurnContext
 from askme.pipeline.trace import get_tracer
 
 if TYPE_CHECKING:
@@ -44,6 +46,7 @@ class TurnExecutor:
         qp_memory: Any = None,
         voice_model: str | None = None,
         cancel_token: asyncio.Event | None = None,
+        hooks: PipelineHooks | None = None,
     ) -> None:
         self._llm = llm
         self._conversation = conversation
@@ -58,6 +61,7 @@ class TurnExecutor:
         self._qp_memory = qp_memory
         self._voice_model = voice_model
         self._cancel_token = cancel_token
+        self._hooks = hooks
 
         self._qp_turn_count = 0
         self._last_spoken_text: str = ""
@@ -134,6 +138,22 @@ class TurnExecutor:
 
         if self._llm_semaphore is None:
             self._llm_semaphore = asyncio.Semaphore(1)
+
+        # ── pre_turn hook (Claude Code: UserPromptSubmit) ──────────────────
+        # Build a lightweight TurnContext snapshot for hooks; the token is
+        # shared with sub-components so hooks can also trigger E-STOP.
+        _token = self._cancel_token if self._cancel_token is not None else asyncio.Event()
+        _ctx = TurnContext(
+            user_text=user_text,
+            source=source,
+            cancel_token=_token,
+            voice_model=self._voice_model,
+        )
+        if self._hooks:
+            skip = await self._hooks.fire_pre_turn(_ctx)
+            if skip:
+                logger.info("[TurnExecutor] pre_turn hook requested turn skip")
+                return ""
 
         self._audio.drain_buffers()
 
@@ -212,6 +232,10 @@ class TurnExecutor:
 
             self._conversation.add_assistant_message(full_response)
             self._last_spoken_text = full_response
+
+            # ── post_turn hook (Claude Code: Stop hook / notification) ─────
+            if self._hooks:
+                await self._hooks.fire_post_turn(_ctx, full_response)
 
             def _on_save_done(task: asyncio.Task) -> None:
                 self._pending_tasks.discard(task)
