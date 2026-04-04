@@ -258,26 +258,9 @@ class BrainPipeline:
         source: str = "voice",
     ) -> str:
         """Execute a named skill and speak the result."""
-        if hasattr(self, "_skill_gate"):
-            return await self._skill_gate.execute_skill(
-                skill_name, user_text, extra_context, source,
-            )
-        # Fallback for tests using object.__new__ without full init
-        from askme.pipeline.skill_gate import SkillGate
-        gate = SkillGate(
-            skill_manager=self._skill_manager,
-            skill_executor=self._skill_executor,
-            audio=getattr(self, "_audio_ref", getattr(self, "_audio", None)),
-            conversation=self._conversation,
-            dog_safety=getattr(self, "_dog_safety", None),
-            dog_control=getattr(self, "_dog_control", None),
-            arm_controller=getattr(self, "_arm", None),
-            episodic=getattr(self, "_episodic", None),
-            memory_system=getattr(self, "_mem", None),
-            agent_shell=getattr(self, "_agent_shell", None),
-            max_response_chars=getattr(self, "_max_response_chars", 500),
+        return await self._skill_gate.execute_skill(
+            skill_name, user_text, extra_context, source,
         )
-        return await gate.execute_skill(skill_name, user_text, extra_context, source)
 
     def start_idle_reflection(self, idle_seconds: float = 300.0) -> asyncio.Task[None] | None:
         return self._turn_executor.start_idle_reflection(idle_seconds)
@@ -314,20 +297,16 @@ class BrainPipeline:
         Call this after confirming the robot is safe and the operator has
         explicitly released the E-STOP.  Hardware interlock release must happen
         separately (e.g. dog_safety.release_estop()).
+
+        Uses asyncio.Event.clear() so all sub-components that hold the *same*
+        event reference (TurnExecutor, SkillGate, StreamProcessor) see the
+        cleared state immediately — no reference-swap needed.
         """
         if not self._cancel_token.is_set():
             logger.info("reset_estop: cancel_token was not set — no-op")
             return
-        # asyncio.Event has no .clear() analogue that's safe to swap under load;
-        # replace the event so in-flight checks on the old object still see it
-        # as set while the new event starts unset.
-        old_token = self._cancel_token
-        self._cancel_token = asyncio.Event()
-        logger.warning(
-            "E-STOP cleared — new turns will be accepted. "
-            "Old cancel_token (%s) remains set for any in-flight coroutines.",
-            id(old_token),
-        )
+        self._cancel_token.clear()
+        logger.warning("E-STOP cleared — new turns will be accepted.")
 
     def has_pending_tool_approval(self) -> bool:
         return self._tools.has_pending_approval()
