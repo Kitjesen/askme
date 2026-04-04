@@ -30,7 +30,12 @@ import numpy as np
 try:
     import sounddevice as sd
 except ModuleNotFoundError:
-    sd = None  # type: ignore[assignment]
+    class _SoundDeviceStub:
+        InputStream = None
+        @staticmethod
+        def query_devices(device: object = None, kind: object = None) -> object:
+            return {}
+    sd = _SoundDeviceStub()  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 

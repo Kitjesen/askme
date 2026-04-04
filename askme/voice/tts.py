@@ -19,7 +19,25 @@ import numpy as np
 try:
     import sounddevice as sd
 except ModuleNotFoundError:
-    sd = None  # type: ignore[assignment]
+    class _SoundDeviceStub:
+        InputStream = None
+        class CallbackFlags: pass
+        class default:
+            device = (None, None)
+        @staticmethod
+        def play(*args: object, **kwargs: object) -> None: ...
+        @staticmethod
+        def stop() -> None: ...
+        @staticmethod
+        def wait() -> None: ...
+        @staticmethod
+        def query_devices(device: object = None, kind: object = None) -> object:
+            return {}
+        class OutputStream:
+            def __init__(self, *args: object, **kwargs: object) -> None: ...
+            def __enter__(self) -> "_SoundDeviceStub.OutputStream": return self
+            def __exit__(self, *args: object) -> None: ...
+    sd = _SoundDeviceStub()  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from askme.voice.audio_router import AudioRouter
