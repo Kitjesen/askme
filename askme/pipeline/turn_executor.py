@@ -9,6 +9,7 @@ from typing import Any, TYPE_CHECKING
 from askme.pipeline.hooks import PipelineHooks
 from askme.pipeline.protocols import TurnContext
 from askme.pipeline.trace import get_tracer
+from askme.pipeline.utils import classify_llm_error
 
 if TYPE_CHECKING:
     from askme.llm.client import LLMClient
@@ -30,6 +31,23 @@ class TurnExecutor:
 
     _SILENT_MARKER = "[SILENT]"
     _REFLECT_DELAY_S = 5.0       # seconds to wait before post-turn reflection
+
+    def _track_task(
+        self, coro: "asyncio.Coroutine[Any, Any, Any]", *, name: str | None = None
+    ) -> "asyncio.Task[Any]":
+        """Create a background task, track it in _pending_tasks, log any exception."""
+        t = asyncio.create_task(coro, name=name)
+        self._pending_tasks.add(t)
+
+        def _done(task: "asyncio.Task[Any]") -> None:
+            self._pending_tasks.discard(task)
+            if not task.cancelled():
+                exc = task.exception()
+                if exc is not None:
+                    logger.warning("[TurnExecutor] Background task %r failed: %s", name or "?", exc)
+
+        t.add_done_callback(_done)
+        return t
 
     def __init__(
         self,
@@ -104,8 +122,7 @@ class TurnExecutor:
             )
             if not _should:
                 return
-            sem = self._llm_semaphore
-            if sem is not None and sem.locked():
+            if self._llm_semaphore.locked():
                 logger.info("[Dream] Skipping reflection — LLM busy with user turn")
                 return
             logger.info("[Dream] Idle-time reflection triggered")
@@ -158,12 +175,10 @@ class TurnExecutor:
         self._audio.drain_buffers()
 
         if self._dog_safety and self._dog_safety.is_configured():
-            _estop_t = asyncio.create_task(
+            self._track_task(
                 asyncio.to_thread(self._dog_safety.query_estop_state),
                 name="estop_refresh",
             )
-            self._pending_tasks.add(_estop_t)
-            _estop_t.add_done_callback(self._pending_tasks.discard)
 
         if not memory_task:
             memory_task = asyncio.create_task(self._memory.retrieve(user_text))
@@ -206,9 +221,7 @@ class TurnExecutor:
             except Exception as _e:
                 logger.warning("Conversation compression failed (non-critical): %s", _e)
 
-        _ct = asyncio.create_task(_compress_bg(), name="conv_compress")
-        self._pending_tasks.add(_ct)
-        _ct.add_done_callback(self._pending_tasks.discard)
+        self._track_task(_compress_bg(), name="conv_compress")
         messages = self._prompt_builder.prepare_messages(
             self._conversation.get_messages(system_prompt)
         )
@@ -217,7 +230,7 @@ class TurnExecutor:
 
         self._audio.start_playback()
         try:
-            async with self._llm_semaphore:  # type: ignore[union-attr]
+            async with self._llm_semaphore:
                 full_response = await self._stream_processor.stream_with_tools(
                     messages, system_prompt, model=self._voice_model,
                     source=source,
@@ -241,19 +254,14 @@ class TurnExecutor:
             if self._hooks:
                 await self._hooks.fire_post_turn(_ctx, full_response)
 
-            def _on_save_done(task: asyncio.Task) -> None:
-                self._pending_tasks.discard(task)
-                if not task.cancelled() and task.exception():
-                    logger.warning("Memory save failed (non-critical): %s", task.exception())
-
             if self._mem is not None:
-                _mt = asyncio.create_task(self._mem.save_to_vector(user_text, full_response))
-                self._pending_tasks.add(_mt)
-                _mt.add_done_callback(_on_save_done)
+                self._track_task(
+                    self._mem.save_to_vector(user_text, full_response), name="mem_save"
+                )
             elif self._memory is not None:
-                _mt = asyncio.create_task(self._memory.save(user_text, full_response))
-                self._pending_tasks.add(_mt)
-                _mt.add_done_callback(_on_save_done)
+                self._track_task(
+                    self._memory.save(user_text, full_response), name="mem_save"
+                )
 
             if source == "voice":
                 await asyncio.to_thread(self._audio.wait_speaking_done)
@@ -274,9 +282,7 @@ class TurnExecutor:
                         pass
 
                 self._qp_turn_count += 1
-                _t = asyncio.create_task(_qp_voice_bg())
-                self._pending_tasks.add(_t)
-                _t.add_done_callback(self._pending_tasks.discard)
+                self._track_task(_qp_voice_bg(), name="qp_memory")
 
             _should = (
                 self._mem.should_reflect() if self._mem is not None
@@ -294,15 +300,13 @@ class TurnExecutor:
                         except Exception as e:
                             logger.error("[Episodic] Reflection failed: %s", e)
 
-                t = asyncio.create_task(_delayed_reflect())
-                self._pending_tasks.add(t)
-                t.add_done_callback(self._pending_tasks.discard)
+                self._track_task(_delayed_reflect(), name="delayed_reflect")
 
             return full_response
         except Exception as exc:
             logger.error("LLM pipeline error: %s", exc)
             self._log_episode("error", f"LLM错误: {exc}")
-            self._audio.speak(self._classify_error_message(exc))
+            self._audio.speak(classify_llm_error(exc))
             error_msg = f"[系统错误] {type(exc).__name__}"
             last_role = (
                 self._conversation.history[-1].get("role")
@@ -337,16 +341,4 @@ class TurnExecutor:
 
     def _classify_error_message(self, exc: Exception) -> str:
         """Return a user-facing voice message for an LLM pipeline error."""
-        try:
-            from openai import APIConnectionError, APITimeoutError
-            if isinstance(exc, (asyncio.TimeoutError, APITimeoutError)):
-                return "想了一下没想出来，你再说一遍？"
-            if isinstance(exc, APIConnectionError):
-                return "网络有点问题，基本功能还在。"
-        except ImportError:
-            pass
-        if "timeout" in str(exc).lower():
-            return "响应超时，请再说一遍。"
-        if "connect" in str(exc).lower() or "network" in str(exc).lower():
-            return "网络连接异常，请稍候重试。"
-        return "处理出错，请重试。"
+        return classify_llm_error(exc)

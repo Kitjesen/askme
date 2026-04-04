@@ -11,7 +11,7 @@ import time as _time
 from typing import Any, TYPE_CHECKING
 
 from askme.pipeline.hooks import PipelineHooks, ToolCallRecord, _PROCEED
-from askme.pipeline.utils import strip_think_blocks
+from askme.pipeline.utils import classify_skill_error, strip_think_blocks
 
 if TYPE_CHECKING:
     from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
@@ -123,11 +123,7 @@ class SkillGate:
 
     def _classify_skill_error_message(self, exc: Exception, skill_name: str) -> str:
         """Return a user-facing voice message for a skill execution error."""
-        if isinstance(exc, asyncio.TimeoutError):
-            return f"{skill_name}执行超时，跳过了。要不要换个方式？"
-        if "connect" in str(exc).lower() or "network" in str(exc).lower():
-            return f"网络有问题，{skill_name}暂时做不了。"
-        return f"{skill_name}执行失败，要不要重试？"
+        return classify_skill_error(exc, skill_name)
 
     def _create_thinking_task(self) -> tuple[asyncio.Task[None], None]:
         async def _thinking_indicator() -> None:
