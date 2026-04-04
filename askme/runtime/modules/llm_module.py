@@ -52,10 +52,10 @@ class LLMModule(Module):
                 {"role": "system", "content": "回答一个字。"},
                 {"role": "user", "content": "好"},
             ]
-            t0 = asyncio.get_event_loop().time()
+            t0 = asyncio.get_running_loop().time()
             async for _ in self.client.chat_stream(warmup_messages):
                 break  # only need first token to warm connection
-            elapsed = (asyncio.get_event_loop().time() - t0) * 1000
+            elapsed = (asyncio.get_running_loop().time() - t0) * 1000
             logger.info("LLM warmup: %.0fms (connection pre-heated)", elapsed)
         except Exception as e:
             logger.debug("LLM warmup failed (non-critical): %s", e)
