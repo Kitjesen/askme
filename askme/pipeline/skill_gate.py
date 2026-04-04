@@ -11,13 +11,7 @@ import time as _time
 from typing import Any, TYPE_CHECKING
 
 from askme.pipeline.hooks import PipelineHooks, ToolCallRecord, _PROCEED
-
-_RE_THINK = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
-
-
-def strip_think_blocks(text: str) -> str:
-    """Remove all ``<think>...</think>`` blocks from a complete string."""
-    return _RE_THINK.sub("", text).strip()
+from askme.pipeline.utils import strip_think_blocks
 
 if TYPE_CHECKING:
     from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
@@ -50,7 +44,7 @@ class SkillGate:
         episodic: EpisodicMemory | None = None,
         memory_system: MemorySystem | None = None,
         agent_shell: ThunderAgentShell | None = None,
-        prompt_seed: str | None = None,
+        prompt_seed: list[dict[str, str]] | None = None,
         max_response_chars: int = 500,
         cancel_token: asyncio.Event | None = None,
         hooks: PipelineHooks | None = None,
@@ -99,7 +93,12 @@ class SkillGate:
             workspace = self._agent_shell._workspace if self._agent_shell else None
             if workspace:
                 workspace.mkdir(parents=True, exist_ok=True)
-                (workspace / "last_result.txt").write_text(result, encoding="utf-8")
+                # Resolve and contain: prevent path traversal via crafted result text
+                target = (workspace / "last_result.txt").resolve()
+                if target.parent.resolve() == workspace.resolve():
+                    target.write_text(result, encoding="utf-8")
+                else:
+                    logger.warning("[SkillGate] Path traversal blocked for last_result.txt")
         except Exception:
             pass
 
@@ -257,8 +256,24 @@ class SkillGate:
         try:
             thinking_task, _ = self._create_thinking_task()
 
+            _hooks = self._hooks
+
             def _on_tool_call(tool_name: str) -> None:
-                pass
+                """Called synchronously when a sub-tool fires within the skill."""
+                logger.debug("[SkillGate] sub-tool invoked: %s", tool_name)
+                if _hooks and _hooks.pre_tool:
+                    # Fire pre_tool hooks as a fire-and-forget task so the
+                    # synchronous callback doesn't block the skill executor.
+                    probe = ToolCallRecord(
+                        call_id="", tool_name=tool_name,
+                        arguments="", result="",
+                        elapsed_ms=0.0,
+                    )
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(_hooks.fire_pre_tool(probe))
+                    except RuntimeError:
+                        pass  # No running loop — hooks can't fire here
 
             t0 = _time.perf_counter()
             raw_result = await self._skill_executor.execute(

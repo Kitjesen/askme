@@ -29,6 +29,7 @@ class TurnExecutor:
     """Orchestrates one full conversation turn: memory → LLM → tools → TTS → save."""
 
     _SILENT_MARKER = "[SILENT]"
+    _REFLECT_DELAY_S = 5.0       # seconds to wait before post-turn reflection
 
     def __init__(
         self,
@@ -66,7 +67,9 @@ class TurnExecutor:
         self._qp_turn_count = 0
         self._last_spoken_text: str = ""
         self._pending_tasks: set[asyncio.Task[Any]] = set()
-        self._llm_semaphore: asyncio.Semaphore | None = None
+        # Semaphore initialized eagerly here so concurrent calls to process()
+        # before the first turn completes don't each create their own semaphore.
+        self._llm_semaphore: asyncio.Semaphore = asyncio.Semaphore(1)
 
     # ── Public API ────────────────────────────────────────────
 
@@ -136,9 +139,6 @@ class TurnExecutor:
             logger.warning("[TurnExecutor] cancel_token set — skipping turn")
             return ""
 
-        if self._llm_semaphore is None:
-            self._llm_semaphore = asyncio.Semaphore(1)
-
         # ── pre_turn hook (Claude Code: UserPromptSubmit) ──────────────────
         # Build a lightweight TurnContext snapshot for hooks; the token is
         # shared with sub-components so hooks can also trigger E-STOP.
@@ -173,14 +173,18 @@ class TurnExecutor:
         try:
             with _tracer.span("memory_retrieve"):
                 context_str = await memory_task
-        except Exception:
+        except Exception as _me:
+            logger.warning("[TurnExecutor] Memory retrieve failed: %s", _me)
             context_str = ""
 
         scene_desc = ""
         if vision_task:
             try:
                 scene_desc = await vision_task
-            except Exception:
+                if not scene_desc:
+                    logger.debug("[TurnExecutor] Vision capture returned empty scene description")
+            except Exception as _ve:
+                logger.warning("[TurnExecutor] Vision capture failed: %s", _ve)
                 scene_desc = ""
 
         if scene_desc:
@@ -281,7 +285,7 @@ class TurnExecutor:
             if _should:
 
                 async def _delayed_reflect() -> None:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(self._REFLECT_DELAY_S)
                     if self._mem is not None:
                         await self._mem.reflect()
                     elif self._episodic and self._episodic.should_reflect():

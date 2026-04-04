@@ -258,6 +258,25 @@ class EpisodicMemory:
             return Episode(event_type, description, context, importance=importance)
 
         episode = Episode(event_type, description, context, importance=importance)
+
+        # Drop-by-importance: if the buffer is at maxlen and the new episode is
+        # more important than the least important existing one, evict the weakest
+        # entry rather than silently dropping the new high-value event.
+        if len(self._buffer) == self._buffer.maxlen and self._buffer.maxlen:
+            min_ep = min(self._buffer, key=lambda e: e.importance)
+            if episode.importance > min_ep.importance:
+                try:
+                    self._buffer.remove(min_ep)
+                    self._cumulative_importance = max(
+                        0.0, self._cumulative_importance - min_ep.importance
+                    )
+                    logger.debug(
+                        "[EpisodicMemory] Evicted low-importance episode (%.2f) for new one (%.2f)",
+                        min_ep.importance, importance,
+                    )
+                except ValueError:
+                    pass  # Already removed (concurrent access guard)
+
         self._buffer.append(episode)
         self._total_logged += 1
         self._cumulative_importance += importance

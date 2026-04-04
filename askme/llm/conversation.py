@@ -71,6 +71,8 @@ class ConversationManager:
         self.history: list[dict[str, Any]] = []
         self._compress_backoff_until: float = 0.0  # back off after compression failure
         self._save_scheduled: bool = False  # debounce: coalesce per-turn saves
+        # Lock prevents concurrent compress calls from clobbering each other's history.
+        self._compress_lock: asyncio.Lock = asyncio.Lock()
         self._load()
 
     # ------------------------------------------------------------------
@@ -133,11 +135,18 @@ class ConversationManager:
           - Summarize them (including any existing summary) into a single message
           - Keep the most recent KEEP_RECENT messages verbatim
 
-        Called by BrainPipeline at the start of each turn.
+        Called by BrainPipeline at the start of each turn. A lock ensures that
+        concurrent invocations (background task vs. new turn) never clobber each
+        other's in-flight history rebuild.
         """
         if time.monotonic() < self._compress_backoff_until:
             return
 
+        async with self._compress_lock:
+            await self._compress_locked(llm)
+
+    async def _compress_locked(self, llm: Any) -> None:
+        """Compression body — must be called while holding _compress_lock."""
         # Skip compression while a tool exchange is in flight — compressing
         # mid-exchange would drop the tool messages and corrupt the API context.
         if any(m.get("role") == "assistant" and m.get("tool_calls") for m in self.history):
@@ -188,12 +197,24 @@ class ConversationManager:
             if not summary:
                 return
 
-            # Rebuild history: summary + recent messages
+            # Rebuild history: summary + recent messages that arrived *after*
+            # the snapshot.  Messages appended during the LLM await are merged
+            # back in to prevent data loss.
             summary_msg = {"role": "assistant", "content": f"{SUMMARY_TAG} {summary}"}
-            recent = regular[-KEEP_RECENT:]
+            # Re-read current history so we include any messages that arrived
+            # while the LLM was running.  Take KEEP_RECENT from the live state.
+            current_regular = [
+                m for m in self.history
+                if m.get("role") in ("user", "assistant") and m.get("content")
+            ]
+            recent = current_regular[-KEEP_RECENT:]
+            new_count = max(0, len(current_regular) - len(regular))
             self.history = [summary_msg] + recent
             self._save()
-            logger.info("[Conversation] Compressed %d messages into summary", len(to_compress))
+            logger.info(
+                "[Conversation] Compressed %d messages into summary (%d new arrivals preserved)",
+                len(to_compress), new_count,
+            )
         except Exception as exc:
             logger.warning("[Conversation] Compression failed: %s", exc)
             self._compress_backoff_until = time.monotonic() + 60.0  # retry after 60s

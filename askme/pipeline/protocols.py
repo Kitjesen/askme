@@ -18,7 +18,7 @@ Inspired by Claude Code's patterns:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 # Re-export hook types for one-stop import convenience
@@ -46,6 +46,17 @@ class StreamProcessorProtocol(Protocol):
         source: str = "voice",
     ) -> str:
         """Stream a follow-up LLM response and pipe to TTS."""
+        ...
+
+    async def consume_llm_stream(
+        self,
+        stream: Any,
+        source: str = "voice",
+    ) -> "tuple[str, dict[int, dict[str, str]]]":
+        """Consume raw LLM stream: think filter, TTS, truncation.
+
+        Returns ``(full_text, tool_calls_acc)``.
+        """
         ...
 
     def reset(self) -> None:
@@ -102,7 +113,7 @@ class TurnExecutorProtocol(Protocol):
         self,
         user_text: str,
         *,
-        memory_task: asyncio.Task[str] | None = None,
+        memory_task: "asyncio.Task[str] | None" = None,
         source: str = "voice",
     ) -> str:
         """Run the full pipeline for *user_text*. Returns assistant reply."""
@@ -148,4 +159,3 @@ class TurnContext:
     source: str
     cancel_token: asyncio.Event
     voice_model: str | None = None
-    memory_task: "asyncio.Task[str] | None" = field(default=None, compare=False)

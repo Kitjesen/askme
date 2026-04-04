@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time as _time
-from typing import Any, Awaitable, Callable, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Protocol, TYPE_CHECKING
 
 from askme.pipeline.hooks import PipelineHooks, ToolCallRecord, _PROCEED
 
@@ -18,8 +18,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# stream_and_speak signature: (messages, model, source) -> str
-_StreamAndSpeakFn = Callable[[list[dict[str, Any]], str | None, str], Awaitable[str]]
+
+class _StreamAndSpeakFn(Protocol):
+    """stream_and_speak callback — keyword args must be passed by keyword."""
+
+    async def __call__(
+        self,
+        messages: list[dict[str, Any]],
+        model: str | None = ...,
+        source: str = ...,
+    ) -> str: ...
 
 
 class ToolExecutor:
@@ -161,7 +169,7 @@ class ToolExecutor:
         follow_msgs = self._prompt_builder.prepare_messages(
             self._conversation.get_messages(system_prompt)
         )
-        return await self._stream_and_speak(follow_msgs, model, source)
+        return await self._stream_and_speak(follow_msgs, model=model, source=source)
 
     async def respond_without_llm(
         self,

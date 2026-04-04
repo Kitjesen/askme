@@ -70,7 +70,9 @@ class _ThinkFilter:
 class StreamProcessor:
     """Handles LLM streaming: think filtering, sentence splitting, TTS piping, tool accumulation."""
 
-    THINKING_DELAY = 1.2
+    THINKING_DELAY = 1.2          # seconds before playing the "thinking" audio cue
+    SLOW_NETWORK_DELAY = 5.0      # seconds before playing a second "slow network" cue
+    TRUNCATION_HINT = "还有更多内容，说继续我就接着说。"
 
     def __init__(
         self,
@@ -111,7 +113,7 @@ class StreamProcessor:
         slow_network_task: asyncio.Task[None] | None = None
         if include_slow_network:
             async def _slow_network_indicator() -> None:
-                await asyncio.sleep(5.0)
+                await asyncio.sleep(self.SLOW_NETWORK_DELAY)
                 self._audio.play_thinking()
 
             slow_network_task = asyncio.create_task(_slow_network_indicator())
@@ -164,7 +166,7 @@ class StreamProcessor:
                         for sentence in self._splitter.feed(clean):
                             if char_limit and chars_spoken + len(sentence) > char_limit:
                                 self._audio.speak(sentence)
-                                self._audio.speak("还有更多内容，说继续我就接着说。")
+                                self._audio.speak(self.TRUNCATION_HINT)
                                 spoke_any = True
                                 truncated = True
                                 logger.info(

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from typing import Any, TYPE_CHECKING
 
 from askme.pipeline.hooks import PipelineHooks
@@ -28,6 +27,7 @@ from askme.pipeline.skill_gate import SkillGate
 from askme.pipeline.stream_processor import StreamProcessor
 from askme.pipeline.tool_executor import ToolExecutor
 from askme.pipeline.turn_executor import TurnExecutor
+from askme.pipeline.utils import strip_think_blocks  # noqa: F401 — re-exported for compat
 
 if TYPE_CHECKING:
     from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
@@ -48,13 +48,6 @@ if TYPE_CHECKING:
     from askme.voice.stream_splitter import StreamSplitter
 
 logger = logging.getLogger(__name__)
-
-_RE_THINK = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
-
-
-def strip_think_blocks(text: str) -> str:
-    """Remove all ``<think>...</think>`` blocks from a complete string."""
-    return _RE_THINK.sub("", text).strip()
 
 
 class BrainPipeline:
@@ -306,6 +299,27 @@ class BrainPipeline:
             self._hooks.fire_estop()
         logger.warning("E-STOP: cancel_token set, local motion halted.")
 
+    def reset_estop(self) -> None:
+        """Clear the emergency-stop signal so new turns can be processed.
+
+        Call this after confirming the robot is safe and the operator has
+        explicitly released the E-STOP.  Hardware interlock release must happen
+        separately (e.g. dog_safety.release_estop()).
+        """
+        if not self._cancel_token.is_set():
+            logger.info("reset_estop: cancel_token was not set — no-op")
+            return
+        # asyncio.Event has no .clear() analogue that's safe to swap under load;
+        # replace the event so in-flight checks on the old object still see it
+        # as set while the new event starts unset.
+        old_token = self._cancel_token
+        self._cancel_token = asyncio.Event()
+        logger.warning(
+            "E-STOP cleared — new turns will be accepted. "
+            "Old cancel_token (%s) remains set for any in-flight coroutines.",
+            id(old_token),
+        )
+
     def has_pending_tool_approval(self) -> bool:
         return self._tools.has_pending_approval()
 
@@ -422,11 +436,11 @@ class BrainPipeline:
             self.__pending_tasks_fallback = value
 
     @property
-    def _llm_semaphore(self):
+    def _llm_semaphore(self) -> asyncio.Semaphore:
         return self._turn_executor._llm_semaphore
 
     @_llm_semaphore.setter
-    def _llm_semaphore(self, value):
+    def _llm_semaphore(self, value: asyncio.Semaphore) -> None:
         if hasattr(self, "_turn_executor"):
             self._turn_executor._llm_semaphore = value
 

@@ -169,11 +169,11 @@ class PipelineHooks:
             except Exception as exc:
                 logger.warning("[hooks.post_turn] Hook %s raised: %s", hook.__name__, exc)
 
-    async def fire_pre_tool(self, record: ToolCallRecord) -> str | None:
+    async def fire_pre_tool(self, record: ToolCallRecord) -> "_ProceedType | str":
         """Fire all pre_tool hooks.
 
-        Returns the first non-None override result; None means block the call.
-        If no hook returns a value, returns ``_SENTINEL`` to indicate proceed.
+        Returns the first non-None override result (a string), or ``_PROCEED``
+        sentinel when no hook intercepted the call.
         """
         for hook in self.pre_tool:
             try:
@@ -204,8 +204,24 @@ class PipelineHooks:
 
 
 # Sentinel returned by fire_pre_tool when no hook overrides the result.
-# Using a module-level object so callers can do ``result is _PROCEED``.
-_PROCEED: str = object()  # type: ignore[assignment]
+# Using a proper sentinel class so ``result is _PROCEED`` has a correct type.
+
+
+class _ProceedType:
+    """Singleton sentinel: fire_pre_tool found no hook override — proceed normally."""
+
+    _instance: "_ProceedType | None" = None
+
+    def __new__(cls) -> "_ProceedType":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "<_PROCEED>"
+
+
+_PROCEED = _ProceedType()
 
 
 def dataclasses_replace(obj: ToolCallRecord, **changes: object) -> ToolCallRecord:
