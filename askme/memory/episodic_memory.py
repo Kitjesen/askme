@@ -105,21 +105,72 @@ REFLECT_PROMPT = """\
 3. **模式识别**: 是否发现重复出现的规律？（如果有）
 4. **知识更新**: 需要更新或修正的已有认知（如果有）
 
-知识分类说明:
+知识分类说明 (category):
 - environment: 环境布局、空间、地标
 - entities: 人、动物、物体
 - routines: 时间规律、日程
 - interactions: 交互经验、命令响应
 - self_knowledge: 自身能力、限制
 
+事件类型说明 (event_type):
+- interaction: 与人交互、问答、命令执行
+- decision: 机器人自主判断或决策
+- anomaly: 异常、错误、意外事件
+- routine: 重复性日常任务或巡检
+
 用 JSON 格式回复:
 {{
   "summary": "这段时间的概要",
-  "new_facts": [{{"fact": "新发现内容", "category": "分类名"}}],
+  "new_facts": [{{"fact": "新发现内容", "category": "分类名", "event_type": "interaction|decision|anomaly|routine", "entities": ["相关人物或物体"]}}],
   "patterns": [{{"pattern": "规律描述", "category": "分类名", "confidence": 0.8}}],
   "updates": [{{"old": "旧认知", "new": "新认知", "category": "分类名"}}],
   "importance": "low|medium|high"
 }}"""
+
+
+# ── Zero-LLM event type classifier ────────────────────────
+
+_ET_ANOMALY = frozenset([
+    "错误", "失败", "异常", "超时", "警告", "故障", "不对", "无法", "崩溃",
+    "error", "timeout", "crash", "fail", "exception",
+])
+_ET_INTERACTION = frozenset([
+    "用户", "说", "问", "回答", "命令", "请", "帮", "告诉", "查一下", "你",
+])
+_ET_DECISION = frozenset([
+    "决定", "选择", "判断", "规划", "策略", "评估", "分析",
+])
+_ET_ROUTINE = frozenset([
+    "巡检", "巡逻", "定时", "周期", "例行", "patrol", "routine",
+])
+
+_ET_KIND_MAP: dict[str, str] = {
+    "command": "interaction",
+    "error": "anomaly",
+    "perception": "routine",
+    "outcome": "routine",
+    "system": "routine",
+    "action": "interaction",
+}
+
+
+def classify_event_type(kind: str, text: str) -> str:
+    """Classify an episode into event_type without LLM.
+
+    Returns one of: interaction | anomaly | decision | routine
+    """
+    t = text.lower()
+    # Anomaly wins unconditionally
+    if kind == "error" or any(kw in t for kw in _ET_ANOMALY):
+        return "anomaly"
+    # Content-based checks before kind-based fallback (more specific wins)
+    if any(kw in t for kw in _ET_ROUTINE):
+        return "routine"
+    if any(kw in t for kw in _ET_DECISION):
+        return "decision"
+    if kind in ("command", "action") or any(kw in t for kw in _ET_INTERACTION):
+        return "interaction"
+    return _ET_KIND_MAP.get(kind, "interaction")
 
 
 _RE_NORMALIZE = re.compile(r"[\s\-—·、，。！？：；\u201c\u201d\u2018\u2019（）()\[\]「」.,!?:;]+")
@@ -625,7 +676,11 @@ class EpisodicMemory:
             lines.append("\n新发现:")
             for item in new_facts:
                 if isinstance(item, dict):
-                    lines.append(f"- [{item.get('category', '?')}] {item.get('fact', item)}")
+                    et = item.get("event_type", "")
+                    ents = item.get("entities", [])
+                    et_tag = f"[{et}]" if et else ""
+                    ent_tag = f" @{','.join(ents[:3])}" if ents else ""
+                    lines.append(f"- [{item.get('category', '?')}]{et_tag} {item.get('fact', item)}{ent_tag}")
                 else:
                     lines.append(f"- {item}")
         if patterns:
@@ -659,11 +714,16 @@ class EpisodicMemory:
             if isinstance(item, dict):
                 cat = item.get("category", "general")
                 fact = item.get("fact", "")
+                et = item.get("event_type", "")
+                ents = item.get("entities", [])
+                tagged = f"[{et}] {fact}" if et else fact
+                if ents:
+                    tagged += f" @{','.join(ents[:3])}"
             else:
-                cat, fact = "general", str(item)
+                cat, tagged = "general", str(item)
             if cat not in KNOWLEDGE_CATEGORIES:
                 cat = "general"
-            categorized.setdefault(cat, []).append(fact)
+            categorized.setdefault(cat, []).append(tagged)
 
         for item in patterns:
             if isinstance(item, dict):
