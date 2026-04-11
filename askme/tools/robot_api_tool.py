@@ -80,9 +80,9 @@ class RobotApiTool(BaseTool):
         },
         "required": ["service", "method", "path"],
     }
-    safety_level = "normal"
+    safety_level = "dangerous"
     agent_allowed = True
-    voice_label = "查询机器人"  # runtime services have their own safety layer
+    voice_label = "操作机器人 API"
 
     _TIMEOUT = 10.0
     _MAX_RESPONSE = 4096
