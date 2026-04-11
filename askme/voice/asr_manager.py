@@ -198,23 +198,19 @@ class ASRManager:
         cloud_text = ""
         local_text = ""
 
-        # Get local ASR result FIRST — so we can decide cloud timeout
-        while self._asr.is_ready(self._stream):
-            self._asr.decode_stream(self._stream)
-        local_text = self._asr.get_result(self._stream).strip()
-
-        # Finish cloud session — if local already has a result, only give cloud
-        # 300ms to confirm/override it; otherwise wait the full 3s fallback window.
+        # Finish cloud session first (preferred result)
         if self._cloud_active:
             self._cloud_active = False
             try:
-                cloud_timeout = 0.3 if local_text else 3.0
-                cloud_text = self._cloud.finish_session(timeout=cloud_timeout).strip()
-                if cloud_timeout == 0.3 and cloud_text:
-                    logger.debug("Cloud ASR confirmed in fast path (local was ready)")
+                cloud_text = self._cloud.finish_session(timeout=3.0).strip()
             except Exception as exc:
                 logger.warning("Cloud ASR finish failed, using local: %s", exc)
                 cloud_text = ""
+
+        # Get local ASR result (fallback)
+        while self._asr.is_ready(self._stream):
+            self._asr.decode_stream(self._stream)
+        local_text = self._asr.get_result(self._stream).strip()
 
         # Pick best: cloud preferred when available
         if cloud_text:
