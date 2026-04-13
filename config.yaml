@@ -98,9 +98,11 @@ conversation:
 voice:
   # Input device index for microphone (see startup log for available devices)
   # null = system default. On sunrise: 0 = HK-MIC (hw:0,0), 1 = MCP01 (hw:1,0, mic dead)
-  input_device: 0
+  # On Windows: null uses system default mic (Realtek). Set to specific index if needed.
+  input_device: null
   # HK-MIC native rate is 48kHz 2ch — MicInput resamples to 16kHz mono
-  mic_native_rate: 48000
+  # On Windows Realtek: typically 44100Hz. Set to match your mic's native rate.
+  mic_native_rate: 44100
   mic_channels: 2
   mic_channel_select: 0
   mic_highpass_hz: 80
@@ -336,6 +338,12 @@ platforms:
     enabled: false
   web:
     enabled: false
+  telegram:
+    enabled: false              # 设为 true 并填写 TELEGRAM_BOT_TOKEN 后启用
+    token_env: TELEGRAM_BOT_TOKEN
+    allowed_users: []           # 空列表=不限制；填 Telegram user_id 整数开白名单
+    voice_transcribe: true      # 是否转写语音消息（需要 ffmpeg + sherpa-onnx）
+    lingtu_url: ""              # 留空则读 NAV_GATEWAY_URL 环境变量
 
 # ----------------------------------------------------------
 # Scheduler: Timed tasks (future)

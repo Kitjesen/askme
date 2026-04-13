@@ -19,3 +19,6 @@ fastapi>=0.103.0
 
 # Memory (install memU locally: cd memU && pip install -e .)
 # memu>=0.1.0
+
+# Telegram Bot (optional, for TelegramModule)
+# python-telegram-bot>=20.0

@@ -27,6 +27,7 @@ from askme.runtime.modules.led_module import LEDModule
 from askme.runtime.modules.proactive_module import ProactiveModule
 from askme.runtime.modules.reaction_module import ReactionModule
 from askme.runtime.modules.health_module import HealthModule
+from askme.runtime.modules.telegram_module import TelegramModule
 
 __all__ = [
     "LLMModule",
@@ -45,4 +46,5 @@ __all__ = [
     "ProactiveModule",
     "ReactionModule",
     "HealthModule",
+    "TelegramModule",
 ]

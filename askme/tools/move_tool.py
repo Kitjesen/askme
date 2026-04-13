@@ -116,10 +116,48 @@ class MoveRobotTool(BaseTool):
             return f"[错误] 未知动作: {action}"
 
     def _go_to(self, target: str) -> str:
-        """Semantic navigation via nav-gateway API."""
+        """Semantic navigation — LingTu instruction API or Thunder nav-gateway fallback."""
         if not target:
             return "[错误] 请指定目标位置"
 
+        import os
+        nav_gateway_url = os.environ.get("NAV_GATEWAY_URL", "")
+
+        # LingTu mode: NAV_GATEWAY_URL points to LingTu REST API
+        if nav_gateway_url:
+            return self._go_to_lingtu(target, nav_gateway_url)
+
+        # Thunder mode: internal nav-gateway (legacy)
+        return self._go_to_thunder(target)
+
+    def _go_to_lingtu(self, target: str, base_url: str) -> str:
+        """Send natural-language instruction to LingTu SemanticPlanner."""
+        import json
+        import urllib.request
+        import urllib.error
+
+        url = f"{base_url.rstrip('/')}/api/v1/instruction"
+        body = json.dumps({"text": target}).encode()
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                result = json.loads(resp.read().decode())
+        except urllib.error.URLError as exc:
+            return f"[导航不可用] LingTu API 不可达 ({base_url}): {exc.reason}"
+        except Exception as exc:
+            return f"[导航错误] {exc}"
+
+        if result.get("ok") is False or "error" in result:
+            err = result.get("error", result.get("message", "未知错误"))
+            return f"[导航错误] {err}"
+
+        return f"正在导航到「{target}」"
+
+    def _go_to_thunder(self, target: str) -> str:
+        """Semantic navigation via Thunder nav-gateway (legacy path)."""
         from uuid import uuid4
         result = _call_runtime_api("nav", "POST", "/api/v1/nav/tasks", {
             "task_type": "SEMANTIC_NAV",

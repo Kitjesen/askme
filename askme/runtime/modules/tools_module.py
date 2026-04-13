@@ -34,6 +34,7 @@ class ToolsModule(Module):
         from askme.tools.move_tool import register_move_tools
         from askme.tools.robot_api_tool import RobotApiTool
         from askme.tools.scan_tool import register_scan_tools
+        from askme.tools.temporal_query_tool import register_temporal_tools
 
         tools_cfg = cfg.get("tools", {})
         production_mode = bool(tools_cfg.get("production_mode", False))
@@ -43,6 +44,7 @@ class ToolsModule(Module):
         self.registry.register(RobotApiTool())
         register_move_tools(self.registry)
         register_scan_tools(self.registry)
+        register_temporal_tools(self.registry)
 
         logger.info("ToolsModule: built (%d tools)", len(self.registry))
 
