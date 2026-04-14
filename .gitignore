@@ -48,3 +48,4 @@ tests/tmp/
 docs/*.pptx
 docs/voice_samples/
 .claude/worktrees/
+memU/

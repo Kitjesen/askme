@@ -170,7 +170,7 @@ class TelegramModule(Module):
     async def _cmd_cancel(self, update: Any, context: Any) -> None:
         if not self._is_allowed(update.effective_user.id):
             return
-        result = await self._post_lingtu("/api/v1/cancel", {})
+        result = await self._post_lingtu("/api/v1/stop", {})
         if result is None:
             await update.message.reply_text("LingTu 不可达，取消失败。")
         else:
