@@ -1,6 +1,6 @@
 """LEDModule — wraps StateLedBridge + LedController as a declarative module.
 
-Mirrors the LED wiring from ``assembly.py`` lines 590-608::
+Canonical wiring::
 
     led_controller = HttpLedController(led_base_url) if led_base_url else NullLedController()
     led_bridge = StateLedBridge(audio=audio, dispatcher=dispatcher, safety=..., led=led_controller)

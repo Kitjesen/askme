@@ -1,6 +1,6 @@
 """ExecutorModule — wraps ThunderAgentShell as a declarative module.
 
-Mirrors the agent shell creation from ``assembly.py`` lines 534-541::
+Canonical wiring::
 
     agent_shell = ThunderAgentShell(
         llm_client=llm, tool_registry=tools, audio=audio, model=...,

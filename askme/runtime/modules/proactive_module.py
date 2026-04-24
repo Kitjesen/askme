@@ -1,6 +1,6 @@
 """ProactiveModule — wraps ProactiveAgent as a declarative module.
 
-Mirrors the proactive wiring from ``assembly.py`` lines 577-588::
+Canonical wiring::
 
     proactive = ProactiveAgent(
         vision=vision, audio=audio, episodic=episodic, llm=llm, config=cfg,

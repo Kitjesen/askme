@@ -1,6 +1,6 @@
 """SafetyModule — wraps DogSafetyClient as a declarative module.
 
-Mirrors the safety wiring from ``assembly.py`` lines 487-490::
+Canonical wiring::
 
     dog_safety = DogSafetyClient(
         cfg.get("runtime", {}).get("dog_safety", {}),

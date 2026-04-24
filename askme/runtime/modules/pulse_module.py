@@ -1,6 +1,6 @@
 """PulseModule — wraps the Pulse DDS bus as a declarative module.
 
-Mirrors the Pulse creation logic from ``assembly.py`` line 486::
+Canonical wiring::
 
     pulse = Pulse(cfg.get("pulse", {}))
 """

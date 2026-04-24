@@ -1,6 +1,6 @@
 """PipelineModule — wraps BrainPipeline as a declarative module.
 
-Mirrors the pipeline creation from ``assembly.py`` lines 493-520::
+Canonical wiring::
 
     pipeline = BrainPipeline(llm=llm, conversation=conversation, ...)
 

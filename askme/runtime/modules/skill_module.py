@@ -1,6 +1,6 @@
 """SkillModule — wraps SkillManager + SkillDispatcher + PlannerAgent.
 
-Mirrors the skill wiring from ``assembly.py`` lines 450-546::
+Canonical wiring::
 
     skill_manager = SkillManager()
     skill_manager.load()

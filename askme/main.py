@@ -1,4 +1,4 @@
-"""Legacy askme runtime entrypoints."""
+"""askme runtime entrypoints."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import askme.interfaces.register_defaults  # noqa: F401 — register all backend
 
 from askme import __version__ as ASKME_VERSION
 from askme.config import get_config
-from askme.runtime.profiles import legacy_profile_for
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +63,3 @@ async def run_app(*, voice_mode: bool, robot_mode: bool) -> None:
             await tl.run()
     finally:
         await app.stop()
-
-
-# Backward compatibility alias
-run_legacy_app = run_app

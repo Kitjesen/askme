@@ -1,6 +1,6 @@
 """TextModule — wraps TextLoop + CommandHandler as a declarative module.
 
-Mirrors the text loop creation from ``assembly.py`` lines 548-561::
+Canonical wiring::
 
     commands = CommandHandler(conversation=conversation, skill_manager=skill_manager)
     text_loop = TextLoop(router=router, pipeline=pipeline, ...)

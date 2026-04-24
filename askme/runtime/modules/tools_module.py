@@ -1,6 +1,6 @@
 """ToolsModule — wraps ToolRegistry construction as a declarative module.
 
-Mirrors the tool registration logic from ``assembly.py`` lines 433-441::
+Canonical wiring::
 
     tools = ToolRegistry()
     register_builtin_tools(tools, production_mode=...)

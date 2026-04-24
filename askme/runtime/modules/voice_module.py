@@ -1,6 +1,6 @@
 """VoiceModule — wraps AudioAgent + IntentRouter + VoiceLoop + AddressDetector.
 
-Mirrors the voice wiring from ``assembly.py`` lines 466-575::
+Canonical wiring::
 
     router = IntentRouter(...)
     audio = AudioAgent(cfg, ...)

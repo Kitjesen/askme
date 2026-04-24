@@ -1,6 +1,6 @@
 """HealthModule — wraps AskmeHealthServer as a declarative module.
 
-Mirrors the health server creation from ``assembly.py`` lines 660-694::
+Canonical wiring::
 
     health_server = AskmeHealthServer(
         cfg.get("health_server", {}),
