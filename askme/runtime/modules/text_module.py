@@ -46,21 +46,21 @@ class TextModule(Module):
         from askme.voice.audio_agent import AudioAgent
         from askme.voice.runtime_bridge import VoiceRuntimeBridge
 
-        llm_mod = getattr(self, "llm_in", None)
+        llm_mod = self.llm_in
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else OTABridgeMetrics()
 
-        mem_mod = getattr(self, "memory_in", None)
+        mem_mod = self.memory_in
         conversation = getattr(mem_mod, "conversation", None) if mem_mod else None
 
-        skill_mod = getattr(self, "skill_in", None)
+        skill_mod = self.skill_in
         skill_manager = getattr(skill_mod, "skill_manager", None) if skill_mod else None
         dispatcher = getattr(skill_mod, "skill_dispatcher", None) if skill_mod else None
 
-        pipeline_mod = getattr(self, "pipeline_in", None)
+        pipeline_mod = self.pipeline_in
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
 
         # Reuse voice module's audio if available, else create text-only AudioAgent
-        voice_mod = getattr(self, "voice_in", None)
+        voice_mod = self.voice_in
         if voice_mod is not None:
             audio = getattr(voice_mod, "audio", None)
             router = getattr(voice_mod, "router", None)

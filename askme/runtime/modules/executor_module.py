@@ -37,10 +37,10 @@ class ExecutorModule(Module):
     pipeline_in: In[BrainPipeline]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        llm_mod = getattr(self, "llm_in", None)
+        llm_mod = self.llm_in
         llm = getattr(llm_mod, "client", None) if llm_mod else None
 
-        tools_mod = getattr(self, "tool_registry_in", None)
+        tools_mod = self.tool_registry_in
         tools = getattr(tools_mod, "registry", None) if tools_mod else None
 
         brain_cfg = cfg.get("brain", {})
@@ -55,8 +55,7 @@ class ExecutorModule(Module):
 
         # Cross-link: pipeline needs the agent shell for agent_task skill dispatch.
         # ExecutorModule owns the shell, so it injects into the pipeline built earlier.
-        # In port is set by auto-wire; fall back to registry for standalone test compat.
-        pipeline_mod = getattr(self, "pipeline_in", None)
+        pipeline_mod = self.pipeline_in
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
         if pipeline is not None:
             pipeline.set_agent_shell(self.shell)

@@ -399,6 +399,18 @@ class Module(ABC):
             # Auto-name from class: MyPerception → my_perception
             cls.name = _camel_to_snake(cls.__name__)
 
+    def __init__(self) -> None:
+        # Pre-initialise every declared In/Required/Alias port to None so that
+        # direct attribute access is safe both (a) under Runtime.build(), where
+        # _auto_wire() later overwrites the attribute with the provider module,
+        # and (b) under standalone instantiation (tests, REPL) where auto-wiring
+        # never runs.  Without this, subclass build() methods have to guard
+        # every port access with ``getattr(self, "port_name", None)``.
+        for port in _scan_ports(type(self)):
+            if port.direction in ("in", "required_in", "alias_in"):
+                if not hasattr(self, port.name):
+                    setattr(self, port.name, None)
+
     @abstractmethod
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         """Construct internal state from config. Called once before start."""
