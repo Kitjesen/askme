@@ -84,8 +84,12 @@ class AlertDispatcher:
         # Severity → channel routing
         self._routes: dict[str, list[str]] = cfg.get("severity_routes", _DEFAULT_ROUTES)
 
-        # Rate limiting
-        self._last_voice_time: float = 0.0
+        # Rate limiting — seed with -inf so the FIRST dispatch always passes
+        # the cooldown check.  ``time.monotonic()`` is not epoch-based; its
+        # starting value depends on process/container uptime and can be
+        # smaller than ``voice_cooldown``, which would otherwise cause the
+        # very first voice alert to be suppressed.
+        self._last_voice_time: float = float("-inf")
         self._voice_cooldown: float = float(cfg.get("voice_cooldown", 10))
 
     def dispatch(
