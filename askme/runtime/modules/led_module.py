@@ -1,6 +1,6 @@
 """LEDModule — wraps StateLedBridge + LedController as a declarative module.
 
-Mirrors the LED wiring from ``assembly.py`` lines 590-608::
+Canonical wiring::
 
     led_controller = HttpLedController(led_base_url) if led_base_url else NullLedController()
     led_bridge = StateLedBridge(audio=audio, dispatcher=dispatcher, safety=..., led=led_controller)
@@ -47,14 +47,13 @@ class LEDModule(Module):
             else NullLedController()
         )
 
-        # Get dependencies via In[T] ports (auto-wired; getattr for standalone test compat)
-        voice_mod = getattr(self, "voice_in", None)
+        voice_mod = self.voice_in
         audio = getattr(voice_mod, "audio", None) if voice_mod else None
 
-        skill_mod = getattr(self, "skill_in", None)
+        skill_mod = self.skill_in
         dispatcher = getattr(skill_mod, "skill_dispatcher", None) if skill_mod else None
 
-        safety_mod = getattr(self, "safety_in", None)
+        safety_mod = self.safety_in
         dog_safety = getattr(safety_mod, "client", None) if safety_mod else None
 
         self.led_bridge = StateLedBridge(

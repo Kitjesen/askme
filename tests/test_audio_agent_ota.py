@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import queue
+from pathlib import Path
+
+import pytest
 
 from askme.robot.ota_bridge import OTABridgeMetrics
 from askme.voice.audio_agent import AudioAgent
+
+_ASR_MODEL_TOKENS = Path(
+    "models/asr/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/tokens.txt"
+)
+pytestmark = pytest.mark.skipif(
+    not _ASR_MODEL_TOKENS.exists(),
+    reason=f"ASR model not present at {_ASR_MODEL_TOKENS}",
+)
 
 
 class _DummyTTS:

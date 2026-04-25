@@ -62,7 +62,7 @@ class TelegramModule(Module):
         )
 
         # Pipeline wired by runtime; may be None if pipeline module absent
-        pipeline_mod = getattr(self, "pipeline", None)
+        pipeline_mod = self.pipeline
         self._pipeline: BrainPipeline | None = getattr(pipeline_mod, "brain_pipeline", None)
 
         self._app: Any = None  # telegram.ext.Application, built in start()

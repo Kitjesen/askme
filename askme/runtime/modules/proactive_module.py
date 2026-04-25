@@ -1,6 +1,6 @@
 """ProactiveModule — wraps ProactiveAgent as a declarative module.
 
-Mirrors the proactive wiring from ``assembly.py`` lines 577-588::
+Canonical wiring::
 
     proactive = ProactiveAgent(
         vision=vision, audio=audio, episodic=episodic, llm=llm, config=cfg,
@@ -44,20 +44,22 @@ class ProactiveModule(Module):
     pipeline_in: In[BrainPipeline]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        # Get dependencies via In[T] ports (auto-wired; getattr for standalone test compat)
-        llm_mod = getattr(self, "llm_in", None)
+        # In[T] ports are pre-set to None by Module.__init__ and overwritten by
+        # _auto_wire() when a provider exists.  Inner getattr guards against
+        # providers that skip setting a specific attribute (e.g. fake test doubles).
+        llm_mod = self.llm_in
         llm = getattr(llm_mod, "client", None) if llm_mod else None
 
-        mem_mod = getattr(self, "memory_in", None)
+        mem_mod = self.memory_in
         episodic = getattr(mem_mod, "episodic", None) if mem_mod else None
 
-        perception_mod = getattr(self, "perception_in", None)
+        perception_mod = self.perception_in
         vision = getattr(perception_mod, "vision_bridge", None) if perception_mod else None
 
-        voice_mod = getattr(self, "voice_in", None)
+        voice_mod = self.voice_in
         audio = getattr(voice_mod, "audio", None) if voice_mod else None
 
-        pipeline_mod = getattr(self, "pipeline_in", None)
+        pipeline_mod = self.pipeline_in
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
 
         self.agent = ProactiveAgent(

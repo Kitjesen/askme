@@ -45,14 +45,13 @@ class ReactionModule(Module):
             RuleBasedReaction,
         )
 
-        # Gather dependencies via In ports
-        llm_mod = getattr(self, "llm_in", None)
+        llm_mod = self.llm_in
         llm = getattr(llm_mod, "client", None) if llm_mod else None
 
-        mem_mod = getattr(self, "memory_in", None)
+        mem_mod = self.memory_in
         episodic = getattr(mem_mod, "episodic", None) if mem_mod else None
 
-        voice_mod = getattr(self, "voice_in", None)
+        voice_mod = self.voice_in
         audio = getattr(voice_mod, "audio", None) if voice_mod else None
 
         # Create our own AlertDispatcher

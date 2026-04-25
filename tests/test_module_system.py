@@ -549,3 +549,56 @@ async def test_wire_result_has_diagnostics():
     assert len(wr.wired) >= 1
     # estop Out has no subscriber → orphan
     assert any(o[1] == "estop" for o in wr.orphan_outs)
+
+
+# ── Module.__init__ port pre-initialisation ─────────
+
+
+def test_init_presets_in_ports_to_none():
+    """Module() without Runtime.build() leaves In ports accessible as None.
+
+    This lets subclass build() methods use ``self.port`` instead of
+    ``getattr(self, 'port', None)`` both under Runtime (where _auto_wire
+    overwrites the None) and in standalone tests (where it stays None).
+    """
+    m = MultiConsumer()
+    assert m.detections is None
+    assert m.estop is None
+
+
+def test_init_presets_required_ports_to_none():
+    class Needy(Module):
+        name = "needy"
+        scene: Required[DetectionData]
+
+        def build(self, cfg, registry):
+            pass
+
+    m = Needy()
+    assert m.scene is None
+
+
+def test_init_does_not_touch_out_ports():
+    """Out ports are not pre-set — providers decide how to expose them."""
+    m = SensorBus()
+    # Out port attributes are never set by __init__; they exist only as
+    # annotations.  Reading should raise AttributeError (no pre-set to None).
+    assert "detections" not in m.__dict__
+    assert "estop" not in m.__dict__
+
+
+def test_init_skips_noport_module():
+    """Module with no port annotations does not fail or set spurious attrs."""
+    m = NoPortModule()
+    assert vars(m) == {}
+
+
+async def test_build_still_overwrites_preset_none_with_provider():
+    """Under Runtime.build(), _auto_wire overrides the __init__ None default."""
+    rt = Runtime.use(SensorBus) + Runtime.use(DetectionConsumer)
+    app = await rt.build()
+    consumer = app.modules["det_consumer"]
+    # detections was preset to None by __init__, then _auto_wire replaced it
+    # with the provider module.  Not None any more.
+    assert consumer.detections is not None
+    assert consumer.detections is app.modules["sensor_bus"]

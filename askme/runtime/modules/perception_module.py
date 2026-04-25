@@ -1,6 +1,6 @@
 """PerceptionModule — wraps VisionBridge + ChangeDetector as a declarative module.
 
-Mirrors the perception wiring from ``assembly.py`` lines 432, 610-614::
+Canonical wiring::
 
     vision = VisionBridge()
     change_detector = ChangeDetector(config=cfg, pulse=pulse)
@@ -35,7 +35,7 @@ class PerceptionModule(Module):
 
         self.change_detector = None
         # In[DetectionFrame] auto-wired to PulseModule by _auto_wire()
-        pulse_mod = getattr(self, "detections", None)  # None if not wired or standalone
+        pulse_mod = self.detections
         pulse_bus = getattr(pulse_mod, "bus", None) if pulse_mod else None
 
         try:

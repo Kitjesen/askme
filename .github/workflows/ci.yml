@@ -16,7 +16,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install system libs for sounddevice/soundfile
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 libsndfile1
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -e ".[dev]"
+      - name: Download silero_vad.onnx for VAD-dependent tests
+        run: |
+          mkdir -p models/vad
+          curl -sSL --retry 3 -o models/vad/silero_vad.onnx \
+            https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short

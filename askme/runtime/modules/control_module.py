@@ -1,6 +1,6 @@
 """ControlModule — wraps DogControlClient as a declarative module.
 
-Mirrors the control client creation from ``assembly.py`` line 491::
+Canonical wiring::
 
     dog_control = DogControlClient(cfg.get("runtime", {}).get("dog_control", {}))
 """

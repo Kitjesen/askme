@@ -577,8 +577,8 @@ class TestCompositions:
 
 
 class TestModuleExports:
-    def test_all_16_modules_importable(self):
-        """All 16 modules should be importable from the package."""
+    def test_all_17_modules_importable(self):
+        """All 17 modules should be importable from the package."""
         from askme.runtime.modules import (
             LLMModule,
             ToolsModule,
@@ -596,22 +596,24 @@ class TestModuleExports:
             ProactiveModule,
             ReactionModule,
             HealthModule,
+            TelegramModule,
         )
         modules = [
             LLMModule, ToolsModule, PulseModule, MemoryModule,
             PerceptionModule, SafetyModule, PipelineModule, SkillModule,
             ExecutorModule, VoiceModule, TextModule, ControlModule,
             LEDModule, ProactiveModule, ReactionModule, HealthModule,
+            TelegramModule,
         ]
-        assert len(modules) == 16
+        assert len(modules) == 17
         for mod_cls in modules:
             assert hasattr(mod_cls, "name")
             assert hasattr(mod_cls, "build")
 
     def test_all_in_dunder_all(self):
-        """__all__ should list all 16 module classes."""
+        """__all__ should list all 17 module classes."""
         import askme.runtime.modules as pkg
-        assert len(pkg.__all__) == 16
+        assert len(pkg.__all__) == 17
 
 
 # ══════════════════════════════════════════════════════════════════════

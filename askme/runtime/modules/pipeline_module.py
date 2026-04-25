@@ -1,6 +1,6 @@
 """PipelineModule — wraps BrainPipeline as a declarative module.
 
-Mirrors the pipeline creation from ``assembly.py`` lines 493-520::
+Canonical wiring::
 
     pipeline = BrainPipeline(llm=llm, conversation=conversation, ...)
 
@@ -81,12 +81,12 @@ class PipelineModule(Module):
         def _from(mod: Any, attr: str) -> Any:
             return getattr(mod, attr, None) if mod is not None else None
 
-        llm_mod: Any = getattr(self, "llm_in", None)
-        mem_mod: Any = getattr(self, "memory_context", None)
-        tools_mod: Any = getattr(self, "tool_registry_in", None)
-        safety_mod: Any = getattr(self, "safety_client", None)
-        perception_mod: Any = getattr(self, "vision", None)
-        control_mod: Any = getattr(self, "control_in", None)
+        llm_mod: Any = self.llm_in
+        mem_mod: Any = self.memory_context
+        tools_mod: Any = self.tool_registry_in
+        safety_mod: Any = self.safety_client
+        perception_mod: Any = self.vision
+        control_mod: Any = self.control_in
 
         # Unpack wired module attributes into typed locals.
         llm = _from(llm_mod, "client")

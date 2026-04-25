@@ -3,6 +3,7 @@ barge-in hold, agent state transitions, mute/unmute, volume/speed delegation."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import numpy as np
@@ -17,6 +18,17 @@ from askme.voice.audio_agent import (
     _MIN_VALID_TEXT_LEN,
     _NOISE_UTTERANCES,
     _SINGLE_CHAR_COMMANDS,
+)
+
+# AudioAgent constructor validates sherpa-onnx ASR model files exist on disk.
+# Skip the construction-dependent tests when the ~100MB model is absent
+# (e.g. CI without model download). Tests of pure constants below stay enabled.
+_ASR_MODEL_TOKENS = Path(
+    "models/asr/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/tokens.txt"
+)
+_requires_asr_model = pytest.mark.skipif(
+    not _ASR_MODEL_TOKENS.exists(),
+    reason=f"ASR model not present at {_ASR_MODEL_TOKENS}",
 )
 
 
@@ -120,6 +132,7 @@ class TestNoiseFilterLogic:
 # ---------------------------------------------------------------------------
 
 
+@_requires_asr_model
 class TestAgentState:
     def test_initial_state_is_idle(self):
         agent = _make_agent()
@@ -177,6 +190,7 @@ class TestAgentState:
 # ---------------------------------------------------------------------------
 
 
+@_requires_asr_model
 class TestVolumeSpeed:
     def test_set_volume_delegates_to_tts(self):
         agent = _make_agent()
@@ -220,6 +234,7 @@ class TestVolumeSpeed:
 # ---------------------------------------------------------------------------
 
 
+@_requires_asr_model
 class TestConvenienceWrappers:
     def test_speak_delegates(self):
         agent = _make_agent()
@@ -254,6 +269,7 @@ class TestConvenienceWrappers:
 # ---------------------------------------------------------------------------
 
 
+@_requires_asr_model
 class TestStatusSnapshot:
     def test_text_mode_snapshot(self):
         agent = _make_agent(voice_mode=False)
@@ -291,6 +307,7 @@ class TestStatusSnapshot:
 # ---------------------------------------------------------------------------
 
 
+@_requires_asr_model
 class TestAwaitingConfirmation:
     def test_default_false(self):
         agent = _make_agent()
@@ -313,6 +330,7 @@ class TestAwaitingConfirmation:
 # ---------------------------------------------------------------------------
 
 
+@_requires_asr_model
 class TestEchoGateConfig:
     def test_default_echo_gate_peak(self):
         agent = _make_agent()
@@ -341,6 +359,7 @@ class TestEchoGateConfig:
 # ---------------------------------------------------------------------------
 
 
+@_requires_asr_model
 class TestNoiseGateConfig:
     def test_default_noise_gate_disabled(self):
         agent = _make_agent()
@@ -362,6 +381,7 @@ class TestNoiseGateConfig:
 # ---------------------------------------------------------------------------
 
 
+@_requires_asr_model
 class TestASRTimeoutConfig:
     def test_default_asr_timeout(self):
         agent = _make_agent()
@@ -383,6 +403,7 @@ class TestASRTimeoutConfig:
 # ---------------------------------------------------------------------------
 
 
+@_requires_asr_model
 class TestInputDeviceConfig:
     def test_default_input_device(self):
         agent = _make_agent()
@@ -418,6 +439,7 @@ class TestInputDeviceConfig:
 # ---------------------------------------------------------------------------
 
 
+@_requires_asr_model
 class TestChimeSynthesis:
     def test_acknowledge_chime_is_valid_audio(self):
         agent = _make_agent()
@@ -479,6 +501,7 @@ class TestBargeInConstants:
 # ---------------------------------------------------------------------------
 
 
+@_requires_asr_model
 class TestLifecycle:
     def test_shutdown_sets_stop_event(self):
         agent = _make_agent()

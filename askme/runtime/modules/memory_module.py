@@ -1,6 +1,6 @@
 """MemoryModule — wraps the four-layer memory stack as a declarative module.
 
-Mirrors the memory construction logic from ``assembly.py`` lines 416-430::
+Canonical wiring::
 
     session_memory = SessionMemory(llm=llm)
     conversation = ConversationManager(session_memory=session_memory, metrics=ota_metrics)

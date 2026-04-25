@@ -1,6 +1,6 @@
 """SafetyModule — wraps DogSafetyClient as a declarative module.
 
-Mirrors the safety wiring from ``assembly.py`` lines 487-490::
+Canonical wiring::
 
     dog_safety = DogSafetyClient(
         cfg.get("runtime", {}).get("dog_safety", {}),
@@ -34,7 +34,7 @@ class SafetyModule(Module):
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         # In[EstopState] auto-wired to PulseModule by _auto_wire()
-        pulse_mod = getattr(self, "estop", None)  # None if not wired or standalone
+        pulse_mod = self.estop
         pulse_bus = getattr(pulse_mod, "bus", None) if pulse_mod else None
 
         safety_cfg = cfg.get("runtime", {}).get("dog_safety", {})
