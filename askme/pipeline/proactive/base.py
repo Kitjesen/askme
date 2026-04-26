@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from askme.skills.skill_model import SkillDefinition
+
     from .session_state import ClarificationSession
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ class ProactiveContext:
     pipeline: Any = None    # BrainPipeline — for semantic extraction
     dispatcher: Any = None  # SkillDispatcher — for mission history
     source: str = "voice"
-    session: "ClarificationSession | None" = None  # state machine (one per run)
+    session: ClarificationSession | None = None  # state machine (one per run)
 
 
 class ProactiveAgent(ABC):
@@ -47,14 +48,14 @@ class ProactiveAgent(ABC):
 
     @abstractmethod
     def should_activate(
-        self, skill: "SkillDefinition", user_text: str, context: ProactiveContext
+        self, skill: SkillDefinition, user_text: str, context: ProactiveContext
     ) -> bool:
         """Return True if this agent should run for the given skill + text."""
 
     @abstractmethod
     async def interact(
         self,
-        skill: "SkillDefinition",
+        skill: SkillDefinition,
         user_text: str,
         audio: Any,
         context: ProactiveContext,

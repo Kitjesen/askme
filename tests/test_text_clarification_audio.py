@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import queue
-import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 
 # ── _TextClarificationAudio ───────────────────────────────────────────────────
 
@@ -101,7 +98,6 @@ class TestTextLoopProcessTurn:
 
     @pytest.mark.asyncio
     async def test_process_turn_returns_string(self):
-        import asyncio
         from askme.pipeline.text_loop import TextLoop
 
         router = MagicMock()

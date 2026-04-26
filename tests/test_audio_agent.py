@@ -4,20 +4,20 @@ barge-in hold, agent state transitions, mute/unmute, volume/speed delegation."""
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
 from askme.voice.audio_agent import (
-    AgentState,
-    AudioAgent,
     _BARGE_IN_HOLD_S,
     _CONFIRMATION_WORDS,
     _MAX_SPEECH_DURATION,
     _MIN_VALID_TEXT_LEN,
     _NOISE_UTTERANCES,
     _SINGLE_CHAR_COMMANDS,
+    AgentState,
+    AudioAgent,
 )
 
 # AudioAgent constructor validates sherpa-onnx ASR model files exist on disk.

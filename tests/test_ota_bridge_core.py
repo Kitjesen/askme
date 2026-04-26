@@ -4,19 +4,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-import requests
 
 from askme.robot.ota_bridge import (
     OTABridge,
     OTABridgeAuthError,
-    OTABridgeMetrics,
     _clean_optional,
     _iso_utc_now,
 )
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

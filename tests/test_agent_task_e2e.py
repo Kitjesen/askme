@@ -20,14 +20,13 @@ import json
 import types
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
+from askme.tools.builtin_tools import GetTimeTool, SandboxedBashTool, WriteFileTool
 from askme.tools.tool_registry import ToolRegistry
-from askme.tools.builtin_tools import SandboxedBashTool, WriteFileTool, GetTimeTool
-
 
 # ── Mock LLM helpers ──────────────────────────────────────────────────────────
 
@@ -331,8 +330,8 @@ async def test_brain_pipeline_routes_agent_task(tmp_path: Path) -> None:
 
 def _make_pipeline_with_agent_shell(tmp_path):
     """Build a minimal BrainPipeline with a mock agent_shell."""
-    from askme.pipeline.brain_pipeline import BrainPipeline
     from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
+    from askme.pipeline.brain_pipeline import BrainPipeline
 
     audio = MagicMock()
     audio.speak = MagicMock()
@@ -461,8 +460,8 @@ def test_read_file_relative_escape_blocked(monkeypatch, tmp_path) -> None:
 
 def test_step_counter_announced_from_iteration_2(workspace, tool_registry) -> None:
     """Iteration 2+ announces step number: '第2步，正在搜索网络...'"""
-    import types
     import asyncio
+    import types
 
     mock_audio = MagicMock()
     mock_audio.speak = MagicMock()

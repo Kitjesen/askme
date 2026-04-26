@@ -9,10 +9,8 @@ from askme.runtime.profiles import (
     MCP_PROFILE,
     TEXT_PROFILE,
     VOICE_PROFILE,
-    RuntimeProfile,
     legacy_profile_for,
 )
-
 
 # ── Predefined profiles ───────────────────────────────────────────────────────
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from askme.memory.procedural import ProceduralMemory, Procedure
+from askme.memory.procedural import ProceduralMemory
 
 
 def test_record_outcome_creates_procedure(tmp_path):

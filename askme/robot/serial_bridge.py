@@ -8,7 +8,6 @@ to the console instead of requiring real hardware.
 
 from __future__ import annotations
 
-import json
 import logging
 import struct
 from typing import Any

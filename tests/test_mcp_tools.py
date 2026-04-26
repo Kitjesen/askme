@@ -1,9 +1,9 @@
 """Tests for MCP tool and resource modules."""
 
 import json
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 
 # ── Helpers ────────────────────────────────────────────────────
 

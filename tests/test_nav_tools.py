@@ -20,7 +20,6 @@ import pytest
 
 from askme.tools.builtin_tools import NavDispatchTool, NavStatusTool
 
-
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture()

@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from askme.tools.scan_tool import ScanAroundTool, register_scan_tools
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

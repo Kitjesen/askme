@@ -14,7 +14,7 @@ def current_detections() -> str:
     """当前 BPU YOLO 检测结果（实时，来自 frame_daemon）。"""
     det_path = "/tmp/askme_frame_detections.json"
     try:
-        with open(det_path, "r") as f:
+        with open(det_path) as f:
             data = json.load(f)
         age = time.time() - data.get("timestamp", 0)
         data["age_seconds"] = round(age, 1)
@@ -30,7 +30,7 @@ def recent_events() -> str:
     event_path = "/tmp/askme_events.jsonl"
     events = []
     try:
-        with open(event_path, "r", encoding="utf-8") as f:
+        with open(event_path, encoding="utf-8") as f:
             lines = f.readlines()
         for line in lines[-20:]:
             line = line.strip()
@@ -49,7 +49,7 @@ def depth_info() -> str:
 
     # Check heartbeat
     try:
-        with open("/tmp/askme_frame_daemon.heartbeat", "r") as f:
+        with open("/tmp/askme_frame_daemon.heartbeat") as f:
             ts = float(f.read().strip())
         result["daemon_alive"] = time.time() - ts < 3.0
     except (FileNotFoundError, ValueError):

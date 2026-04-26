@@ -7,13 +7,13 @@ AlertDispatcher reference. Does NOT delegate to or from ProactiveAgent.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
 from askme.llm.client import LLMClient
 from askme.runtime.module import In, Module, ModuleRegistry
 from askme.schemas.messages import MemoryContext
+
 try:
     from askme.voice.audio_agent import AudioAgent
 except ModuleNotFoundError:

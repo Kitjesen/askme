@@ -83,8 +83,8 @@ class PlannerAgent:
 
     def __init__(
         self,
-        llm_client: "LLMClient",
-        skill_manager: "SkillManager",
+        llm_client: LLMClient,
+        skill_manager: SkillManager,
         *,
         model: str | None = None,
     ) -> None:

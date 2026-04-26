@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from askme.robot.serial_bridge import SerialBridge
 
@@ -133,7 +132,6 @@ class TestGetStateSimulate:
 class TestRealSerialFallback:
     def test_connect_fails_gracefully_without_pyserial(self):
         """connect() returns False when pyserial is unavailable (not simulate)."""
-        import sys
         from unittest.mock import patch
 
         sb = SerialBridge(port="/dev/fake", simulate=False)

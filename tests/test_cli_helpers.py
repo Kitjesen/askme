@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import argparse
 
-import pytest
-
 from askme.cli import (
     _looks_like_mcp_request,
     _normalise_server_url,
     _resolve_runtime_flags,
     build_parser,
 )
-
 
 # ── _looks_like_mcp_request ───────────────────────────────────────────────────
 

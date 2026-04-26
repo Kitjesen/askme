@@ -4,26 +4,20 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
-from unittest.mock import patch, mock_open
-
-import pytest
-
+from unittest.mock import mock_open, patch
 
 # Import the resource functions by patching the mcp decorator
 # since FastMCP resources register on import
 
 def _get_resources():
     """Import perception resource functions without triggering MCP registration."""
-    import importlib
-    import sys
     # The functions are already registered as @mcp.resource() decorators;
     # we call them directly since they just read files.
     from askme.mcp.resources.perception_resources import (
         current_detections,
-        recent_events,
         depth_info,
         memory_knowledge,
+        recent_events,
     )
     return current_detections, recent_events, depth_info, memory_knowledge
 

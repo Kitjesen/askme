@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
-from askme.pipeline.hooks import PipelineHooks, ToolCallRecord, _PROCEED
+from askme.pipeline.hooks import PipelineHooks, ToolCallRecord
 from askme.pipeline.tool_executor import ToolExecutor
 
 
@@ -116,7 +113,7 @@ class TestTimeout:
     async def test_timeout_records_error_in_conversation(self):
         """Timeout → tool result in conversation contains error; execute_tools still returns follow-up."""
         async def fake_wait_for(coro, timeout):
-            raise asyncio.TimeoutError()
+            raise TimeoutError()
 
         with patch("asyncio.wait_for", new=fake_wait_for):
             executor = _make_executor()

@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
+from askme.config import project_root
 from askme.tools.builtin_tools import (
     GetTimeTool,
     ListDirectoryTool,
@@ -14,8 +11,6 @@ from askme.tools.builtin_tools import (
     _is_path_allowed,
     _is_url_allowed,
 )
-from askme.config import project_root
-
 
 # ── _is_path_allowed ──────────────────────────────────────────────────────────
 

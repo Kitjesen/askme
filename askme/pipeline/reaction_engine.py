@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from typing import Any, Callable, TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from askme.interfaces.reaction import ReactionBackend
-from askme.schemas.events import ChangeEvent, ChangeEventType
+from askme.schemas.events import ChangeEventType
 from askme.schemas.reaction import ReactionDecision, ReactionType, SceneContext
 
 if TYPE_CHECKING:
@@ -220,8 +220,8 @@ class RuleBasedReaction(ReactionBackend):
     def __init__(
         self,
         *,
-        alert_dispatcher: "AlertDispatcher | None" = None,
-        episodic: "EpisodicMemory | None" = None,
+        alert_dispatcher: AlertDispatcher | None = None,
+        episodic: EpisodicMemory | None = None,
         **kwargs: Any,
     ) -> None:
         self._alert_dispatcher = alert_dispatcher
@@ -268,9 +268,9 @@ class HybridReaction(ReactionBackend):
     def __init__(
         self,
         *,
-        llm: "LLMClient | None" = None,
-        alert_dispatcher: "AlertDispatcher | None" = None,
-        episodic: "EpisodicMemory | None" = None,
+        llm: LLMClient | None = None,
+        alert_dispatcher: AlertDispatcher | None = None,
+        episodic: EpisodicMemory | None = None,
         content_model: str = "",
         content_timeout: float = 5.0,
         **kwargs: Any,
@@ -329,7 +329,7 @@ class HybridReaction(ReactionBackend):
                 result = result.strip()
                 if result:
                     return result
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.debug("[HybridReaction] LLM content gen timed out")
             except Exception as exc:
                 logger.debug("[HybridReaction] LLM content gen failed: %s", exc)
@@ -363,9 +363,9 @@ class LLMReaction(ReactionBackend):
     def __init__(
         self,
         *,
-        llm: "LLMClient | None" = None,
-        alert_dispatcher: "AlertDispatcher | None" = None,
-        episodic: "EpisodicMemory | None" = None,
+        llm: LLMClient | None = None,
+        alert_dispatcher: AlertDispatcher | None = None,
+        episodic: EpisodicMemory | None = None,
         decision_model: str = "",
         decision_timeout: float = 8.0,
         **kwargs: Any,

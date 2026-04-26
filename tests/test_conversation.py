@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-import pytest
-
 
 def _make_conv(tmp_path, monkeypatch, max_history=40):
     """Create a ConversationManager with paths in tmp_path."""
@@ -79,7 +77,7 @@ async def test_maybe_compress_triggers(tmp_path, monkeypatch):
     monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", 20)
     monkeypatch.setattr("askme.llm.conversation.KEEP_RECENT", 6)
 
-    from askme.llm.conversation import ConversationManager, SUMMARY_TAG
+    from askme.llm.conversation import SUMMARY_TAG, ConversationManager
 
     conv = ConversationManager()
 
@@ -118,7 +116,7 @@ async def test_maybe_compress_preserves_existing_summary(tmp_path, monkeypatch):
     monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", 10)
     monkeypatch.setattr("askme.llm.conversation.KEEP_RECENT", 4)
 
-    from askme.llm.conversation import ConversationManager, SUMMARY_TAG
+    from askme.llm.conversation import SUMMARY_TAG, ConversationManager
 
     conv = ConversationManager()
 

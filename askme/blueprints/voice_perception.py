@@ -7,6 +7,7 @@ Usage::
     python -m askme.blueprints.voice_perception
 """
 
+from askme.blueprints.voice import voice
 from askme.runtime.module import Runtime
 from askme.runtime.modules import (
     PerceptionModule,
@@ -14,8 +15,6 @@ from askme.runtime.modules import (
     ReactionModule,
     SafetyModule,
 )
-
-from askme.blueprints.voice import voice
 
 voice_perception = (
     voice

@@ -5,8 +5,6 @@ from __future__ import annotations
 import time
 from unittest.mock import AsyncMock
 
-import pytest
-
 
 def _make_conv(tmp_path, monkeypatch, *, max_history=100, threshold=20, keep_recent=6):
     """Create a ConversationManager with lower thresholds suitable for testing."""

@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-
 import pytest
 
 from askme.runtime.module import (
-    In, Module, ModuleRegistry, Out, Required, Runtime, RuntimeApp,
-    WireResult, _scan_ports, _validate_topology,
+    In,
+    Module,
+    ModuleRegistry,
+    Out,
+    Required,
+    Runtime,
+    _scan_ports,
 )
-
 
 # ── Test modules ─────────────────────────────────────
 

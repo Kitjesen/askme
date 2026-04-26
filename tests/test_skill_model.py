@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
-
+from askme.skills.contracts import SkillContract
 from askme.skills.skill_model import (
     SkillDefinition,
     SlotSpec,
     _slot_type_to_json_type,
 )
-from askme.skills.contracts import SkillContract, SkillParameter
-
 
 # ── SlotSpec defaults ─────────────────────────────────────────────────────────
 

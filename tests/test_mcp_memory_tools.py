@@ -7,12 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # The MCP tools are registered via @mcp.tool() decorators on import.
 # We test them by calling the underlying functions directly.
 
 def _import_tools():
-    from askme.mcp.tools.memory_tools import memory_search, memory_save
+    from askme.mcp.tools.memory_tools import memory_save, memory_search
     return memory_search, memory_save
 
 

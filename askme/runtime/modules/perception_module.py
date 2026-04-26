@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.runtime.module import In, Module, ModuleRegistry, Out
 from askme.perception.vision_bridge import VisionBridge
+from askme.runtime.module import In, Module, ModuleRegistry, Out
 from askme.schemas.messages import DetectionFrame
 
 logger = logging.getLogger(__name__)

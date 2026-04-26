@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from askme.memory.map_adapter import MapAdapter
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

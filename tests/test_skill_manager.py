@@ -6,11 +6,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from askme.skills.skill_manager import SkillManager
 from askme.skills.skill_model import SkillDefinition
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

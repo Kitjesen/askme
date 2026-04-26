@@ -18,13 +18,10 @@ chain with realistic audio mock sequences.
 
 from __future__ import annotations
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
-from askme.pipeline.proactive.base import ProactiveContext
 from askme.skills.skill_model import SkillDefinition, SlotSpec
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

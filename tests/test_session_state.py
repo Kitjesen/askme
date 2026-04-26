@@ -10,7 +10,6 @@ from askme.pipeline.proactive.session_state import (
     InvalidTransitionError,
 )
 
-
 # ── ClarificationState ────────────────────────────────────────────────────────
 
 class TestClarificationState:

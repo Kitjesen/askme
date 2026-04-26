@@ -49,7 +49,7 @@ def test_max_sessions_limit(tmp_path, monkeypatch):
         lambda: {"app": {"data_dir": str(tmp_path / "data")}},
     )
 
-    from askme.memory.session import SessionMemory, MAX_RECENT_SESSIONS
+    from askme.memory.session import MAX_RECENT_SESSIONS, SessionMemory
 
     sm = SessionMemory()
 

@@ -6,10 +6,10 @@ import asyncio
 import logging
 from typing import Any
 
-from askme.runtime.module import Module, ModuleRegistry, Out
 from askme.llm.client import LLMClient
 from askme.llm.config import LLMConfig
 from askme.robot.ota_bridge import OTABridgeMetrics
+from askme.runtime.module import Module, ModuleRegistry, Out
 
 logger = logging.getLogger(__name__)
 

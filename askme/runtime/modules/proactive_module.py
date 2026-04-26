@@ -22,6 +22,7 @@ from askme.pipeline.brain_pipeline import BrainPipeline
 from askme.pipeline.proactive_agent import ProactiveAgent
 from askme.runtime.module import In, Module, ModuleRegistry
 from askme.schemas.messages import MemoryContext
+
 try:
     from askme.voice.audio_agent import AudioAgent
 except ModuleNotFoundError:

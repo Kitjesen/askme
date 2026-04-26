@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from askme.skills.contracts import (
     SkillContract,
     SkillContractRegistry,
@@ -11,7 +9,6 @@ from askme.skills.contracts import (
     build_skills_openapi,
     skill_contract,
 )
-
 
 # ── SkillParameter ────────────────────────────────────────────────────────────
 

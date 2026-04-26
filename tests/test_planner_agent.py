@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
-from askme.pipeline.planner_agent import PlannerAgent, PlanStep
+from askme.pipeline.planner_agent import PlannerAgent
 
 
 def _make_skill(name: str, description: str = "") -> MagicMock:

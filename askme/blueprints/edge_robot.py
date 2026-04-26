@@ -7,6 +7,7 @@ Usage::
     python -m askme.blueprints.edge_robot
 """
 
+from askme.blueprints.voice_perception import voice_perception
 from askme.runtime.module import Runtime
 from askme.runtime.modules import (
     ControlModule,
@@ -16,8 +17,6 @@ from askme.runtime.modules import (
     ProactiveModule,
     ToolsModule,
 )
-
-from askme.blueprints.voice_perception import voice_perception
 
 edge_robot = (
     voice_perception

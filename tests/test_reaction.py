@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from askme.schemas.events import ChangeEvent, ChangeEventType
-from askme.schemas.reaction import ReactionDecision, ReactionType, SceneContext
 from askme.pipeline.reaction_engine import (
     HybridReaction,
     LLMReaction,
     RuleBasedReaction,
     evaluate_rules,
 )
-
+from askme.schemas.events import ChangeEvent, ChangeEventType
+from askme.schemas.reaction import ReactionDecision, ReactionType, SceneContext
 
 # -- Helpers ------------------------------------------------------------------
 
@@ -292,7 +290,7 @@ class TestHybridReaction:
 
     async def test_generate_content_falls_back_on_llm_timeout(self):
         mock_llm = AsyncMock()
-        mock_llm.chat = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_llm.chat = AsyncMock(side_effect=TimeoutError())
         engine = HybridReaction(llm=mock_llm, content_timeout=0.1)
         ctx = _ctx(
             event_type=ChangeEventType.COUNT_CHANGED,

@@ -8,14 +8,14 @@ import logging
 import os
 import time
 from collections import deque
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib import error, parse, request
 
 from askme.pipeline.alert_dispatcher import AlertDispatcher
 
 if TYPE_CHECKING:
-    from askme.memory.episodic_memory import EpisodicMemory
     from askme.llm.client import LLMClient
+    from askme.memory.episodic_memory import EpisodicMemory
     from askme.perception.vision_bridge import VisionBridge
     from askme.voice.audio_agent import AudioAgent
 
@@ -241,7 +241,7 @@ class ProactiveAgent:
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=interval)
                     break  # stop_event was set
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass  # normal — time for next tick
         finally:
             event_task.cancel()
@@ -351,7 +351,7 @@ class ProactiveAgent:
             response = response.strip()
             if response.startswith("ANOMALY|"):
                 return response[8:].strip()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.debug("[Proactive] Anomaly check timed out")
         except Exception as exc:
             logger.debug("[Proactive] Anomaly check failed: %s", exc)
@@ -394,8 +394,6 @@ class ProactiveAgent:
             logger.info("[Proactive] Change event consumer disabled.")
             return
 
-        import json as _json
-        from askme.schemas.events import ChangeEvent
 
         logger.info("[Proactive] Change event consumer started: %s", self._change_event_file)
 
@@ -422,16 +420,17 @@ class ProactiveAgent:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=2.0)
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     def _read_change_events(self, file_pos: int) -> tuple[int, list[Any]] | None:
         """Read new lines from event JSONL file since file_pos. Blocking."""
         import json as _json
+
         from askme.schemas.events import ChangeEvent
 
         try:
-            with open(self._change_event_file, "r", encoding="utf-8") as f:
+            with open(self._change_event_file, encoding="utf-8") as f:
                 f.seek(file_pos)
                 new_lines = f.readlines()
                 new_pos = f.tell()
@@ -507,7 +506,7 @@ class ProactiveAgent:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=self._event_poll_interval)
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     async def _poll_telemetry_events(self) -> None:

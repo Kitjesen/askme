@@ -8,7 +8,7 @@ import logging
 
 from mcp.server.fastmcp import Context
 
-from askme.errors import ROBOT_NOT_CONNECTED, INTERNAL_ERROR, error_response
+from askme.errors import ROBOT_NOT_CONNECTED, error_response
 from askme.mcp.server import AppContext, mcp
 
 logger = logging.getLogger(__name__)

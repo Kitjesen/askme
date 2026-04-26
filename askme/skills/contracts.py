@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -51,7 +52,7 @@ class SkillContract:
         execution: str = "",
         tags: Iterable[str] = (),
         confirm_before_execute: bool = False,
-    ) -> "SkillContract":
+    ) -> SkillContract:
         """Fill unset contract metadata from legacy/loaded skill metadata."""
         fallback_tags = tuple(tag for tag in tags if tag)
         return replace(

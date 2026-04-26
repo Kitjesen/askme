@@ -7,14 +7,10 @@ build without errors when backed by mock modules.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
-from askme.runtime.module import Module, ModuleRegistry, Out, Runtime, RuntimeApp
-
+from askme.runtime.module import Module, ModuleRegistry, Runtime, RuntimeApp
 
 # ── Minimal mock modules for composition testing ──────────────────────
 
@@ -580,23 +576,23 @@ class TestModuleExports:
     def test_all_17_modules_importable(self):
         """All 17 modules should be importable from the package."""
         from askme.runtime.modules import (
+            ControlModule,
+            ExecutorModule,
+            HealthModule,
+            LEDModule,
             LLMModule,
-            ToolsModule,
-            PulseModule,
             MemoryModule,
             PerceptionModule,
-            SafetyModule,
             PipelineModule,
-            SkillModule,
-            ExecutorModule,
-            VoiceModule,
-            TextModule,
-            ControlModule,
-            LEDModule,
             ProactiveModule,
+            PulseModule,
             ReactionModule,
-            HealthModule,
+            SafetyModule,
+            SkillModule,
             TelegramModule,
+            TextModule,
+            ToolsModule,
+            VoiceModule,
         )
         modules = [
             LLMModule, ToolsModule, PulseModule, MemoryModule,

@@ -228,7 +228,7 @@ class ThunderAgentShell:
                 self._run_agent_loop(messages, tool_definitions, system_prompt),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("[AgentShell] Task timed out after %.0fs", timeout)
             final_response = f"任务执行超时（{int(timeout)}秒），已停止。"
         except Exception as exc:
@@ -473,7 +473,7 @@ class ThunderAgentShell:
                 timeout=35.0,  # slightly above SandboxedBashTool's 30s limit
             )
             return str(result)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return f"[Error] 工具 {name} 执行超时（35s）"
         except Exception as exc:
             return f"[Error] {exc}"

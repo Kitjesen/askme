@@ -9,7 +9,6 @@ import pytest
 
 from askme.voice.audio_router import AudioErrorKind, AudioRouter
 
-
 # ── Ownership ────────────────────────────────────────────────────────────────
 
 

@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
-
 from askme.robot.runtime_health import (
     RuntimeHealthSnapshot,
-    merge_voice_pipeline_status,
     _clean_optional,
     _normalise_skill_names,
+    merge_voice_pipeline_status,
 )
-
 
 # ── _clean_optional ──────────────────────────────────────────────────────────
 

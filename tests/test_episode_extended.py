@@ -16,7 +16,6 @@ from askme.memory.episode import (
     score_importance,
 )
 
-
 # ── Episode ───────────────────────────────────────────────────────────────────
 
 class TestEpisodeInit:

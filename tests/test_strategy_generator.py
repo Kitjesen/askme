@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
-from askme.memory.strategy import Suggestion, StrategyGenerator
-
+from askme.memory.strategy import StrategyGenerator, Suggestion
 
 # ── Suggestion dataclass ──────────────────────────────────────────────────────
 

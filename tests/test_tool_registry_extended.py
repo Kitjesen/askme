@@ -13,7 +13,6 @@ from askme.tools.tool_registry import (
     _normalize_safety_level,
 )
 
-
 # ── Test doubles ─────────────────────────────────────────────────────────────
 
 def _make_tool(

@@ -49,3 +49,7 @@ docs/*.pptx
 docs/voice_samples/
 .claude/worktrees/
 memU/
+
+# Audio fixtures and one-off bench artifacts (never commit recordings)
+*.wav
+scripts/bench/test_voice_generated.py

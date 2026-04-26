@@ -27,7 +27,6 @@ Usage::
 from __future__ import annotations
 
 import logging
-from abc import ABC
 from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)

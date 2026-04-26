@@ -3,11 +3,7 @@
 from __future__ import annotations
 
 import json
-import time
-from unittest.mock import patch, MagicMock
-
-import pytest
-
+from unittest.mock import patch
 
 # ── health_check ──────────────────────────────────────────────────────────────
 

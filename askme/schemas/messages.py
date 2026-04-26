@@ -6,15 +6,8 @@ These replace the raw dicts that Pulse returns for well-known topics.
 
 from __future__ import annotations
 
-import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-
-if sys.version_info >= (3, 11):
-    from typing import Self
-else:
-    from typing import TypeVar
-    Self = TypeVar("Self", bound="EstopState")  # type: ignore[misc,assignment]
 
 from askme.schemas.observation import Detection
 
@@ -33,7 +26,7 @@ class MemoryContext:
     timestamp: float = 0.0
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "MemoryContext":
+    def from_dict(cls, d: dict[str, Any]) -> MemoryContext:
         return cls(
             episodic_context=str(d.get("episodic_context", "")),
             session_context=str(d.get("session_context", "")),

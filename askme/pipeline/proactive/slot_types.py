@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 class SlotFill:
     """Analysis result for a single slot of a skill."""
 
-    spec: "SlotSpec"
+    spec: SlotSpec
     value: str | None = None    # extracted value (may be vague)
     status: str = "missing"     # "filled" | "missing" | "vague"
 

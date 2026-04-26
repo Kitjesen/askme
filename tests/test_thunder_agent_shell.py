@@ -3,19 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from askme.agent_shell.thunder_agent_shell import (
-    ThunderAgentShell,
     _MAX_DEPTH,
     _MAX_ITERATIONS,
     _SPAWN_AGENT_SCHEMA,
+    ThunderAgentShell,
 )
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -217,8 +214,11 @@ async def test_timeout_returns_gracefully(shell, mock_llm) -> None:
 def test_key_tools_have_agent_allowed() -> None:
     """Critical tools must have agent_allowed=True."""
     from askme.tools.builtin_tools import (
-        SandboxedBashTool, WriteFileTool, ReadFileTool,
-        HttpRequestTool, SpeakProgressTool,
+        HttpRequestTool,
+        ReadFileTool,
+        SandboxedBashTool,
+        SpeakProgressTool,
+        WriteFileTool,
     )
     assert SandboxedBashTool.agent_allowed is True
     assert WriteFileTool.agent_allowed is True

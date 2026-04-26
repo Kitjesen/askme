@@ -31,9 +31,9 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Generator
 from contextlib import contextmanager
 from enum import Enum
-from typing import Generator
 
 logger = logging.getLogger(__name__)
 

@@ -7,13 +7,14 @@ import json
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-import uvicorn
 
 from askme.robot.runtime_health import RuntimeHealthSnapshot, merge_voice_pipeline_status
 
@@ -103,7 +104,7 @@ def build_health_snapshot(
     if recorded_at_raw:
         merged_voice_status["recorded_at"] = str(recorded_at_raw)
     else:
-        _now_rec = datetime.now(timezone.utc)
+        _now_rec = datetime.now(UTC)
         merged_voice_status["recorded_at"] = (
             _now_rec.strftime("%Y-%m-%dT%H:%M:%S.")
             + f"{_now_rec.microsecond // 1000:03d}Z"
@@ -116,7 +117,7 @@ def build_health_snapshot(
         degraded_reasons.append("ota_bridge")
 
     # ISO 8601 UTC timestamp for this snapshot — lets OTA Agent detect stale payloads.
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     snapshot_at = (
         now_utc.strftime("%Y-%m-%dT%H:%M:%S.")
         + f"{now_utc.microsecond // 1000:03d}Z"
@@ -295,7 +296,7 @@ def create_health_app(
         # Perception
         perception: dict[str, Any] = {}
         try:
-            with open("/tmp/askme_frame_daemon.heartbeat", "r") as f:
+            with open("/tmp/askme_frame_daemon.heartbeat") as f:
                 hb = float(f.read().strip())
             perception["frame_daemon"] = {
                 "alive": _time.time() - hb < 3.0,
@@ -305,7 +306,7 @@ def create_health_app(
             perception["frame_daemon"] = {"alive": False}
 
         try:
-            with open("/tmp/askme_frame_detections.json", "r") as f:
+            with open("/tmp/askme_frame_detections.json") as f:
                 det = json.load(f)
             perception["detections"] = {
                 "count": len(det.get("detections", [])),
@@ -319,7 +320,7 @@ def create_health_app(
             import os
             event_path = "/tmp/askme_events.jsonl"
             if os.path.exists(event_path):
-                with open(event_path, "r") as f:
+                with open(event_path) as f:
                     lines = f.readlines()
                 perception["change_events"] = {"total": len(lines)}
                 if lines:
@@ -434,7 +435,7 @@ def create_health_app(
             if not history_file.is_absolute():
                 history_file = project_root() / history_file
             if history_file.exists():
-                with open(history_file, "r", encoding="utf-8") as fh:
+                with open(history_file, encoding="utf-8") as fh:
                     history = json.load(fh)
             else:
                 history = []
@@ -741,7 +742,7 @@ class AskmeHealthServer:
                 "image_base64": b64,
                 "width": w,
                 "height": h,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
         except Exception as exc:
             logger.warning("[Vision] Encode error: %s", exc)
@@ -754,6 +755,7 @@ class AskmeHealthServer:
             return "视觉模块未配置"
         try:
             import base64
+
             import cv2  # type: ignore[import-untyped]
             import numpy as np  # type: ignore[import-untyped]
             img_bytes = base64.b64decode(image_b64)
@@ -838,7 +840,7 @@ class AskmeHealthServer:
 
         try:
             await asyncio.wait_for(task, timeout=self._shutdown_timeout_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 

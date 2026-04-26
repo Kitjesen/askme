@@ -19,10 +19,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from askme.pipeline.skill_dispatcher import SkillDispatcher
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -267,7 +264,7 @@ class TestDispatchTimeoutActual:
 
         def _mock_wait_for(coro, timeout):
             coro.close()  # prevent RuntimeWarning
-            raise asyncio.TimeoutError()
+            raise TimeoutError()
 
         with patch(
             "askme.pipeline.skill_dispatcher.asyncio.wait_for",
@@ -285,7 +282,7 @@ class TestDispatchTimeoutActual:
 
         def _mock_wait_for(coro, timeout):
             coro.close()
-            raise asyncio.TimeoutError()
+            raise TimeoutError()
 
         with patch(
             "askme.pipeline.skill_dispatcher.asyncio.wait_for",
@@ -439,7 +436,7 @@ class TestBindRuntimeMission:
 
     async def test_bind_persisted_in_json(self, tmp_path, monkeypatch):
         import json
-        from askme.config import project_root as _pr
+
         monkeypatch.setattr("askme.pipeline.skill_dispatcher.project_root", lambda: tmp_path)
 
         skill = _make_skill()
@@ -478,7 +475,9 @@ class TestCompleteMissionFailedState:
 class TestHandleGeneralPlanOriginalContext:
     async def test_plan_steps_receive_original_user_text(self):
         """Each plan step's extra_context must contain the original user_text."""
-        from unittest.mock import AsyncMock as _AsyncMock, MagicMock as _MagicMock
+        from unittest.mock import AsyncMock as _AsyncMock
+        from unittest.mock import MagicMock as _MagicMock
+
         from askme.pipeline.planner_agent import PlanStep
 
         skill = _make_skill()

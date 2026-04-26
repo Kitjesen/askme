@@ -94,9 +94,9 @@ class SkillModule(Module):
 
         # Wire dispatch_skill tool
         if tools is not None:
+            from askme.llm.intent_router import IntentRouter
             from askme.tools.builtin_tools import DispatchSkillTool
             from askme.tools.skill_tools import register_skill_tools
-            from askme.llm.intent_router import IntentRouter
 
             dispatch_tool = DispatchSkillTool()
             dispatch_tool.set_dispatcher(self._dispatcher)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -15,7 +15,6 @@ from askme.pipeline.proactive.base import (
 )
 from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
 from askme.skills.skill_model import SkillDefinition
-
 
 # ── ProactiveResult ───────────────────────────────────────────────────────────
 

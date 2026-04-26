@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
-from askme.runtime.registry import BackendRegistry
-from askme.interfaces.llm import LLMBackend, llm_registry
 from askme.interfaces.asr import ASRBackend, asr_registry
-from askme.interfaces.tts import TTSBackend, tts_registry
-from askme.interfaces.detector import DetectorBackend, detector_registry
-from askme.interfaces.navigator import NavigatorBackend, navigator_registry
 from askme.interfaces.bus import BusBackend, bus_registry
-
+from askme.interfaces.detector import DetectorBackend, detector_registry
+from askme.interfaces.llm import LLMBackend, llm_registry
+from askme.interfaces.navigator import NavigatorBackend, navigator_registry
+from askme.interfaces.tts import TTSBackend, tts_registry
+from askme.runtime.registry import BackendRegistry
 
 # ── BackendRegistry core ─────────────────────────────
 

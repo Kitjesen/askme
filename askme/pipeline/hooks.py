@@ -33,10 +33,10 @@ and logged — they never propagate into the main pipeline.
 
 from __future__ import annotations
 
-import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from askme.pipeline.protocols import TurnContext
@@ -172,7 +172,7 @@ class PipelineHooks:
             except Exception as exc:
                 logger.warning("[hooks.post_turn] Hook %s raised: %s", getattr(hook, "__name__", repr(hook)), exc)
 
-    async def fire_pre_tool(self, record: ToolCallRecord) -> "_ProceedType | str":
+    async def fire_pre_tool(self, record: ToolCallRecord) -> _ProceedType | str:
         """Fire all pre_tool hooks.
 
         Returns the first non-None override result (a string), or ``_PROCEED``
@@ -213,9 +213,9 @@ class PipelineHooks:
 class _ProceedType:
     """Singleton sentinel: fire_pre_tool found no hook override — proceed normally."""
 
-    _instance: "_ProceedType | None" = None
+    _instance: _ProceedType | None = None
 
-    def __new__(cls) -> "_ProceedType":
+    def __new__(cls) -> _ProceedType:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance

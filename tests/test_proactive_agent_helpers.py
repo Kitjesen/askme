@@ -5,10 +5,7 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from askme.pipeline.proactive_agent import ProactiveAgent, _ALERT_TEMPLATES
-
+from askme.pipeline.proactive_agent import _ALERT_TEMPLATES, ProactiveAgent
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

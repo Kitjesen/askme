@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+
 from mcp.server.fastmcp import Context
 
-from askme.mcp.server import mcp, AppContext
+from askme.mcp.server import AppContext, mcp
 
 
 def _get_app(ctx: Context) -> AppContext:
@@ -19,7 +20,6 @@ async def look_around(question: str = "", ctx: Context = None) -> str:
     if not hasattr(app, "vision") or app.vision is None:
         return json.dumps({"error": "vision not available"})
 
-    import asyncio
     if question:
         result = await app.vision.describe_scene_with_question(question)
     else:

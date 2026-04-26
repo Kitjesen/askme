@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -161,7 +161,7 @@ class TestErrorHandling:
     async def test_llm_error_speaks_error_via_audio(self):
         stream_processor = MagicMock()
         stream_processor.stream_with_tools = AsyncMock(
-            side_effect=asyncio.TimeoutError()
+            side_effect=TimeoutError()
         )
         te = _make_executor(stream_processor=stream_processor)
         await te.process("hello")

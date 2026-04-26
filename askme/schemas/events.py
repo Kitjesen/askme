@@ -7,12 +7,12 @@ Designed for JSONL serialization and Phase 2 WorldState compatibility.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
 
-class ChangeEventType(str, Enum):
+class ChangeEventType(str, Enum):  # noqa: UP042 — keep (str, Enum) for str() back-compat
     PERSON_APPEARED = "person_appeared"
     PERSON_LEFT = "person_left"
     OBJECT_APPEARED = "object_appeared"
@@ -102,7 +102,7 @@ class ChangeEvent:
         if self.event_type == ChangeEventType.PERSON_APPEARED:
             return f"检测到有人出现{dist}"
         if self.event_type == ChangeEventType.PERSON_LEFT:
-            return f"人已离开"
+            return "人已离开"
         if self.event_type == ChangeEventType.OBJECT_APPEARED:
             return f"检测到新物体：{cls}{dist}"
         if self.event_type == ChangeEventType.OBJECT_DISAPPEARED:

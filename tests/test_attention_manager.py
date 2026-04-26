@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import patch
-
-import pytest
 
 from askme.perception.attention_manager import AttentionConfig, AttentionManager
 from askme.schemas.events import ChangeEvent, ChangeEventType
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

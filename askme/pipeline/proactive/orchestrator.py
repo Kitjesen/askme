@@ -42,7 +42,7 @@ class ProactiveOrchestrator:
     @classmethod
     def default(
         cls, *, pipeline: Any = None, dispatcher: Any = None
-    ) -> "ProactiveOrchestrator":
+    ) -> ProactiveOrchestrator:
         """Build the standard three-agent chain: Clarify → Slot(legacy) → Confirm."""
         return cls(
             agents=[

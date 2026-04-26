@@ -41,7 +41,7 @@ class SkillDefinition:
     voice_trigger: str | None = None
     required_prompt: str = ""   # Question to ask if required slot is missing, e.g. "导航去哪里？"
     confirm_before_execute: bool = False  # True → ConfirmationAgent runs before dispatch
-    required_slots: list["SlotSpec"] = field(default_factory=list)  # typed slot schema
+    required_slots: list[SlotSpec] = field(default_factory=list)  # typed slot schema
     schedule: str | None = None  # cron expression
     prompt_template: str = ""
     tools_section: str = ""

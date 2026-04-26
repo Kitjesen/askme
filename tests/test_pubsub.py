@@ -5,9 +5,8 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock
 
-from askme.robot.pubsub import PubSubBase
 from askme.robot.mock_pulse import MockPulse
-
+from askme.robot.pubsub import PubSubBase
 
 # ── PubSubBase ABC ──────────────────────────────────
 

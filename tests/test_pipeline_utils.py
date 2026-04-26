@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from askme.pipeline.utils import (
-    strip_think_blocks,
     classify_llm_error,
     classify_skill_error,
+    strip_think_blocks,
 )
 
 
@@ -42,7 +40,7 @@ class TestStripThinkBlocks:
 
 class TestClassifyLlmError:
     def test_asyncio_timeout(self):
-        msg = classify_llm_error(asyncio.TimeoutError())
+        msg = classify_llm_error(TimeoutError())
         assert "超时" in msg or "想了" in msg
 
     def test_timeout_in_message(self):
@@ -67,7 +65,7 @@ class TestClassifyLlmError:
 
 class TestClassifySkillError:
     def test_timeout_includes_skill_name(self):
-        msg = classify_skill_error(asyncio.TimeoutError(), "navigate")
+        msg = classify_skill_error(TimeoutError(), "navigate")
         assert "navigate" in msg
         assert "超时" in msg
 

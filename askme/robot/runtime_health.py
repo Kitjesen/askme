@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 class RuntimeHealthSnapshot:
@@ -183,8 +184,8 @@ def _normalise_skill_names(skill_names: list[str]) -> list[str]:
 
 def _probe_http(url: str, timeout: float = 1.5) -> bool:
     """Return True if *url* responds with HTTP < 500."""
-    import urllib.request
     import urllib.error
+    import urllib.request
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.status < 500

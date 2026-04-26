@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 def slot_present(
-    skill: "SkillDefinition", user_text: str, pipeline: Any = None
+    skill: SkillDefinition, user_text: str, pipeline: Any = None
 ) -> bool:
     """Return True if *user_text* already contains the required slot content.
 

@@ -1,15 +1,11 @@
 """Tests for VectorStore — works without sentence-transformers via mocking."""
 
-import json
 import threading
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from askme.memory.vector_store import VectorStore
-
 
 # -- Helpers ------------------------------------------------------------------
 

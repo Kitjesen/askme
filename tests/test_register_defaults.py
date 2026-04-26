@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import pytest
-
 # Import module to trigger all registrations
 import askme.interfaces.register_defaults  # noqa: F401
-
-from askme.interfaces.llm import llm_registry
 from askme.interfaces.asr import asr_registry
-from askme.interfaces.tts import tts_registry
 from askme.interfaces.bus import bus_registry
+from askme.interfaces.llm import llm_registry
 from askme.interfaces.reaction import reaction_registry
+from askme.interfaces.tts import tts_registry
 
 
 class TestLLMRegistry:

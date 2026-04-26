@@ -7,15 +7,11 @@ wire together via In/Out ports, and can be replaced with mocks.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from askme.runtime.module import In, Module, ModuleRegistry, Out, Runtime
 from askme.llm.client import LLMClient
-from askme.tools.tool_registry import ToolRegistry
+from askme.runtime.module import Module, ModuleRegistry, Out, Runtime
 from askme.schemas.messages import (
     CmsState,
     DetectionFrame,
@@ -23,7 +19,7 @@ from askme.schemas.messages import (
     ImuSnapshot,
     JointStateSnapshot,
 )
-
+from askme.tools.tool_registry import ToolRegistry
 
 # ── Helpers / Mocks ──────────────────────────────────────────────
 
@@ -318,8 +314,8 @@ class TestMemoryModule:
 class TestComposition:
     async def test_four_modules_compose(self):
         """All four Phase 1 modules compose, build, and start."""
-        from askme.runtime.modules.tools_module import ToolsModule
         from askme.runtime.modules.memory_module import MemoryModule
+        from askme.runtime.modules.tools_module import ToolsModule
 
         rt = (
             Runtime.use(StubLLMModule)
@@ -373,8 +369,8 @@ class TestComposition:
 
     async def test_full_health_snapshot(self):
         """Composed runtime returns health for all modules."""
-        from askme.runtime.modules.tools_module import ToolsModule
         from askme.runtime.modules.memory_module import MemoryModule
+        from askme.runtime.modules.tools_module import ToolsModule
 
         rt = (
             Runtime.use(StubLLMModule)

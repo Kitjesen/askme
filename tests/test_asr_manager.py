@@ -2,20 +2,14 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
-import pytest
 
 from askme.voice.asr_manager import (
-    ASRManager,
-    ASRResult,
-    _CONFIRMATION_WORDS,
-    _MIN_VALID_TEXT_LEN,
-    _NOISE_UTTERANCES,
     _SINGLE_CHAR_COMMANDS,
+    ASRManager,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

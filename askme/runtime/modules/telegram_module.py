@@ -248,9 +248,9 @@ class TelegramModule(Module):
     def _asr_decode_wav(self, wav_path: Path) -> str:
         """Decode a WAV file using sherpa-onnx offline recognizer."""
         try:
+            import numpy as np
             import sherpa_onnx
             import soundfile as sf
-            import numpy as np
         except ImportError:
             logger.warning("TelegramModule: sherpa_onnx or soundfile not installed")
             return ""
@@ -307,8 +307,8 @@ class TelegramModule(Module):
 
     async def _get_lingtu(self, path: str) -> dict | None:
         import json
-        import urllib.request
         import urllib.error
+        import urllib.request
 
         url = f"{self._lingtu_url.rstrip('/')}{path}"
         try:
@@ -324,8 +324,8 @@ class TelegramModule(Module):
 
     async def _post_lingtu(self, path: str, body: dict) -> dict | None:
         import json
-        import urllib.request
         import urllib.error
+        import urllib.request
 
         if not self._lingtu_url:
             return None

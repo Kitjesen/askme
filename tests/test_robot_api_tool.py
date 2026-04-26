@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
 import urllib.error
+from unittest.mock import MagicMock, patch
 
-import pytest
-
-from askme.tools.robot_api_tool import RobotApiTool, _SERVICE_PORTS
-
+from askme.tools.robot_api_tool import _SERVICE_PORTS, RobotApiTool
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

@@ -12,12 +12,10 @@ source of truth.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
-import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +54,7 @@ class ImageArchive:
 
         Raises ``OSError`` on disk failure (caller should handle).
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         date_str = now.strftime("%Y%m%d")
         ts_str = now.strftime("%Y%m%d_%H%M%S")
         safe_label = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)

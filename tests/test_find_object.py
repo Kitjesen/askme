@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-from askme.tools.vision_tool import LookAroundTool, FindTargetTool, register_vision_tools
-from askme.tools.tool_registry import ToolRegistry
 from askme.skills.skill_manager import SkillManager
-
+from askme.tools.tool_registry import ToolRegistry
+from askme.tools.vision_tool import FindTargetTool, LookAroundTool, register_vision_tools
 
 # ---------- Vision Tools ----------
 
@@ -129,7 +127,7 @@ class TestFindObjectSkill:
 
 class TestAgentShellWhitelist:
     def test_vision_tools_have_agent_allowed(self):
-        from askme.tools.vision_tool import LookAroundTool, FindTargetTool
+        from askme.tools.vision_tool import FindTargetTool, LookAroundTool
         assert LookAroundTool.agent_allowed is True
         assert FindTargetTool.agent_allowed is True
 

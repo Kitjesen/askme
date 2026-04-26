@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 
 class TestInit:
@@ -211,8 +210,9 @@ class TestSearch:
         assert result == []
 
     async def test_parses_results(self):
-        from askme.memory.semantic_index import SemanticIndex
         import json
+
+        from askme.memory.semantic_index import SemanticIndex
         idx = SemanticIndex()
         rm = MagicMock()
         rm.recall = MagicMock(return_value=[{
@@ -229,8 +229,9 @@ class TestSearch:
         assert result[0]["score"] == 0.92
 
     async def test_source_filter(self):
-        from askme.memory.semantic_index import SemanticIndex
         import json
+
+        from askme.memory.semantic_index import SemanticIndex
         idx = SemanticIndex()
         rm = MagicMock()
         rm.recall = MagicMock(return_value=[
@@ -243,8 +244,9 @@ class TestSearch:
         assert result[0]["text"] == "A"
 
     async def test_skips_empty_content(self):
-        from askme.memory.semantic_index import SemanticIndex
         import json
+
+        from askme.memory.semantic_index import SemanticIndex
         idx = SemanticIndex()
         rm = MagicMock()
         rm.recall = MagicMock(return_value=[

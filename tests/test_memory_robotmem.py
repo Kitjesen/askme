@@ -7,7 +7,6 @@ import pytest
 
 from askme.memory.robotmem_backend import RobotMemBackend
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -356,8 +355,9 @@ class TestBridgeRobotmemBackend:
 
     @pytest.mark.asyncio
     async def test_bridge_retrieve_routes_to_robotmem(self):
-        from askme.memory.bridge import MemoryBridge
         from unittest.mock import AsyncMock
+
+        from askme.memory.bridge import MemoryBridge
 
         vs_patch, vs_mock = self._patch_vector_store()
         with self._patch_config(backend="robotmem"), vs_patch:
@@ -377,8 +377,9 @@ class TestBridgeRobotmemBackend:
 
     @pytest.mark.asyncio
     async def test_bridge_save_routes_to_robotmem(self):
-        from askme.memory.bridge import MemoryBridge
         from unittest.mock import AsyncMock
+
+        from askme.memory.bridge import MemoryBridge
 
         vs_patch, vs_mock = self._patch_vector_store()
         with self._patch_config(backend="robotmem"), vs_patch:

@@ -13,8 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.runtime.module import In, Module, ModuleRegistry, Out
 from askme.robot.safety_client import DogSafetyClient
+from askme.runtime.module import In, Module, ModuleRegistry, Out
 from askme.schemas.messages import EstopState
 
 logger = logging.getLogger(__name__)

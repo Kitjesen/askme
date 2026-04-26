@@ -7,7 +7,7 @@ No graph database needed: "find similar situations" = vector similarity.
 from __future__ import annotations
 
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from askme.memory.vector_store import VectorStore

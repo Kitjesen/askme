@@ -10,7 +10,6 @@ import pytest
 
 from askme.robot.policy_runner import PolicyRunner
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_runner_with_mock_session(action_dim: int = 16) -> PolicyRunner:

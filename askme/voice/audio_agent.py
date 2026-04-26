@@ -10,6 +10,7 @@ from enum import Enum
 from typing import Any
 
 import numpy as np
+
 try:
     import sounddevice as sd
 except ModuleNotFoundError:
@@ -30,11 +31,11 @@ except ModuleNotFoundError:
 from askme.robot.ota_bridge import OTABridgeMetrics, get_ota_runtime_metrics
 
 from .asr_manager import (
+    _CONFIRMATION_WORDS,  # noqa: F401 — re-exported for tests
+    _MIN_VALID_TEXT_LEN,  # noqa: F401 — re-exported for tests
+    _NOISE_UTTERANCES,  # noqa: F401 — re-exported for tests
+    _SINGLE_CHAR_COMMANDS,  # noqa: F401 — re-exported for tests
     ASRManager,
-    _CONFIRMATION_WORDS,
-    _MIN_VALID_TEXT_LEN,
-    _NOISE_UTTERANCES,
-    _SINGLE_CHAR_COMMANDS,
 )
 from .audio_processor import AudioProcessor
 from .audio_router import AudioRouter
@@ -42,10 +43,10 @@ from .kws import KWSEngine
 from .mic_input import MicInput
 from .tts import TTSEngine
 from .vad_controller import (
+    _BARGE_IN_HOLD_S,  # noqa: F401 — re-exported for tests
+    _MAX_SPEECH_DURATION,  # noqa: F401 — re-exported for tests
     VADController,
     VADEvent,
-    _BARGE_IN_HOLD_S,
-    _MAX_SPEECH_DURATION,
 )
 
 logger = logging.getLogger(__name__)
@@ -358,7 +359,8 @@ class AudioAgent:
                 # Phase 2: VAD-gated ASR
                 # Play beep in background (non-blocking)
                 try:
-                    import subprocess as _sp, threading as _th
+                    import subprocess as _sp
+                    import threading as _th
                     _out_dev = getattr(self.tts, "_output_device", None)
                     _beep_cmd = ["aplay", "-r", "44100", "-f", "S16_LE", "-c", "1", "-q"]
                     if _out_dev:

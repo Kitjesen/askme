@@ -8,9 +8,9 @@ import json
 import logging
 import re
 import time as _time
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
-from askme.pipeline.hooks import PipelineHooks, ToolCallRecord, _PROCEED
+from askme.pipeline.hooks import PipelineHooks, ToolCallRecord
 from askme.pipeline.trace import get_tracer
 from askme.pipeline.utils import classify_skill_error, strip_think_blocks
 

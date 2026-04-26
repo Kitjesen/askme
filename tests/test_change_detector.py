@@ -7,12 +7,9 @@ import json
 import tempfile
 from unittest.mock import MagicMock
 
-import pytest
-
 from askme.perception.change_detector import ChangeDetector, compute_iou
 from askme.schemas.events import ChangeEvent, ChangeEventType
 from askme.schemas.observation import Detection, Observation
-
 
 # ---------- IoU ----------
 
@@ -151,7 +148,7 @@ class TestEventEmission:
         )
         cd._emit_events([event])
 
-        with open(path, "r") as f:
+        with open(path) as f:
             lines = f.readlines()
         assert len(lines) == 1
         data = json.loads(lines[0])
@@ -352,7 +349,7 @@ class TestPulsePushMode:
             ],
         })
 
-        with open(path, "r") as f:
+        with open(path) as f:
             lines = f.readlines()
         assert len(lines) == 1
         data = json.loads(lines[0])

@@ -6,10 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from askme.pipeline.proactive.confirm_agent import ConfirmationAgent, _YES_WORDS, _NO_WORDS
 from askme.pipeline.proactive.base import ProactiveContext, ProactiveResult
+from askme.pipeline.proactive.confirm_agent import ConfirmationAgent
 from askme.skills.skill_model import SkillDefinition
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

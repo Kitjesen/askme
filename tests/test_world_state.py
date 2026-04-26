@@ -6,10 +6,9 @@ import time
 
 import pytest
 
-from askme.perception.attention_manager import AttentionManager, AttentionConfig
-from askme.perception.world_state import TrackedObject, WorldState
+from askme.perception.attention_manager import AttentionManager
+from askme.perception.world_state import WorldState
 from askme.schemas.events import ChangeEvent, ChangeEventType
-
 
 # ---------------------------------------------------------------------------
 # Helpers

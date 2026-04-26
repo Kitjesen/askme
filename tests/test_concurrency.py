@@ -15,11 +15,8 @@ from __future__ import annotations
 import asyncio
 import threading
 
-import pytest
-
 # Shared factory from conftest — single definition, not duplicated per test file
 from tests.conftest import make_proactive_orch
-
 
 # ── Audio helpers ──────────────────────────────────────────────────────────────
 

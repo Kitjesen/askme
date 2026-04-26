@@ -21,7 +21,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from askme.config import get_config, project_root
 from askme.robot.ota_bridge import OTABridgeMetrics
@@ -306,7 +306,7 @@ class ConversationManager:
         """Load history from disk if the file exists."""
         try:
             if self._history_file.exists():
-                with open(self._history_file, "r", encoding="utf-8") as fh:
+                with open(self._history_file, encoding="utf-8") as fh:
                     raw = json.load(fh)
                 self.history = self._strip_orphan_tool_messages(raw)
         except Exception:

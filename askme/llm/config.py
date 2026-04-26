@@ -75,7 +75,7 @@ class LLMConfig:
         return len(errors) == 0
 
     @classmethod
-    def from_cfg(cls, brain_cfg: dict) -> "LLMConfig":
+    def from_cfg(cls, brain_cfg: dict) -> LLMConfig:
         """Construct from the ``brain`` sub-dict of config.yaml.
 
         Intended for use in ``LLMModule.build()`` only.

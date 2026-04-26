@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from askme.memory.strategy import StrategyGenerator, Suggestion
+from askme.memory.strategy import StrategyGenerator
 
 
 def _make_generator(llm_response=""):

@@ -18,22 +18,24 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from askme.interfaces.bus import BusBackend
 
 logger = logging.getLogger(__name__)
 
 try:
-    from cyclonedds.domain import DomainParticipant
-    from cyclonedds.topic import Topic
-    from cyclonedds.sub import DataReader
-    from cyclonedds.pub import DataWriter
-    from cyclonedds.idl import IdlStruct
-    from cyclonedds.core import Listener, ReadCondition, WaitSet
-    from cyclonedds.qos import Qos, Policy
-    from cyclonedds.util import duration
     from dataclasses import dataclass as _dc
+
+    from cyclonedds.core import Listener, ReadCondition, WaitSet
+    from cyclonedds.domain import DomainParticipant
+    from cyclonedds.idl import IdlStruct
+    from cyclonedds.pub import DataWriter
+    from cyclonedds.qos import Policy, Qos
+    from cyclonedds.sub import DataReader
+    from cyclonedds.topic import Topic
+    from cyclonedds.util import duration
 
     _CYCLONE_AVAILABLE = True
 except (ImportError, Exception):
