@@ -142,7 +142,7 @@ brain:
 ## 5. 语音管理（在哪里）
 
 ```
-askme/voice/                              ← 实现层（最大目录，18 个文件）
+askme/voice/                              ← 实现层（最大目录，19 个 .py 文件）
 ├── mic_input.py        13.2KB   麦克风输入：48kHz→16kHz 重采样 + HPF + AGC
 ├── audio_agent.py      32.9KB ★ AudioAgent — 状态机(idle/listening/speaking/muted)
 ├── audio_router.py      9.5KB   音频路由（多输出端）
@@ -230,9 +230,9 @@ voice:
 
 | 子系统 | 实现层 | Module 装配 | config 章节 | 文件数 |
 |---|---|---|---|---|
-| **LLM** | `askme/llm/` | `runtime/modules/llm_module.py` | `brain:` | 4 |
-| **语音** | `askme/voice/` | `runtime/modules/voice_module.py` | `voice:` | 18 |
-| **记忆** | `askme/memory/` | `runtime/modules/memory_module.py` | `memory:` + `conversation:` | 19 |
+| **LLM** | `askme/llm/` | `runtime/modules/llm_module.py` | `brain:` | 4 .py |
+| **语音** | `askme/voice/` | `runtime/modules/voice_module.py` | `voice:` | 19 .py |
+| **记忆** | `askme/memory/` | `runtime/modules/memory_module.py` | `memory:` + `conversation:` | 19 .py |
 | **Pipeline** | `askme/pipeline/` (voice_loop, brain_pipeline, planner_agent) | `runtime/modules/pipeline_module.py` | 散在 brain/voice | 12+ |
 | **技能** | `askme/skills/` (skill_manager + 41 SKILL.md) | `runtime/modules/skill_module.py` | `tools:` | 7 |
 | **工具** | `askme/tools/` (24 个 tool) | `runtime/modules/tools_module.py` | `tools:` | 10 |
