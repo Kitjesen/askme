@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,7 +13,6 @@ from askme.pipeline.reaction_engine import (
 )
 from askme.schemas.events import ChangeEvent, ChangeEventType
 from askme.schemas.reaction import ReactionDecision, ReactionType, SceneContext
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

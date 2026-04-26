@@ -15,7 +15,7 @@ from typing import Any
 from askme.schemas.events import ChangeEvent
 
 
-class ReactionType(str, Enum):
+class ReactionType(str, Enum):  # noqa: UP042 — keep (str, Enum) for str() back-compat
     """How the robot should react to a scene event."""
 
     IGNORE = "ignore"

@@ -7,10 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from askme.pipeline.proactive.base import ProactiveContext
-from askme.pipeline.proactive.slot_agent import SlotCollectorAgent, _MIN_SLOT_CHARS, _MAX_ATTEMPTS
+from askme.pipeline.proactive.slot_agent import SlotCollectorAgent
 from askme.pipeline.proactive.slot_utils import slot_present
 from askme.skills.skill_model import SkillDefinition, SlotSpec
-
 
 # ── slot_present ──────────────────────────────────────────────────────────────
 

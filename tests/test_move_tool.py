@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from askme.tools.move_tool import MoveRobotTool, _call_runtime_api, register_move_tools
-
 
 # ── _call_runtime_api ─────────────────────────────────────────────────────────
 

@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import json
-import threading
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from askme.voice.tts import TTSEngine
-
 
 # ---------------------------------------------------------------------------
 # Helpers

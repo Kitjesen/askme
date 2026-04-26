@@ -1,10 +1,8 @@
 """Tests for VoiceLoop._slot_present() — trigger-based slot detection."""
 
-import pytest
 
 from askme.pipeline.voice_loop import VoiceLoop
 from askme.skills.skill_model import SkillDefinition
-
 
 # ── minimal VoiceLoop stub ────────────────────────────────────────────────────
 

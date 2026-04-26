@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 import numpy as np
+
 try:
     import sherpa_onnx
 except ModuleNotFoundError:

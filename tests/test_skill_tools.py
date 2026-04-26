@@ -5,10 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from askme.tools.skill_tools import CreateSkillTool, register_skill_tools
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

@@ -721,7 +721,7 @@ class OTABridge:
     async def _sleep_or_stop(self, delay_s: float) -> None:
         try:
             await asyncio.wait_for(self._stop_event.wait(), timeout=delay_s)
-        except (asyncio.TimeoutError, TimeoutError):
+        except TimeoutError:
             return
 
 
@@ -766,7 +766,7 @@ def _get_ip_address() -> str:
 
 
 def _iso_utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
 
 
 def _clean_optional(value: Any) -> str | None:

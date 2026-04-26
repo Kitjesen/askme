@@ -6,19 +6,16 @@ without any real audio devices, ASR models, or TTS engines.
 
 from __future__ import annotations
 
-import threading
-import time
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Generator
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
-from askme.voice.audio_agent import AudioAgent, AgentState
 from askme.voice.asr_manager import ASRResult
+from askme.voice.audio_agent import AudioAgent
 from askme.voice.vad_controller import VADEvent
-
 
 # ---------------------------------------------------------------------------
 # Helpers

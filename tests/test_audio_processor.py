@@ -1,7 +1,6 @@
 """Tests for AudioProcessor — unified audio preprocessing pipeline."""
 
 import numpy as np
-import pytest
 
 from askme.voice.audio_processor import AudioProcessor
 

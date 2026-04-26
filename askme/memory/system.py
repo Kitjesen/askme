@@ -22,19 +22,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from askme.memory.trend_analyzer import TrendAnalyzer
 from askme.memory.association import AssociationGraph
-from askme.memory.strategy import StrategyGenerator, Suggestion
-from askme.memory.semantic_index import SemanticIndex
 from askme.memory.policies import PolicyStore
+from askme.memory.semantic_index import SemanticIndex
+from askme.memory.strategy import StrategyGenerator, Suggestion
+from askme.memory.trend_analyzer import TrendAnalyzer
 
 if TYPE_CHECKING:
-    from askme.llm.conversation import ConversationManager
-    from askme.memory.episodic_memory import EpisodicMemory
     from askme.llm.client import LLMClient
+    from askme.llm.conversation import ConversationManager
     from askme.memory.bridge import MemoryBridge
+    from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.procedural import ProceduralMemory
     from askme.memory.session import SessionMemory
     from askme.memory.site_knowledge import SiteKnowledge

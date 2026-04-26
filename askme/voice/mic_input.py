@@ -23,10 +23,12 @@ from __future__ import annotations
 import collections
 import logging
 import queue
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Generator
+from typing import Any
 
 import numpy as np
+
 try:
     import sounddevice as sd
 except ModuleNotFoundError:
@@ -186,8 +188,9 @@ class MicInput:
             audio = np.clip(audio * self._agc_gain, -1.0, 1.0)
 
         # Resample with scipy polyphase (deterministic, fixed output length)
-        from scipy.signal import resample_poly
         from math import gcd
+
+        from scipy.signal import resample_poly
         up = self._sample_rate
         down = self._native_rate
         g = gcd(up, down)
@@ -255,7 +258,7 @@ class MicInput:
                 break
 
     @contextmanager
-    def open(self) -> Generator["MicInput", None, None]:
+    def open(self) -> Generator[MicInput, None, None]:
         """Open the microphone as a context manager.
 
         If the mic is already persistently open (via start()), yields
@@ -315,7 +318,7 @@ class MicInput:
         return int(np.max(np.abs(samples_int16)))
 
     @classmethod
-    def from_config(cls, config: dict[str, Any], audio_router: Any = None) -> "MicInput":
+    def from_config(cls, config: dict[str, Any], audio_router: Any = None) -> MicInput:
         """Create MicInput from askme voice config dict."""
         voice_cfg = config.get("voice", {})
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from askme.pipeline.stream_processor import _ThinkFilter
 
 

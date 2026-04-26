@@ -43,23 +43,15 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from askme.config import get_config, project_root
 from askme.memory.admission import MemoryAdmissionControl
-from askme.memory.trend_analyzer import TrendAnalyzer
 from askme.memory.episode import (
     Episode,
     score_importance,
-    DEFAULT_STABILITY_S,
-    STABILITY_GROWTH_FACTOR,
-    MAX_STABILITY_S,
-    WEIGHT_RECENCY,
-    WEIGHT_IMPORTANCE,
-    WEIGHT_RELEVANCE,
-    IMPORTANCE_RULES,
-    IMPORTANCE_BOOSTS,
 )
-from askme.config import get_config, project_root
+from askme.memory.trend_analyzer import TrendAnalyzer
 
 if TYPE_CHECKING:
     from askme.llm.client import LLMClient
@@ -220,10 +212,10 @@ class EpisodicMemory:
     def __init__(
         self,
         *,
-        llm: "LLMClient | None" = None,
+        llm: LLMClient | None = None,
         vector_store: Any = None,
         config: dict | None = None,
-        data_dir: "str | Path | None" = None,
+        data_dir: str | Path | None = None,
     ) -> None:
         """Create an EpisodicMemory.
 
@@ -618,7 +610,7 @@ class EpisodicMemory:
         skipped_expired = 0
         skipped_corrupt = 0
         try:
-            with open(self._active_file, "r", encoding="utf-8") as f:
+            with open(self._active_file, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:

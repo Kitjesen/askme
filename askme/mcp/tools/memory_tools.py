@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from askme.mcp.server import mcp, AppContext
+from askme.mcp.server import AppContext, mcp
 
 
 @mcp.tool()

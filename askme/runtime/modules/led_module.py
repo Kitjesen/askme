@@ -15,6 +15,7 @@ from typing import Any
 from askme.pipeline.skill_dispatcher import SkillDispatcher
 from askme.robot.safety_client import DogSafetyClient
 from askme.runtime.module import In, Module, ModuleRegistry
+
 try:
     from askme.voice.audio_agent import AudioAgent
 except ModuleNotFoundError:

@@ -21,13 +21,13 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from askme.config import project_root
 
 if TYPE_CHECKING:
     from askme.pipeline.brain_pipeline import BrainPipeline
-    from askme.pipeline.planner_agent import PlannerAgent, PlanStep
+    from askme.pipeline.planner_agent import PlannerAgent
     from askme.skills.skill_manager import SkillManager
     from askme.voice.audio_agent import AudioAgent
 
@@ -131,7 +131,7 @@ class SkillDispatcher:
         pipeline: BrainPipeline,
         skill_manager: SkillManager,
         audio: AudioAgent,
-        planner: "PlannerAgent | None" = None,
+        planner: PlannerAgent | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._skill_manager = skill_manager
@@ -237,7 +237,7 @@ class SkillDispatcher:
                     if self._current_mission is _mission:
                         self._current_mission = None
                     raise
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning("agent_task timed out after %.0fs", step_timeout)
                     _mission.state = MissionState.FAILED
                     if self._current_mission is _mission:
@@ -259,7 +259,7 @@ class SkillDispatcher:
                 self._pipeline.execute_skill(skill_name, user_text, combined_context, source=source),
                 timeout=step_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("Skill '%s' timed out after %.0fs", skill_name, step_timeout)
             result = f"[超时] 技能 {skill_name} 执行超过 {int(step_timeout)} 秒，已中止。"
             if self._current_mission:
@@ -316,7 +316,7 @@ class SkillDispatcher:
                 steps = await asyncio.wait_for(
                     self._planner.plan(user_text), timeout=_PLANNER_TIMEOUT
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("PlannerAgent timed out after %.0fs, falling back", _PLANNER_TIMEOUT)
                 steps = None
             except Exception as exc:

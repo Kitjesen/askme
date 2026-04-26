@@ -6,12 +6,9 @@ import json
 import time
 from pathlib import Path
 
-import pytest
-
-from askme.schemas.observation import Detection, Observation
-from askme.schemas.events import ChangeEvent, ChangeEventType
 from askme.perception.change_detector import ChangeDetector, compute_iou
-
+from askme.schemas.events import ChangeEvent, ChangeEventType
+from askme.schemas.observation import Detection, Observation
 
 # ── Detection ────────────────────────────────────────────────────────────────
 

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from openai import APITimeoutError, APIStatusError
+from openai import APIStatusError, APITimeoutError
 
 
 def _make_client(monkeypatch, **overrides):

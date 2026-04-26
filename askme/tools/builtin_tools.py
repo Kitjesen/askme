@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from askme.config import get_section, project_root
+
 from .tool_registry import BaseTool, ToolRegistry
 
 # Directories the LLM is allowed to read. Data produced by askme itself
@@ -132,7 +133,7 @@ class ReadFileTool(BaseTool):
                 " LLM 只能读取 data/、logs/、askme/skills/ 目录下的文件。"
             )
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 return f.read(3000)
         except Exception as exc:
             return f"[Error] Reading file failed: {exc}"
@@ -446,7 +447,7 @@ class NavDispatchTool(BaseTool):
         except urllib.error.URLError as exc:
             return f"[导航] 导航服务不可达: {exc.reason}。请检查 NAV_GATEWAY_URL={url}"
         except (TimeoutError, OSError):
-            return f"[导航] 请求超时 (5s)，请检查导航服务是否在线"
+            return "[导航] 请求超时 (5s)，请检查导航服务是否在线"
         except Exception as exc:
             return f"[导航] 请求异常: {exc}"
 
@@ -904,8 +905,8 @@ class WebFetchTool(BaseTool):
     }
 
     def execute(self, *, url: str = "", max_chars: int = 0, **kwargs: Any) -> str:
-        import re as _re
         import html as _html
+        import re as _re
 
         if not url:
             return "[Error] URL 不能为空。"

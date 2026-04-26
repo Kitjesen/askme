@@ -2,25 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from askme.pipeline.frames import (
     CancellationToken,
-    DataFrame,
     Frame,
     FramePipeline,
     FrameProcessor,
     InterruptFrame,
     MetricsFrame,
-    PassthroughProcessor,
-    StartInterruptFrame,
-    StopInterruptFrame,
     SystemFrame,
     TranscriptionFrame,
 )
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

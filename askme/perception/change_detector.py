@@ -15,21 +15,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from askme.constants import (
-    DAEMON_HEARTBEAT_PATH, DAEMON_DETECTIONS_PATH,
-    CHANGE_EVENTS_PATH, DAEMON_MAX_STALENESS,
+    CHANGE_EVENTS_PATH,
+    DAEMON_DETECTIONS_PATH,
+    DAEMON_HEARTBEAT_PATH,
 )
 from askme.schemas.events import ChangeEvent, ChangeEventType
 from askme.schemas.messages import DetectionFrame
 from askme.schemas.observation import Detection, Observation
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from askme.robot.pubsub import PubSubBase
@@ -162,7 +160,7 @@ class ChangeDetector:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=self._read_interval)
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     # ------------------------------------------------------------------
@@ -173,7 +171,7 @@ class ChangeDetector:
         """Read latest detections from frame_daemon. Returns None if stale/missing."""
         # Heartbeat check
         try:
-            with open(_HEARTBEAT_PATH, "r", encoding="utf-8") as f:
+            with open(_HEARTBEAT_PATH, encoding="utf-8") as f:
                 ts = float(f.read().strip())
             if time.time() - ts > self._max_staleness:
                 return None
@@ -182,7 +180,7 @@ class ChangeDetector:
 
         # Read detections
         try:
-            with open(_DETECTIONS_PATH, "r", encoding="utf-8") as f:
+            with open(_DETECTIONS_PATH, encoding="utf-8") as f:
                 data = json.load(f)
             return Observation.from_daemon_json(data)
         except (FileNotFoundError, json.JSONDecodeError, KeyError):

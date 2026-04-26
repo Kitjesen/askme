@@ -16,17 +16,16 @@ import re
 from pathlib import Path
 from typing import Any
 
-from askme.pipeline.brain_pipeline import BrainPipeline
+# LLMClient imported lazily to avoid circular imports at module scan time
+from askme.llm.client import LLMClient
 from askme.perception.vision_bridge import VisionBridge
+from askme.pipeline.brain_pipeline import BrainPipeline
 from askme.robot.control_client import DogControlClient
 from askme.robot.safety_client import DogSafetyClient
 from askme.runtime.module import In, Module, ModuleRegistry, Out
 from askme.schemas.messages import MemoryContext
 from askme.tools.tool_registry import ToolRegistry
 from askme.voice.stream_splitter import StreamSplitter
-
-# LLMClient imported lazily to avoid circular imports at module scan time
-from askme.llm.client import LLMClient
 
 logger = logging.getLogger(__name__)
 

@@ -181,7 +181,7 @@ class VectorStore:
         if self._store_path is None or not self._store_path.exists():
             return
         try:
-            with open(self._store_path, "r", encoding="utf-8") as f:
+            with open(self._store_path, encoding="utf-8") as f:
                 data = json.load(f)
             self._texts = data.get("texts", [])
             self._metadata = data.get("metadata", [])

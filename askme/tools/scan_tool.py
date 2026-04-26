@@ -9,7 +9,6 @@ Does NOT directly publish to ROS2 cmd_vel topics.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any

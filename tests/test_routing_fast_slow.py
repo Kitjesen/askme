@@ -22,7 +22,6 @@ import pytest
 
 from askme.llm.intent_router import IntentRouter, IntentType
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 def _router_with_nav_and_time():

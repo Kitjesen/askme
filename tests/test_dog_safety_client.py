@@ -5,10 +5,9 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
 import requests
 
-from askme.robot.safety_client import DogSafetyClient, _ESTOP_PATH
+from askme.robot.safety_client import _ESTOP_PATH, DogSafetyClient
 
 
 class TestDogSafetyClientConfiguration:

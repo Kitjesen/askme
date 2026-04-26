@@ -21,8 +21,8 @@ import logging
 import threading
 from typing import Any
 
-from askme.memory.map_adapter import MapAdapter
 from askme.memory.admission import MemoryAdmissionControl
+from askme.memory.map_adapter import MapAdapter
 from askme.memory.procedural import ProceduralMemory
 from askme.memory.site_knowledge import Location, SiteKnowledge
 

@@ -8,14 +8,13 @@ with available tools, handles tool-call loops, and returns the final response.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any
 
 from askme.robot.ota_bridge import OTABridgeMetrics
 
-from .skill_model import SkillDefinition
 from ..tools.tool_registry import ToolRegistry
+from .skill_model import SkillDefinition
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +134,7 @@ class SkillExecutor:
                     duration_s=duration_s,
                 )
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             duration_s = _time.perf_counter() - t_start
             logger.warning("Skill '%s' timed out after %ds", skill.name, timeout)
             if self._metrics is not None:

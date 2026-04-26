@@ -5,7 +5,6 @@ Complements test_llm_retry.py which covers non-streaming chat() basics.
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

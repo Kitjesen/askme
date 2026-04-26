@@ -16,7 +16,6 @@ from typing import Any
 from colorama import just_fix_windows_console
 
 import askme.interfaces.register_defaults  # noqa: F401 — register all backends
-
 from askme.config import get_config
 from askme.runtime.module import RuntimeApp
 from askme.runtime.profiles import legacy_profile_for
@@ -211,7 +210,7 @@ class AskmeTerminalUI:
                         line = await asyncio.wait_for(
                             self._input_queue.get(), timeout=_REFRESH_INTERVAL,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         continue  # re-render with updated status/events
 
                     if line is None:
@@ -334,7 +333,7 @@ class AskmeTerminalUI:
                         self._quit = True
                         turn_task.cancel()
                         break
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
 
             reply = await turn_task
@@ -374,7 +373,7 @@ class AskmeTerminalUI:
         context = self._build_context_bar(width)
         separator = f"{_C_DIM}{'─' * width}{_C_RESET}"
         footer = _truncate_to_width(
-            f" Ctrl+C:ESTOP  /help /skills /status /clear /quit ",
+            " Ctrl+C:ESTOP  /help /skills /status /clear /quit ",
             width,
         )
 
@@ -509,9 +508,9 @@ class AskmeTerminalUI:
 
     def _health_snapshot(self) -> dict[str, Any]:
         """Build a minimal health snapshot from module data."""
+        from askme import __version__ as ASKME_VERSION
         from askme.health_server import build_health_snapshot
         from askme.robot.runtime_health import merge_voice_pipeline_status
-        from askme import __version__ as ASKME_VERSION
 
         cfg = get_config()
         app_name = cfg.get("app", {}).get("name", "askme")

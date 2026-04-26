@@ -117,7 +117,7 @@ class RobotMemBackend:
                 logger.info("[Memory] RobotMem found %d items.", len(items))
                 return "\n".join(f"- {item}" for item in items)
             return ""
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "[Memory] RobotMem retrieval timed out (%.1fs).",
                 self._retrieve_timeout,

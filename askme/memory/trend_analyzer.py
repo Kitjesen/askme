@@ -69,8 +69,6 @@ class TrendAnalyzer:
             elif ts >= baseline_start:
                 baseline_counts[ep.event_type] += 1
 
-        # Compute baseline hourly rate
-        baseline_window_hours = max((now - window_start - (now - baseline_start)) / 3600, 1.0)
         # Hours in baseline period excluding the recent window
         baseline_span = max(baseline_hours - window_hours, 1)
 

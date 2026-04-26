@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import urllib.error
-from io import BytesIO
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -16,7 +15,6 @@ from askme.tools.builtin_tools import (
     register_builtin_tools,
 )
 from askme.tools.tool_registry import ToolRegistry
-
 
 # ---------------------------------------------------------------------------
 # Helpers

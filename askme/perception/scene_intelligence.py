@@ -20,11 +20,11 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from askme.memory.episodic_memory import EpisodicMemory
     from askme.llm.client import LLMClient
+    from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.session import SessionMemory
 
 logger = logging.getLogger(__name__)

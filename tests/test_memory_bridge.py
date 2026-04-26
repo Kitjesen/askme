@@ -1,12 +1,10 @@
 """Tests for MemoryBridge — Mem0 primary + VectorStore fallback."""
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from askme.memory.bridge import MemoryBridge
-
 
 # ---------------------------------------------------------------------------
 # Helpers

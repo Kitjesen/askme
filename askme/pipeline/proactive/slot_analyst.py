@@ -88,7 +88,7 @@ def is_vague(text: str) -> bool:
 # ── Extraction helpers ────────────────────────────────────────────────────────
 
 
-def _strip_triggers(user_text: str, skill: "SkillDefinition") -> str:
+def _strip_triggers(user_text: str, skill: SkillDefinition) -> str:
     """Remove the longest matching voice trigger from user_text and return the rest."""
     if not skill.voice_trigger:
         return user_text.strip()
@@ -110,9 +110,9 @@ def _strip_triggers(user_text: str, skill: "SkillDefinition") -> str:
 
 
 def _extract_slot_value(
-    spec: "SlotSpec",
+    spec: SlotSpec,
     user_text: str,
-    skill: "SkillDefinition",
+    skill: SkillDefinition,
     pipeline: Any = None,
 ) -> str:
     """Extract the value for a slot from user_text.
@@ -138,7 +138,7 @@ def _extract_slot_value(
 
 
 def analyze_slots(
-    skill: "SkillDefinition",
+    skill: SkillDefinition,
     user_text: str,
     pipeline: Any = None,
 ) -> SlotAnalysis:

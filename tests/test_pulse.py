@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 import threading
 import time
 from unittest.mock import MagicMock, patch
 
 from askme.robot.pulse import Pulse
-
 
 # ── Construction ─────────────────────────────────────
 

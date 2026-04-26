@@ -11,7 +11,6 @@ from askme.schemas.messages import (
 )
 from askme.schemas.observation import Detection
 
-
 # ── EstopState ──────────────────────────────────────────
 
 

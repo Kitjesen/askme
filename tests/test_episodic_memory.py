@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 import time
 from unittest.mock import AsyncMock
 
@@ -142,7 +141,7 @@ def test_episode_initial_retrievability():
 
 def test_episode_ebbinghaus_decay():
     """Retrievability decays following R = e^(-t/S)."""
-    from askme.memory.episodic_memory import Episode, DEFAULT_STABILITY_S
+    from askme.memory.episodic_memory import Episode
 
     ep = Episode("action", "test", importance=0.5)
     # After one stability period, R = e^(-1) ≈ 0.368

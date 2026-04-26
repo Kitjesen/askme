@@ -9,7 +9,6 @@ import pytest
 
 from askme.tools.builtin_tools import WebFetchTool, WebSearchTool
 
-
 # ── WebFetchTool ──────────────────────────────────────────────────────────────
 
 

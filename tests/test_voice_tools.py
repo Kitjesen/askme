@@ -4,16 +4,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from askme.tools.voice_tools import (
+    _VOICE_TOOL_CLASSES,
     MuteMicTool,
     StopSpeakingTool,
     UnmuteMicTool,
-    _VOICE_TOOL_CLASSES,
     register_voice_tools,
 )
-
 
 # ── MuteMicTool ───────────────────────────────────────────────────────────────
 

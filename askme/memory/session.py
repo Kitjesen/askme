@@ -14,10 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from askme.config import get_config, project_root
 
@@ -46,9 +45,9 @@ class SessionMemory:
     def __init__(
         self,
         *,
-        llm: "LLMClient | None" = None,
-        config: "dict | None" = None,
-        sessions_dir: "str | Path | None" = None,
+        llm: LLMClient | None = None,
+        config: dict | None = None,
+        sessions_dir: str | Path | None = None,
     ) -> None:
         """Create a SessionMemory.
 
@@ -73,7 +72,7 @@ class SessionMemory:
         self._summary_cache: str = ""
         self._summary_cache_time: float = 0.0
 
-    def set_llm(self, llm: "LLMClient") -> None:
+    def set_llm(self, llm: LLMClient) -> None:
         """Late-bind the LLM client (e.g. after dependency injection)."""
         self._llm = llm
 

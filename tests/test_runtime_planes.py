@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 import pytest
 
-from askme.runtime.module import Module, ModuleRegistry, Runtime, RuntimeApp
+from askme.runtime.module import Module, Runtime
 from askme.runtime.profiles import (
     EDGE_ROBOT_PROFILE,
     MCP_PROFILE,
@@ -15,7 +13,6 @@ from askme.runtime.profiles import (
     RuntimeProfile,
     legacy_profile_for,
 )
-
 
 # ---------------------------------------------------------------------------
 # Minimal test modules for dependency ordering
@@ -28,13 +25,13 @@ class _ModuleA(Module):
 
     def build(self, cfg, registry):
         self._log = cfg.get("_log", [])
-        self._log.append(f"build:a")
+        self._log.append("build:a")
 
     async def start(self):
-        self._log.append(f"start:a")
+        self._log.append("start:a")
 
     async def stop(self):
-        self._log.append(f"stop:a")
+        self._log.append("stop:a")
 
 
 class _ModuleB(Module):
@@ -44,13 +41,13 @@ class _ModuleB(Module):
 
     def build(self, cfg, registry):
         self._log = cfg.get("_log", [])
-        self._log.append(f"build:b")
+        self._log.append("build:b")
 
     async def start(self):
-        self._log.append(f"start:b")
+        self._log.append("start:b")
 
     async def stop(self):
-        self._log.append(f"stop:b")
+        self._log.append("stop:b")
 
 
 class _ModuleC(Module):
@@ -60,13 +57,13 @@ class _ModuleC(Module):
 
     def build(self, cfg, registry):
         self._log = cfg.get("_log", [])
-        self._log.append(f"build:c")
+        self._log.append("build:c")
 
     async def start(self):
-        self._log.append(f"start:c")
+        self._log.append("start:c")
 
     async def stop(self):
-        self._log.append(f"stop:c")
+        self._log.append("stop:c")
 
 
 # ---------------------------------------------------------------------------

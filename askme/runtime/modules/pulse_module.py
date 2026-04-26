@@ -10,8 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.runtime.module import Module, ModuleRegistry, Out
 from askme.robot.pulse import Pulse
+from askme.runtime.module import Module, ModuleRegistry, Out
 from askme.schemas.messages import (
     CmsState,
     DetectionFrame,

@@ -39,13 +39,13 @@ class ConfirmationAgent(ProactiveAgent):
     """
 
     def should_activate(
-        self, skill: "SkillDefinition", user_text: str, context: ProactiveContext
+        self, skill: SkillDefinition, user_text: str, context: ProactiveContext
     ) -> bool:
         return bool(getattr(skill, "confirm_before_execute", False))
 
     async def interact(
         self,
-        skill: "SkillDefinition",
+        skill: SkillDefinition,
         user_text: str,
         audio: Any,
         context: ProactiveContext,

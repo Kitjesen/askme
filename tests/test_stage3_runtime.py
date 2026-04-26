@@ -12,10 +12,7 @@ from __future__ import annotations
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
-from askme.robot.safety_client import DogSafetyClient, _ESTOP_STATE_TTL
-
+from askme.robot.safety_client import _ESTOP_STATE_TTL, DogSafetyClient
 
 # ── DogSafetyClient ──────────────────────────────────────────────────────────
 

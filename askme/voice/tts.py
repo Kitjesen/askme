@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 import logging
 import os
 import queue
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
 try:
     import sounddevice as sd
 except ModuleNotFoundError:
@@ -35,7 +35,7 @@ except ModuleNotFoundError:
             return {}
         class OutputStream:
             def __init__(self, *args: object, **kwargs: object) -> None: ...
-            def __enter__(self) -> "_SoundDeviceStub.OutputStream": return self
+            def __enter__(self) -> _SoundDeviceStub.OutputStream: return self
             def __exit__(self, *args: object) -> None: ...
     sd = _SoundDeviceStub()  # type: ignore[assignment]
 
@@ -92,7 +92,7 @@ class TTSEngine(TTSBackend):
     _RE_IMG = re.compile(r'!\[.*?\]\(.*?\)')
     _RE_LINK = re.compile(r'\[(.+?)\]\(.*?\)')
 
-    def __init__(self, config: dict[str, Any], *, audio_router: "AudioRouter | None" = None) -> None:
+    def __init__(self, config: dict[str, Any], *, audio_router: AudioRouter | None = None) -> None:
         self._backend: str = config.get("backend", "local")
         self._sample_rate: int = int(config.get("sample_rate", 24000))
         self._output_device: int | str | None = config.get("output_device")
@@ -646,8 +646,9 @@ class TTSEngine(TTSBackend):
 
     async def _generate_minimax(self, text: str, generation: int) -> None:
         """Synthesise via MiniMax T2A v2 — SSE hex-PCM stream → incremental buffer."""
-        import httpx
         import json as _json
+
+        import httpx
 
         url = f"{self._minimax_tts_url}/t2a_v2"
         headers = {

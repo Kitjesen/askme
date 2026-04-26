@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time as _time
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from askme.pipeline.trace import get_tracer
 

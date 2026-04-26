@@ -63,6 +63,22 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP"]
+# Ignored stylistic / pragmatic rules. Re-enable individually as the codebase
+# converges. Real bugs (F-codes, UP-codes) stay enforced.
+ignore = [
+    "E501",  # line-too-long — 100-col is target, not strict; let formatter own it
+    "E701",  # one-line if/colon — common in defensive guard clauses
+    "E702",  # one-line semicolons — used in test setup helpers
+    "E741",  # ambiguous variable name (l, I, O) — appears in stream-position locals
+    "E402",  # module-level import not at top — used in conditional/sys.path setups
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]  # re-exports are intentional
+"tests/**" = ["F841"]        # tests often assign for inspection
+# Conditional imports for backend availability detection (cyclonedds/telegram/numpy)
+"askme/robot/pulse.py" = ["F401"]
+"askme/runtime/modules/telegram_module.py" = ["F401"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

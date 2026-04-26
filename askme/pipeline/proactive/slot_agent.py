@@ -27,7 +27,7 @@ class SlotCollectorAgent(ProactiveAgent):
     """Ask for a missing required slot, with retry and memory-hint support."""
 
     def should_activate(
-        self, skill: "SkillDefinition", user_text: str, context: ProactiveContext
+        self, skill: SkillDefinition, user_text: str, context: ProactiveContext
     ) -> bool:
         if not skill.required_prompt:
             return False
@@ -38,7 +38,7 @@ class SlotCollectorAgent(ProactiveAgent):
 
     async def interact(
         self,
-        skill: "SkillDefinition",
+        skill: SkillDefinition,
         user_text: str,
         audio: Any,
         context: ProactiveContext,
@@ -75,12 +75,12 @@ class SlotCollectorAgent(ProactiveAgent):
     # ── helpers ──────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _build_question(skill: "SkillDefinition", hint: str) -> str:
+    def _build_question(skill: SkillDefinition, hint: str) -> str:
         if hint:
             return f"上次是{hint}，这次还是吗？或者{skill.required_prompt}"
         return skill.required_prompt
 
-    def _get_hint(self, skill: "SkillDefinition", context: ProactiveContext) -> str:
+    def _get_hint(self, skill: SkillDefinition, context: ProactiveContext) -> str:
         """Extract a slot hint from the current mission's step history.
 
         For ``navigate``: uses semantic extraction to surface just the

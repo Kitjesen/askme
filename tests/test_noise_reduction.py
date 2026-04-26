@@ -1,10 +1,8 @@
 """Tests for spectral subtraction noise reduction and noise gate calibration."""
 
 import numpy as np
-import pytest
 
 from askme.voice.noise_reduction import NoiseGateCalibrator, SpectralSubtractor
-
 
 # ---------------------------------------------------------------------------
 # SpectralSubtractor

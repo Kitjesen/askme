@@ -1,7 +1,6 @@
 """Tests for audio input filter (DC removal + HPF + bandpass)."""
 
 import numpy as np
-import pytest
 
 from askme.voice.audio_filter import AudioFilter
 

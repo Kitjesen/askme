@@ -4,17 +4,13 @@ from __future__ import annotations
 
 import threading
 import time
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from askme.robot.led_controller import (
     HttpLedController,
-    LedController,
     LedStateKind,
     NullLedController,
 )
-
 
 # ── LedStateKind ──────────────────────────────────────────────────────────────
 

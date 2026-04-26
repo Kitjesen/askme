@@ -110,7 +110,7 @@ def _load_config_from_disk() -> dict:
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    with open(config_path, "r", encoding="utf-8") as fh:
+    with open(config_path, encoding="utf-8") as fh:
         raw: dict = yaml.safe_load(fh) or {}
 
     # 3. Resolve ${VAR} references from environment

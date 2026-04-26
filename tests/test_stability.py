@@ -18,20 +18,16 @@ Stability criteria:
 
 from __future__ import annotations
 
-import asyncio
 import gc
 import tracemalloc
 import weakref
 from unittest.mock import patch
 
-import pytest
-
-# Shared factory from conftest — avoids duplicate _make_orch() across test files
-from tests.conftest import make_proactive_orch
-
 import askme.pipeline.proactive.orchestrator as _orch_module
 from askme.pipeline.proactive.session_state import ClarificationSession
 
+# Shared factory from conftest — avoids duplicate _make_orch() across test files
+from tests.conftest import make_proactive_orch
 
 # ── Audio helper ──────────────────────────────────────────────────────────────
 

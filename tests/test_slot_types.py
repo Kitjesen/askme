@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from askme.pipeline.proactive.slot_types import SlotAnalysis, SlotFill
 
 

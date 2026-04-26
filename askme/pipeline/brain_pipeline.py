@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from askme.pipeline.hooks import PipelineHooks
 from askme.pipeline.prompt_builder import PromptBuilder
@@ -31,16 +31,16 @@ from askme.pipeline.utils import strip_think_blocks  # noqa: F401 — re-exporte
 
 if TYPE_CHECKING:
     from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
-    from askme.llm.conversation import ConversationManager
-    from askme.memory.episodic_memory import EpisodicMemory
     from askme.llm.client import LLMClient
+    from askme.llm.conversation import ConversationManager
     from askme.memory.bridge import MemoryBridge
-    from askme.memory.system import MemorySystem
+    from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.session import SessionMemory
+    from askme.memory.system import MemorySystem
     from askme.perception.vision_bridge import VisionBridge
+    from askme.robot.arm_controller import ArmController
     from askme.robot.control_client import DogControlClient
     from askme.robot.safety_client import DogSafetyClient
-    from askme.robot.arm_controller import ArmController
     from askme.skills.skill_executor import SkillExecutor
     from askme.skills.skill_manager import SkillManager
     from askme.tools.tool_registry import ToolRegistry

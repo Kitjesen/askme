@@ -17,17 +17,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from askme.config import get_config
 from askme.constants import (
-    DAEMON_HEARTBEAT_PATH, DAEMON_COLOR_FRAME_PATH,
-    DAEMON_DEPTH_FRAME_PATH, DAEMON_DETECTIONS_PATH,
-    DAEMON_ROS2_FRAME_PATH, DEFAULT_BPU_MODEL_PATH,
-    DAEMON_MAX_STALENESS,
+    DAEMON_COLOR_FRAME_PATH,
+    DAEMON_DEPTH_FRAME_PATH,
+    DAEMON_DETECTIONS_PATH,
+    DAEMON_HEARTBEAT_PATH,
+    DAEMON_ROS2_FRAME_PATH,
+    DEFAULT_BPU_MODEL_PATH,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,8 +81,9 @@ with open(out, "wb") as f:
 
     def grab(self) -> Any:
         """Grab a single frame via subprocess. Returns numpy array (H, W, 3) or None."""
-        import subprocess
         import struct
+        import subprocess
+
         import numpy as np
 
         # Use bash -c to source ROS2 setup, then run grab script with system python
@@ -190,7 +192,7 @@ class VisionBridge:
         import json as _json
         det_path = DAEMON_DETECTIONS_PATH
         try:
-            with open(det_path, "r") as f:
+            with open(det_path) as f:
                 data = _json.load(f)
             if time.time() - data.get("timestamp", 0) > max_age:
                 return None
@@ -225,8 +227,12 @@ class VisionBridge:
             return False
 
         try:
-            from qp_perception.tracking.yolo_seg import YoloSegTracker  # type: ignore[import-untyped]
-            from qp_perception.selection.weighted import WeightedTargetSelector  # type: ignore[import-untyped]
+            from qp_perception.selection.weighted import (
+                WeightedTargetSelector,  # type: ignore[import-untyped]
+            )
+            from qp_perception.tracking.yolo_seg import (
+                YoloSegTracker,  # type: ignore[import-untyped]
+            )
 
             self._tracker = YoloSegTracker(
                 model_path=self._model_path,
@@ -370,6 +376,7 @@ class VisionBridge:
                 return ""
 
             import base64
+
             import numpy as np
 
             image_b64 = ""
@@ -379,8 +386,9 @@ class VisionBridge:
                 image_b64 = base64.b64encode(buf).decode("utf-8")
             except ImportError:
                 try:
-                    from PIL import Image as PILImage
                     import io
+
+                    from PIL import Image as PILImage
                     img = PILImage.fromarray(np.asarray(frame))
                     buf = io.BytesIO()
                     img.save(buf, format="JPEG", quality=80)
@@ -475,8 +483,8 @@ class VisionBridge:
             cv2.imwrite(filepath, frame)
         except ImportError:
             try:
-                from PIL import Image as PILImage
                 import numpy as np
+                from PIL import Image as PILImage
                 img = PILImage.fromarray(np.asarray(frame))
                 img.save(filepath, quality=85)
             except ImportError:
@@ -557,6 +565,7 @@ class VisionBridge:
 
             # Encode frame as base64 JPEG (cv2 → PIL → raw PPM fallback)
             import base64
+
             import numpy as np
 
             image_b64 = ""
@@ -566,8 +575,9 @@ class VisionBridge:
                 image_b64 = base64.b64encode(buf).decode("utf-8")
             except ImportError:
                 try:
-                    from PIL import Image as PILImage
                     import io
+
+                    from PIL import Image as PILImage
                     img = PILImage.fromarray(np.asarray(frame))
                     buf = io.BytesIO()
                     img.save(buf, format="JPEG", quality=80)
@@ -725,7 +735,7 @@ class VisionBridge:
     @staticmethod
     def _check_daemon_alive(max_age: float = 2.0) -> bool:
         try:
-            with open(DAEMON_HEARTBEAT_PATH, "r") as f:
+            with open(DAEMON_HEARTBEAT_PATH) as f:
                 ts = float(f.read().strip())
             return time.time() - ts <= max_age
         except (FileNotFoundError, ValueError):
@@ -738,6 +748,7 @@ class VisionBridge:
     ) -> Any:
         """Read latest frame from frame_daemon shared file. Returns None if stale/missing."""
         import struct
+
         import numpy as np
 
         if not VisionBridge._check_daemon_alive(max_age):
@@ -764,6 +775,7 @@ class VisionBridge:
         Depth frame is 848x480 uint16 mm from Orbbec Gemini 335.
         """
         import struct
+
         import numpy as np
 
         if not VisionBridge._check_daemon_alive():
@@ -798,6 +810,7 @@ class VisionBridge:
     def read_depth_map() -> Any:
         """Read full depth map. Returns (848, 480) uint16 mm array or None."""
         import struct
+
         import numpy as np
 
         if not VisionBridge._check_daemon_alive():

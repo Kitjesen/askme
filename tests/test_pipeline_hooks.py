@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from askme.pipeline.hooks import (
+    _PROCEED,
     PipelineHooks,
     ToolCallRecord,
-    _PROCEED,
     _ProceedType,
     dataclasses_replace,
 )
-
 
 # ── ToolCallRecord ────────────────────────────────────────────────────────────
 

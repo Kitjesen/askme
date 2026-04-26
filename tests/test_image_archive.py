@@ -6,8 +6,6 @@ import base64
 import json
 from pathlib import Path
 
-import pytest
-
 from askme.perception.image_archive import ImageArchive
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
-from askme.mcp.server import AppContext, mcp
+from askme.mcp.server import mcp
 
 logger = logging.getLogger(__name__)
 

@@ -8,7 +8,7 @@ import logging
 import numpy as np
 from mcp.server.fastmcp import Context
 
-from askme.errors import VOICE_NOT_AVAILABLE, INTERNAL_ERROR, error_response
+from askme.errors import VOICE_NOT_AVAILABLE, error_response
 from askme.mcp.server import AppContext, mcp
 
 logger = logging.getLogger(__name__)

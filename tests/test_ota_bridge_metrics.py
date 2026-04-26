@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import threading
-import time
-
-import pytest
 
 from askme.robot.ota_bridge import OTABridgeMetrics, _compute_percentiles
-
 
 # ── _compute_percentiles ─────────────────────────────────────────────────────
 

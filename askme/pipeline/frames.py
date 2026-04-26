@@ -207,7 +207,7 @@ class FramePipeline:
         self.processors: list[FrameProcessor] = processors or []
         self._metrics: list[MetricsFrame] = []
 
-    def add(self, processor: FrameProcessor) -> "FramePipeline":
+    def add(self, processor: FrameProcessor) -> FramePipeline:
         """Add a processor to the end of the pipeline."""
         self.processors.append(processor)
         return self
@@ -306,7 +306,7 @@ class CancellationToken:
         try:
             await asyncio.wait_for(self._event.wait(), timeout=timeout)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
 
     def reset(self) -> None:

@@ -15,17 +15,17 @@ The system must never enter an unrecoverable state after a single failure.
 from __future__ import annotations
 
 import asyncio
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from askme.pipeline.proactive.base import ProactiveContext, ProactiveResult
+import pytest
+
+from askme.pipeline.proactive.base import ProactiveContext
 from askme.pipeline.proactive.clarification_agent import ClarificationPlannerAgent
 from askme.pipeline.proactive.confirm_agent import ConfirmationAgent
-from askme.pipeline.proactive.slot_agent import SlotCollectorAgent
 from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
-from askme.pipeline.skill_dispatcher import MissionContext, SkillDispatcher
+from askme.pipeline.proactive.slot_agent import SlotCollectorAgent
+from askme.pipeline.skill_dispatcher import SkillDispatcher
 from askme.skills.skill_model import SkillDefinition, SlotSpec
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -185,7 +185,7 @@ class TestDispatcherPipelineFailure:
         async def _execute(name, text, ctx="", *, source=None):
             call_count[0] += 1
             if call_count[0] == 1:
-                raise asyncio.TimeoutError
+                raise TimeoutError
             return "ok"
         p.execute_skill = _execute
 

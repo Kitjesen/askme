@@ -183,7 +183,7 @@ python -m pytest --cov=askme --cov-report=html
 | 任务 | 说明 |
 |------|------|
 | 集成测试：语音 → Pipeline → TTS | 端到端 E2E，需要 mock 全栈 |
-| `docs/PRODUCTION_GAPS.md` 中列出的生产差距 | 详见该文档 |
+| `docs/archive/PRODUCTION_GAPS.md` 中列出的生产差距 | 详见该文档（已归档，待重新评估） |
 | OTA bridge 远端上报 | `test_ota_bridge_core.py` 已覆盖本地部分 |
 | 健康检查 HTTP 端点 | `AskmeHealthServer` 的 `/healthz`、`/metrics` 路由 |
 
@@ -268,6 +268,5 @@ pip install -e .
 ## 八、联系与资源
 
 - **架构文档**: `docs/ARCHITECTURE.md`、`docs/ARCHITECTURE_PATTERNS.md`
-- **生产差距清单**: `docs/PRODUCTION_GAPS.md`
-- **模块迁移计划**: `docs/MODULE_MIGRATION_PLAN.md`
-- **层级差距分析**: `docs/LAYER_GAPS.md`
+- **配置布局总览**: `docs/CONFIG_GUIDE.md`
+- **历史设计稿（已归档）**: `docs/archive/`（PRODUCTION_GAPS、MODULE_MIGRATION_PLAN、LAYER_GAPS、PROACTIVE_AGENT_V2、DECORATOR_ARCHITECTURE、AUTONOMOUS_ARCHITECTURE）

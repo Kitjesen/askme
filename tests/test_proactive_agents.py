@@ -8,18 +8,14 @@ All audio I/O is mocked; asyncio.to_thread calls run the mock synchronously.
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
-
-from askme.pipeline.proactive.base import ProactiveContext, ProactiveResult
+from askme.pipeline.proactive.base import ProactiveContext
 from askme.pipeline.proactive.confirm_agent import ConfirmationAgent
 from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
 from askme.pipeline.proactive.slot_agent import SlotCollectorAgent
 from askme.pipeline.proactive.slot_utils import slot_present
 from askme.skills.skill_model import SkillDefinition
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

@@ -6,9 +6,8 @@ import asyncio
 
 import pytest
 
-from askme.pipeline.protocols import TurnContext
 from askme.pipeline.hooks import PipelineHooks, ToolCallRecord
-
+from askme.pipeline.protocols import TurnContext
 
 # ── TurnContext ───────────────────────────────────────────────────────────────
 

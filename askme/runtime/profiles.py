@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Component bundle constants — used by RuntimeProfile.components frozenset
 # ---------------------------------------------------------------------------

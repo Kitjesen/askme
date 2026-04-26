@@ -25,8 +25,8 @@ from askme.robot.led_controller import LedController, LedStateKind, NullLedContr
 from askme.voice.audio_agent import AgentState
 
 if TYPE_CHECKING:
-    from askme.robot.safety_client import DogSafetyClient
     from askme.pipeline.skill_dispatcher import SkillDispatcher
+    from askme.robot.safety_client import DogSafetyClient
     from askme.voice.audio_agent import AudioAgent
 
 logger = logging.getLogger(__name__)

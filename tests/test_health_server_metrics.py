@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from askme.health_server import (
     _append_metric,
     _escape_label_value,
@@ -11,7 +9,6 @@ from askme.health_server import (
     _format_metric_value,
     render_prometheus_metrics,
 )
-
 
 # ── _format_metric_value ──────────────────────────────────────────────────────
 

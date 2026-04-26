@@ -1,6 +1,5 @@
 """Tests for ClarificationPlannerAgent and the _combine_prompts helper."""
 
-import pytest
 from unittest.mock import MagicMock
 
 from askme.pipeline.proactive.base import ProactiveContext
@@ -9,7 +8,6 @@ from askme.pipeline.proactive.clarification_agent import (
     _combine_prompts,
 )
 from askme.skills.skill_model import SkillDefinition, SlotSpec
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

@@ -25,8 +25,8 @@ def _call_runtime_api(
 ) -> dict[str, Any]:
     """Call a runtime service via HTTP. Returns parsed response or error dict."""
     import os
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     port_map = {
         "control": 5080,
@@ -133,8 +133,8 @@ class MoveRobotTool(BaseTool):
     def _go_to_lingtu(self, target: str, base_url: str) -> str:
         """Send natural-language instruction to LingTu SemanticPlanner."""
         import json
-        import urllib.request
         import urllib.error
+        import urllib.request
 
         url = f"{base_url.rstrip('/')}/api/v1/instruction"
         body = json.dumps({"text": target}).encode()

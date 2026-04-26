@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock
 
-import pytest
-
 from askme.robot.led_controller import LedStateKind, NullLedController
 from askme.robot.state_led_bridge import StateLedBridge
 from askme.voice.audio_agent import AgentState

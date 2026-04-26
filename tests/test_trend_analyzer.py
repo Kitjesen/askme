@@ -5,7 +5,7 @@ import time
 import pytest
 
 from askme.memory.episode import Episode
-from askme.memory.trend_analyzer import TrendAnalyzer, Trend
+from askme.memory.trend_analyzer import Trend, TrendAnalyzer
 
 
 def _make_episode(event_type: str, hours_ago: float = 0.0, description: str = "") -> Episode:

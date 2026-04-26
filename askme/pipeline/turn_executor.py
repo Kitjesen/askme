@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from askme.pipeline.hooks import PipelineHooks
 from askme.pipeline.protocols import TurnContext
@@ -33,8 +33,8 @@ class TurnExecutor:
     _REFLECT_DELAY_S = 5.0       # seconds to wait before post-turn reflection
 
     def _track_task(
-        self, coro: "asyncio.Coroutine[Any, Any, Any]", *, name: str | None = None
-    ) -> "asyncio.Task[Any]":
+        self, coro: asyncio.Coroutine[Any, Any, Any], *, name: str | None = None
+    ) -> asyncio.Task[Any]:
         """Create a background task, track it in _pending_tasks, log any exception.
 
         Python 3.7+ asyncio.create_task() copies the *current* contextvars.Context
@@ -46,7 +46,7 @@ class TurnExecutor:
         t = asyncio.create_task(coro, name=name)
         self._pending_tasks.add(t)
 
-        def _done(task: "asyncio.Task[Any]") -> None:
+        def _done(task: asyncio.Task[Any]) -> None:
             self._pending_tasks.discard(task)
             if not task.cancelled():
                 exc = task.exception()

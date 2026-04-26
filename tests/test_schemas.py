@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-import time
-
-import pytest
-
 from askme.schemas.events import ChangeEvent, ChangeEventType
 from askme.schemas.observation import Detection, Observation
-
 
 # ── ChangeEventType ───────────────────────────────────────────────────────────
 

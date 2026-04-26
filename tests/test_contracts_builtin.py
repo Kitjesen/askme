@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
 import askme.skills.contracts_builtin  # noqa: F401 — triggers @skill_contract decorators
-from askme.skills.contracts import SkillContractRegistry, registered_skill_contracts
+from askme.skills.contracts import registered_skill_contracts
 
 
 class TestBuiltinContracts:

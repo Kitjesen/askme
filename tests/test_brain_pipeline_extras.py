@@ -3,7 +3,6 @@ _classify_skill_error_message."""
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -78,7 +77,7 @@ class TestClassifyErrorMessage:
     def test_classify_error_timeout(self):
         """asyncio.TimeoutError → friendly retry message."""
         pipeline = _make_pipeline()
-        exc = asyncio.TimeoutError()
+        exc = TimeoutError()
         result = pipeline._classify_error_message(exc)
         assert "再说一遍" in result or "超时" in result
 
@@ -94,7 +93,7 @@ class TestClassifySkillErrorMessage:
     def test_classify_skill_error_timeout(self):
         """asyncio.TimeoutError → 返り値に '超时' を含む。"""
         pipeline = _make_pipeline()
-        exc = asyncio.TimeoutError()
+        exc = TimeoutError()
         result = pipeline._classify_skill_error_message(exc, "navigate")
         assert "超时" in result
 

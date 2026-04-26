@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import json
 import math
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import patch
 
 
 def _get_resources():
     from askme.mcp.resources.robot_resources import (
-        robot_status,
         robot_joint_info,
         robot_safety_config,
+        robot_status,
     )
     return robot_status, robot_joint_info, robot_safety_config
 

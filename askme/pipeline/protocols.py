@@ -52,7 +52,7 @@ class StreamProcessorProtocol(Protocol):
         self,
         stream: Any,
         source: str = "voice",
-    ) -> "tuple[str, dict[int, dict[str, str]]]":
+    ) -> tuple[str, dict[int, dict[str, str]]]:
         """Consume raw LLM stream: think filter, TTS, truncation.
 
         Returns ``(full_text, tool_calls_acc)``.
@@ -113,7 +113,7 @@ class TurnExecutorProtocol(Protocol):
         self,
         user_text: str,
         *,
-        memory_task: "asyncio.Task[str] | None" = None,
+        memory_task: asyncio.Task[str] | None = None,
         source: str = "voice",
     ) -> str:
         """Run the full pipeline for *user_text*. Returns assistant reply."""

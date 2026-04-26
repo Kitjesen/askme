@@ -459,8 +459,8 @@ askme/
 | [`docs/ASKME_BOUNDARY.md`](docs/ASKME_BOUNDARY.md) | 核心/感知/插件三层边界，不该做什么 |
 | [`docs/PROACTIVE_INTELLIGENCE_PLAN.md`](docs/PROACTIVE_INTELLIGENCE_PLAN.md) | 主动智能 + ReactionEngine 设计 |
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | 关键模式、陷阱、待完成工作 |
-| [`docs/LAYER_GAPS.md`](docs/LAYER_GAPS.md) | 分层差距清单（28/28 已关闭） |
 | [`docs/ARCHITECTURE_PATTERNS.md`](docs/ARCHITECTURE_PATTERNS.md) | 设计模式参考（Blueprint/Module/Backend） |
+| [`docs/archive/`](docs/archive/) | 已完成或被取代的设计稿（LAYER_GAPS、MODULE_MIGRATION_PLAN 等） |
 
 ---
 

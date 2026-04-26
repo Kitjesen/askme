@@ -2,24 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from askme.tools.robot_tools import (
+    _ROBOT_TOOL_CLASSES,
     RobotEmergencyStopTool,
     RobotGetStateTool,
     RobotGrabTool,
     RobotHomeTool,
     RobotMoveTool,
     RobotReleaseTool,
-    _ROBOT_TOOL_CLASSES,
     _run_coro,
     register_robot_tools,
 )
-
 
 # ── _run_coro helper ──────────────────────────────────────────────────────────
 

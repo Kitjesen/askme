@@ -5,10 +5,7 @@ from __future__ import annotations
 import sys
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from askme.voice.punctuation import PunctuationRestorer
-
 
 # ── Init ──────────────────────────────────────────────────────────────────────
 

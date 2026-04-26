@@ -30,7 +30,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import os
 import time
 from typing import Any, Protocol
 from urllib import error, request
@@ -266,7 +265,7 @@ class AlertDispatcher:
         try:
             with open(path, "rb") as f:
                 return base64.b64encode(f.read()).decode("ascii")
-        except (OSError, IOError):
+        except OSError:
             return None
 
     @staticmethod
@@ -276,7 +275,7 @@ class AlertDispatcher:
         try:
             with open(path, "rb") as f:
                 return hashlib.md5(f.read()).hexdigest()
-        except (OSError, IOError):
+        except OSError:
             return None
 
     # ── HTTP helper ──

@@ -18,12 +18,10 @@ SkillManager, and IntentRouter code paths.
 from __future__ import annotations
 
 import json
-import shutil
-import tempfile
 import types
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

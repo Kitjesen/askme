@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time as _time
-from typing import Any, Awaitable, Callable, Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
-from askme.pipeline.hooks import PipelineHooks, ToolCallRecord, _PROCEED
+from askme.pipeline.hooks import _PROCEED, PipelineHooks, ToolCallRecord
 
 if TYPE_CHECKING:
     from askme.llm.conversation import ConversationManager
@@ -125,7 +125,7 @@ class ToolExecutor:
                         ),
                         timeout=self._TOOL_TIMEOUT,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.error(
                         "Tool '%s' timed out after %.0fs", tool_name, self._TOOL_TIMEOUT
                     )

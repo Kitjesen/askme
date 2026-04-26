@@ -25,7 +25,8 @@ import asyncio
 import logging
 import random
 import time
-from typing import Any, AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Sequence
+from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from openai.types.chat import ChatCompletionChunk

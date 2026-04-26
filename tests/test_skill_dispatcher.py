@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from askme.pipeline.skill_dispatcher import MissionContext, SkillDispatcher
 from askme.tools.builtin_tools import DispatchSkillTool
-
 
 # ── Fixtures ──────────────────────────────────────────────────────
 

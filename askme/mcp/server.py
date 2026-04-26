@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -69,14 +70,14 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     from askme.llm.client import LLMClient
     from askme.llm.conversation import ConversationManager
     from askme.memory.bridge import MemoryBridge
-    from askme.memory.session import SessionMemory
     from askme.memory.episodic_memory import EpisodicMemory
-    from askme.perception.vision_bridge import VisionBridge
+    from askme.memory.session import SessionMemory
     from askme.perception.scene_intelligence import SceneIntelligence
-    from askme.skills.skill_manager import SkillManager
+    from askme.perception.vision_bridge import VisionBridge
     from askme.skills.skill_executor import SkillExecutor
-    from askme.tools.tool_registry import ToolRegistry
+    from askme.skills.skill_manager import SkillManager
     from askme.tools.builtin_tools import register_builtin_tools
+    from askme.tools.tool_registry import ToolRegistry
 
     ctx.llm_client = LLMClient()
     ctx.session_memory = SessionMemory(llm=ctx.llm_client)
@@ -164,15 +165,15 @@ mcp = FastMCP(
 
 # Import tool/resource modules to trigger @mcp.tool()/@mcp.resource() registration.
 # These MUST be imported after `mcp` is defined.
-import askme.mcp.tools.robot_tools as _rt  # noqa: E402, F401
-import askme.mcp.tools.voice_tools as _vt  # noqa: E402, F401
-import askme.mcp.tools.skill_tools as _st  # noqa: E402, F401
+import askme.mcp.resources.health_resources as _hr  # noqa: E402, F401
+import askme.mcp.resources.perception_resources as _pr  # noqa: E402, F401
 import askme.mcp.resources.robot_resources as _rr  # noqa: E402, F401
 import askme.mcp.resources.skill_resources as _sr  # noqa: E402, F401
-import askme.mcp.resources.health_resources as _hr  # noqa: E402, F401
-import askme.mcp.tools.vision_tools as _vit  # noqa: E402, F401
-import askme.mcp.resources.perception_resources as _pr  # noqa: E402, F401
 import askme.mcp.tools.memory_tools as _mt  # noqa: E402, F401
+import askme.mcp.tools.robot_tools as _rt  # noqa: E402, F401
+import askme.mcp.tools.skill_tools as _st  # noqa: E402, F401
+import askme.mcp.tools.vision_tools as _vit  # noqa: E402, F401
+import askme.mcp.tools.voice_tools as _vt  # noqa: E402, F401
 
 
 def main() -> None:

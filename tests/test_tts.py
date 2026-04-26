@@ -11,8 +11,8 @@ import pytest
 
 def test_local_backend_generates_and_queues(monkeypatch):
     """Local backend: sherpa-onnx generate → resample → queue."""
+
     from askme.voice.tts import TTSEngine
-    import numpy as np
 
     class _FakeAudio:
         def __init__(self):
@@ -58,7 +58,6 @@ def test_edge_backend_calls_edge_tts_and_decodes(monkeypatch):
     monkeypatch.setattr("edge_tts.Communicate.stream", fake_stream)
 
     import miniaudio
-    import numpy as np
 
     class _Decoded:
         samples = b"\x01\x00" * 100
@@ -106,8 +105,9 @@ def test_drain_buffers_invalidates_inflight_generation(monkeypatch):
 def test_playback_loop_uses_configured_output_device(monkeypatch):
     """_playback_loop passes the configured output_device to sd.play."""
     import numpy as np
-    from askme.voice.tts import TTSEngine
+
     import askme.voice.tts as tts_mod
+    from askme.voice.tts import TTSEngine
 
     played_kwargs: dict[str, object] = {}
 

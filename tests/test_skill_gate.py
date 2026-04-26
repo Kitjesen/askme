@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from askme.pipeline.skill_gate import SkillGate
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

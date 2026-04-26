@@ -2,8 +2,6 @@
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from askme.memory.association import AssociationGraph
 
 

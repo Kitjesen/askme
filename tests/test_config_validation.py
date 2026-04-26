@@ -1,7 +1,6 @@
 """Tests for config validation and feature flags."""
 
-import pytest
-from askme.config import validate_config, _apply_feature_flags
+from askme.config import _apply_feature_flags, validate_config
 
 
 class TestValidateConfig:

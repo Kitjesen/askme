@@ -12,8 +12,8 @@ from askme.pipeline.frames import (
     Frame,
     FramePipeline,
     FrameProcessor,
-    InterruptFrame,
     IntentFrame,
+    InterruptFrame,
     LLMFullResponseFrame,
     LLMStartFrame,
     LLMTextFrame,
@@ -22,12 +22,11 @@ from askme.pipeline.frames import (
     StartInterruptFrame,
     StopInterruptFrame,
     SystemFrame,
+    TranscriptionFrame,
     TTSAudioFrame,
     TTSSpeakFrame,
-    TranscriptionFrame,
     VADFrame,
 )
-
 
 # ---------------------------------------------------------------------------
 # Frame type hierarchy

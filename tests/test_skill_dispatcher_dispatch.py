@@ -16,7 +16,6 @@ import pytest
 
 from askme.pipeline.skill_dispatcher import SkillDispatcher
 
-
 # ── Helpers ────────────────────────────────────────────────────────
 
 

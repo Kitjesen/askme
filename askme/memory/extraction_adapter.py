@@ -85,8 +85,9 @@ class ExtractionAdapter:
             )
 
             # Synchronous LLM call (fire-and-forget, not on hot path)
-            import httpx
             import os
+
+            import httpx
 
             key = os.environ.get("DASHSCOPE_API_KEY", "")
             if not key:

@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 # LLM
 # ---------------------------------------------------------------------------
 from askme.interfaces.llm import llm_registry  # noqa: E402
-
 from askme.llm.client import LLMClient  # noqa: E402
 
 llm_registry.register("minimax")(LLMClient)
@@ -28,7 +27,6 @@ llm_registry.register("minimax")(LLMClient)
 # ASR
 # ---------------------------------------------------------------------------
 from askme.interfaces.asr import asr_registry  # noqa: E402
-
 from askme.voice.asr import ASREngine  # noqa: E402
 
 asr_registry.register("sherpa")(ASREngine)
@@ -44,7 +42,6 @@ except ImportError:
 # TTS
 # ---------------------------------------------------------------------------
 from askme.interfaces.tts import tts_registry  # noqa: E402
-
 from askme.voice.tts import TTSEngine  # noqa: E402
 
 tts_registry.register("minimax")(TTSEngine)
@@ -53,7 +50,6 @@ tts_registry.register("minimax")(TTSEngine)
 # Bus
 # ---------------------------------------------------------------------------
 from askme.interfaces.bus import bus_registry  # noqa: E402
-
 from askme.robot.pulse import Pulse  # noqa: E402
 
 bus_registry.register("pulse")(Pulse)
@@ -82,7 +78,6 @@ except ImportError:
 # Reaction
 # ---------------------------------------------------------------------------
 from askme.interfaces.reaction import reaction_registry  # noqa: E402
-
 from askme.pipeline.reaction_engine import HybridReaction, RuleBasedReaction  # noqa: E402
 
 reaction_registry.register("hybrid")(HybridReaction)

@@ -41,7 +41,7 @@ class MemoryBridge:
         self,
         config: dict[str, Any] | None = None,
         *,
-        data_dir: "str | Path | None" = None,
+        data_dir: str | Path | None = None,
     ) -> None:
         """Create a MemoryBridge.
 
@@ -347,7 +347,7 @@ class MemoryBridge:
                 logger.info("[Memory] Mem0 found %d items.", len(items))
                 return "\n".join(f"- {m}" for m in items)
             return ""
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("[Memory] Mem0 retrieval timed out (%.1fs).", self._retrieve_timeout)
             return ""
         except Exception as exc:
@@ -385,7 +385,7 @@ class MemoryBridge:
                 )
             logger.debug("[Memory] VectorStore no relevant memories found.")
             return ""
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("[Memory] VectorStore retrieval timed out (%.1fs).", self._retrieve_timeout)
             return ""
         except Exception as exc:

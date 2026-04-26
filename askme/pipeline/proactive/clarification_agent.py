@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 from .base import ESTOP_SIGNALS, ProactiveAgent, ProactiveContext, ProactiveResult, ask_and_listen
 from .session_state import ClarificationState
 from .slot_analyst import analyze_slots
-from .slot_types import SlotAnalysis, SlotFill
+from .slot_types import SlotAnalysis
 
 if TYPE_CHECKING:
     from askme.skills.skill_model import SkillDefinition
@@ -106,7 +106,7 @@ class ClarificationPlannerAgent(ProactiveAgent):
     """
 
     def should_activate(
-        self, skill: "SkillDefinition", user_text: str, context: ProactiveContext
+        self, skill: SkillDefinition, user_text: str, context: ProactiveContext
     ) -> bool:
         if not skill.required_slots:
             return False
@@ -115,7 +115,7 @@ class ClarificationPlannerAgent(ProactiveAgent):
 
     async def interact(
         self,
-        skill: "SkillDefinition",
+        skill: SkillDefinition,
         user_text: str,
         audio: Any,
         context: ProactiveContext,
@@ -212,7 +212,7 @@ class ClarificationPlannerAgent(ProactiveAgent):
     def _build_question(
         self,
         analysis: SlotAnalysis,
-        skill: "SkillDefinition",
+        skill: SkillDefinition,
         context: ProactiveContext,
         turn: int,
     ) -> str:
@@ -240,7 +240,7 @@ class ClarificationPlannerAgent(ProactiveAgent):
 
     # ── memory hint ───────────────────────────────────────────────────────────
 
-    def _get_hint(self, skill: "SkillDefinition", context: ProactiveContext) -> str:
+    def _get_hint(self, skill: SkillDefinition, context: ProactiveContext) -> str:
         """Return the most recent slot value from the current mission, if any."""
         if not context.dispatcher:
             return ""
