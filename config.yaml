@@ -231,6 +231,10 @@ voice:
     minimax_pitch: 0
     # emotion: "" (auto), happy, sad, angry, fearful, disgusted, surprised, calm
     minimax_emotion: ""
+    # Preserve enough leading context that short first tokens ("1"/"一") are not
+    # thinned out before the USB speaker wake-up protection runs.
+    minimax_leading_silence_preserve_seconds: 0.16
+    minimax_onset_threshold: 0.0005
     # Voice cloning: run `python scripts/clone_voice.py <audio> --voice-id <id>`
     # then set minimax_voice_id to the cloned voice_id above.
     # Cloned voice expires in 7 days if not used in any T2A call.
@@ -245,16 +249,39 @@ voice:
     # direct USB playback if Sunrise exposes no ALSA card; "usb_direct" forces
     # the fallback path for the Lenovo MCP01 USB Audio speaker.
     output_transport: auto
-    # MCP01 wakes slowly when opened through direct USB. Add a short silence
-    # pre-roll and coalesce streamed MiniMax chunks to avoid clipped starts and
-    # choppy playback on Sunrise.
-    usb_direct_preroll_seconds: 1.5
-    # Keep separate background prewarm disabled while the USB helper opens one
-    # stream per speech burst; the speech burst itself carries the pre-roll.
+    # MCP01 wakes slowly when opened through direct USB. Keep one userland USB
+    # playback helper alive for the response so the first word does not sit on a
+    # fresh stream boundary.
+    usb_direct_persistent_stream: true
+    # The helper streams silence while idle, so a live USB process does not prove
+    # the physical speaker/amp gate is still open. Keep this false unless a
+    # nonzero idle keepalive is added and verified on Sunrise.
+    usb_direct_trust_persistent_warm_state: false
+    usb_direct_stream_start_grace_seconds: 0.8
+    usb_direct_stream_drain_grace_seconds: 0.9
+    # Add pre-roll and coalesce streamed MiniMax chunks to avoid clipped starts
+    # and choppy playback on Sunrise.
+    usb_direct_preroll_seconds: 1.05
+    # Background prewarm can become stale before speech is ready. Keep speaker
+    # wake-up attached to each utterance until a verified idle keepalive exists.
     usb_direct_background_prewarm: false
-    # Speech gets an independent lead-in even when a previous helper/chime just
-    # ran, because MCP01 opens a fresh USB stream for each speech burst.
-    usb_direct_speech_leadin_seconds: 1.5
+    # Speech always pays the cold-start guard on Sunrise for now; a live helper
+    # alone is not enough to keep the analog output path physically awake.
+    usb_direct_speech_leadin_seconds: 1.25
+    usb_direct_speech_warm_leadin_seconds: 1.25
+    # A very short shaped tone wakes the MCP01 speaker/amp gate. Low-level
+    # dither alone can leave the analog path closed, causing the first syllable
+    # or digit to become the wake-up signal and get clipped.
+    usb_direct_speech_wake_signal_seconds: 1.05
+    usb_direct_speech_wake_signal_gain: 0.28
+    usb_direct_speech_wake_signal_hz: 880
+    usb_direct_speech_wake_gap_seconds: 0.1
+    # Copy the first audible speech onset at low volume before the real speech.
+    # This sacrificial onset protects very short leading syllables/digits ("一")
+    # from MCP01 soft-start clipping without adding seconds of silence.
+    usb_direct_speech_onset_cushion_seconds: 0.35
+    usb_direct_speech_onset_cushion_gain: 0.45
+    usb_direct_speech_onset_gap_seconds: 0.0
     usb_direct_stream_guard_seconds: 0.25
     usb_direct_coalesce_timeout: 8.0
 

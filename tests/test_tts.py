@@ -406,6 +406,182 @@ def test_usb_direct_speech_leadin_ignores_feedback_warm_state(monkeypatch):
     assert np.allclose(speech[100:], 0.2)
 
 
+def test_usb_direct_speech_does_not_trust_live_stream_by_default(monkeypatch):
+    """A live stdin stream alone still sends idle silence, so speech stays protected."""
+    import time
+
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    class FakeProc:
+        def poll(self):
+            return None
+
+    played: dict[str, np.ndarray] = {}
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 1000,
+            "usb_direct_persistent_stream": True,
+            "usb_direct_speech_leadin_seconds": 1.0,
+            "usb_direct_speech_warm_leadin_seconds": 0.12,
+            "usb_direct_speech_wake_signal_seconds": 0.8,
+            "usb_direct_speech_wake_signal_gain": 0.2,
+        }
+    )
+
+    def fake_usb_play(chunk):
+        played["chunk"] = chunk.copy()
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_locked", fake_usb_play)
+    try:
+        with engine._usb_audio_lock:
+            engine._usb_audio_stream_proc = FakeProc()
+            engine._usb_audio_stream_ready_at = time.monotonic()
+        engine._last_aplay_close = time.monotonic()
+        assert engine._play_chunk_usb_direct_speech(np.ones(10, dtype=np.float32) * 0.2)
+    finally:
+        engine.shutdown()
+
+    chunk = played["chunk"]
+    assert len(chunk) == 1000 + 10
+    assert np.max(np.abs(chunk[:800])) > 0.15
+    assert np.allclose(chunk[1000:], 0.2)
+
+
+def test_usb_direct_speech_onset_cushion_protects_first_audible_samples():
+    """USB direct speech can prepend a low-volume sacrificial first onset."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 1000,
+            "usb_direct_speech_onset_cushion_seconds": 0.2,
+            "usb_direct_speech_onset_cushion_gain": 0.2,
+            "usb_direct_speech_onset_gap_seconds": 0.05,
+        }
+    )
+    try:
+        chunk = np.concatenate(
+            [
+                np.zeros(100, dtype=np.float32),
+                np.ones(300, dtype=np.float32) * 0.5,
+            ]
+        )
+        cushion = engine._usb_direct_speech_onset_cushion_chunk(chunk)
+    finally:
+        engine.shutdown()
+
+    assert len(cushion) == 200 + 50
+    audible = np.flatnonzero(np.abs(cushion[:200]) > 0.001)
+    assert audible[0] == 20
+    assert np.max(np.abs(cushion[:200])) <= 0.11
+    assert 0.0 < np.max(np.abs(cushion[200:])) < 0.03
+
+
+def test_usb_direct_speech_path_inserts_cushion_between_leadin_and_speech(monkeypatch):
+    """The real USB speech path sends lead-in, cushion, gap, then full speech."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    played: dict[str, np.ndarray] = {}
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 1000,
+            "usb_direct_speech_leadin_seconds": 0.1,
+            "usb_direct_speech_onset_cushion_seconds": 0.2,
+            "usb_direct_speech_onset_cushion_gain": 0.2,
+            "usb_direct_speech_onset_gap_seconds": 0.05,
+        }
+    )
+
+    def fake_usb_play(chunk):
+        played["chunk"] = chunk.copy()
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_locked", fake_usb_play)
+    try:
+        speech = np.ones(300, dtype=np.float32) * 0.5
+        assert engine._play_chunk_usb_direct_speech(speech)
+    finally:
+        engine.shutdown()
+
+    chunk = played["chunk"]
+    assert len(chunk) == 100 + 200 + 50 + 300
+    assert np.max(np.abs(chunk[:100])) < 0.04
+    assert np.max(np.abs(chunk[100:300])) <= 0.11
+    assert 0.0 < np.max(np.abs(chunk[300:350])) < 0.03
+    assert np.allclose(chunk[350:], 0.5)
+
+
+def test_usb_direct_speech_leadin_can_include_wake_signal():
+    """A shaped wake signal can open MCP01's speaker gate before speech."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 1000,
+            "usb_direct_speech_leadin_seconds": 0.5,
+            "usb_direct_speech_wake_signal_seconds": 0.2,
+            "usb_direct_speech_wake_signal_gain": 0.1,
+            "usb_direct_speech_wake_signal_hz": 50,
+            "usb_direct_speech_wake_gap_seconds": 0.05,
+        }
+    )
+    try:
+        leadin = engine._usb_direct_speech_leadin_chunk()
+    finally:
+        engine.shutdown()
+
+    assert len(leadin) == 500
+    assert 0.07 <= np.max(np.abs(leadin[:200])) <= 0.11
+    assert 0.0 < np.max(np.abs(leadin[200:250])) < 0.03
+    assert 0.0 < np.max(np.abs(leadin[250:])) < 0.03
+
+
+def test_usb_direct_speech_leadin_shortens_when_stream_is_warm():
+    """A trusted warm stream can use a shorter active wake guard."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 1000,
+            "usb_direct_speech_leadin_seconds": 1.0,
+            "usb_direct_speech_warm_leadin_seconds": 0.12,
+            "usb_direct_speech_wake_signal_seconds": 0.8,
+            "usb_direct_speech_wake_signal_gain": 0.2,
+        }
+    )
+    try:
+        cold = engine._usb_direct_speech_leadin_chunk()
+        warm = engine._usb_direct_speech_leadin_chunk(warm=True)
+    finally:
+        engine.shutdown()
+
+    assert len(cold) == 1000
+    assert len(warm) == 120
+    assert np.max(np.abs(cold[:800])) > 0.15
+    assert np.max(np.abs(warm)) > 0.15
+
+
 def test_playback_loop_falls_back_to_usb_when_aplay_pipe_breaks(monkeypatch):
     """On Sunrise, ALSA can expose aplay but fail when no card exists."""
     import numpy as np
@@ -505,6 +681,128 @@ def test_usb_direct_pcm_is_48k_stereo():
     pcm = np.frombuffer(pcm_bytes, dtype=np.int16)
     assert pcm.size == 480 * 2
     assert np.array_equal(pcm[0::2], pcm[1::2])
+
+
+def test_usb_direct_persistent_stream_writes_pcm_without_one_shot(monkeypatch):
+    """Persistent USB mode writes to the live helper instead of reopening USB."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    class _Stdin:
+        def __init__(self):
+            self.data = bytearray()
+            self.flushes = 0
+
+        def write(self, data):
+            self.data.extend(bytes(data))
+
+        def flush(self):
+            self.flushes += 1
+
+    class _Proc:
+        def __init__(self):
+            self.stdin = _Stdin()
+
+        def poll(self):
+            return None
+
+    proc = _Proc()
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 48000,
+            "usb_direct_persistent_stream": True,
+            "usb_direct_stream_drain_grace_seconds": 0.0,
+        }
+    )
+    monkeypatch.setattr(engine, "_start_usb_audio_stream_locked", lambda: proc)
+    monkeypatch.setattr(
+        engine,
+        "_play_chunk_usb_direct_one_shot_locked",
+        lambda _chunk: pytest.fail("one-shot playback should not run"),
+    )
+    try:
+        assert engine._play_chunk_usb_direct_locked(
+            np.ones(480, dtype=np.float32) * 0.25
+        )
+    finally:
+        engine.shutdown()
+
+    pcm = np.frombuffer(bytes(proc.stdin.data), dtype=np.int16)
+    assert pcm.size == 480 * 2
+    assert np.array_equal(pcm[0::2], pcm[1::2])
+    assert proc.stdin.flushes > 0
+
+
+def test_usb_direct_persistent_stream_falls_back_to_one_shot(monkeypatch):
+    """If the persistent helper fails to start, playback still has a fallback."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    played: dict[str, int] = {}
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 48000,
+            "usb_direct_persistent_stream": True,
+        }
+    )
+    monkeypatch.setattr(engine, "_start_usb_audio_stream_locked", lambda: None)
+
+    def fake_one_shot(chunk):
+        played["samples"] = len(chunk)
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_one_shot_locked", fake_one_shot)
+    try:
+        assert engine._play_chunk_usb_direct_locked(np.ones(480, dtype=np.float32))
+    finally:
+        engine.shutdown()
+
+    assert played["samples"] == 480
+
+
+def test_usb_direct_persistent_playback_loop_can_prewarm_same_stream(monkeypatch):
+    """Persistent prewarm starts the stream before speech chunks arrive."""
+    from askme.voice.tts import TTSEngine
+
+    start_calls: list[bool] = []
+    warm_calls: list[int] = []
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 1000,
+            "usb_direct_persistent_stream": True,
+            "usb_direct_background_prewarm": True,
+            "usb_direct_preroll_seconds": 0.1,
+        }
+    )
+
+    monkeypatch.setattr(
+        engine,
+        "_start_usb_audio_stream_locked",
+        lambda: start_calls.append(True) or object(),
+    )
+
+    def fake_warm(chunk):
+        warm_calls.append(len(chunk))
+        engine._is_playing = False
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_warming", fake_warm)
+    try:
+        engine._is_playing = True
+        engine._playback_loop()
+    finally:
+        engine.shutdown()
+
+    assert start_calls
+    assert warm_calls == [100]
 
 
 def test_feedback_audio_uses_usb_direct_with_preroll(monkeypatch):

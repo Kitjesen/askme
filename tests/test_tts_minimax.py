@@ -197,6 +197,62 @@ async def test_minimax_http_error_returns_without_crash():
         engine.shutdown()
 
 
+async def test_minimax_no_audio_returns_false_for_fallback():
+    """A 200 response without audio must not be treated as playable speech."""
+    engine = _make_engine(minimax_api_key="test-key")
+    try:
+        lines = [
+            'data:{"base_resp":{"status_code":1004,"status_msg":"login fail"}}',
+            "data:[DONE]",
+        ]
+        response = _FakeSSEResponse(lines)
+        client = _FakeClient(response)
+
+        gen = engine._get_generation()
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await engine._generate_minimax("hello", gen)
+
+        assert result is False
+        assert not engine._has_buffered_audio()
+    finally:
+        engine.shutdown()
+
+
+async def test_minimax_first_flush_preserves_soft_leading_digit_onset():
+    """First-flush trimming keeps context before a quiet leading digit."""
+    silence = np.zeros(6000, dtype="<i2")
+    soft_digit = np.ones(1200, dtype="<i2") * 20
+    speech = np.ones(1200, dtype="<i2") * 1000
+    pcm = np.concatenate([silence, soft_digit, speech])
+    engine = _make_engine(
+        minimax_api_key="test-key",
+        sample_rate=24000,
+        minimax_sample_rate=24000,
+        minimax_leading_silence_preserve_seconds=0.16,
+        minimax_onset_threshold=0.0005,
+    )
+    try:
+        lines = [
+            _sse_data(pcm.tobytes().hex()),
+            "data:[DONE]",
+        ]
+        response = _FakeSSEResponse(lines)
+        client = _FakeClient(response)
+
+        gen = engine._get_generation()
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await engine._generate_minimax("1，2，3", gen)
+
+        assert result is True
+        with engine._buffer_lock:
+            chunk = engine.tts_buffer[0]
+        first_audio = int(np.flatnonzero(np.abs(chunk) > 0.0005)[0])
+        assert first_audio == int(24000 * 0.16)
+        assert len(chunk) == len(pcm) - (len(silence) - first_audio)
+    finally:
+        engine.shutdown()
+
+
 async def test_minimax_resamples_when_rates_differ():
     """When minimax_sample_rate != sample_rate, audio is resampled."""
     engine = _make_engine(
@@ -440,11 +496,26 @@ def test_speak_strips_links():
         engine.shutdown()
 
 
-def test_speak_skips_single_char():
-    """Single-character text after cleaning is skipped (len <= 1)."""
+def test_speak_skips_non_numeric_single_char():
+    """Single-character filler text after cleaning is skipped."""
     engine = _make_engine()
     try:
         engine.speak("a")
+        assert engine.tts_text_queue.empty()
+    finally:
+        engine.shutdown()
+
+
+def test_speak_queues_single_digit_and_cjk_numeral():
+    """Single-token numeric answers are valid TTS utterances."""
+    engine = _make_engine()
+    try:
+        engine.speak("1")
+        engine.speak("一")
+        _, first = engine.tts_text_queue.get_nowait()
+        _, second = engine.tts_text_queue.get_nowait()
+        assert first == "1"
+        assert second == "一"
         assert engine.tts_text_queue.empty()
     finally:
         engine.shutdown()

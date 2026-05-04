@@ -122,6 +122,12 @@ class TTSEngine(TTSBackend):
         self._minimax_pitch: int = int(config.get("minimax_pitch", 0))
         # Emotion: "" (auto), happy, sad, angry, fearful, disgusted, surprised, calm
         self._minimax_emotion: str = config.get("minimax_emotion", "")
+        self._minimax_leading_silence_preserve_seconds: float = float(
+            config.get("minimax_leading_silence_preserve_seconds", 0.16)
+        )
+        self._minimax_onset_threshold: float = float(
+            config.get("minimax_onset_threshold", 0.0005)
+        )
 
         # Consecutive failure tracking for MiniMax auto-disable
         self._minimax_fail_count: int = 0
@@ -147,10 +153,21 @@ class TTSEngine(TTSBackend):
         self._aplay_bin: str | None = shutil.which("aplay")
         self._playback_busy = threading.Event()
         self._usb_audio_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        self._usb_audio_stream_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        self._usb_audio_stream_ready_at: float = 0.0
         self._usb_audio_lock = threading.Lock()
         self._usb_audio_session_lock = threading.Lock()
         self._usb_audio_binary: str | None = config.get("usb_audio_binary")
         self._usb_audio_source: str | None = config.get("usb_audio_source")
+        self._usb_direct_persistent_stream: bool = bool(
+            config.get("usb_direct_persistent_stream", False)
+        )
+        self._usb_direct_trust_persistent_warm_state: bool = bool(
+            config.get("usb_direct_trust_persistent_warm_state", False)
+        )
+        self._usb_direct_stream_start_grace_seconds: float = float(
+            config.get("usb_direct_stream_start_grace_seconds", 0.08)
+        )
         self._usb_direct_preroll_seconds: float = float(
             config.get("usb_direct_preroll_seconds", 1.5)
         )
@@ -160,11 +177,38 @@ class TTSEngine(TTSBackend):
         self._usb_direct_speech_leadin_seconds: float = float(
             config.get("usb_direct_speech_leadin_seconds", self._usb_direct_preroll_seconds)
         )
+        self._usb_direct_speech_warm_leadin_seconds: float = float(
+            config.get("usb_direct_speech_warm_leadin_seconds", 0.12)
+        )
+        self._usb_direct_speech_wake_signal_seconds: float = float(
+            config.get("usb_direct_speech_wake_signal_seconds", 0.0)
+        )
+        self._usb_direct_speech_wake_signal_gain: float = float(
+            config.get("usb_direct_speech_wake_signal_gain", 0.08)
+        )
+        self._usb_direct_speech_wake_signal_hz: float = float(
+            config.get("usb_direct_speech_wake_signal_hz", 880.0)
+        )
+        self._usb_direct_speech_wake_gap_seconds: float = float(
+            config.get("usb_direct_speech_wake_gap_seconds", 0.04)
+        )
+        self._usb_direct_speech_onset_cushion_seconds: float = float(
+            config.get("usb_direct_speech_onset_cushion_seconds", 0.0)
+        )
+        self._usb_direct_speech_onset_cushion_gain: float = float(
+            config.get("usb_direct_speech_onset_cushion_gain", 0.18)
+        )
+        self._usb_direct_speech_onset_gap_seconds: float = float(
+            config.get("usb_direct_speech_onset_gap_seconds", 0.08)
+        )
         self._usb_direct_background_prewarm: bool = bool(
             config.get("usb_direct_background_prewarm", False)
         )
         self._usb_direct_coalesce_timeout: float = float(
             config.get("usb_direct_coalesce_timeout", 8.0)
+        )
+        self._usb_direct_stream_drain_grace_seconds: float = float(
+            config.get("usb_direct_stream_drain_grace_seconds", 0.35)
         )
         self._usb_audio_build_failed = False
         # Immediate stop flag: checked by _playback_loop to abort mid-chunk
@@ -326,9 +370,17 @@ class TTSEngine(TTSBackend):
         clean = self._RE_IMG.sub('', clean)
         clean = self._RE_LINK.sub(r'\1', clean)
         clean = clean.strip()
-        if clean and len(clean) > 1:
+        if clean and self._is_speakable_text(clean):
             logger.info("speak queued: %r", clean[:60])
             self.tts_text_queue.put((self._get_generation(), clean))
+
+    @staticmethod
+    def _is_speakable_text(text: str) -> bool:
+        """Return True for normal text and short numeric/CJK utterances."""
+        if len(text) > 1:
+            return True
+        char = text[0]
+        return char.isdigit() or "\u4e00" <= char <= "\u9fff"
 
     def start_playback(self) -> None:
         """Start the sounddevice output stream in a background thread."""
@@ -619,8 +671,8 @@ class TTSEngine(TTSBackend):
             loop = asyncio.new_event_loop()
             # Do NOT call asyncio.set_event_loop(loop) — the main thread
             # already owns the process-wide event loop.
-            loop.run_until_complete(coro)
-            return True
+            result = loop.run_until_complete(coro)
+            return True if result is None else bool(result)
         except Exception as exc:
             logger.error("TTS async error: %s", exc)
             return False
@@ -706,7 +758,7 @@ class TTSEngine(TTSBackend):
     # MiniMax backend (SSE streaming, incremental playback)
     # ------------------------------------------------------------------
 
-    async def _generate_minimax(self, text: str, generation: int) -> None:
+    async def _generate_minimax(self, text: str, generation: int) -> bool:
         """Synthesise via MiniMax T2A v2 — SSE hex-PCM stream → incremental buffer."""
         import json as _json
 
@@ -746,6 +798,7 @@ class TTSEngine(TTSBackend):
         _MIN_SAMPLES = 2400
         pending: list[np.ndarray] = []
         pending_len = 0
+        queued_samples = 0
         _first_flush = True  # trim leading silence from MiniMax's first chunk
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -753,11 +806,11 @@ class TTSEngine(TTSBackend):
                 if resp.status_code != 200:
                     body_text = await resp.aread()
                     logger.error("MiniMax TTS HTTP %d: %s", resp.status_code, body_text[:200])
-                    return
+                    return False
 
                 async for line in resp.aiter_lines():
                     if not self._is_generation_current(generation):
-                        return
+                        return True
                     if not line.startswith("data:"):
                         continue
                     data_str = line[5:].strip()
@@ -792,13 +845,19 @@ class TTSEngine(TTSBackend):
                                 # cause the first word to be inaudible.
                                 if _first_flush:
                                     _first_flush = False
-                                    nonzero = np.where(np.abs(chunk) > 0.002)[0]
+                                    threshold = max(0.0, self._minimax_onset_threshold)
+                                    nonzero = np.where(np.abs(chunk) > threshold)[0]
                                     if len(nonzero) > 0 and nonzero[0] > 100:
-                                        trim = max(0, nonzero[0] - 50)  # keep 50 samples before speech
+                                        preserve = int(
+                                            self._sample_rate
+                                            * max(0.0, self._minimax_leading_silence_preserve_seconds)
+                                        )
+                                        trim = max(0, nonzero[0] - preserve)
                                         chunk = chunk[trim:]
                                         logger.debug("TTS: trimmed %d leading silence samples", trim)
                                 with self._buffer_lock:
                                     self.tts_buffer.append(chunk)
+                                queued_samples += len(chunk)
                                 pending.clear()
                                 pending_len = 0
                     except (_json.JSONDecodeError, ValueError) as exc:
@@ -809,6 +868,14 @@ class TTSEngine(TTSBackend):
             chunk = np.concatenate(pending) if len(pending) > 1 else pending[0]
             with self._buffer_lock:
                 self.tts_buffer.append(chunk)
+            queued_samples += len(chunk)
+
+        if not self._is_generation_current(generation):
+            return True
+        if queued_samples <= 0:
+            logger.warning("MiniMax TTS produced no playable audio; using fallback")
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Playback
@@ -831,11 +898,31 @@ class TTSEngine(TTSBackend):
         with self._usb_audio_lock:
             proc = self._usb_audio_proc
             self._usb_audio_proc = None
+            stream_proc = self._usb_audio_stream_proc
+            self._usb_audio_stream_proc = None
+            self._usb_audio_stream_ready_at = 0.0
         if proc is not None:
             try:
                 proc.terminate()
             except Exception as exc:
                 logger.debug("MCP01 USB audio terminate failed (ignored): %s", exc)
+        if stream_proc is not None:
+            try:
+                if stream_proc.stdin is not None:
+                    stream_proc.stdin.close()
+            except Exception as exc:
+                logger.debug("MCP01 USB stream stdin close failed (ignored): %s", exc)
+            try:
+                stream_proc.terminate()
+            except Exception as exc:
+                logger.debug("MCP01 USB stream terminate failed (ignored): %s", exc)
+            try:
+                stream_proc.wait(timeout=0.8)
+            except Exception:
+                try:
+                    stream_proc.kill()
+                except Exception as exc:
+                    logger.debug("MCP01 USB stream kill failed (ignored): %s", exc)
 
     def _usb_direct_source_path(self) -> Path:
         if self._usb_audio_source:
@@ -938,9 +1025,17 @@ class TTSEngine(TTSBackend):
             samples = np.asarray(chunk, dtype=np.float32)
             warming_set = False
             if speech_leadin:
-                leadin = self._usb_direct_speech_leadin_chunk()
+                leadin = self._usb_direct_speech_leadin_chunk(
+                    warm=self._is_persistent_usb_stream_warm()
+                )
+                leadin_len = len(leadin)
                 if len(leadin) > 0:
                     samples = np.concatenate([leadin, samples])
+                cushion = self._usb_direct_speech_onset_cushion_chunk(chunk)
+                if len(cushion) > 0:
+                    samples = np.concatenate(
+                        [samples[:leadin_len], cushion, samples[leadin_len:]]
+                    )
             elif preroll_if_cold and not self._is_dac_warm():
                 preroll = self._usb_direct_preroll_chunk()
                 if len(preroll) > 0:
@@ -964,6 +1059,128 @@ class TTSEngine(TTSBackend):
 
     def _play_chunk_usb_direct_locked(self, chunk: np.ndarray) -> bool:
         """Play one chunk through MCP01 USB Audio without ALSA/PortAudio."""
+        if self._usb_direct_persistent_stream:
+            if self._play_chunk_usb_direct_stream_locked(chunk):
+                return True
+            logger.warning("MCP01 USB persistent stream failed; falling back to one-shot playback")
+            self._kill_usb_audio()
+        return self._play_chunk_usb_direct_one_shot_locked(chunk)
+
+    def _watch_usb_audio_stream_stderr(
+        self,
+        proc: subprocess.Popen,  # type: ignore[type-arg]
+        ready: threading.Event,
+        startup_lines: list[str],
+    ) -> None:
+        """Drain MCP01 helper stderr and signal when the stream is configured."""
+        stream = proc.stderr
+        if stream is None:
+            ready.set()
+            return
+        try:
+            for raw in iter(stream.readline, b""):
+                line = raw.decode(errors="replace").strip()
+                if len(startup_lines) < 12:
+                    startup_lines.append(line)
+                if line:
+                    logger.debug("MCP01 USB stream: %s", line)
+                if "stdin stream ready" in line:
+                    ready.set()
+        except Exception as exc:
+            logger.debug("MCP01 USB stream stderr reader ended: %s", exc)
+
+    def _start_usb_audio_stream_locked(self) -> subprocess.Popen | None:
+        """Start the persistent MCP01 helper while the session lock is held."""
+        binary = self._ensure_usb_audio_binary()
+        if binary is None:
+            return None
+
+        with self._usb_audio_lock:
+            proc = self._usb_audio_stream_proc
+            if proc is not None and proc.poll() is None:
+                return proc
+            self._usb_audio_stream_proc = None
+            self._usb_audio_stream_ready_at = 0.0
+
+        args = [binary, "--stdin-stream", "--capture-ms", "0"]
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as exc:
+            logger.error("MCP01 USB persistent stream failed to start: %s", exc)
+            return None
+
+        ready = threading.Event()
+        startup_lines: list[str] = []
+        threading.Thread(
+            target=self._watch_usb_audio_stream_stderr,
+            args=(proc, ready, startup_lines),
+            daemon=True,
+        ).start()
+
+        ready_timeout = max(0.05, self._usb_direct_stream_start_grace_seconds)
+        ready.wait(timeout=ready_timeout)
+        if proc.poll() is not None:
+            _, stderr = proc.communicate(timeout=1.0)
+            logger.error(
+                "MCP01 USB persistent stream exited rc=%s startup=%s stderr=%s",
+                proc.returncode,
+                " | ".join(startup_lines),
+                stderr.decode(errors="replace").strip(),
+            )
+            return None
+        if not ready.is_set():
+            logger.warning(
+                "MCP01 USB persistent stream not ready after %.2fs; continuing startup=%s",
+                ready_timeout,
+                " | ".join(startup_lines),
+            )
+
+        with self._usb_audio_lock:
+            self._usb_audio_stream_proc = proc
+            self._usb_audio_stream_ready_at = time.monotonic()
+        logger.info("MCP01 USB persistent stream started")
+        return proc
+
+    def _play_chunk_usb_direct_stream_locked(self, chunk: np.ndarray) -> bool:
+        """Write PCM into a persistent MCP01 USB stream and wait for playback."""
+        pcm_bytes = self._chunk_to_usb_stereo_pcm(chunk)
+        if not pcm_bytes:
+            return True
+
+        proc = self._start_usb_audio_stream_locked()
+        if proc is None or proc.stdin is None:
+            return False
+
+        duration = len(pcm_bytes) / (48000 * 2 * 2)
+        started = time.monotonic()
+        try:
+            view = memoryview(pcm_bytes)
+            block = 48000 * 2 * 2 // 10  # 100 ms of 48 kHz stereo S16_LE.
+            for pos in range(0, len(view), block):
+                if self._stop_requested.is_set() or proc.poll() is not None:
+                    return False
+                proc.stdin.write(view[pos : pos + block])
+                proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            logger.error("MCP01 USB persistent stream write failed: %s", exc)
+            return False
+
+        deadline = started + duration + max(0.0, self._usb_direct_stream_drain_grace_seconds)
+        while time.monotonic() < deadline:
+            if self._stop_requested.is_set() or proc.poll() is not None:
+                return False
+            time.sleep(min(0.05, deadline - time.monotonic()))
+
+        self._last_aplay_close = time.monotonic()
+        return True
+
+    def _play_chunk_usb_direct_one_shot_locked(self, chunk: np.ndarray) -> bool:
+        """Play one chunk through the legacy one-shot MCP01 helper."""
         binary = self._ensure_usb_audio_binary()
         if binary is None:
             return False
@@ -1096,26 +1313,121 @@ class TTSEngine(TTSBackend):
             and (time.monotonic() - self._last_aplay_close) < self._preroll_warm_window
         )
 
+    def _is_persistent_usb_stream_warm(self) -> bool:
+        """Return True only when the live stream is allowed to imply speaker warmth."""
+        if not self._usb_direct_persistent_stream:
+            return False
+        if not self._usb_direct_trust_persistent_warm_state:
+            return False
+        with self._usb_audio_lock:
+            proc = self._usb_audio_stream_proc
+            ready_at = self._usb_audio_stream_ready_at
+        if proc is None or proc.poll() is not None or ready_at <= 0:
+            return False
+        return (
+            self._last_aplay_close > 0
+            and (time.monotonic() - self._last_aplay_close) < self._preroll_warm_window
+        )
+
     def _usb_direct_preroll_chunk(self) -> np.ndarray:
         samples = int(self._sample_rate * self._usb_direct_preroll_seconds)
         if samples <= 0:
             return np.empty(0, dtype=np.float32)
-        rng = np.random.RandomState(42)
-        return (rng.randn(samples) * (200.0 / 32767.0)).astype(np.float32)
+        return self._usb_direct_wake_chunk(samples, seed=42)
 
     def _usb_direct_stream_guard_chunk(self) -> np.ndarray:
         samples = int(self._sample_rate * self._usb_direct_stream_guard_seconds)
         if samples <= 0:
             return np.empty(0, dtype=np.float32)
-        rng = np.random.RandomState(43)
-        return (rng.randn(samples) * (160.0 / 32767.0)).astype(np.float32)
+        return self._usb_direct_noise_chunk(samples, amp=160.0 / 32767.0, seed=43)
 
-    def _usb_direct_speech_leadin_chunk(self) -> np.ndarray:
-        samples = int(self._sample_rate * self._usb_direct_speech_leadin_seconds)
+    def _usb_direct_speech_leadin_chunk(self, *, warm: bool = False) -> np.ndarray:
+        seconds = (
+            self._usb_direct_speech_warm_leadin_seconds
+            if warm
+            else self._usb_direct_speech_leadin_seconds
+        )
+        total_samples = int(self._sample_rate * seconds)
+        if total_samples <= 0:
+            return np.empty(0, dtype=np.float32)
+        return self._usb_direct_wake_chunk(total_samples, seed=47 if warm else 44)
+
+    def _usb_direct_wake_chunk(self, total_samples: int, *, seed: int) -> np.ndarray:
+        if total_samples <= 0:
+            return np.empty(0, dtype=np.float32)
+        wake_samples = int(self._sample_rate * self._usb_direct_speech_wake_signal_seconds)
+        gap_samples = int(self._sample_rate * self._usb_direct_speech_wake_gap_seconds)
+        if wake_samples <= 0:
+            return self._usb_direct_noise_chunk(total_samples, amp=200.0 / 32767.0, seed=seed)
+
+        wake_samples = min(wake_samples, total_samples)
+        gap_samples = max(0, min(gap_samples, total_samples - wake_samples))
+        hold_samples = max(0, total_samples - wake_samples - gap_samples)
+
+        parts: list[np.ndarray] = []
+        parts.append(self._usb_direct_tone_chunk(
+            wake_samples,
+            hz=self._usb_direct_speech_wake_signal_hz,
+            gain=self._usb_direct_speech_wake_signal_gain,
+        ))
+        if gap_samples > 0:
+            parts.append(self._usb_direct_noise_chunk(gap_samples, amp=260.0 / 32767.0, seed=seed + 1))
+        if hold_samples > 0:
+            parts.append(self._usb_direct_noise_chunk(hold_samples, amp=260.0 / 32767.0, seed=seed + 2))
+        return np.concatenate(parts) if len(parts) > 1 else parts[0]
+
+    def _usb_direct_noise_chunk(self, samples: int, *, amp: float, seed: int) -> np.ndarray:
         if samples <= 0:
             return np.empty(0, dtype=np.float32)
-        rng = np.random.RandomState(44)
-        return (rng.randn(samples) * (200.0 / 32767.0)).astype(np.float32)
+        rng = np.random.RandomState(seed)
+        return (rng.randn(samples) * amp).astype(np.float32)
+
+    def _usb_direct_tone_chunk(self, samples: int, *, hz: float, gain: float) -> np.ndarray:
+        if samples <= 0:
+            return np.empty(0, dtype=np.float32)
+        t = np.arange(samples, dtype=np.float32) / float(self._sample_rate)
+        tone = (max(0.0, min(1.0, gain)) * np.sin(2.0 * np.pi * hz * t)).astype(np.float32)
+        edge = min(samples // 2, int(self._sample_rate * 0.025))
+        if edge > 1:
+            ramp = np.linspace(0.0, 1.0, edge, dtype=np.float32)
+            tone[:edge] *= ramp
+            tone[-edge:] *= ramp[::-1]
+        return tone
+
+    def _usb_direct_speech_onset_cushion_chunk(self, chunk: np.ndarray) -> np.ndarray:
+        """Return a low-volume sacrificial copy of the first audible speech onset."""
+        cushion_samples = int(self._sample_rate * self._usb_direct_speech_onset_cushion_seconds)
+        if cushion_samples <= 0:
+            return np.empty(0, dtype=np.float32)
+
+        samples = np.asarray(chunk, dtype=np.float32)
+        if len(samples) == 0:
+            return np.empty(0, dtype=np.float32)
+
+        audible = np.flatnonzero(np.abs(samples) > 0.002)
+        if len(audible) > 0:
+            preserve = int(self._sample_rate * 0.02)
+            start = max(0, int(audible[0]) - preserve)
+        else:
+            start = 0
+
+        excerpt = samples[start : start + cushion_samples].astype(np.float32, copy=True)
+        if len(excerpt) == 0:
+            return np.empty(0, dtype=np.float32)
+        gain = max(0.0, min(1.0, self._usb_direct_speech_onset_cushion_gain))
+        excerpt *= gain
+
+        edge = min(len(excerpt) // 4, int(self._sample_rate * 0.02))
+        if edge > 1:
+            ramp = np.linspace(0.0, 1.0, edge, dtype=np.float32)
+            excerpt[:edge] *= ramp
+            excerpt[-edge:] *= ramp[::-1]
+
+        gap_samples = int(self._sample_rate * self._usb_direct_speech_onset_gap_seconds)
+        if gap_samples > 0:
+            gap = self._usb_direct_noise_chunk(gap_samples, amp=260.0 / 32767.0, seed=46)
+            return np.concatenate([excerpt, gap])
+        return excerpt
 
     def _playback_loop(self) -> None:
         """Drain tts_buffer one sentence at a time.
@@ -1140,10 +1452,12 @@ class TTSEngine(TTSBackend):
             _use_usb_direct = self._should_use_usb_direct()
             if _use_usb_direct and self._output_transport == "auto":
                 logger.info("TTS playback: ALSA plughw output unavailable; using MCP01 USB direct")
-            # The libusb helper currently opens a fresh USB stream per speech
-            # burst.  Background prewarm is therefore opt-in: on Sunrise/MCP01 a
-            # separate prewarm stream can falsely mark the next speech stream
-            # warm, then the hardware clips the first phoneme/digit.
+            if _use_usb_direct and self._usb_direct_persistent_stream:
+                with self._usb_audio_session_lock:
+                    self._start_usb_audio_stream_locked()
+            # Background prewarm remains opt-in.  With persistent USB streaming
+            # it happens inside the same helper process that later carries
+            # speech; with one-shot playback it still uses a separate stream.
             if (
                 _use_usb_direct
                 and self._usb_direct_background_prewarm

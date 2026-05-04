@@ -1,10 +1,13 @@
 #include <libusb-1.0/libusb.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -26,6 +29,8 @@
 #define PLAY_PACKET_SIZE (PLAY_PACKET_FRAMES * PLAY_CHANNELS * 2)
 #define PLAY_PACKETS_PER_TRANSFER 8
 #define PLAY_TRANSFERS 8
+#define STREAM_RING_SIZE (PLAY_RATE * PLAY_CHANNELS * 2)
+#define STREAM_EOF_TAIL_PACKETS 80
 
 #define CAPTURE_PACKET_SIZE 32
 #define CAPTURE_PACKETS_PER_TRANSFER 16
@@ -43,6 +48,19 @@ struct play_state {
     int pcm_pos;
     double freq;
     double phase;
+};
+
+struct play_stream_state {
+    int active;
+    int errors;
+    int eof;
+    int submitted_packets;
+    int stdin_bytes;
+    int silence_packets;
+    int tail_packets_remaining;
+    unsigned char ring[STREAM_RING_SIZE];
+    int ring_start;
+    int ring_len;
 };
 
 struct capture_state {
@@ -363,6 +381,199 @@ cleanup:
     return state.errors ? 5 : 0;
 }
 
+static void stream_ring_append(struct play_stream_state *state,
+                               const unsigned char *data, int len) {
+    while (len > 0 && state->ring_len < STREAM_RING_SIZE) {
+        int write_pos = (state->ring_start + state->ring_len) % STREAM_RING_SIZE;
+        int space_to_end = STREAM_RING_SIZE - write_pos;
+        int space_total = STREAM_RING_SIZE - state->ring_len;
+        int chunk = len;
+        if (chunk > space_to_end) chunk = space_to_end;
+        if (chunk > space_total) chunk = space_total;
+        memcpy(state->ring + write_pos, data, (size_t)chunk);
+        state->ring_len += chunk;
+        data += chunk;
+        len -= chunk;
+    }
+}
+
+static int stream_ring_pop(struct play_stream_state *state,
+                           unsigned char *dest, int len) {
+    int copied = 0;
+    while (len > 0 && state->ring_len > 0) {
+        int chunk = state->ring_len;
+        int to_end = STREAM_RING_SIZE - state->ring_start;
+        if (chunk > to_end) chunk = to_end;
+        if (chunk > len) chunk = len;
+        memcpy(dest + copied, state->ring + state->ring_start, (size_t)chunk);
+        state->ring_start = (state->ring_start + chunk) % STREAM_RING_SIZE;
+        state->ring_len -= chunk;
+        copied += chunk;
+        len -= chunk;
+    }
+    return copied;
+}
+
+static void read_stream_stdin(struct play_stream_state *state) {
+    unsigned char buf[8192];
+
+    while (!state->eof && state->ring_len < STREAM_RING_SIZE) {
+        int available = STREAM_RING_SIZE - state->ring_len;
+        int request = (int)sizeof(buf);
+        if (request > available) request = available;
+        ssize_t n = read(STDIN_FILENO, buf, (size_t)request);
+        if (n > 0) {
+            stream_ring_append(state, buf, (int)n);
+            state->stdin_bytes += (int)n;
+            continue;
+        }
+        if (n == 0) {
+            state->eof = 1;
+            return;
+        }
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+        fprintf(stderr, "stdin stream read failed: %s\n", strerror(errno));
+        state->errors++;
+        state->eof = 1;
+        return;
+    }
+}
+
+static int set_stdin_nonblocking(void) {
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    if (flags < 0) return -1;
+    return fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+}
+
+static int submit_play_stream_transfer(struct libusb_transfer *transfer,
+                                       struct play_stream_state *state);
+
+static void play_stream_callback(struct libusb_transfer *transfer) {
+    struct play_stream_state *state = (struct play_stream_state *)transfer->user_data;
+    if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
+        fprintf(stderr, "play stream transfer status=%d actual=%d\n",
+                transfer->status, transfer->actual_length);
+        state->errors++;
+    }
+    if (submit_play_stream_transfer(transfer, state) == 0) return;
+    state->active--;
+}
+
+static int submit_play_stream_transfer(struct libusb_transfer *transfer,
+                                       struct play_stream_state *state) {
+    read_stream_stdin(state);
+    if (state->eof && state->ring_len == 0 && state->tail_packets_remaining <= 0) {
+        return -1;
+    }
+
+    int packets = PLAY_PACKETS_PER_TRANSFER;
+    int byte_count = packets * PLAY_PACKET_SIZE;
+    memset(transfer->buffer, 0, PLAY_PACKETS_PER_TRANSFER * PLAY_PACKET_SIZE);
+    int copied = stream_ring_pop(state, transfer->buffer, byte_count);
+    if (copied < byte_count) {
+        int silent_bytes = byte_count - copied;
+        state->silence_packets += (silent_bytes + PLAY_PACKET_SIZE - 1) / PLAY_PACKET_SIZE;
+        if (state->eof && state->ring_len == 0) {
+            state->tail_packets_remaining -= packets;
+            if (state->tail_packets_remaining < 0) state->tail_packets_remaining = 0;
+        }
+    }
+
+    transfer->length = byte_count;
+    transfer->num_iso_packets = packets;
+    for (int i = 0; i < packets; ++i) {
+        transfer->iso_packet_desc[i].length = PLAY_PACKET_SIZE;
+        transfer->iso_packet_desc[i].actual_length = 0;
+        transfer->iso_packet_desc[i].status = 0;
+    }
+    state->submitted_packets += packets;
+    return libusb_submit_transfer(transfer);
+}
+
+static int run_play_stdin_stream(void) {
+    libusb_context *ctx = NULL;
+    libusb_device_handle *handle = NULL;
+    struct play_stream_state state;
+    struct libusb_transfer *transfers[PLAY_TRANSFERS];
+    int result = 0;
+
+    memset(&state, 0, sizeof(state));
+    memset(transfers, 0, sizeof(transfers));
+    state.tail_packets_remaining = STREAM_EOF_TAIL_PACKETS;
+
+    if (set_stdin_nonblocking() < 0) {
+        fprintf(stderr, "stdin nonblocking setup failed: %s\n", strerror(errno));
+        return 1;
+    }
+
+    int r = libusb_init(&ctx);
+    if (r < 0) {
+        fprintf(stderr, "libusb_init: %s\n", libusb_error_name(r));
+        return 1;
+    }
+    handle = open_mcp01(ctx);
+    if (handle == NULL) {
+        libusb_exit(ctx);
+        return 2;
+    }
+    r = claim_interfaces(handle, IFACE_PLAYBACK);
+    if (r < 0) {
+        libusb_close(handle);
+        libusb_exit(ctx);
+        return 3;
+    }
+    configure_playback(handle);
+
+    for (int i = 0; i < PLAY_TRANSFERS; ++i) {
+        unsigned char *buffer = calloc(1, PLAY_PACKETS_PER_TRANSFER * PLAY_PACKET_SIZE);
+        transfers[i] = libusb_alloc_transfer(PLAY_PACKETS_PER_TRANSFER);
+        if (buffer == NULL || transfers[i] == NULL) {
+            fprintf(stderr, "play stream allocation failed\n");
+            free(buffer);
+            result = 4;
+            goto cleanup;
+        }
+        libusb_fill_iso_transfer(transfers[i], handle, EP_PLAYBACK, buffer,
+                                 PLAY_PACKETS_PER_TRANSFER * PLAY_PACKET_SIZE,
+                                 PLAY_PACKETS_PER_TRANSFER, play_stream_callback, &state, 1000);
+        r = submit_play_stream_transfer(transfers[i], &state);
+        if (r == 0) {
+            state.active++;
+        } else {
+            fprintf(stderr, "initial play stream submit failed: %s\n", libusb_error_name(r));
+            state.errors++;
+        }
+    }
+
+    fprintf(stderr, "stdin stream ready for MCP01 USB endpoint 0x%02x...\n", EP_PLAYBACK);
+    while (state.active > 0) {
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 50000;
+        r = libusb_handle_events_timeout(ctx, &tv);
+        if (r < 0) {
+            fprintf(stderr, "play stream events: %s\n", libusb_error_name(r));
+            state.errors++;
+            break;
+        }
+    }
+
+cleanup:
+    for (int i = 0; i < PLAY_TRANSFERS; ++i) {
+        if (transfers[i] != NULL) {
+            free(transfers[i]->buffer);
+            libusb_free_transfer(transfers[i]);
+        }
+    }
+    close_claimed(handle, IFACE_PLAYBACK);
+    libusb_exit(ctx);
+    printf("stream_done submitted_packets=%d stdin_bytes=%d silence_packets=%d errors=%d\n",
+           state.submitted_packets, state.stdin_bytes, state.silence_packets, state.errors);
+    if (result != 0) return result;
+    return state.errors ? 5 : 0;
+}
+
 static int submit_capture_transfer(struct libusb_transfer *transfer, struct capture_state *state);
 
 static void capture_callback(struct libusb_transfer *transfer) {
@@ -523,9 +734,10 @@ cleanup:
 
 static void usage(const char *argv0) {
     fprintf(stderr,
-            "Usage: %s [--play-ms N] [--capture-ms N] [--freq HZ] [--amp N] [--stdin-play] [--capture-stdout]\n"
+            "Usage: %s [--play-ms N] [--capture-ms N] [--freq HZ] [--amp N] [--stdin-play] [--stdin-stream] [--capture-stdout]\n"
             "Default: play 3000ms tone and capture 3000ms from Lenovo MCP01 (17ef:a03b).\n"
-            "--stdin-play reads 48kHz stereo S16_LE PCM from stdin and streams it to USB.\n",
+            "--stdin-play reads 48kHz stereo S16_LE PCM from stdin and streams it to USB.\n"
+            "--stdin-stream opens USB immediately, keeps streaming silence, and consumes stdin incrementally.\n",
             argv0);
 }
 
@@ -580,6 +792,7 @@ int main(int argc, char **argv) {
     int amp = 9000;
     double freq = 1000.0;
     int stdin_play = 0;
+    int stdin_stream = 0;
     int capture_stdout = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -593,6 +806,9 @@ int main(int argc, char **argv) {
             amp = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--stdin-play") == 0) {
             stdin_play = 1;
+            play_ms = 0;
+        } else if (strcmp(argv[i], "--stdin-stream") == 0) {
+            stdin_stream = 1;
             play_ms = 0;
         } else if (strcmp(argv[i], "--capture-stdout") == 0) {
             capture_stdout = 1;
@@ -610,14 +826,22 @@ int main(int argc, char **argv) {
         usage(argv[0]);
         return 64;
     }
-    if (capture_stdout && stdin_play) {
+    if (capture_stdout && (stdin_play || stdin_stream)) {
         fprintf(stderr, "--capture-stdout cannot be combined with playback\n");
+        usage(argv[0]);
+        return 64;
+    }
+    if (stdin_play && stdin_stream) {
+        fprintf(stderr, "--stdin-play and --stdin-stream are mutually exclusive\n");
         usage(argv[0]);
         return 64;
     }
 
     int rc = 0;
-    if (stdin_play) {
+    if (stdin_stream) {
+        int play_rc = run_play_stdin_stream();
+        if (play_rc != 0) rc = play_rc;
+    } else if (stdin_play) {
         unsigned char *pcm = NULL;
         int pcm_len = 0;
         if (read_stdin_all(&pcm, &pcm_len) != 0) {
