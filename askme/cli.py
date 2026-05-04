@@ -128,6 +128,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Mark the check as live preflight without opening audio devices",
     )
 
+    runtime_sunrise_audio_doctor = runtime_subparsers.add_parser(
+        "sunrise-audio-doctor",
+        help="Run the Sunrise MCP01 USB audio diagnostic",
+    )
+    runtime_sunrise_audio_doctor.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_sunrise_audio_doctor.add_argument(
+        "--json-out",
+        default="",
+        help="Also write the diagnostic JSON to this path",
+    )
+    runtime_sunrise_audio_doctor.add_argument(
+        "--guard-min-seconds",
+        type=float,
+        default=1.5,
+        help="Minimum sacrificial lead-in+cushion before real speech",
+    )
+    runtime_sunrise_audio_doctor.add_argument(
+        "--skip-command-probes",
+        action="store_true",
+        help="Skip lsusb and /proc/asound probes",
+    )
+    runtime_sunrise_audio_doctor.add_argument(
+        "--skip-output-probe",
+        action="store_true",
+        help="Skip non-playing TTSEngine USB output-shape probe",
+    )
+
     skills_parser = subparsers.add_parser("skills", help="Inspect loaded skills and generated contracts")
     skills_subparsers = skills_parser.add_subparsers(dest="skills_command")
 
@@ -379,6 +406,27 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
             raise SystemExit(1)
         return
 
+    if args.runtime_command == "sunrise-audio-doctor":
+        payload = _run_sunrise_audio_doctor(
+            include_command_probes=not args.skip_command_probes,
+            include_output_probe=not args.skip_output_probe,
+            guard_min_seconds=args.guard_min_seconds,
+        )
+        if args.json_out:
+            path = Path(args.json_out)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            _emit_sunrise_audio_doctor_payload(payload)
+        if payload.get("status") != "ok":
+            raise SystemExit(1)
+        return
+
     raise SystemExit(f"Unknown runtime command: {args.runtime_command}")
 
 
@@ -561,6 +609,27 @@ def _emit_voice_health_payload(payload: dict[str, Any]) -> None:
     from askme.voice.health_check import print_voice_health_summary
 
     print_voice_health_summary(payload)
+
+
+def _run_sunrise_audio_doctor(
+    *,
+    include_command_probes: bool,
+    include_output_probe: bool,
+    guard_min_seconds: float,
+) -> dict[str, Any]:
+    from askme.voice.sunrise_audio_doctor import run_sunrise_audio_doctor
+
+    return run_sunrise_audio_doctor(
+        include_command_probes=include_command_probes,
+        include_output_probe=include_output_probe,
+        guard_min_seconds=guard_min_seconds,
+    )
+
+
+def _emit_sunrise_audio_doctor_payload(payload: dict[str, Any]) -> None:
+    from askme.voice.sunrise_audio_doctor import print_sunrise_audio_doctor_summary
+
+    print_sunrise_audio_doctor_summary(payload)
 
 
 async def _load_local_capabilities_async(
