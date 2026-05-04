@@ -145,6 +145,7 @@ class TTSEngine(TTSBackend):
         self._aplay_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         self._aplay_lock = threading.Lock()  # guards _aplay_proc r/w across threads
         self._aplay_bin: str | None = shutil.which("aplay")
+        self._playback_busy = threading.Event()
         self._usb_audio_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         self._usb_audio_lock = threading.Lock()
         self._usb_audio_binary: str | None = config.get("usb_audio_binary")
@@ -354,7 +355,7 @@ class TTSEngine(TTSBackend):
         """
         self.tts_text_queue.join()
         deadline = time.monotonic() + timeout
-        while self._has_buffered_audio():
+        while self._has_buffered_audio() or self._playback_busy.is_set():
             if time.monotonic() >= deadline:
                 logger.warning("wait_done: timed out after %.1fs waiting for buffer drain", timeout)
                 return
@@ -958,11 +959,14 @@ class TTSEngine(TTSBackend):
         return self._is_plughw_output()
 
     def _collect_usb_direct_chunk(self, first_chunk: np.ndarray) -> np.ndarray:
-        """Coalesce streamed TTS chunks into one continuous MCP01 USB play."""
+        """Coalesce the current streamed TTS burst into one MCP01 USB play."""
         chunks = [np.asarray(first_chunk, dtype=np.float32)]
         deadline = time.monotonic() + self._usb_direct_coalesce_timeout
         last_audio_at = time.monotonic()
-        settle_seconds = 0.08
+        # MiniMax emits several chunks per sentence.  Stop after a short quiet
+        # gap so the first sentence can play while later sentences are still
+        # being generated.
+        settle_seconds = 0.18
 
         while self._is_playing and not self._stop_requested.is_set():
             drained: list[np.ndarray] = []
@@ -974,9 +978,8 @@ class TTSEngine(TTSBackend):
                 chunks.extend(np.asarray(chunk, dtype=np.float32) for chunk in drained)
                 last_audio_at = time.monotonic()
 
-            generation_pending = getattr(self.tts_text_queue, "unfinished_tasks", 0) > 0
             now = time.monotonic()
-            if not generation_pending and now - last_audio_at >= settle_seconds:
+            if now - last_audio_at >= settle_seconds:
                 break
             if now >= deadline:
                 logger.debug(
@@ -987,7 +990,10 @@ class TTSEngine(TTSBackend):
             time.sleep(0.02)
 
         merged = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
-        preroll_samples = int(self._sample_rate * self._usb_direct_preroll_seconds)
+        preroll_samples = (
+            0 if self._is_dac_warm()
+            else int(self._sample_rate * self._usb_direct_preroll_seconds)
+        )
         if preroll_samples > 0:
             # MCP01/Sunrise eats the first audible samples while the speaker path
             # wakes. Match the aplay path's low-level deterministic noise so the
@@ -1002,6 +1008,19 @@ class TTSEngine(TTSBackend):
             len(merged) / self._sample_rate,
         )
         return merged.astype(np.float32, copy=False)
+
+    def _is_dac_warm(self) -> bool:
+        return (
+            self._last_aplay_close > 0
+            and (time.monotonic() - self._last_aplay_close) < self._preroll_warm_window
+        )
+
+    def _usb_direct_preroll_chunk(self) -> np.ndarray:
+        samples = int(self._sample_rate * self._usb_direct_preroll_seconds)
+        if samples <= 0:
+            return np.empty(0, dtype=np.float32)
+        rng = np.random.RandomState(42)
+        return (rng.randn(samples) * (200.0 / 32767.0)).astype(np.float32)
 
     def _playback_loop(self) -> None:
         """Drain tts_buffer one sentence at a time.
@@ -1026,6 +1045,22 @@ class TTSEngine(TTSBackend):
             _use_usb_direct = self._should_use_usb_direct()
             if _use_usb_direct and self._output_transport == "auto":
                 logger.info("TTS playback: ALSA plughw output unavailable; using MCP01 USB direct")
+            if _use_usb_direct and not self._has_buffered_audio() and not self._is_dac_warm():
+                preroll = self._usb_direct_preroll_chunk()
+                if len(preroll) > 0:
+                    logger.info(
+                        "MCP01 USB direct: prewarming speaker path %.3fs",
+                        len(preroll) / self._sample_rate,
+                    )
+                    self._playback_busy.set()
+                    try:
+                        if self._audio_router is not None:
+                            with self._audio_router.output_session():
+                                self._play_chunk_usb_direct(preroll)
+                        else:
+                            self._play_chunk_usb_direct(preroll)
+                    finally:
+                        self._playback_busy.clear()
 
             # --- aplay persistent-process setup (computed once) ---
             _aplay_cmd: list[str] | None = None
@@ -1108,12 +1143,15 @@ class TTSEngine(TTSBackend):
                 with self._buffer_lock:
                     if self.tts_buffer:
                         chunk = self.tts_buffer.popleft()
+                        if len(chunk) > 0:
+                            self._playback_busy.set()
 
                 if chunk is not None and len(chunk) > 0:
                     _empty_polls = 0
                     if _use_usb_direct:
                         chunk = self._collect_usb_direct_chunk(chunk)
                         if self._stop_requested.is_set():
+                            self._playback_busy.clear()
                             continue
                     # Apply volume
                     if self._volume != 1.0:
@@ -1195,6 +1233,7 @@ class TTSEngine(TTSBackend):
                         else:
                             sd.play(chunk, samplerate=self._sample_rate, device=self._output_device)
                             sd.wait()
+                    self._playback_busy.clear()
                 else:
                     if _proc is not None:
                         _empty_polls += 1
@@ -1210,6 +1249,7 @@ class TTSEngine(TTSBackend):
             self._kill_usb_audio()
             with self._aplay_lock:
                 self._aplay_proc = None
+            self._playback_busy.clear()
             # Always clear _is_playing on exit — prevents start_playback() from
             # getting permanently blocked and wait_done() from deadlocking when
             # the audio device is unavailable or throws.

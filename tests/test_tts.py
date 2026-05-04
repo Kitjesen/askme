@@ -165,6 +165,47 @@ def test_playback_loop_uses_usb_direct_transport(monkeypatch):
     assert played["samples"] == 100
 
 
+def test_wait_done_waits_for_usb_direct_chunk_after_buffer_pop(monkeypatch):
+    """wait_done must not return while USB direct playback is in progress."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    started = threading.Event()
+    finished = threading.Event()
+
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "usb_direct_preroll_seconds": 0.0,
+            "usb_direct_coalesce_timeout": 0.1,
+        }
+    )
+
+    def fake_usb_play(_chunk):
+        started.set()
+        time.sleep(0.15)
+        finished.set()
+        engine._is_playing = False
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct", fake_usb_play)
+    try:
+        engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
+        engine.start_playback()
+        assert started.wait(timeout=1.0)
+
+        start = time.monotonic()
+        engine.wait_done(timeout=2.0)
+        elapsed = time.monotonic() - start
+    finally:
+        engine.shutdown()
+
+    assert finished.is_set()
+    assert elapsed >= 0.10
+
+
 def test_usb_direct_playback_coalesces_chunks_and_adds_preroll(monkeypatch):
     """MiniMax streamed chunks should become one continuous MCP01 USB play."""
     import numpy as np
