@@ -245,6 +245,43 @@ def test_usb_direct_playback_coalesces_chunks_and_adds_preroll(monkeypatch):
     assert np.allclose(chunk[1760:], 0.3)
 
 
+def test_usb_direct_warm_playback_adds_stream_guard(monkeypatch):
+    """Warm USB sessions still need a short guard for new stream start-up."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    played: dict[str, np.ndarray] = {}
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 16000,
+            "usb_direct_preroll_seconds": 0.1,
+            "usb_direct_stream_guard_seconds": 0.02,
+        }
+    )
+
+    def fake_usb_play(chunk):
+        played["chunk"] = chunk.copy()
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_locked", fake_usb_play)
+    try:
+        engine._last_aplay_close = time.monotonic()
+        ok = engine._play_chunk_usb_direct_with_preroll(
+            np.ones(160, dtype=np.float32) * 0.2
+        )
+    finally:
+        engine.shutdown()
+
+    assert ok is True
+    chunk = played["chunk"]
+    assert len(chunk) == 320 + 160
+    assert np.max(np.abs(chunk[:320])) < 0.04
+    assert np.allclose(chunk[320:], 0.2)
+
+
 def test_playback_loop_falls_back_to_usb_when_aplay_pipe_breaks(monkeypatch):
     """On Sunrise, ALSA can expose aplay but fail when no card exists."""
     import numpy as np
@@ -359,6 +396,7 @@ def test_feedback_audio_uses_usb_direct_with_preroll(monkeypatch):
             "output_transport": "usb_direct",
             "sample_rate": 44100,
             "usb_direct_preroll_seconds": 0.1,
+            "usb_direct_stream_guard_seconds": 0.02,
         }
     )
 
@@ -425,6 +463,7 @@ def test_feedback_audio_serializes_cold_preroll(monkeypatch):
             "output_transport": "usb_direct",
             "sample_rate": 44100,
             "usb_direct_preroll_seconds": 0.1,
+            "usb_direct_stream_guard_seconds": 0.02,
         }
     )
 
@@ -452,7 +491,7 @@ def test_feedback_audio_serializes_cold_preroll(monkeypatch):
 
     assert not t1.is_alive()
     assert not t2.is_alive()
-    assert played == [4410 + 441, 441]
+    assert played == [4410 + 441, 882 + 441]
     assert not engine._usb_direct_warming.is_set()
 
 

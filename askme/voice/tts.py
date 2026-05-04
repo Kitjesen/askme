@@ -154,6 +154,9 @@ class TTSEngine(TTSBackend):
         self._usb_direct_preroll_seconds: float = float(
             config.get("usb_direct_preroll_seconds", 1.5)
         )
+        self._usb_direct_stream_guard_seconds: float = float(
+            config.get("usb_direct_stream_guard_seconds", 0.25)
+        )
         self._usb_direct_coalesce_timeout: float = float(
             config.get("usb_direct_coalesce_timeout", 8.0)
         )
@@ -928,6 +931,10 @@ class TTSEngine(TTSBackend):
                 if len(preroll) > 0:
                     samples = np.concatenate([preroll, samples])
                     mark_warming = True
+            elif preroll_if_cold:
+                guard = self._usb_direct_stream_guard_chunk()
+                if len(guard) > 0:
+                    samples = np.concatenate([guard, samples])
             if mark_warming:
                 self._usb_direct_warming.set()
                 warming_set = True
@@ -1080,6 +1087,13 @@ class TTSEngine(TTSBackend):
             return np.empty(0, dtype=np.float32)
         rng = np.random.RandomState(42)
         return (rng.randn(samples) * (200.0 / 32767.0)).astype(np.float32)
+
+    def _usb_direct_stream_guard_chunk(self) -> np.ndarray:
+        samples = int(self._sample_rate * self._usb_direct_stream_guard_seconds)
+        if samples <= 0:
+            return np.empty(0, dtype=np.float32)
+        rng = np.random.RandomState(43)
+        return (rng.randn(samples) * (160.0 / 32767.0)).astype(np.float32)
 
     def _playback_loop(self) -> None:
         """Drain tts_buffer one sentence at a time.
