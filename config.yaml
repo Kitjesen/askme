@@ -238,6 +238,10 @@ voice:
     # On sunrise: "plughw:1,0" = MCP01 USB Audio direct hardware access,
     # bypassing PipeWire auto_null sink which silently discards audio.
     output_device: "plughw:1,0"
+    # Output transport: "auto" uses ALSA/aplay first and falls back to MCP01
+    # direct USB playback if Sunrise exposes no ALSA card; "usb_direct" forces
+    # the fallback path for the Lenovo MCP01 USB Audio speaker.
+    output_transport: auto
 
 # ----------------------------------------------------------
 # Vision: qp-perception (YOLO detection + tracking)

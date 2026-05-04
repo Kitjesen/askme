@@ -9,9 +9,11 @@ import queue
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -96,6 +98,7 @@ class TTSEngine(TTSBackend):
         self._backend: str = config.get("backend", "local")
         self._sample_rate: int = int(config.get("sample_rate", 24000))
         self._output_device: int | str | None = config.get("output_device")
+        self._output_transport: str = str(config.get("output_transport", "auto")).lower()
 
         # Local backend config
         self._model_dir: str = config.get("model_dir", "models/tts/vits-melo-tts-zh_en")
@@ -142,6 +145,11 @@ class TTSEngine(TTSBackend):
         self._aplay_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         self._aplay_lock = threading.Lock()  # guards _aplay_proc r/w across threads
         self._aplay_bin: str | None = shutil.which("aplay")
+        self._usb_audio_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        self._usb_audio_lock = threading.Lock()
+        self._usb_audio_binary: str | None = config.get("usb_audio_binary")
+        self._usb_audio_source: str | None = config.get("usb_audio_source")
+        self._usb_audio_build_failed = False
         # Immediate stop flag: checked by _playback_loop to abort mid-chunk
         self._stop_requested = threading.Event()
         # Pre-roll warm state: skip 400ms pre-roll when DAC was recently active
@@ -163,6 +171,9 @@ class TTSEngine(TTSBackend):
         if self._backend == "local" and not os.path.isdir(self._model_dir):
             logger.warning("Local TTS model not found at %s, falling back to edge-tts", self._model_dir)
             self._backend = "edge"
+        if self._output_transport not in {"auto", "aplay", "sounddevice", "usb_direct"}:
+            logger.warning("Unknown TTS output_transport=%s, using auto", self._output_transport)
+            self._output_transport = "auto"
 
         if self._backend == "local":
             self._init_local_tts()
@@ -317,6 +328,7 @@ class TTSEngine(TTSBackend):
             thread = self._playback_thread
             self._playback_thread = None
         self._kill_aplay()
+        self._kill_usb_audio()
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
 
@@ -349,6 +361,11 @@ class TTSEngine(TTSBackend):
                 logger.warning("wait_done: timed out after %.1fs waiting for aplay", timeout)
                 return
             time.sleep(0.02)
+        while self._usb_audio_proc is not None:
+            if time.monotonic() >= deadline:
+                logger.warning("wait_done: timed out after %.1fs waiting for MCP01 USB audio", timeout)
+                return
+            time.sleep(0.02)
         # Fallback: wait for any sounddevice stream (non-aplay systems).
         try:
             sd.wait()
@@ -366,6 +383,7 @@ class TTSEngine(TTSBackend):
                 break
         self._clear_audio_buffer()
         self._kill_aplay()
+        self._kill_usb_audio()
 
     def stop_immediately(self) -> None:
         """Signal the playback loop to abort the current chunk immediately.
@@ -377,6 +395,7 @@ class TTSEngine(TTSBackend):
         """
         self._stop_requested.set()
         self._kill_aplay()
+        self._kill_usb_audio()
 
     def shutdown(self) -> None:
         """Signal the worker thread to exit and stop playback."""
@@ -763,6 +782,175 @@ class TTSEngine(TTSBackend):
             except Exception as exc:
                 logger.debug("aplay terminate failed (ignored): %s", exc)
 
+    def _kill_usb_audio(self) -> None:
+        """Terminate any running MCP01 direct USB playback helper."""
+        with self._usb_audio_lock:
+            proc = self._usb_audio_proc
+            self._usb_audio_proc = None
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception as exc:
+                logger.debug("MCP01 USB audio terminate failed (ignored): %s", exc)
+
+    def _usb_direct_source_path(self) -> Path:
+        if self._usb_audio_source:
+            return Path(self._usb_audio_source)
+        return Path(__file__).resolve().parents[2] / "scripts" / "bench" / "mcp01_usb_audio_libusb.c"
+
+    def _ensure_usb_audio_binary(self) -> str | None:
+        if self._usb_audio_binary and Path(self._usb_audio_binary).exists():
+            return self._usb_audio_binary
+        if self._usb_audio_build_failed:
+            return None
+
+        source = self._usb_direct_source_path()
+        binary = Path(tempfile.gettempdir()) / "askme_mcp01_usb_audio_libusb"
+        if os.name == "nt":
+            binary = binary.with_suffix(".exe")
+        self._usb_audio_binary = str(binary)
+
+        try:
+            if binary.exists() and binary.stat().st_mtime >= source.stat().st_mtime:
+                return str(binary)
+        except OSError:
+            pass
+
+        if not source.exists():
+            logger.warning("MCP01 USB audio source not found: %s", source)
+            self._usb_audio_build_failed = True
+            return None
+        if shutil.which("gcc") is None or shutil.which("pkg-config") is None:
+            logger.warning("MCP01 USB audio fallback requires gcc and pkg-config")
+            self._usb_audio_build_failed = True
+            return None
+
+        pkg = subprocess.run(
+            ["pkg-config", "--cflags", "--libs", "libusb-1.0"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if pkg.returncode != 0:
+            logger.warning("MCP01 USB audio fallback requires libusb-1.0 development files")
+            self._usb_audio_build_failed = True
+            return None
+
+        cmd = [
+            "gcc",
+            str(source),
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-o",
+            str(binary),
+            *pkg.stdout.split(),
+            "-lm",
+        ]
+        build = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if build.returncode != 0:
+            logger.warning("MCP01 USB audio helper build failed: %s", build.stderr.strip())
+            self._usb_audio_build_failed = True
+            return None
+        return str(binary)
+
+    def _chunk_to_usb_stereo_pcm(self, chunk: np.ndarray) -> bytes:
+        """Convert a mono float32 chunk to 48 kHz stereo S16_LE for MCP01."""
+        samples = np.asarray(chunk, dtype=np.float32)
+        if self._sample_rate != 48000:
+            samples = self._resample(samples, self._sample_rate, 48000)
+        pcm = (samples * 32767).clip(-32768, 32767).astype(np.int16)
+        stereo = np.empty(pcm.size * 2, dtype=np.int16)
+        stereo[0::2] = pcm
+        stereo[1::2] = pcm
+        return stereo.tobytes()
+
+    def _play_chunk_usb_direct(self, chunk: np.ndarray) -> bool:
+        """Play one chunk through MCP01 USB Audio without ALSA/PortAudio."""
+        binary = self._ensure_usb_audio_binary()
+        if binary is None:
+            return False
+
+        pcm_bytes = self._chunk_to_usb_stereo_pcm(chunk)
+        if not pcm_bytes:
+            return True
+
+        args = [binary, "--stdin-play", "--capture-ms", "0"]
+        timeout = max(5.0, len(pcm_bytes) / (48000 * 2 * 2) + 5.0)
+        proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            with self._usb_audio_lock:
+                self._usb_audio_proc = proc
+            stdout, stderr = proc.communicate(pcm_bytes, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._kill_usb_audio()
+            logger.error("MCP01 USB audio playback timed out")
+            return False
+        except OSError as exc:
+            logger.error("MCP01 USB audio playback failed to start: %s", exc)
+            return False
+        finally:
+            with self._usb_audio_lock:
+                if proc is not None and self._usb_audio_proc is proc:
+                    self._usb_audio_proc = None
+
+        if proc is None:
+            return False
+        if proc.returncode != 0:
+            logger.error(
+                "MCP01 USB audio playback failed rc=%s stdout=%s stderr=%s",
+                proc.returncode,
+                stdout.decode(errors="replace").strip(),
+                stderr.decode(errors="replace").strip(),
+            )
+            return False
+        logger.debug("MCP01 USB audio playback ok: %s", stdout.decode(errors="replace").strip())
+        self._last_aplay_close = time.monotonic()
+        return True
+
+    def _is_plughw_output(self) -> bool:
+        return self._output_device is not None and str(self._output_device).startswith("plughw:")
+
+    def _alsa_output_available(self) -> bool:
+        """Return False when ALSA clearly has no card for a plughw output."""
+        if os.name != "posix" or not self._is_plughw_output():
+            return True
+
+        cards_path = Path("/proc/asound/cards")
+        try:
+            cards_text = cards_path.read_text(encoding="utf-8", errors="ignore").lower()
+        except OSError:
+            return True
+        if "no soundcards" in cards_text:
+            return False
+
+        match = re.match(r"plughw:(\d+)", str(self._output_device))
+        if match and not Path(f"/proc/asound/card{match.group(1)}").exists():
+            return False
+        return True
+
+    def _should_use_usb_direct(self) -> bool:
+        if self._output_transport == "usb_direct":
+            return True
+        return (
+            self._output_transport == "auto"
+            and self._is_plughw_output()
+            and not self._alsa_output_available()
+        )
+
+    def _should_try_usb_direct_fallback(self) -> bool:
+        if self._output_transport == "usb_direct":
+            return True
+        if self._output_transport != "auto":
+            return False
+        return self._is_plughw_output()
+
     def _playback_loop(self) -> None:
         """Drain tts_buffer one sentence at a time.
 
@@ -776,16 +964,25 @@ class TTSEngine(TTSBackend):
         """
         try:
             logger.info(
-                "TTS playback: device=%s, sample_rate=%d, aplay=%s",
+                "TTS playback: device=%s, sample_rate=%d, transport=%s, aplay=%s",
                 self._output_device if self._output_device is not None else "default",
                 self._sample_rate,
+                self._output_transport,
                 self._aplay_bin is not None,
             )
+
+            _use_usb_direct = self._should_use_usb_direct()
+            if _use_usb_direct and self._output_transport == "auto":
+                logger.info("TTS playback: ALSA plughw output unavailable; using MCP01 USB direct")
 
             # --- aplay persistent-process setup (computed once) ---
             _aplay_cmd: list[str] | None = None
             _preroll_bytes: bytes = b""
-            if self._aplay_bin:
+            if (
+                self._aplay_bin
+                and self._output_transport in {"auto", "aplay"}
+                and not _use_usb_direct
+            ):
                 _aplay_cmd = [
                     self._aplay_bin,
                     "-r", str(self._sample_rate),
@@ -867,7 +1064,13 @@ class TTSEngine(TTSBackend):
                         chunk = chunk * self._volume
                         np.clip(chunk, -1.0, 1.0, out=chunk)
 
-                    if _aplay_cmd is not None:
+                    if _use_usb_direct:
+                        if self._audio_router is not None:
+                            with self._audio_router.output_session():
+                                self._play_chunk_usb_direct(chunk)
+                        else:
+                            self._play_chunk_usb_direct(chunk)
+                    elif _aplay_cmd is not None:
                         pcm = (chunk * 32767).clip(-32768, 32767).astype(np.int16)
                         dur = len(chunk) / self._sample_rate
                         logger.info(
@@ -921,6 +1124,13 @@ class TTSEngine(TTSBackend):
                                 except Exception:
                                     pass
                                 _router_ctx = None
+                            if self._should_try_usb_direct_fallback():
+                                logger.warning("aplay failed; trying MCP01 direct USB fallback")
+                                if self._audio_router is not None:
+                                    with self._audio_router.output_session():
+                                        self._play_chunk_usb_direct(chunk)
+                                else:
+                                    self._play_chunk_usb_direct(chunk)
                     else:
                         if self._audio_router is not None:
                             with self._audio_router.output_session():
@@ -941,6 +1151,7 @@ class TTSEngine(TTSBackend):
             # Clean up persistent aplay if still running
             if _aplay_cmd is not None:
                 _close_aplay()
+            self._kill_usb_audio()
             with self._aplay_lock:
                 self._aplay_proc = None
             # Always clear _is_playing on exit — prevents start_playback() from

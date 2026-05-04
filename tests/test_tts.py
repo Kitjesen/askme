@@ -132,6 +132,124 @@ def test_playback_loop_uses_configured_output_device(monkeypatch):
     assert played_kwargs.get("device") == 3
 
 
+def test_playback_loop_uses_usb_direct_transport(monkeypatch):
+    """output_transport=usb_direct bypasses aplay/sounddevice playback."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    played: dict[str, int] = {}
+
+    engine = TTSEngine({"backend": "edge", "output_transport": "usb_direct"})
+
+    def fake_usb_play(chunk):
+        played["samples"] = len(chunk)
+        engine._is_playing = False
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct", fake_usb_play)
+    engine._aplay_bin = "aplay"
+    try:
+        engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
+        engine._is_playing = True
+        engine._playback_loop()
+    finally:
+        engine.shutdown()
+
+    assert played["samples"] == 100
+
+
+def test_playback_loop_falls_back_to_usb_when_aplay_pipe_breaks(monkeypatch):
+    """On Sunrise, ALSA can expose aplay but fail when no card exists."""
+    import numpy as np
+
+    import askme.voice.tts as tts_mod
+    from askme.voice.tts import TTSEngine
+
+    class _BrokenStdin:
+        def write(self, _data):
+            raise BrokenPipeError()
+
+        def flush(self):
+            pass
+
+    class _BrokenProc:
+        stdin = _BrokenStdin()
+
+    played: dict[str, int] = {}
+
+    def fake_popen(*_args, **_kwargs):
+        return _BrokenProc()
+
+    engine = TTSEngine(
+        {"backend": "edge", "output_device": "plughw:1,0", "output_transport": "auto"}
+    )
+
+    def fake_usb_play(chunk):
+        played["samples"] = len(chunk)
+        engine._is_playing = False
+        return True
+
+    monkeypatch.setattr(tts_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct", fake_usb_play)
+    engine._aplay_bin = "aplay"
+    try:
+        engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
+        engine._is_playing = True
+        engine._playback_loop()
+    finally:
+        engine.shutdown()
+
+    assert played["samples"] == 100
+
+
+def test_auto_transport_uses_usb_when_plughw_has_no_alsa_card(monkeypatch):
+    """If ALSA reports no card, auto mode should not trust aplay."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    played: dict[str, int] = {}
+
+    engine = TTSEngine(
+        {"backend": "edge", "output_device": "plughw:1,0", "output_transport": "auto"}
+    )
+
+    def fake_usb_play(chunk):
+        played["samples"] = len(chunk)
+        engine._is_playing = False
+        return True
+
+    monkeypatch.setattr(engine, "_alsa_output_available", lambda: False)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct", fake_usb_play)
+    engine._aplay_bin = "aplay"
+    try:
+        engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
+        engine._is_playing = True
+        engine._playback_loop()
+    finally:
+        engine.shutdown()
+
+    assert played["samples"] == 100
+
+
+def test_usb_direct_pcm_is_48k_stereo():
+    """MCP01 direct USB helper expects 48 kHz stereo S16_LE PCM."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine({"backend": "edge", "sample_rate": 24000})
+    try:
+        pcm_bytes = engine._chunk_to_usb_stereo_pcm(np.ones(240, dtype=np.float32) * 0.5)
+    finally:
+        engine.shutdown()
+
+    pcm = np.frombuffer(pcm_bytes, dtype=np.int16)
+    assert pcm.size == 480 * 2
+    assert np.array_equal(pcm[0::2], pcm[1::2])
+
+
 def test_auto_fallback_when_model_missing():
     """Backend auto-falls back to edge when model directory doesn't exist."""
     from askme.voice.tts import TTSEngine
