@@ -153,7 +153,7 @@ def test_playback_loop_uses_usb_direct_transport(monkeypatch):
         engine._is_playing = False
         return True
 
-    monkeypatch.setattr(engine, "_play_chunk_usb_direct", fake_usb_play)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_with_preroll", fake_usb_play)
     engine._aplay_bin = "aplay"
     try:
         engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
@@ -190,7 +190,7 @@ def test_wait_done_waits_for_usb_direct_chunk_after_buffer_pop(monkeypatch):
         engine._is_playing = False
         return True
 
-    monkeypatch.setattr(engine, "_play_chunk_usb_direct", fake_usb_play)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_with_preroll", fake_usb_play)
     try:
         engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
         engine.start_playback()
@@ -229,7 +229,7 @@ def test_usb_direct_playback_coalesces_chunks_and_adds_preroll(monkeypatch):
         engine._is_playing = False
         return True
 
-    monkeypatch.setattr(engine, "_play_chunk_usb_direct", fake_usb_play)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_locked", fake_usb_play)
     try:
         engine.tts_buffer.append(np.ones(160, dtype=np.float32) * 0.2)
         engine.tts_buffer.append(np.ones(160, dtype=np.float32) * 0.3)
@@ -282,7 +282,7 @@ def test_playback_loop_falls_back_to_usb_when_aplay_pipe_breaks(monkeypatch):
         return True
 
     monkeypatch.setattr(tts_mod.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(engine, "_play_chunk_usb_direct", fake_usb_play)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_with_preroll", fake_usb_play)
     engine._aplay_bin = "aplay"
     try:
         engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
@@ -317,7 +317,7 @@ def test_auto_transport_uses_usb_when_plughw_has_no_alsa_card(monkeypatch):
         return True
 
     monkeypatch.setattr(engine, "_alsa_output_available", lambda: False)
-    monkeypatch.setattr(engine, "_play_chunk_usb_direct", fake_usb_play)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_with_preroll", fake_usb_play)
     engine._aplay_bin = "aplay"
     try:
         engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
@@ -344,6 +344,129 @@ def test_usb_direct_pcm_is_48k_stereo():
     pcm = np.frombuffer(pcm_bytes, dtype=np.int16)
     assert pcm.size == 480 * 2
     assert np.array_equal(pcm[0::2], pcm[1::2])
+
+
+def test_feedback_audio_uses_usb_direct_with_preroll(monkeypatch):
+    """ACK/thinking chimes should use the same USB direct path as TTS."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    played: dict[str, np.ndarray] = {}
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 44100,
+            "usb_direct_preroll_seconds": 0.1,
+        }
+    )
+
+    def fake_usb_play(chunk):
+        played["chunk"] = chunk.copy()
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_locked", fake_usb_play)
+    try:
+        ok = engine.play_feedback_audio(np.ones(441, dtype=np.float32) * 0.2, 44100)
+    finally:
+        engine.shutdown()
+
+    assert ok is True
+    assert len(played["chunk"]) == 4410 + 441
+    assert not engine._usb_direct_warming.is_set()
+
+
+def test_feedback_audio_clears_warming_when_router_fails():
+    """A failed output-session claim must not leave the DAC marked warm."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    class _FailingRouter:
+        def output_session(self):
+            return self
+
+        def __enter__(self):
+            raise RuntimeError("router busy")
+
+        def __exit__(self, *_args):
+            return False
+
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 44100,
+            "usb_direct_preroll_seconds": 0.1,
+        },
+        audio_router=_FailingRouter(),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="router busy"):
+            engine.play_feedback_audio(np.ones(441, dtype=np.float32) * 0.2, 44100)
+        assert not engine._usb_direct_warming.is_set()
+    finally:
+        engine.shutdown()
+
+
+def test_feedback_audio_serializes_cold_preroll(monkeypatch):
+    """Concurrent USB feedback calls should not both pay cold-DAC preroll."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    played: list[int] = []
+    played_lock = threading.Lock()
+    start = threading.Barrier(2)
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 44100,
+            "usb_direct_preroll_seconds": 0.1,
+        }
+    )
+
+    def fake_usb_play(chunk):
+        with played_lock:
+            played.append(len(chunk))
+        time.sleep(0.05)
+        engine._last_aplay_close = time.monotonic()
+        return True
+
+    def call_feedback():
+        start.wait(timeout=1.0)
+        assert engine.play_feedback_audio(np.ones(441, dtype=np.float32) * 0.2, 44100)
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_locked", fake_usb_play)
+    try:
+        t1 = threading.Thread(target=call_feedback)
+        t2 = threading.Thread(target=call_feedback)
+        t1.start()
+        t2.start()
+        t1.join(timeout=2.0)
+        t2.join(timeout=2.0)
+    finally:
+        engine.shutdown()
+
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+    assert played == [4410 + 441, 441]
+    assert not engine._usb_direct_warming.is_set()
+
+
+def test_feedback_audio_returns_false_when_usb_direct_inactive():
+    """Non-USB transports keep the legacy chime playback path."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine({"backend": "edge", "output_transport": "sounddevice"})
+    try:
+        assert engine.play_feedback_audio(np.zeros(100, dtype=np.float32), 44100) is False
+    finally:
+        engine.shutdown()
 
 
 def test_auto_fallback_when_model_missing():

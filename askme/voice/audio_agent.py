@@ -115,6 +115,8 @@ class AudioAgent:
         self._agent_state: AgentState = AgentState.IDLE
         # When True, confirmation words bypass the noise filter.
         self.awaiting_confirmation: bool = False
+        self._chime_lock = threading.Lock()
+        self._last_chime_at: float = 0.0
 
         # Wake timeout: after wake word detection + successful interaction,
         # stay "awake" for this many seconds so the user can continue chatting
@@ -568,6 +570,13 @@ class AudioAgent:
         failure, and logs success/failure for diagnostics.
         """
         try:
+            now = time.monotonic()
+            with self._chime_lock:
+                if event == "thinking" and now - self._last_chime_at < 2.0:
+                    logger.debug("chime '%s' skipped due to recent feedback", event)
+                    return
+                self._last_chime_at = now
+
             generators = {
                 "acknowledge": self._chime_acknowledge,
                 "wake": self._chime_wake,
@@ -584,16 +593,32 @@ class AudioAgent:
                 audio = audio * (target_peak / peak_val)
 
             aplay_bin = getattr(self.tts, "_aplay_bin", None)
-            if aplay_bin:
-                pcm = (audio * 32767).clip(-32768, 32767).astype("int16")
-                pcm_bytes = pcm.tobytes()
+            output_device = getattr(self.tts, "_output_device", None)
 
-                output_device = getattr(self.tts, "_output_device", None)
-                chime_cmd = [aplay_bin, "-r", str(self._SR), "-f", "S16_LE", "-c", "1", "-q"]
-                if output_device is not None:
-                    chime_cmd += ["-D", str(output_device)]
+            def _run() -> None:
+                try:
+                    if self.tts.play_feedback_audio(audio, self._SR):
+                        logger.debug("chime '%s' played via TTS feedback path", event)
+                        return
+                except Exception as exc:
+                    logger.debug("chime '%s' feedback path failed: %s", event, exc)
 
-                def _run() -> None:
+                if aplay_bin:
+                    pcm = (audio * 32767).clip(-32768, 32767).astype("int16")
+                    pcm_bytes = pcm.tobytes()
+                    chime_cmd = [
+                        aplay_bin,
+                        "-r",
+                        str(self._SR),
+                        "-f",
+                        "S16_LE",
+                        "-c",
+                        "1",
+                        "-q",
+                    ]
+                    if output_device is not None:
+                        chime_cmd += ["-D", str(output_device)]
+
                     import subprocess
                     for attempt in range(2):
                         try:
@@ -620,11 +645,12 @@ class AudioAgent:
                             logger.warning("chime '%s' failed (attempt %d): %s", event, attempt + 1, _e)
                         if attempt == 0:
                             time.sleep(0.05)  # brief pause before retry
+                    return
 
-                threading.Thread(target=_run, daemon=True).start()
-            else:
                 sd.play(audio, self._SR, blocking=False)
                 logger.debug("chime '%s' queued via sounddevice", event)
+
+            threading.Thread(target=_run, daemon=True).start()
         except Exception as _e:
             logger.warning("chime '%s' synthesis failed: %s", event, _e)
 

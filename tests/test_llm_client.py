@@ -440,3 +440,81 @@ async def test_chat_stream_passes_tool_choice(monkeypatch):
 
     call_kwargs = client._client.chat.completions.create.call_args.kwargs
     assert call_kwargs["tool_choice"] == "auto"
+
+
+async def test_chat_stream_uses_minimax_reasoning_split(monkeypatch):
+    """MiniMax voice turns keep reasoning out of streamed content."""
+    client = _make_client(
+        monkeypatch,
+        model="MiniMax-M2.7-highspeed",
+        fallback_models=[],
+    )
+
+    async def fake_chunks():
+        yield MagicMock()
+
+    client._client.chat.completions.create = AsyncMock(return_value=fake_chunks())
+
+    async for _ in client.chat_stream([{"role": "user", "content": "hi"}]):
+        pass
+
+    call_kwargs = client._client.chat.completions.create.call_args.kwargs
+    assert call_kwargs["extra_body"] == {"reasoning_split": True}
+
+
+async def test_chat_stream_omits_minimax_extra_body_when_thinking_enabled(monkeypatch):
+    """thinking=True preserves raw provider reasoning behavior."""
+    client = _make_client(
+        monkeypatch,
+        model="MiniMax-M2.7-highspeed",
+        fallback_models=[],
+    )
+
+    async def fake_chunks():
+        yield MagicMock()
+
+    client._client.chat.completions.create = AsyncMock(return_value=fake_chunks())
+
+    async for _ in client.chat_stream(
+        [{"role": "user", "content": "hi"}],
+        thinking=True,
+    ):
+        pass
+
+    call_kwargs = client._client.chat.completions.create.call_args.kwargs
+    assert "extra_body" not in call_kwargs
+
+
+async def test_chat_stream_does_not_send_minimax_extra_body_to_other_models(monkeypatch):
+    """OpenAI-compatible non-MiniMax providers should not receive MiniMax-only flags."""
+    client = _make_client(monkeypatch, model="primary-model", fallback_models=[])
+
+    async def fake_chunks():
+        yield MagicMock()
+
+    client._client.chat.completions.create = AsyncMock(return_value=fake_chunks())
+
+    async for _ in client.chat_stream([{"role": "user", "content": "hi"}]):
+        pass
+
+    call_kwargs = client._client.chat.completions.create.call_args.kwargs
+    assert "extra_body" not in call_kwargs
+
+
+async def test_chat_completion_uses_minimax_reasoning_split(monkeypatch):
+    """Non-streaming MiniMax calls use the same reasoning/content split."""
+    client = _make_client(
+        monkeypatch,
+        model="MiniMax-M2.7-highspeed",
+        fallback_models=[],
+    )
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "ok"
+    client._client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+    await client.chat_completion([{"role": "user", "content": "hi"}])
+
+    call_kwargs = client._client.chat.completions.create.call_args.kwargs
+    assert call_kwargs["extra_body"] == {"reasoning_split": True}

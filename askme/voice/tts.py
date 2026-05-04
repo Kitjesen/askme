@@ -148,6 +148,7 @@ class TTSEngine(TTSBackend):
         self._playback_busy = threading.Event()
         self._usb_audio_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         self._usb_audio_lock = threading.Lock()
+        self._usb_audio_session_lock = threading.Lock()
         self._usb_audio_binary: str | None = config.get("usb_audio_binary")
         self._usb_audio_source: str | None = config.get("usb_audio_source")
         self._usb_direct_preroll_seconds: float = float(
@@ -163,6 +164,7 @@ class TTSEngine(TTSBackend):
         self._last_aplay_close: float = 0.0  # monotonic time of last aplay close
         _PREROLL_WARM_WINDOW = 5.0  # seconds — DAC stays warm after close
         self._preroll_warm_window = _PREROLL_WARM_WINDOW
+        self._usb_direct_warming = threading.Event()
 
         # AudioRouter for device ownership coordination (optional)
         self._audio_router: AudioRouter | None = audio_router
@@ -378,6 +380,31 @@ class TTSEngine(TTSBackend):
             sd.wait()
         except Exception:
             pass
+
+    def play_feedback_audio(self, audio: np.ndarray, sample_rate: int) -> bool:
+        """Play a short non-TTS feedback sound through the active output path.
+
+        Sunrise uses MCP01 USB direct when ALSA does not expose a usable card.
+        ACK/thinking chimes should use that same path so the user hears prompt
+        feedback during LLM/TTS latency gaps.
+        """
+        if not self._should_use_usb_direct():
+            return False
+
+        samples = np.asarray(audio, dtype=np.float32)
+        if len(samples) == 0:
+            return True
+        if sample_rate != self._sample_rate:
+            samples = self._resample(samples, sample_rate, self._sample_rate)
+        if self._volume != 1.0:
+            samples = samples * self._volume
+            np.clip(samples, -1.0, 1.0, out=samples)
+
+        self._playback_busy.set()
+        try:
+            return self._play_chunk_usb_direct_with_preroll(samples)
+        finally:
+            self._playback_busy.clear()
 
     def drain_buffers(self) -> None:
         """Clear all pending TTS text and audio buffers."""
@@ -791,6 +818,7 @@ class TTSEngine(TTSBackend):
 
     def _kill_usb_audio(self) -> None:
         """Terminate any running MCP01 direct USB playback helper."""
+        self._usb_direct_warming.clear()
         with self._usb_audio_lock:
             proc = self._usb_audio_proc
             self._usb_audio_proc = None
@@ -873,6 +901,46 @@ class TTSEngine(TTSBackend):
         return stereo.tobytes()
 
     def _play_chunk_usb_direct(self, chunk: np.ndarray) -> bool:
+        """Play one chunk through MCP01 USB Audio without ALSA/PortAudio."""
+        return self._play_chunk_usb_direct_scoped(chunk)
+
+    def _play_chunk_usb_direct_with_preroll(self, chunk: np.ndarray) -> bool:
+        """Play one chunk, prepending cold-DAC preroll under the USB session lock."""
+        return self._play_chunk_usb_direct_scoped(chunk, preroll_if_cold=True)
+
+    def _play_chunk_usb_direct_warming(self, chunk: np.ndarray) -> bool:
+        """Play an intentional preroll/prewarm chunk while advertising warm-up state."""
+        return self._play_chunk_usb_direct_scoped(chunk, mark_warming=True)
+
+    def _play_chunk_usb_direct_scoped(
+        self,
+        chunk: np.ndarray,
+        *,
+        preroll_if_cold: bool = False,
+        mark_warming: bool = False,
+    ) -> bool:
+        """Serialize USB ownership, warm-state transition, optional preroll, and playback."""
+        with self._usb_audio_session_lock:
+            samples = np.asarray(chunk, dtype=np.float32)
+            warming_set = False
+            if preroll_if_cold and not self._is_dac_warm():
+                preroll = self._usb_direct_preroll_chunk()
+                if len(preroll) > 0:
+                    samples = np.concatenate([preroll, samples])
+                    mark_warming = True
+            if mark_warming:
+                self._usb_direct_warming.set()
+                warming_set = True
+            try:
+                if self._audio_router is not None:
+                    with self._audio_router.output_session():
+                        return self._play_chunk_usb_direct_locked(samples)
+                return self._play_chunk_usb_direct_locked(samples)
+            finally:
+                if warming_set:
+                    self._usb_direct_warming.clear()
+
+    def _play_chunk_usb_direct_locked(self, chunk: np.ndarray) -> bool:
         """Play one chunk through MCP01 USB Audio without ALSA/PortAudio."""
         binary = self._ensure_usb_audio_binary()
         if binary is None:
@@ -990,17 +1058,6 @@ class TTSEngine(TTSBackend):
             time.sleep(0.02)
 
         merged = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
-        preroll_samples = (
-            0 if self._is_dac_warm()
-            else int(self._sample_rate * self._usb_direct_preroll_seconds)
-        )
-        if preroll_samples > 0:
-            # MCP01/Sunrise eats the first audible samples while the speaker path
-            # wakes. Match the aplay path's low-level deterministic noise so the
-            # hardware is active before speech starts.
-            rng = np.random.RandomState(42)
-            preroll = (rng.randn(preroll_samples) * (200.0 / 32767.0)).astype(np.float32)
-            merged = np.concatenate([preroll, merged.astype(np.float32, copy=False)])
         logger.info(
             "MCP01 USB direct: %d chunks, %d samples = %.3fs",
             len(chunks),
@@ -1010,6 +1067,8 @@ class TTSEngine(TTSBackend):
         return merged.astype(np.float32, copy=False)
 
     def _is_dac_warm(self) -> bool:
+        if self._usb_direct_warming.is_set():
+            return True
         return (
             self._last_aplay_close > 0
             and (time.monotonic() - self._last_aplay_close) < self._preroll_warm_window
@@ -1054,11 +1113,7 @@ class TTSEngine(TTSBackend):
                     )
                     self._playback_busy.set()
                     try:
-                        if self._audio_router is not None:
-                            with self._audio_router.output_session():
-                                self._play_chunk_usb_direct(preroll)
-                        else:
-                            self._play_chunk_usb_direct(preroll)
+                        self._play_chunk_usb_direct_warming(preroll)
                     finally:
                         self._playback_busy.clear()
 
@@ -1159,11 +1214,7 @@ class TTSEngine(TTSBackend):
                         np.clip(chunk, -1.0, 1.0, out=chunk)
 
                     if _use_usb_direct:
-                        if self._audio_router is not None:
-                            with self._audio_router.output_session():
-                                self._play_chunk_usb_direct(chunk)
-                        else:
-                            self._play_chunk_usb_direct(chunk)
+                        self._play_chunk_usb_direct_with_preroll(chunk)
                     elif _aplay_cmd is not None:
                         pcm = (chunk * 32767).clip(-32768, 32767).astype(np.int16)
                         dur = len(chunk) / self._sample_rate
@@ -1220,11 +1271,7 @@ class TTSEngine(TTSBackend):
                                 _router_ctx = None
                             if self._should_try_usb_direct_fallback():
                                 logger.warning("aplay failed; trying MCP01 direct USB fallback")
-                                if self._audio_router is not None:
-                                    with self._audio_router.output_session():
-                                        self._play_chunk_usb_direct(chunk)
-                                else:
-                                    self._play_chunk_usb_direct(chunk)
+                                self._play_chunk_usb_direct_with_preroll(chunk)
                     else:
                         if self._audio_router is not None:
                             with self._audio_router.output_session():

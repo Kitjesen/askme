@@ -479,6 +479,54 @@ class TestChimeSynthesis:
         finally:
             agent.shutdown()
 
+    def test_chime_prefers_tts_feedback_path(self, monkeypatch):
+        """Sunrise chimes should use TTS feedback output before legacy aplay."""
+        import threading
+
+        agent = _make_agent()
+        called = threading.Event()
+
+        def fake_feedback(audio, sample_rate):
+            called.set()
+            assert sample_rate == agent._SR
+            assert len(audio) > 0
+            return True
+
+        monkeypatch.setattr(agent.tts, "play_feedback_audio", fake_feedback)
+        try:
+            agent._play_chime("acknowledge")
+            assert called.wait(timeout=1.0)
+        finally:
+            agent.shutdown()
+
+    def test_thinking_chime_is_suppressed_after_recent_feedback(self, monkeypatch):
+        """Avoid stacking acknowledge + thinking chimes inside one voice turn."""
+        import threading
+        import time
+
+        agent = _make_agent()
+        played: list[int] = []
+        called = threading.Event()
+
+        def fake_feedback(audio, sample_rate):
+            played.append(len(audio))
+            called.set()
+            return True
+
+        monkeypatch.setattr(agent.tts, "play_feedback_audio", fake_feedback)
+        try:
+            agent._play_chime("acknowledge")
+            assert called.wait(timeout=1.0)
+
+            called.clear()
+            agent._play_chime("thinking")
+            time.sleep(0.1)
+
+            assert not called.is_set()
+            assert len(played) == 1
+        finally:
+            agent.shutdown()
+
 
 # ---------------------------------------------------------------------------
 # Barge-in hold constants

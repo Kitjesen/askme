@@ -159,7 +159,8 @@ class LLMClient(LLMBackend):
         """Return an async streaming iterator of ``ChatCompletionChunk``.
 
         Retries on transient errors and falls back to alternate models.
-        ``thinking=False`` by default to skip <think> generation and reduce TTFT.
+        ``thinking=False`` by default keeps MiniMax reasoning out of content so
+        downstream TTS can start from spoken text instead of <think> blocks.
 
         Pass ``cancel_token`` (an asyncio.Event) to support mid-stream E-STOP.
         When the event is set the generator stops yielding and returns cleanly.
@@ -180,15 +181,16 @@ class LLMClient(LLMBackend):
                 kwargs["tools"] = tools
             if tool_choice is not None:
                 kwargs["tool_choice"] = tool_choice
-            # Disable MiniMax thinking for faster TTFT on conversational turns
-            if not thinking:
-                kwargs["extra_body"] = {"thinking": {"enabled": False}}
-
             models_to_try = self._model_chain(model)
 
             for model_name in models_to_try:
                 last_model_name = model_name
                 kwargs["model"] = model_name
+                extra_body = self._extra_body_for_model(model_name, thinking=thinking)
+                if extra_body is None:
+                    kwargs.pop("extra_body", None)
+                else:
+                    kwargs["extra_body"] = extra_body
                 streaming_started = False
                 try:
                     async for chunk in self._stream_with_retry(kwargs, cancel_token=cancel_token):
@@ -270,14 +272,16 @@ class LLMClient(LLMBackend):
                 kwargs["tools"] = tools
             if tool_choice is not None:
                 kwargs["tool_choice"] = tool_choice
-            if not thinking:
-                kwargs["extra_body"] = {"thinking": {"enabled": False}}
-
             models_to_try = self._model_chain(model)
 
             for model_name in models_to_try:
                 last_model_name = model_name
                 kwargs["model"] = model_name
+                extra_body = self._extra_body_for_model(model_name, thinking=thinking)
+                if extra_body is None:
+                    kwargs.pop("extra_body", None)
+                else:
+                    kwargs["extra_body"] = extra_body
                 try:
                     result = await self._completion_with_retry(kwargs)
                     success = True
@@ -339,6 +343,21 @@ class LLMClient(LLMBackend):
             if primary_is_minimax == fb_is_minimax:
                 chain.append(fb)
         return chain
+
+    @staticmethod
+    def _extra_body_for_model(model: str, *, thinking: bool) -> dict[str, Any] | None:
+        """Return provider-specific request body extensions for a model.
+
+        MiniMax's OpenAI-compatible endpoint supports ``reasoning_split``.  It
+        does not disable reasoning, but it keeps reasoning deltas out of
+        ``delta.content`` so the voice pipeline does not wait for or speak
+        ``<think>`` content on fast conversational turns.
+        """
+        if thinking:
+            return None
+        if model.lower().startswith("minimax"):
+            return {"reasoning_split": True}
+        return None
 
     async def _stream_with_retry(
         self,

@@ -1,51 +1,77 @@
 #!/usr/bin/env python3
-"""Cloud ASR: HK-MIC (card0, 48kHz 2ch) → resample → DashScope + local ASR."""
+"""Cloud ASR: product MicInput path -> DashScope + local ASR."""
+import json
 import os
 import sys
-import json
-import time
 import threading
+import time
 import uuid
 import wave
+from math import gcd
+
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-import sounddevice as sd
-import soxr
 import websocket
+
+from askme.config import get_config
+from askme.voice.asr import ASREngine
+from askme.voice.mic_input import MicInput
 
 api_key = os.environ.get("DASHSCOPE_API_KEY", "")
 if not api_key:
     print("DASHSCOPE_API_KEY not set", flush=True)
     sys.exit(1)
 
-DEVICE = 0       # card0 = HK-MIC
-NATIVE_RATE = 48000
 TARGET_RATE = 16000
 DURATION = 5
+cfg = get_config()
 
 # Countdown
 for i in range(3, 0, -1):
     print(f"  {i}...", flush=True)
     time.sleep(1)
 
-print(f"RECORDING {DURATION}s! SPEAK NOW!", flush=True)
-rec = sd.rec(int(DURATION * NATIVE_RATE), samplerate=NATIVE_RATE, channels=2, dtype="float32", device=DEVICE)
-sd.wait()
+print(f"RECORDING {DURATION}s through MicInput! SPEAK NOW!", flush=True)
+mic = MicInput.from_config(cfg)
+chunks: list[np.ndarray] = []
+deadline = time.monotonic() + DURATION
+with mic.open():
+    while time.monotonic() < deadline:
+        chunks.append(mic.read_chunk())
 
-# Use channel 0 (stronger signal)
-raw = rec[:, 0]
-dc = np.mean(raw)
+raw = np.concatenate(chunks).astype(np.float32) if chunks else np.empty(0, dtype=np.float32)
+dc = float(np.mean(raw)) if len(raw) else 0.0
 raw = raw - dc
-peak = np.max(np.abs(raw))
-rms = np.sqrt(np.mean(raw ** 2))
-print(f"Ch0: DC={dc:.4f} peak={peak:.4f}({int(peak*32768)}) rms={rms:.4f}", flush=True)
+peak = float(np.max(np.abs(raw))) if len(raw) else 0.0
+rms = float(np.sqrt(np.mean(raw ** 2))) if len(raw) else 0.0
+print(
+    f"MicInput: {mic._native_rate}Hz {mic._native_channels}ch -> {mic.sample_rate}Hz mono",
+    flush=True,
+)
+print(f"Audio: DC={dc:.4f} peak={peak:.4f}({int(peak*32768)}) rms={rms:.4f}", flush=True)
+if len(raw) == 0:
+    print("No MicInput samples captured; cannot run ASR.", flush=True)
+    sys.exit(2)
 
-# Resample 48k → 16k with soxr
-audio_16k = soxr.resample(raw, NATIVE_RATE, TARGET_RATE, quality="VHQ").astype(np.float32)
-pcm16 = (audio_16k * 32768).clip(-32768, 32767).astype(np.int16)
-print(f"Resampled: peak={int(np.max(np.abs(pcm16)))}", flush=True)
+asr_audio = raw
+if mic.sample_rate != TARGET_RATE:
+    from scipy.signal import resample_poly
+
+    rate_gcd = gcd(TARGET_RATE, mic.sample_rate)
+    asr_audio = resample_poly(
+        raw,
+        TARGET_RATE // rate_gcd,
+        mic.sample_rate // rate_gcd,
+    ).astype(np.float32)
+    asr_audio = np.clip(asr_audio, -1.0, 1.0)
+    print(f"Resampled for ASR: {mic.sample_rate}Hz -> {TARGET_RATE}Hz", flush=True)
+else:
+    print(f"ASR audio rate: {TARGET_RATE}Hz", flush=True)
+
+pcm16 = (asr_audio * 32768).clip(-32768, 32767).astype(np.int16)
+print(f"PCM16: peak={int(np.max(np.abs(pcm16)))}", flush=True)
 
 # Save wav
 with wave.open("/tmp/mic_hkmic.wav", "w") as wf:
@@ -56,13 +82,10 @@ with wave.open("/tmp/mic_hkmic.wav", "w") as wf:
 
 # Local ASR
 print("\n=== Local ASR ===", flush=True)
-from askme.voice.asr import ASREngine
-from askme.config import get_config
-cfg = get_config()
 engine = ASREngine(cfg.get("voice", {}).get("asr", {}))
 stream = engine.recognizer.create_stream()
-for i in range(0, len(audio_16k), 1600):
-    stream.accept_waveform(TARGET_RATE, audio_16k[i:i+1600])
+for i in range(0, len(asr_audio), 1600):
+    stream.accept_waveform(TARGET_RATE, asr_audio[i:i + 1600])
     while engine.recognizer.is_ready(stream):
         engine.recognizer.decode_stream(stream)
 local_text = engine.recognizer.get_result(stream).strip()
@@ -124,6 +147,6 @@ result_ready.wait(timeout=10)
 ws.close()
 
 print(f"Cloud: '{result_text}'", flush=True)
-print(f"\n=== Result ===", flush=True)
+print("\n=== Result ===", flush=True)
 print(f"  Local: '{local_text}'", flush=True)
 print(f"  Cloud: '{result_text}'", flush=True)
