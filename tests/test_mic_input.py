@@ -1,5 +1,6 @@
 """Tests for MicInput module."""
 
+import io
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -53,6 +54,11 @@ class TestMicInputInit:
         cfg = {"voice": {}}
         mic = MicInput.from_config(cfg)
         assert mic._device is None
+
+    def test_from_config_input_transport(self):
+        cfg = {"voice": {"input_transport": "usb_direct"}}
+        mic = MicInput.from_config(cfg)
+        assert mic._input_transport == "usb_direct"
 
 
 class TestPreRoll:
@@ -116,3 +122,72 @@ class TestMicInputOpen:
         with mic.open():
             pass
         router.wait_for_input_ready.assert_called_once_with(timeout=10.0)
+
+
+class TestMicInputUsbDirect:
+    def test_usb_direct_read_chunk_from_helper(self, monkeypatch):
+        pcm = np.arange(1600, dtype=np.int16).tobytes()
+        captured: dict[str, list[str]] = {}
+
+        class _FakeProc:
+            def __init__(self) -> None:
+                self.stdout = io.BytesIO(pcm)
+                self.stderr = io.BytesIO()
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = -15
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        def fake_popen(args, **_kwargs):
+            captured["args"] = args
+            return _FakeProc()
+
+        mic = MicInput(input_transport="usb_direct")
+        monkeypatch.setattr(mic, "_ensure_usb_audio_binary", lambda: "helper")
+        monkeypatch.setattr("askme.voice.mic_input.subprocess.Popen", fake_popen)
+
+        mic.start()
+        try:
+            chunk = mic.read_chunk()
+        finally:
+            mic.stop()
+
+        assert captured["args"] == [
+            "helper",
+            "--play-ms",
+            "0",
+            "--capture-ms",
+            "0",
+            "--capture-stdout",
+        ]
+        assert chunk.shape == (1600,)
+        assert chunk.dtype == np.float32
+        assert chunk[1] == pytest.approx(1 / 32768.0)
+
+    def test_auto_transport_uses_usb_when_alsa_has_no_cards(self, monkeypatch):
+        mic = MicInput()
+        started: dict[str, bool] = {}
+
+        def fake_start_usb():
+            started["called"] = True
+            mic._usb_audio_proc = MagicMock()
+
+        monkeypatch.setattr(mic, "_alsa_input_available", lambda: False)
+        monkeypatch.setattr(mic, "_mcp01_visible", lambda: True)
+        monkeypatch.setattr(mic, "_start_usb_direct", fake_start_usb)
+
+        mic.start()
+        try:
+            assert started["called"] is True
+            assert mic.is_open is True
+        finally:
+            mic._usb_audio_proc = None

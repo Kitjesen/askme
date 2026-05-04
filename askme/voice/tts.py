@@ -149,6 +149,12 @@ class TTSEngine(TTSBackend):
         self._usb_audio_lock = threading.Lock()
         self._usb_audio_binary: str | None = config.get("usb_audio_binary")
         self._usb_audio_source: str | None = config.get("usb_audio_source")
+        self._usb_direct_preroll_seconds: float = float(
+            config.get("usb_direct_preroll_seconds", 1.5)
+        )
+        self._usb_direct_coalesce_timeout: float = float(
+            config.get("usb_direct_coalesce_timeout", 8.0)
+        )
         self._usb_audio_build_failed = False
         # Immediate stop flag: checked by _playback_loop to abort mid-chunk
         self._stop_requested = threading.Event()
@@ -799,8 +805,6 @@ class TTSEngine(TTSBackend):
         return Path(__file__).resolve().parents[2] / "scripts" / "bench" / "mcp01_usb_audio_libusb.c"
 
     def _ensure_usb_audio_binary(self) -> str | None:
-        if self._usb_audio_binary and Path(self._usb_audio_binary).exists():
-            return self._usb_audio_binary
         if self._usb_audio_build_failed:
             return None
 
@@ -808,6 +812,8 @@ class TTSEngine(TTSBackend):
         binary = Path(tempfile.gettempdir()) / "askme_mcp01_usb_audio_libusb"
         if os.name == "nt":
             binary = binary.with_suffix(".exe")
+        if self._usb_audio_binary:
+            binary = Path(self._usb_audio_binary)
         self._usb_audio_binary = str(binary)
 
         try:
@@ -910,7 +916,7 @@ class TTSEngine(TTSBackend):
                 stderr.decode(errors="replace").strip(),
             )
             return False
-        logger.debug("MCP01 USB audio playback ok: %s", stdout.decode(errors="replace").strip())
+        logger.info("MCP01 USB audio playback ok: %s", stdout.decode(errors="replace").strip())
         self._last_aplay_close = time.monotonic()
         return True
 
@@ -950,6 +956,52 @@ class TTSEngine(TTSBackend):
         if self._output_transport != "auto":
             return False
         return self._is_plughw_output()
+
+    def _collect_usb_direct_chunk(self, first_chunk: np.ndarray) -> np.ndarray:
+        """Coalesce streamed TTS chunks into one continuous MCP01 USB play."""
+        chunks = [np.asarray(first_chunk, dtype=np.float32)]
+        deadline = time.monotonic() + self._usb_direct_coalesce_timeout
+        last_audio_at = time.monotonic()
+        settle_seconds = 0.08
+
+        while self._is_playing and not self._stop_requested.is_set():
+            drained: list[np.ndarray] = []
+            with self._buffer_lock:
+                while self.tts_buffer:
+                    drained.append(self.tts_buffer.popleft())
+
+            if drained:
+                chunks.extend(np.asarray(chunk, dtype=np.float32) for chunk in drained)
+                last_audio_at = time.monotonic()
+
+            generation_pending = getattr(self.tts_text_queue, "unfinished_tasks", 0) > 0
+            now = time.monotonic()
+            if not generation_pending and now - last_audio_at >= settle_seconds:
+                break
+            if now >= deadline:
+                logger.debug(
+                    "MCP01 USB direct coalesce timeout after %.1fs",
+                    self._usb_direct_coalesce_timeout,
+                )
+                break
+            time.sleep(0.02)
+
+        merged = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+        preroll_samples = int(self._sample_rate * self._usb_direct_preroll_seconds)
+        if preroll_samples > 0:
+            # MCP01/Sunrise eats the first audible samples while the speaker path
+            # wakes. Match the aplay path's low-level deterministic noise so the
+            # hardware is active before speech starts.
+            rng = np.random.RandomState(42)
+            preroll = (rng.randn(preroll_samples) * (200.0 / 32767.0)).astype(np.float32)
+            merged = np.concatenate([preroll, merged.astype(np.float32, copy=False)])
+        logger.info(
+            "MCP01 USB direct: %d chunks, %d samples = %.3fs",
+            len(chunks),
+            len(merged),
+            len(merged) / self._sample_rate,
+        )
+        return merged.astype(np.float32, copy=False)
 
     def _playback_loop(self) -> None:
         """Drain tts_buffer one sentence at a time.
@@ -1059,6 +1111,10 @@ class TTSEngine(TTSBackend):
 
                 if chunk is not None and len(chunk) > 0:
                     _empty_polls = 0
+                    if _use_usb_direct:
+                        chunk = self._collect_usb_direct_chunk(chunk)
+                        if self._stop_requested.is_set():
+                            continue
                     # Apply volume
                     if self._volume != 1.0:
                         chunk = chunk * self._volume

@@ -140,7 +140,13 @@ def test_playback_loop_uses_usb_direct_transport(monkeypatch):
 
     played: dict[str, int] = {}
 
-    engine = TTSEngine({"backend": "edge", "output_transport": "usb_direct"})
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "usb_direct_preroll_seconds": 0.0,
+        }
+    )
 
     def fake_usb_play(chunk):
         played["samples"] = len(chunk)
@@ -157,6 +163,45 @@ def test_playback_loop_uses_usb_direct_transport(monkeypatch):
         engine.shutdown()
 
     assert played["samples"] == 100
+
+
+def test_usb_direct_playback_coalesces_chunks_and_adds_preroll(monkeypatch):
+    """MiniMax streamed chunks should become one continuous MCP01 USB play."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    played: dict[str, np.ndarray] = {}
+
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 16000,
+            "usb_direct_preroll_seconds": 0.1,
+            "usb_direct_coalesce_timeout": 0.2,
+        }
+    )
+
+    def fake_usb_play(chunk):
+        played["chunk"] = chunk.copy()
+        engine._is_playing = False
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct", fake_usb_play)
+    try:
+        engine.tts_buffer.append(np.ones(160, dtype=np.float32) * 0.2)
+        engine.tts_buffer.append(np.ones(160, dtype=np.float32) * 0.3)
+        engine._is_playing = True
+        engine._playback_loop()
+    finally:
+        engine.shutdown()
+
+    chunk = played["chunk"]
+    assert len(chunk) == 1600 + 320
+    assert np.max(np.abs(chunk[:1600])) < 0.04
+    assert np.allclose(chunk[1600:1760], 0.2)
+    assert np.allclose(chunk[1760:], 0.3)
 
 
 def test_playback_loop_falls_back_to_usb_when_aplay_pipe_breaks(monkeypatch):
@@ -182,7 +227,12 @@ def test_playback_loop_falls_back_to_usb_when_aplay_pipe_breaks(monkeypatch):
         return _BrokenProc()
 
     engine = TTSEngine(
-        {"backend": "edge", "output_device": "plughw:1,0", "output_transport": "auto"}
+        {
+            "backend": "edge",
+            "output_device": "plughw:1,0",
+            "output_transport": "auto",
+            "usb_direct_preroll_seconds": 0.0,
+        }
     )
 
     def fake_usb_play(chunk):
@@ -212,7 +262,12 @@ def test_auto_transport_uses_usb_when_plughw_has_no_alsa_card(monkeypatch):
     played: dict[str, int] = {}
 
     engine = TTSEngine(
-        {"backend": "edge", "output_device": "plughw:1,0", "output_transport": "auto"}
+        {
+            "backend": "edge",
+            "output_device": "plughw:1,0",
+            "output_transport": "auto",
+            "usb_direct_preroll_seconds": 0.0,
+        }
     )
 
     def fake_usb_play(chunk):

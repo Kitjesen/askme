@@ -47,13 +47,16 @@ struct play_state {
 
 struct capture_state {
     int packet_budget;
+    int continuous;
     int submitted_packets;
     int completed_packets;
     int active;
     int errors;
+    int raw_errors;
     long long sumsq;
     int samples;
     int max_abs;
+    FILE *raw_out;
 };
 
 static libusb_device_handle *open_mcp01(libusb_context *ctx) {
@@ -100,7 +103,7 @@ static int claim_interfaces(libusb_device_handle *handle, int streaming_iface) {
 static void configure_playback(libusb_device_handle *handle) {
     unsigned char freq_48k[3] = {0x80, 0xbb, 0x00};
     unsigned char mute = 0;
-    unsigned char vol_0db[2] = {0x00, 0x00};
+    unsigned char volume[2] = {0xf0, 0xff};
     int r;
 
     r = libusb_control_transfer(handle, 0x22, 0x01, 0x0100, EP_PLAYBACK,
@@ -111,9 +114,19 @@ static void configure_playback(libusb_device_handle *handle) {
                                 (9 << 8) | IFACE_CONTROL, &mute, sizeof(mute), 1000);
     fprintf(stderr, "set speaker mute=0 result=%d\n", r);
 
+    r = libusb_control_transfer(handle, 0xa1, 0x83, 0x0200,
+                                (9 << 8) | IFACE_CONTROL, volume, sizeof(volume), 1000);
+    if (r == (int)sizeof(volume)) {
+        fprintf(stderr, "speaker max volume raw=%02x%02x\n", volume[0], volume[1]);
+    } else {
+        fprintf(stderr, "get speaker max volume result=%d; using cached MCP01 max\n", r);
+        volume[0] = 0xf0;
+        volume[1] = 0xff;
+    }
+
     r = libusb_control_transfer(handle, 0x21, 0x01, 0x0200,
-                                (9 << 8) | IFACE_CONTROL, vol_0db, sizeof(vol_0db), 1000);
-    fprintf(stderr, "set speaker volume=0dB result=%d\n", r);
+                                (9 << 8) | IFACE_CONTROL, volume, sizeof(volume), 1000);
+    fprintf(stderr, "set speaker volume=max result=%d\n", r);
 }
 
 static void fill_play_tone(struct play_state *state, unsigned char *buffer) {
@@ -225,6 +238,7 @@ static int run_play(int ms, int amp, double freq) {
         libusb_fill_iso_transfer(transfers[i], handle, EP_PLAYBACK, buffer,
                                  PLAY_PACKETS_PER_TRANSFER * PLAY_PACKET_SIZE,
                                  PLAY_PACKETS_PER_TRANSFER, play_callback, &state, 1000);
+        if (state.next_packet >= state.total_packets) break;
         r = submit_play_transfer(transfers[i], &state);
         if (r == 0) {
             state.active++;
@@ -310,6 +324,7 @@ static int run_play_pcm(const unsigned char *pcm, int pcm_len) {
         libusb_fill_iso_transfer(transfers[i], handle, EP_PLAYBACK, buffer,
                                  PLAY_PACKETS_PER_TRANSFER * PLAY_PACKET_SIZE,
                                  PLAY_PACKETS_PER_TRANSFER, play_callback, &state, 1000);
+        if (state.next_packet >= state.total_packets) break;
         r = submit_play_transfer(transfers[i], &state);
         if (r == 0) {
             state.active++;
@@ -364,6 +379,16 @@ static void capture_callback(struct libusb_transfer *transfer) {
                 continue;
             }
             unsigned char *data = libusb_get_iso_packet_buffer_simple(transfer, p);
+            if (state->raw_out != NULL && desc->actual_length > 0) {
+                size_t written = fwrite(data, 1, (size_t)desc->actual_length, state->raw_out);
+                if (written != (size_t)desc->actual_length) {
+                    state->errors++;
+                    state->raw_errors++;
+                    state->continuous = 0;
+                    state->packet_budget = 0;
+                    continue;
+                }
+            }
             int16_t *samples = (int16_t *)data;
             int count = desc->actual_length / 2;
             for (int i = 0; i < count; ++i) {
@@ -377,7 +402,7 @@ static void capture_callback(struct libusb_transfer *transfer) {
         }
     }
 
-    if (state->packet_budget > 0) {
+    if (state->continuous || state->packet_budget > 0) {
         if (submit_capture_transfer(transfer, state) == 0) return;
         state->errors++;
     }
@@ -386,8 +411,11 @@ static void capture_callback(struct libusb_transfer *transfer) {
 
 static int submit_capture_transfer(struct libusb_transfer *transfer, struct capture_state *state) {
     int packets = CAPTURE_PACKETS_PER_TRANSFER;
-    if (state->packet_budget <= 0) return -1;
-    if (state->packet_budget < packets) packets = state->packet_budget;
+    if (!state->continuous) {
+        if (state->packet_budget <= 0) return -1;
+        if (state->packet_budget < packets) packets = state->packet_budget;
+        state->packet_budget -= packets;
+    }
 
     memset(transfer->buffer, 0, CAPTURE_PACKETS_PER_TRANSFER * CAPTURE_PACKET_SIZE);
     transfer->length = packets * CAPTURE_PACKET_SIZE;
@@ -397,12 +425,11 @@ static int submit_capture_transfer(struct libusb_transfer *transfer, struct capt
         transfer->iso_packet_desc[i].actual_length = 0;
         transfer->iso_packet_desc[i].status = 0;
     }
-    state->packet_budget -= packets;
     state->submitted_packets += packets;
     return libusb_submit_transfer(transfer);
 }
 
-static int run_capture(int ms) {
+static int run_capture(int ms, FILE *raw_out) {
     libusb_context *ctx = NULL;
     libusb_device_handle *handle = NULL;
     struct capture_state state;
@@ -412,6 +439,12 @@ static int run_capture(int ms) {
     memset(&state, 0, sizeof(state));
     memset(transfers, 0, sizeof(transfers));
     state.packet_budget = ms;
+    state.continuous = (ms <= 0 && raw_out != NULL);
+    state.raw_out = raw_out;
+
+    if (raw_out != NULL) {
+        setvbuf(raw_out, NULL, _IONBF, 0);
+    }
 
     int r = libusb_init(&ctx);
     if (r < 0) {
@@ -442,6 +475,7 @@ static int run_capture(int ms) {
         libusb_fill_iso_transfer(transfers[i], handle, EP_CAPTURE, buffer,
                                  CAPTURE_PACKETS_PER_TRANSFER * CAPTURE_PACKET_SIZE,
                                  CAPTURE_PACKETS_PER_TRANSFER, capture_callback, &state, 1000);
+        if (!state.continuous && state.packet_budget <= 0) break;
         r = submit_capture_transfer(transfers[i], &state);
         if (r == 0) {
             state.active++;
@@ -477,9 +511,11 @@ cleanup:
     if (state.samples > 0) {
         rms = sqrt((double)state.sumsq / (double)state.samples);
     }
-    printf("capture_done submitted_packets=%d completed_packets=%d samples=%d rms=%.2f max_abs=%d errors=%d\n",
-           state.submitted_packets, state.completed_packets, state.samples,
-           rms, state.max_abs, state.errors);
+    FILE *summary = raw_out != NULL ? stderr : stdout;
+    fprintf(summary,
+            "capture_done submitted_packets=%d completed_packets=%d samples=%d rms=%.2f max_abs=%d errors=%d raw_errors=%d\n",
+            state.submitted_packets, state.completed_packets, state.samples,
+            rms, state.max_abs, state.errors, state.raw_errors);
 
     if (result != 0) return result;
     return state.errors ? 5 : 0;
@@ -487,7 +523,7 @@ cleanup:
 
 static void usage(const char *argv0) {
     fprintf(stderr,
-            "Usage: %s [--play-ms N] [--capture-ms N] [--freq HZ] [--amp N] [--stdin-play]\n"
+            "Usage: %s [--play-ms N] [--capture-ms N] [--freq HZ] [--amp N] [--stdin-play] [--capture-stdout]\n"
             "Default: play 3000ms tone and capture 3000ms from Lenovo MCP01 (17ef:a03b).\n"
             "--stdin-play reads 48kHz stereo S16_LE PCM from stdin and streams it to USB.\n",
             argv0);
@@ -544,6 +580,7 @@ int main(int argc, char **argv) {
     int amp = 9000;
     double freq = 1000.0;
     int stdin_play = 0;
+    int capture_stdout = 0;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--play-ms") == 0 && i + 1 < argc) {
@@ -557,6 +594,9 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--stdin-play") == 0) {
             stdin_play = 1;
             play_ms = 0;
+        } else if (strcmp(argv[i], "--capture-stdout") == 0) {
+            capture_stdout = 1;
+            play_ms = 0;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 0;
@@ -567,6 +607,11 @@ int main(int argc, char **argv) {
     }
 
     if (play_ms < 0 || capture_ms < 0 || amp < 0 || amp > 32767 || freq <= 0.0) {
+        usage(argv[0]);
+        return 64;
+    }
+    if (capture_stdout && stdin_play) {
+        fprintf(stderr, "--capture-stdout cannot be combined with playback\n");
         usage(argv[0]);
         return 64;
     }
@@ -585,8 +630,8 @@ int main(int argc, char **argv) {
         int play_rc = run_play(play_ms, amp, freq);
         if (play_rc != 0) rc = play_rc;
     }
-    if (capture_ms > 0) {
-        int capture_rc = run_capture(capture_ms);
+    if (capture_ms > 0 || capture_stdout) {
+        int capture_rc = run_capture(capture_ms, capture_stdout ? stdout : NULL);
         if (capture_rc != 0 && rc == 0) rc = capture_rc;
     }
     return rc;

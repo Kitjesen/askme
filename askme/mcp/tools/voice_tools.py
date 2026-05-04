@@ -45,20 +45,19 @@ async def voice_listen(ctx: Context) -> str:
 
 def _listen_sync(app: AppContext) -> str | None:
     """Blocking microphone listen — runs in a worker thread."""
-    import sounddevice as sd
+    from askme.voice.mic_input import MicInput
 
     asr = app.asr_engine
     vad = app.vad_engine
     sample_rate: int = asr.sample_rate
-    samples_per_read = int(0.1 * sample_rate)  # 100 ms chunks
     speech_active = False
 
     stream = asr.create_stream()
+    mic = MicInput.from_config(app.config)
 
-    with sd.InputStream(channels=1, dtype="float32", samplerate=sample_rate) as s:
+    with mic.open() as mic_ctx:
         for _ in range(300):  # 300 × 100 ms = 30 s timeout
-            samples, _ = s.read(samples_per_read)
-            samples = samples.reshape(-1)
+            samples = mic_ctx.read_chunk()
 
             samples_int16 = (samples * 32768).astype(np.int16)
             vad.accept_waveform(samples_int16)

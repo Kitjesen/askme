@@ -100,6 +100,9 @@ voice:
   # null = system default. On sunrise: 0 = HK-MIC (hw:0,0), 1 = MCP01 (hw:1,0, mic dead)
   # On Windows: null uses system default mic (Realtek). Set to specific index if needed.
   input_device: null
+  # Input transport: auto uses sounddevice when ALSA is healthy and falls back to
+  # MCP01 direct USB capture on Sunrise when the custom kernel exposes no ALSA card.
+  input_transport: auto
   # HK-MIC native rate is 48kHz 2ch — MicInput resamples to 16kHz mono
   # On Windows Realtek: typically 44100Hz. Set to match your mic's native rate.
   mic_native_rate: 44100
@@ -242,6 +245,11 @@ voice:
     # direct USB playback if Sunrise exposes no ALSA card; "usb_direct" forces
     # the fallback path for the Lenovo MCP01 USB Audio speaker.
     output_transport: auto
+    # MCP01 wakes slowly when opened through direct USB. Add a short silence
+    # pre-roll and coalesce streamed MiniMax chunks to avoid clipped starts and
+    # choppy playback on Sunrise.
+    usb_direct_preroll_seconds: 1.5
+    usb_direct_coalesce_timeout: 8.0
 
 # ----------------------------------------------------------
 # Vision: qp-perception (YOLO detection + tracking)

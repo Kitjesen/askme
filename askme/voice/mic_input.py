@@ -22,9 +22,14 @@ from __future__ import annotations
 
 import collections
 import logging
+import os
 import queue
+import shutil
+import subprocess
+import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -61,6 +66,7 @@ class MicInput:
     Config keys (under ``voice``)::
 
         input_device: int|str|null      - Device index or ALSA name (null=default)
+        input_transport: str            - "auto", "sounddevice", or "usb_direct"
         asr.sample_rate: int            - Target sample rate for ASR (default 16000)
         mic_native_rate: int|null       - Mic hardware sample rate (null=same as asr)
         mic_channels: int               - Mic hardware channels (default 1)
@@ -82,12 +88,20 @@ class MicInput:
         mic_channel_select: int = 0,
         mic_highpass_hz: int = 80,
         mic_agc_target_rms: float = 0.15,
+        input_transport: str = "auto",
+        usb_audio_binary: str | None = None,
+        usb_audio_source: str | None = None,
     ) -> None:
         self._device = device
         self._sample_rate = sample_rate
+        self._chunk_ms = chunk_ms
         self._chunk_samples = int(chunk_ms / 1000 * sample_rate)
         self._audio_router = audio_router
         self._stream: sd.InputStream | None = None
+        self._input_transport = input_transport.lower()
+        if self._input_transport not in {"auto", "sounddevice", "usb_direct"}:
+            logger.warning("Unknown mic input_transport=%s; using auto", input_transport)
+            self._input_transport = "auto"
 
         # Resampling pipeline config
         self._native_rate = mic_native_rate or sample_rate
@@ -107,6 +121,10 @@ class MicInput:
 
         # Callback-based audio queue (replaces blocking stream.read)
         self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()
+        self._usb_audio_binary: str | None = usb_audio_binary
+        self._usb_audio_source: str | None = usb_audio_source
+        self._usb_audio_build_failed = False
+        self._usb_audio_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
 
         # Pre-roll buffer: recent chunks for catching speech onset
         self.pre_roll: collections.deque[np.ndarray] = collections.deque(
@@ -123,7 +141,7 @@ class MicInput:
 
     @property
     def is_open(self) -> bool:
-        return self._stream is not None
+        return self._stream is not None or self._usb_audio_proc is not None
 
     def _init_pipeline(self) -> None:
         """Initialize the signal processing pipeline for resampling mics."""
@@ -213,8 +231,16 @@ class MicInput:
         The mic stays open across listen/speak cycles so VAD can detect
         barge-in during TTS playback and LLM processing.
         """
-        if self._stream is not None:
+        if self.is_open:
             return  # already open
+
+        if self._should_use_usb_direct():
+            self._start_usb_direct()
+            self.pre_roll.clear()
+            if self._audio_router is not None:
+                self._audio_router.wait_for_input_ready(timeout=10.0)
+            logger.info("MicInput: started MCP01 direct USB capture")
+            return
 
         self._init_pipeline()
 
@@ -248,6 +274,18 @@ class MicInput:
             self._stream.close()
             self._stream = None
             logger.info("MicInput: stopped")
+        if self._usb_audio_proc is not None:
+            proc = self._usb_audio_proc
+            self._usb_audio_proc = None
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception as exc:
+                    logger.debug("MCP01 USB capture kill failed (ignored): %s", exc)
+            logger.info("MicInput: stopped MCP01 direct USB capture")
 
     def _flush_queue(self) -> None:
         """Discard stale audio chunks from the callback queue."""
@@ -279,6 +317,9 @@ class MicInput:
         Returns float32 array of shape ``(chunk_samples,)`` at ``sample_rate``.
         Raises RuntimeError if mic is not open.
         """
+        if self._usb_audio_proc is not None:
+            return self._read_usb_direct_chunk()
+
         if self._stream is None:
             raise RuntimeError("MicInput not open — use 'with mic.open():'")
 
@@ -296,6 +337,161 @@ class MicInput:
             return self._process_chunk(raw)
         else:
             return raw.reshape(-1)
+
+    def _usb_direct_source_path(self) -> Path:
+        if self._usb_audio_source:
+            return Path(self._usb_audio_source)
+        return Path(__file__).resolve().parents[2] / "scripts" / "bench" / "mcp01_usb_audio_libusb.c"
+
+    def _ensure_usb_audio_binary(self) -> str | None:
+        if self._usb_audio_build_failed:
+            return None
+
+        source = self._usb_direct_source_path()
+        binary = Path(tempfile.gettempdir()) / "askme_mcp01_usb_audio_libusb"
+        if os.name == "nt":
+            binary = binary.with_suffix(".exe")
+        if self._usb_audio_binary:
+            binary = Path(self._usb_audio_binary)
+        self._usb_audio_binary = str(binary)
+
+        try:
+            if binary.exists() and binary.stat().st_mtime >= source.stat().st_mtime:
+                return str(binary)
+        except OSError:
+            pass
+
+        if not source.exists():
+            logger.warning("MCP01 USB audio source not found: %s", source)
+            self._usb_audio_build_failed = True
+            return None
+        if shutil.which("gcc") is None or shutil.which("pkg-config") is None:
+            logger.warning("MCP01 USB input requires gcc and pkg-config")
+            self._usb_audio_build_failed = True
+            return None
+
+        pkg = subprocess.run(
+            ["pkg-config", "--cflags", "--libs", "libusb-1.0"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if pkg.returncode != 0:
+            logger.warning("MCP01 USB input requires libusb-1.0 development files")
+            self._usb_audio_build_failed = True
+            return None
+
+        cmd = [
+            "gcc",
+            str(source),
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-o",
+            str(binary),
+            *pkg.stdout.split(),
+            "-lm",
+        ]
+        build = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if build.returncode != 0:
+            logger.warning("MCP01 USB input helper build failed: %s", build.stderr.strip())
+            self._usb_audio_build_failed = True
+            return None
+        return str(binary)
+
+    def _alsa_input_available(self) -> bool:
+        """Return False when ALSA/PortAudio clearly has no input device."""
+        if os.name != "posix":
+            return True
+
+        cards_path = Path("/proc/asound/cards")
+        try:
+            cards_text = cards_path.read_text(encoding="utf-8", errors="ignore").lower()
+        except OSError:
+            cards_text = ""
+        if "no soundcards" in cards_text:
+            return False
+
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return False
+
+        if isinstance(devices, dict):
+            return int(devices.get("max_input_channels", 0) or 0) > 0
+        try:
+            return any(int(device.get("max_input_channels", 0) or 0) > 0 for device in devices)
+        except Exception:
+            return False
+
+    def _mcp01_visible(self) -> bool:
+        if os.name != "posix":
+            return False
+        if shutil.which("lsusb") is None:
+            return True
+        try:
+            result = subprocess.run(
+                ["lsusb"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0 and "17ef:a03b" in result.stdout.lower()
+
+    def _should_use_usb_direct(self) -> bool:
+        if self._input_transport == "usb_direct":
+            return True
+        if self._input_transport != "auto":
+            return False
+        return not self._alsa_input_available() and self._mcp01_visible()
+
+    def _start_usb_direct(self) -> None:
+        binary = self._ensure_usb_audio_binary()
+        if binary is None:
+            raise RuntimeError("MCP01 USB input helper is not available")
+
+        self._usb_audio_proc = subprocess.Popen(
+            [binary, "--play-ms", "0", "--capture-ms", "0", "--capture-stdout"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def _read_usb_direct_chunk(self) -> np.ndarray:
+        proc = self._usb_audio_proc
+        if proc is None or proc.stdout is None:
+            raise RuntimeError("MicInput not open")
+
+        usb_rate = 16000
+        usb_samples = int(self._chunk_ms / 1000 * usb_rate)
+        byte_count = usb_samples * 2
+        data = bytearray()
+        while len(data) < byte_count:
+            chunk = proc.stdout.read(byte_count - len(data))
+            if not chunk:
+                stderr = ""
+                if proc.poll() is not None and proc.stderr is not None:
+                    stderr = proc.stderr.read().decode(errors="replace").strip()
+                self.stop()
+                raise RuntimeError(f"MCP01 USB input stopped unexpectedly: {stderr}")
+            data.extend(chunk)
+
+        samples = np.frombuffer(bytes(data), dtype="<i2").astype(np.float32) / 32768.0
+        if self._sample_rate != usb_rate:
+            samples = self._resample_mono(samples, usb_rate, self._sample_rate)
+        return np.clip(samples, -1.0, 1.0).astype(np.float32)
+
+    @staticmethod
+    def _resample_mono(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+        if source_rate == target_rate:
+            return samples.astype(np.float32)
+        from math import gcd
+
+        from scipy.signal import resample_poly
+
+        g = gcd(source_rate, target_rate)
+        return resample_poly(samples, target_rate // g, source_rate // g).astype(np.float32)
 
     def buffer_pre_roll(self, samples: np.ndarray) -> None:
         """Add a chunk to the pre-roll buffer (recent silence for speech onset)."""
@@ -342,6 +538,9 @@ class MicInput:
         channel_select = int(voice_cfg.get("mic_channel_select", 0))
         highpass_hz = int(voice_cfg.get("mic_highpass_hz", 80))
         agc_target = float(voice_cfg.get("mic_agc_target_rms", 0.15))
+        input_transport = str(voice_cfg.get("input_transport", "auto"))
+        usb_audio_binary = voice_cfg.get("usb_audio_binary")
+        usb_audio_source = voice_cfg.get("usb_audio_source")
 
         return cls(
             device=device,
@@ -352,4 +551,7 @@ class MicInput:
             mic_channel_select=channel_select,
             mic_highpass_hz=highpass_hz,
             mic_agc_target_rms=agc_target,
+            input_transport=input_transport,
+            usb_audio_binary=usb_audio_binary,
+            usb_audio_source=usb_audio_source,
         )
