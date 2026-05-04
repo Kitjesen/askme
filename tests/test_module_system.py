@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from askme.runtime.module import (
+    Alias,
+    AmbiguousPortError,
     In,
     Module,
     ModuleRegistry,
@@ -471,6 +473,9 @@ class PoseData:
     pass
 
 
+SLAM2_ALIAS = "slam2"
+
+
 class SlamModule(Module):
     name = "slam"
     odom: Out[PoseData]
@@ -508,17 +513,50 @@ async def test_semantic_match_not_used_when_exact_exists():
     assert len(app.wire_result.semantic_matches) == 0  # exact, not semantic
 
 
-async def test_semantic_match_ambiguous_skipped():
-    """Two Out[PoseData] with different names → semantic match skipped."""
+async def test_semantic_match_ambiguous_raises():
+    """Two Out[PoseData] with different names requires explicit Alias."""
     class Slam2(Module):
         name = "slam2"
         world_pose: Out[PoseData]
         def build(self, cfg, registry): pass
 
     rt = Runtime.use(SlamModule) + Runtime.use(Slam2) + Runtime.use(PlannerModule)
+    with pytest.raises(AmbiguousPortError, match="Ambiguous port 'planner.robot_pose'"):
+        await rt.build()
+
+
+async def test_required_semantic_match_ambiguous_raises():
+    """Required[T] also raises on ambiguous type-only providers."""
+    class Slam2(Module):
+        name = "slam2"
+        world_pose: Out[PoseData]
+        def build(self, cfg, registry): pass
+
+    class RequiredPlanner(Module):
+        name = "required_planner"
+        robot_pose: Required[PoseData]
+        def build(self, cfg, registry): pass
+
+    rt = Runtime.use(SlamModule) + Runtime.use(Slam2) + Runtime.use(RequiredPlanner)
+    with pytest.raises(AmbiguousPortError, match="Ambiguous port 'required_planner.robot_pose'"):
+        await rt.build()
+
+
+async def test_alias_disambiguates_semantic_match():
+    """Alias[T, module_name] selects one provider when type-only wiring is ambiguous."""
+    class Slam2(Module):
+        name = "slam2"
+        world_pose: Out[PoseData]
+        def build(self, cfg, registry): pass
+
+    class AliasPlanner(Module):
+        name = "alias_planner"
+        robot_pose: Alias[PoseData, SLAM2_ALIAS]
+        def build(self, cfg, registry): pass
+
+    rt = Runtime.use(SlamModule) + Runtime.use(Slam2) + Runtime.use(AliasPlanner)
     app = await rt.build()
-    # robot_pose: In[PoseData] can't decide between odom and world_pose
-    assert app.modules["planner"].robot_pose is None
+    assert app.modules["alias_planner"].robot_pose is app.modules["slam2"]
 
 
 # ── Topology validation ──────────────────────────────

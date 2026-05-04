@@ -52,7 +52,11 @@ async def run_app(*, voice_mode: bool, robot_mode: bool) -> None:
             vl = getattr(voice_mod, "voice_loop", None) if voice_mod else None
             if vl is None:
                 raise RuntimeError("voice profile is missing the voice loop")
-            await vl.run()
+            voice_task = getattr(voice_mod, "_task", None)
+            if voice_task is not None:
+                await voice_task
+            else:
+                await vl.run()
         else:
             text_mod = app.modules.get("text")
             tl = getattr(text_mod, "text_loop", None) if text_mod else None

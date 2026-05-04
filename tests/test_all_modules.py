@@ -7,6 +7,7 @@ build without errors when backed by mock modules.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -514,14 +515,14 @@ class TestHealthModule:
 
 class TestCompositions:
     def test_voice_runtime_builds(self):
-        """voice blueprint = 7 core modules."""
+        """voice blueprint = 9 core modules."""
         from askme.blueprints.voice import voice
-        assert len(voice._module_classes) == 7
+        assert len(voice._module_classes) == 9
 
     def test_voice_perception_extends_voice(self):
         """voice_perception = voice + 4 perception modules."""
         from askme.blueprints.voice_perception import voice_perception
-        assert len(voice_perception._module_classes) == 11
+        assert len(voice_perception._module_classes) == 13
 
     def test_text_runtime_has_no_voice(self):
         """text blueprint has no VoiceModule."""
@@ -529,7 +530,9 @@ class TestCompositions:
         names = [mc.name for mc in text._module_classes]
         assert "voice" not in names
         assert "text" in names
-        assert len(text._module_classes) == 6
+        assert "mission" in names
+        assert "health" in names
+        assert len(text._module_classes) == 8
 
     def test_edge_robot_adds_plugins(self):
         """edge_robot = voice_perception + 6 external plugins."""
@@ -537,7 +540,8 @@ class TestCompositions:
         names = [mc.name for mc in edge_robot._module_classes]
         assert "control" in names
         assert "led" in names
-        assert len(edge_robot._module_classes) == 16
+        assert "mission" in names
+        assert len(edge_robot._module_classes) == 17
 
     def test_replace_on_composition(self):
         """Replacing a module in a blueprint should work."""
@@ -564,7 +568,7 @@ class TestCompositions:
         smaller = voice.without(TextModule)
         names = [mc.name for mc in smaller._module_classes]
         assert "text" not in names
-        assert len(smaller._module_classes) == 6
+        assert len(smaller._module_classes) == 8
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -573,8 +577,8 @@ class TestCompositions:
 
 
 class TestModuleExports:
-    def test_all_17_modules_importable(self):
-        """All 17 modules should be importable from the package."""
+    def test_all_18_modules_importable(self):
+        """All 18 modules should be importable from the package."""
         from askme.runtime.modules import (
             ControlModule,
             ExecutorModule,
@@ -582,6 +586,7 @@ class TestModuleExports:
             LEDModule,
             LLMModule,
             MemoryModule,
+            MissionModule,
             PerceptionModule,
             PipelineModule,
             ProactiveModule,
@@ -596,20 +601,20 @@ class TestModuleExports:
         )
         modules = [
             LLMModule, ToolsModule, PulseModule, MemoryModule,
-            PerceptionModule, SafetyModule, PipelineModule, SkillModule,
-            ExecutorModule, VoiceModule, TextModule, ControlModule,
-            LEDModule, ProactiveModule, ReactionModule, HealthModule,
-            TelegramModule,
+            MissionModule, PerceptionModule, SafetyModule, PipelineModule,
+            SkillModule, ExecutorModule, VoiceModule, TextModule,
+            ControlModule, LEDModule, ProactiveModule, ReactionModule,
+            HealthModule, TelegramModule,
         ]
-        assert len(modules) == 17
+        assert len(modules) == 18
         for mod_cls in modules:
             assert hasattr(mod_cls, "name")
             assert hasattr(mod_cls, "build")
 
     def test_all_in_dunder_all(self):
-        """__all__ should list all 17 module classes."""
+        """__all__ should list all 18 module classes."""
         import askme.runtime.modules as pkg
-        assert len(pkg.__all__) == 17
+        assert len(pkg.__all__) == 18
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -649,3 +654,72 @@ class TestAsyncBuild:
         assert "tools" in health
         assert "pulse" in health
         assert "memory" in health
+
+
+class TestRuntimeEntrypoint:
+    async def test_voice_run_app_waits_for_voice_module_task(self, monkeypatch):
+        """VoiceModule.start owns VoiceLoop.run; run_app must not call it twice."""
+        from askme import main
+
+        voice_loop = MagicMock()
+        voice_loop.run = AsyncMock()
+        voice_mod = MagicMock()
+        voice_mod.voice_loop = voice_loop
+        voice_mod._task = None
+
+        class _App:
+            modules = {"voice": voice_mod}
+
+            async def start(self):
+                voice_mod._task = asyncio.create_task(voice_loop.run())
+
+            async def stop(self):
+                pass
+
+        class _Blueprint:
+            async def build(self, cfg):
+                return _App()
+
+        monkeypatch.setattr(main, "get_config", lambda: {})
+        monkeypatch.setattr(
+            main,
+            "_select_blueprint",
+            lambda *, voice_mode, robot_mode: _Blueprint(),
+        )
+
+        await main.run_app(voice_mode=True, robot_mode=False)
+
+        voice_loop.run.assert_awaited_once()
+
+    async def test_text_run_app_still_runs_text_loop_directly(self, monkeypatch):
+        """Text mode has no module-owned loop task, so run_app still runs TextLoop."""
+        from askme import main
+
+        text_loop = MagicMock()
+        text_loop.run = AsyncMock()
+        text_mod = MagicMock()
+        text_mod.text_loop = text_loop
+
+        class _App:
+            modules = {"text": text_mod}
+
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
+        class _Blueprint:
+            async def build(self, cfg):
+                return _App()
+
+        monkeypatch.setattr(main, "get_config", lambda: {})
+        monkeypatch.setattr(
+            main,
+            "_select_blueprint",
+            lambda *, voice_mode, robot_mode: _Blueprint(),
+        )
+
+        await main.run_app(voice_mode=False, robot_mode=False)
+
+        text_loop.run.assert_awaited_once()

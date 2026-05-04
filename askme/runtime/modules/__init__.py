@@ -16,6 +16,7 @@ from askme.runtime.modules.health_module import HealthModule
 from askme.runtime.modules.led_module import LEDModule
 from askme.runtime.modules.llm_module import LLMModule
 from askme.runtime.modules.memory_module import MemoryModule
+from askme.runtime.modules.mission_module import MissionModule
 from askme.runtime.modules.perception_module import PerceptionModule
 from askme.runtime.modules.pipeline_module import PipelineModule
 from askme.runtime.modules.proactive_module import ProactiveModule
@@ -33,6 +34,7 @@ __all__ = [
     "ToolsModule",
     "PulseModule",
     "MemoryModule",
+    "MissionModule",
     "PerceptionModule",
     "SafetyModule",
     "PipelineModule",

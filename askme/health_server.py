@@ -9,6 +9,7 @@ import math
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ _DEGRADED_OTA_STATES = {"auth_error", "degraded"}
 HealthProvider = Callable[[], dict[str, Any]]
 MetricsProvider = Callable[[], dict[str, Any]]
 CapabilitiesProvider = Callable[[], dict[str, Any]]
+MissionHandler = Any
 
 
 class HealthSnapshotProvider(RuntimeHealthSnapshot):
@@ -180,6 +182,7 @@ def create_health_app(
     archive_list_handler: ArchiveListHandler | None = None,
     archive_get_handler: ArchiveGetHandler | None = None,
     archive_delete_handler: ArchiveDeleteHandler | None = None,
+    mission_handler: MissionHandler | None = None,
 ) -> FastAPI:
     """Create the HTTP app used for readiness and telemetry probes."""
     resolved_health_provider = health_provider or provider
@@ -193,6 +196,18 @@ def create_health_app(
         redoc_url=None,
         openapi_url=None,
     )
+    _CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
+
+    async def _dispatch_mission(method_name: str, *args: Any) -> dict[str, Any]:
+        if mission_handler is None:
+            raise RuntimeError("mission handler not configured")
+        method = getattr(mission_handler, method_name, None)
+        if not callable(method):
+            raise RuntimeError(f"mission handler missing {method_name}")
+        payload = await _maybe_await(method(*args))
+        if not isinstance(payload, dict):
+            raise RuntimeError("mission handler returned non-object payload")
+        return payload
 
     @app.get("/health", tags=["System"])
     async def health() -> JSONResponse:
@@ -387,6 +402,112 @@ def create_health_app(
                 headers={"Access-Control-Allow-Origin": "*"},
             )
 
+    @app.post("/api/missions/draft", tags=["Mission"])
+    async def mission_draft(request: Request) -> JSONResponse:
+        """Draft a high-level mission without dispatching hardware."""
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                return JSONResponse(
+                    {"error": "JSON object body required"},
+                    status_code=400,
+                    headers=_CORS_HEADERS,
+                )
+            payload = await _dispatch_mission("draft_from_payload", body)
+            return JSONResponse(payload, headers={"Cache-Control": "no-store", **_CORS_HEADERS})
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400, headers=_CORS_HEADERS)
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503, headers=_CORS_HEADERS)
+        except Exception as exc:
+            logger.error("Mission draft failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+
+    @app.post("/api/missions", tags=["Mission"])
+    async def mission_submit(request: Request) -> JSONResponse:
+        """Dry-run or submit a mission through the configured runtime arbiter."""
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                return JSONResponse(
+                    {"error": "JSON object body required"},
+                    status_code=400,
+                    headers=_CORS_HEADERS,
+                )
+            payload = await _dispatch_mission("submit_from_payload", body)
+            return JSONResponse(payload, headers={"Cache-Control": "no-store", **_CORS_HEADERS})
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400, headers=_CORS_HEADERS)
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503, headers=_CORS_HEADERS)
+        except Exception as exc:
+            logger.error("Mission submit failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+
+    @app.get("/api/missions", tags=["Mission"])
+    async def mission_list() -> JSONResponse:
+        """Return locally drafted/submitted mission records."""
+        try:
+            payload = await _dispatch_mission("list_payload")
+            return JSONResponse(payload, headers={"Cache-Control": "no-store", **_CORS_HEADERS})
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503, headers=_CORS_HEADERS)
+        except Exception as exc:
+            logger.error("Mission list failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+
+    @app.get("/api/missions/{mission_id}", tags=["Mission"])
+    async def mission_get(mission_id: str) -> JSONResponse:
+        """Return a single mission plan and its latest submission state."""
+        try:
+            payload = await _dispatch_mission("get_payload", mission_id)
+            status_code = 404 if payload.get("error") else 200
+            return JSONResponse(
+                payload,
+                status_code=status_code,
+                headers={"Cache-Control": "no-store", **_CORS_HEADERS},
+            )
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503, headers=_CORS_HEADERS)
+        except Exception as exc:
+            logger.error("Mission get failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+
+    @app.get("/api/missions/{mission_id}/report", tags=["Mission"])
+    async def mission_report(mission_id: str) -> JSONResponse:
+        """Build an inspection report shell from mission evidence."""
+        try:
+            payload = await _dispatch_mission("report_payload", mission_id)
+            status_code = 404 if payload.get("error") else 200
+            return JSONResponse(
+                payload,
+                status_code=status_code,
+                headers={"Cache-Control": "no-store", **_CORS_HEADERS},
+            )
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503, headers=_CORS_HEADERS)
+        except Exception as exc:
+            logger.error("Mission report failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+
+    @app.options("/api/missions", include_in_schema=False)
+    @app.options("/api/missions/draft", include_in_schema=False)
+    async def mission_collection_cors() -> Response:
+        return Response(status_code=204, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        })
+
+    @app.options("/api/missions/{mission_id}", include_in_schema=False)
+    @app.options("/api/missions/{mission_id}/report", include_in_schema=False)
+    async def mission_item_cors(mission_id: str) -> Response:
+        return Response(status_code=204, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        })
+
     @app.get("/dashboard", tags=["Monitor"])
     async def dashboard() -> Response:
         """Serve a simple web dashboard for testing and monitoring."""
@@ -452,8 +573,6 @@ def create_health_app(
             )
 
     # ---- Vision endpoints ----
-
-    _CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
 
     @app.get("/api/vision/snapshot", tags=["Vision"])
     async def vision_snapshot() -> JSONResponse:
@@ -625,6 +744,7 @@ class AskmeHealthServer:
         self._vision_bridge: Any | None = None
         self._image_archive: Any | None = None
         self._capabilities_provider: CapabilitiesProvider | None = None
+        self._mission_handler: MissionHandler | None = None
 
         resolved_health_provider = health_provider or snapshot_provider or provider
         if resolved_health_provider is None:
@@ -649,6 +769,7 @@ class AskmeHealthServer:
             archive_list_handler=self._dispatch_archive_list,
             archive_get_handler=self._dispatch_archive_get,
             archive_delete_handler=self._dispatch_archive_delete,
+            mission_handler=self,
         )
 
     def _get_conversation(self) -> list[dict[str, Any]]:
@@ -673,10 +794,41 @@ class AskmeHealthServer:
         """Wire conversation history provider for /api/live endpoint."""
         self._conversation_provider = provider
 
+    def set_mission_handler(self, handler: MissionHandler) -> None:
+        """Wire the mission adapter after construction."""
+        self._mission_handler = handler
+
     def _get_capabilities(self) -> dict[str, Any]:
         if self._capabilities_provider is None:
             return {}
         return self._capabilities_provider()
+
+    async def draft_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._dispatch_mission_handler("draft_from_payload", payload)
+
+    async def submit_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._dispatch_mission_handler("submit_from_payload", payload)
+
+    async def list_payload(self) -> dict[str, Any]:
+        return await self._dispatch_mission_handler("list_payload")
+
+    async def get_payload(self, mission_id: str) -> dict[str, Any]:
+        return await self._dispatch_mission_handler("get_payload", mission_id)
+
+    async def report_payload(self, mission_id: str) -> dict[str, Any]:
+        return await self._dispatch_mission_handler("report_payload", mission_id)
+
+    async def _dispatch_mission_handler(self, method_name: str, *args: Any) -> dict[str, Any]:
+        handler = self._mission_handler
+        if handler is None:
+            raise RuntimeError("mission handler not configured")
+        method = getattr(handler, method_name, None)
+        if not callable(method):
+            raise RuntimeError(f"mission handler missing {method_name}")
+        payload = await _maybe_await(method(*args))
+        if not isinstance(payload, dict):
+            raise RuntimeError("mission handler returned non-object payload")
+        return payload
 
     def set_vision_bridge(self, bridge: Any) -> None:
         """Wire the VisionBridge after construction."""
@@ -1093,6 +1245,12 @@ def _snapshot_payload(
             status_code=500,
             headers={"Cache-Control": "no-store"},
         )
+
+
+async def _maybe_await(value: Any) -> Any:
+    if isawaitable(value):
+        return await value
+    return value
 
 
 def _append_metric(

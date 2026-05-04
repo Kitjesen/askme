@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -11,7 +12,12 @@ import pytest
 def _make_controller(**kwargs):
     """Build an ArmController with simulate=True (no hardware needed)."""
     from askme.robot.arm_controller import ArmController
-    config = {"simulate": True, **kwargs}
+    missing_model_path = Path(__file__).with_name("__missing_policy_model__.onnx")
+    config = {
+        "policy_model_path": str(missing_model_path),
+        "simulate": True,
+        **kwargs,
+    }
     return ArmController(config=config)
 
 

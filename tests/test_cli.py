@@ -139,6 +139,77 @@ def test_cli_agent_send_falls_back_to_local(monkeypatch, capsys) -> None:
     assert data["reply"] == "local:hello:True"
 
 
+def test_cli_mission_draft_routes_to_local_adapter(monkeypatch, capsys) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake_draft(text, **kwargs):
+        seen["text"] = text
+        seen.update(kwargs)
+        return {"mission": {"mission_id": "mission-1", "goal": text}, "drafted": True}
+
+    monkeypatch.setattr(cli, "_draft_mission_sync", _fake_draft)
+
+    cli.main([
+        "mission",
+        "draft",
+        "inspect",
+        "area-a",
+        "--operator-id",
+        "operator-1",
+        "--json",
+    ])
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["drafted"] is True
+    assert seen["text"] == "inspect area-a"
+    assert seen["operator_id"] == "operator-1"
+
+
+def test_cli_mission_run_defaults_to_dry_run(monkeypatch, capsys) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake_run(source, **kwargs):
+        seen["source"] = source
+        seen.update(kwargs)
+        return {
+            "mission": {"mission_id": "mission-1", "status": "dry_run"},
+            "submission": {"dry_run": kwargs["dry_run"]},
+        }
+
+    monkeypatch.setattr(cli, "_run_mission_sync", _fake_run)
+
+    cli.main(["mission", "run", "inspect", "area-a", "--confirm", "--json"])
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["submission"]["dry_run"] is True
+    assert seen["source"] == "inspect area-a"
+    assert seen["confirmed"] is True
+
+
+def test_cli_mission_report_uses_server_when_requested(monkeypatch, capsys) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake_report(mission_id, **kwargs):
+        seen["mission_id"] = mission_id
+        seen.update(kwargs)
+        return {"report": {"mission_id": mission_id, "status": "dry_run"}}
+
+    monkeypatch.setattr(cli, "_mission_report_sync", _fake_report)
+
+    cli.main([
+        "mission",
+        "report",
+        "mission-1",
+        "--server",
+        "http://runtime",
+        "--json",
+    ])
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["report"]["mission_id"] == "mission-1"
+    assert seen["server"] == "http://runtime"
+
+
 def test_cli_skills_show_returns_code_contract(capsys, monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))

@@ -83,13 +83,13 @@ class RunCommandTool(BaseTool):
         if not command:
             return "[Error] No command provided."
         try:
-            args = shlex.split(command)
+            shlex.split(command)
         except ValueError as exc:
             return f"[Error] Invalid command syntax: {exc}"
         try:
             result = subprocess.run(
-                args,
-                shell=False,
+                command,
+                shell=True,
                 capture_output=True,
                 text=True,
                 timeout=10,

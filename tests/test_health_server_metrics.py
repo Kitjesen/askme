@@ -87,7 +87,7 @@ class TestEscapeLabelValue:
         assert _escape_label_value("") == ""
 
 
-# ── _format_labels ───��────────────────────────────────────────────────────────
+# -- _format_labels --------------------------------------------------------
 
 class TestFormatLabels:
     def test_none_returns_empty(self):

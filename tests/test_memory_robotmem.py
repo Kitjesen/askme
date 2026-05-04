@@ -1,6 +1,6 @@
 """Tests for RobotMem backend integration."""
 
-import asyncio
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -170,12 +170,8 @@ class TestRetrieve:
             "retrieve_timeout": 0.01,
         })
 
-        async def slow_recall(*args, **kwargs):
-            await asyncio.sleep(1)
-            return []
-
         mock_rm = MagicMock()
-        mock_rm.recall = MagicMock(side_effect=lambda *a, **kw: asyncio.sleep(1))
+        mock_rm.recall = MagicMock(side_effect=lambda *a, **kw: time.sleep(1))
         backend._rm = mock_rm
 
         # The timeout in retrieve should catch this

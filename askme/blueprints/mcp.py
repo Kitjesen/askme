@@ -15,6 +15,7 @@ from askme.runtime.modules import (
     HealthModule,
     LLMModule,
     MemoryModule,
+    MissionModule,
     PipelineModule,
     PulseModule,
     SafetyModule,
@@ -28,6 +29,7 @@ mcp = (
     + Runtime.use(ToolsModule)
     + Runtime.use(PulseModule)
     + Runtime.use(MemoryModule)
+    + Runtime.use(MissionModule)
     + Runtime.use(SafetyModule)
     + Runtime.use(PipelineModule)
     + Runtime.use(SkillModule)

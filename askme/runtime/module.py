@@ -293,7 +293,7 @@ def _auto_wire(instances: dict[str, Module]) -> WireResult:
                 f"Use Alias[{port.data_type.__name__}, 'module_name'] to select one explicitly."
             )
 
-        # ── 2. Semantic match (same type, unambiguous) ────────────────────
+        # ── 2. Semantic match (same type, unambiguous) ─────────────────────
         type_providers = out_by_type.get(port.data_type, [])
         if len(type_providers) == 1:
             out_port_name, out_mod_name, out_mod = type_providers[0]
@@ -308,21 +308,20 @@ def _auto_wire(instances: dict[str, Module]) -> WireResult:
             )
             continue
 
-        # ── 3. Ambiguity guard ────────────────────────────────────────────
+        # ── 3. Ambiguity guard ─────────────────────────────────────────────
         # Multiple type-only (semantic) providers exist with NO matching name.
-        # Unlike exact-name conflicts, we skip rather than raise: the In port
-        # simply stays None.  Log a warning so developers know to use Alias.
+        # Refuse to guess, even for optional In[T] ports. Missing providers are
+        # optional; ambiguous providers require an explicit Alias.
         if len(type_providers) > 1:
             provider_list = ", ".join(
                 f"'{mn}.{pn}'" for pn, mn, _ in type_providers
             )
-            logger.warning(
-                "[autowire] Ambiguous semantic match for %s.%s (%s): %d providers [%s]. "
-                "Port left unset — use Alias[%s, 'module_name'] to wire explicitly.",
-                mod_name, port.name, port.data_type.__name__,
-                len(type_providers), provider_list, port.data_type.__name__,
+            raise AmbiguousPortError(
+                f"Ambiguous port '{mod_name}.{port.name}' ({port.data_type.__name__}): "
+                f"{len(type_providers)} modules export matching type with different names: "
+                f"{provider_list}. "
+                f"Use Alias[{port.data_type.__name__}, 'module_name'] to select one explicitly."
             )
-            # Fall through to "No match" path — port stays None
 
         # ── 4. No match ───────────────────────────────────────────────────
         if port.direction == "required_in":

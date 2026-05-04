@@ -138,6 +138,77 @@ class TestHealthServer:
         assert data["components"]["skills"]["capabilities"]["openapi_generated"] is True
         assert data["skills"]["contract_count"] == 3
 
+    def test_mission_endpoints_delegate_to_handler(self):
+        class DummyMissionHandler:
+            def __init__(self):
+                self.mission = {
+                    "mission_id": "mission-1",
+                    "goal": "inspect area-a",
+                    "status": "draft",
+                }
+
+            def draft_from_payload(self, payload):
+                self.mission["goal"] = payload["text"]
+                return {"mission": self.mission, "drafted": True}
+
+            def submit_from_payload(self, payload):
+                self.mission["status"] = "dry_run" if payload.get("dry_run", True) else "submitted"
+                return {
+                    "mission": self.mission,
+                    "submission": {"submitted": False, "dry_run": True},
+                }
+
+            def list_payload(self):
+                return {"missions": [self.mission], "count": 1}
+
+            def get_payload(self, mission_id):
+                if mission_id != self.mission["mission_id"]:
+                    return {"error": "mission not found", "mission_id": mission_id}
+                return {"mission": self.mission}
+
+            def report_payload(self, mission_id):
+                if mission_id != self.mission["mission_id"]:
+                    return {"error": "mission not found", "mission_id": mission_id}
+                return {"report": {"mission_id": mission_id, "status": self.mission["status"]}}
+
+        client = TestClient(
+            create_health_app(
+                lambda: _runtime_snapshot(),
+                mission_handler=DummyMissionHandler(),
+            )
+        )
+
+        draft = client.post("/api/missions/draft", json={"text": "inspect area-a"})
+        assert draft.status_code == 200
+        assert draft.json()["drafted"] is True
+
+        submit = client.post("/api/missions", json={"text": "inspect area-a", "dry_run": True})
+        assert submit.status_code == 200
+        assert submit.json()["submission"]["dry_run"] is True
+
+        mission_list = client.get("/api/missions")
+        assert mission_list.status_code == 200
+        assert mission_list.json()["count"] == 1
+
+        mission_get = client.get("/api/missions/mission-1")
+        assert mission_get.status_code == 200
+        assert mission_get.json()["mission"]["mission_id"] == "mission-1"
+
+        report = client.get("/api/missions/mission-1/report")
+        assert report.status_code == 200
+        assert report.json()["report"]["status"] == "dry_run"
+
+        missing = client.get("/api/missions/missing")
+        assert missing.status_code == 404
+
+    def test_mission_endpoint_returns_unconfigured_status(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        response = client.post("/api/missions/draft", json={"text": "inspect area-a"})
+
+        assert response.status_code == 503
+        assert response.json()["error"] == "mission handler not configured"
+
 
 class TestVoiceBridgeSnapshot:
     """Cover the voice_bridge=None / voice_bridge=<dict> branches of build_health_snapshot."""

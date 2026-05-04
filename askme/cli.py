@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -116,6 +117,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print raw JSON",
     )
 
+    runtime_voice_health = runtime_subparsers.add_parser(
+        "voice-health",
+        help="Run an offline voice pipeline health check",
+    )
+    runtime_voice_health.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_voice_health.add_argument(
+        "--live",
+        action="store_true",
+        help="Mark the check as live preflight without opening audio devices",
+    )
+
     skills_parser = subparsers.add_parser("skills", help="Inspect loaded skills and generated contracts")
     skills_subparsers = skills_parser.add_subparsers(dest="skills_command")
 
@@ -153,6 +165,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable robot APIs for local execution",
     )
     agent_send.add_argument("--json", action="store_true", help="Print raw JSON")
+
+    mission_parser = subparsers.add_parser(
+        "mission",
+        help="Draft and dry-run industrial inspection missions",
+    )
+    mission_subparsers = mission_parser.add_subparsers(dest="mission_command")
+
+    mission_draft = mission_subparsers.add_parser(
+        "draft",
+        help="Draft a high-level mission from operator text",
+    )
+    mission_draft.add_argument("text", nargs="+", help="Mission request text")
+    _add_mission_context_args(mission_draft)
+
+    mission_run = mission_subparsers.add_parser(
+        "run",
+        help="Dry-run or submit a mission plan through the runtime arbiter",
+    )
+    mission_run.add_argument("source", nargs="+", help="Mission text or JSON/YAML plan path")
+    mission_run.add_argument(
+        "--submit",
+        action="store_true",
+        help="Request live submission; requires runtime.mission.submit_enabled",
+    )
+    mission_run.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Force dry-run even when --submit is present",
+    )
+    mission_run.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirm an operator-reviewed mission before live submission",
+    )
+    _add_mission_context_args(mission_run)
+
+    mission_report = mission_subparsers.add_parser(
+        "report",
+        help="Build an inspection report shell for a mission",
+    )
+    mission_report.add_argument("mission_id", help="Mission id")
+    mission_report.add_argument(
+        "--server",
+        default="",
+        help="Read from a running runtime mission endpoint",
+    )
+    mission_report.add_argument("--json", action="store_true", help="Print raw JSON")
 
     mcp_parser = subparsers.add_parser("mcp", help="Serve askme over MCP")
     mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
@@ -203,6 +262,30 @@ def _add_runtime_selection_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_mission_context_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--operator-id",
+        default="",
+        help="Operator id for audit and runtime submission headers",
+    )
+    parser.add_argument(
+        "--robot-id",
+        default="",
+        help="Target robot id",
+    )
+    parser.add_argument(
+        "--site-id",
+        default="",
+        help="Target site id",
+    )
+    parser.add_argument(
+        "--server",
+        default="",
+        help="Use a running runtime mission endpoint instead of local dry-run logic",
+    )
+    parser.add_argument("--json", action="store_true", help="Print raw JSON")
+
+
 def main(argv: list[str] | None = None) -> None:
     """Entry point for the askme CLI."""
     raw_args = list(sys.argv[1:] if argv is None else argv)
@@ -224,6 +307,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "agent":
         _handle_agent_command(args)
+        return
+    if args.command == "mission":
+        _handle_mission_command(args)
         return
     if args.command == "mcp":
         _handle_mcp_command(args)
@@ -281,6 +367,16 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
                 robot_mode=robot_mode,
             )
         _emit_payload(payload, json_output=args.json)
+        return
+
+    if args.runtime_command == "voice-health":
+        payload = _run_voice_health_check(live=args.live)
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            _emit_voice_health_payload(payload)
+        if payload.get("status") != "ok":
+            raise SystemExit(1)
         return
 
     raise SystemExit(f"Unknown runtime command: {args.runtime_command}")
@@ -352,6 +448,39 @@ def _handle_agent_command(args: argparse.Namespace) -> None:
     _emit_agent_payload(payload, json_output=args.json)
 
 
+def _handle_mission_command(args: argparse.Namespace) -> None:
+    if args.mission_command == "draft":
+        payload = _draft_mission_sync(
+            " ".join(args.text),
+            operator_id=args.operator_id,
+            robot_id=args.robot_id,
+            site_id=args.site_id,
+            server=args.server,
+        )
+        _emit_payload(payload, json_output=args.json)
+        return
+
+    if args.mission_command == "run":
+        payload = _run_mission_sync(
+            " ".join(args.source),
+            dry_run=(not args.submit) or args.dry_run,
+            confirmed=args.confirm,
+            operator_id=args.operator_id,
+            robot_id=args.robot_id,
+            site_id=args.site_id,
+            server=args.server,
+        )
+        _emit_payload(payload, json_output=args.json)
+        return
+
+    if args.mission_command == "report":
+        payload = _mission_report_sync(args.mission_id, server=args.server)
+        _emit_payload(payload, json_output=args.json)
+        return
+
+    raise SystemExit(f"Unknown mission command: {args.mission_command}")
+
+
 def _handle_mcp_command(args: argparse.Namespace) -> None:
     if args.mcp_command != "serve":
         raise SystemExit(f"Unknown mcp command: {args.mcp_command}")
@@ -420,6 +549,18 @@ def _load_local_capabilities(*, voice_mode: bool, robot_mode: bool) -> dict[str,
     return asyncio.run(
         _load_local_capabilities_async(voice_mode=voice_mode, robot_mode=robot_mode)
     )
+
+
+def _run_voice_health_check(*, live: bool) -> dict[str, Any]:
+    from askme.voice.health_check import run_voice_health
+
+    return run_voice_health(live=live)
+
+
+def _emit_voice_health_payload(payload: dict[str, Any]) -> None:
+    from askme.voice.health_check import print_voice_health_summary
+
+    print_voice_health_summary(payload)
 
 
 async def _load_local_capabilities_async(
@@ -523,6 +664,115 @@ def _send_agent_message_via_server(message: str, server: str) -> dict[str, Any]:
         "reply": payload.get("reply", ""),
         "message": payload.get("text", message),
     }
+
+
+def _draft_mission_sync(
+    text: str,
+    *,
+    operator_id: str = "",
+    robot_id: str = "",
+    site_id: str = "",
+    server: str = "",
+) -> dict[str, Any]:
+    payload = _mission_context_payload(
+        {"text": text, "channel": "cli"},
+        operator_id=operator_id,
+        robot_id=robot_id,
+        site_id=site_id,
+    )
+    if server:
+        return _post_json(f"{_normalise_server_url(server)}/api/missions/draft", payload)
+
+    service = _load_local_mission_service()
+    return service.draft_from_payload(payload)
+
+
+def _run_mission_sync(
+    source: str,
+    *,
+    dry_run: bool,
+    confirmed: bool,
+    operator_id: str = "",
+    robot_id: str = "",
+    site_id: str = "",
+    server: str = "",
+) -> dict[str, Any]:
+    payload = _load_mission_source(source)
+    payload = _mission_context_payload(
+        payload,
+        operator_id=operator_id,
+        robot_id=robot_id,
+        site_id=site_id,
+    )
+    payload.setdefault("channel", "cli")
+    payload["dry_run"] = dry_run
+    payload["confirmed"] = confirmed
+
+    if server:
+        return _post_json(f"{_normalise_server_url(server)}/api/missions", payload)
+
+    service = _load_local_mission_service()
+    return service.submit_from_payload(payload)
+
+
+def _mission_report_sync(mission_id: str, *, server: str = "") -> dict[str, Any]:
+    if server:
+        return _get_json(
+            f"{_normalise_server_url(server)}/api/missions/{mission_id}/report"
+        )
+
+    service = _load_local_mission_service()
+    return service.report_payload(mission_id)
+
+
+def _mission_context_payload(
+    payload: dict[str, Any],
+    *,
+    operator_id: str = "",
+    robot_id: str = "",
+    site_id: str = "",
+) -> dict[str, Any]:
+    result = dict(payload)
+    if operator_id:
+        result["operator_id"] = operator_id
+    if robot_id:
+        result["robot_id"] = robot_id
+    if site_id:
+        result["site_id"] = site_id
+    return result
+
+
+def _load_local_mission_service():
+    from askme.config import get_config
+    from askme.runtime.mission import MissionService
+
+    return MissionService(get_config())
+
+
+def _load_mission_source(source: str) -> dict[str, Any]:
+    path = Path(source)
+    if not path.exists():
+        return {"text": source}
+
+    raw = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        payload = json.loads(raw)
+    elif path.suffix.lower() in {".yaml", ".yml"}:
+        import yaml
+
+        payload = yaml.safe_load(raw)
+    else:
+        return {"text": raw}
+
+    if not isinstance(payload, dict):
+        raise SystemExit(f"Mission source must be a JSON/YAML object: {path}")
+    return payload
+
+
+def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    response = requests.post(url, json=payload, timeout=5)
+    response.raise_for_status()
+    return response.json()
 
 
 def _get_json(url: str) -> dict[str, Any]:

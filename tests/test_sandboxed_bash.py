@@ -83,7 +83,9 @@ def test_bash_empty_command_returns_error(bash_tool: SandboxedBashTool) -> None:
 def test_bash_timeout(bash_tool: SandboxedBashTool) -> None:
     """Commands exceeding timeout return timeout message."""
     bash_tool._TIMEOUT = 1  # 1 second for test speed
-    result = bash_tool.execute(command="sleep 5")
+    result = bash_tool.execute(
+        command=f'{sys.executable} -c "import time; time.sleep(5)"'
+    )
     assert "[Timeout]" in result
 
 

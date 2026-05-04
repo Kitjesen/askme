@@ -76,31 +76,41 @@ class TestFileCreation:
     def test_skill_md_contains_name(self, tmp_path):
         tool = _make_tool(tmp_path)
         tool.execute(name="patrol_skill", description="patrols", prompt="go patrol")
-        content = (tmp_path / "skills" / "generated" / "patrol_skill" / "SKILL.md").read_text()
+        content = (
+            tmp_path / "skills" / "generated" / "patrol_skill" / "SKILL.md"
+        ).read_text(encoding="utf-8")
         assert "patrol_skill" in content
 
     def test_skill_md_contains_prompt(self, tmp_path):
         tool = _make_tool(tmp_path)
         tool.execute(name="skill_a", description="d", prompt="my custom prompt text")
-        content = (tmp_path / "skills" / "generated" / "skill_a" / "SKILL.md").read_text()
+        content = (
+            tmp_path / "skills" / "generated" / "skill_a" / "SKILL.md"
+        ).read_text(encoding="utf-8")
         assert "my custom prompt text" in content
 
     def test_skill_md_contains_voice_trigger(self, tmp_path):
         tool = _make_tool(tmp_path)
         tool.execute(name="skill_b", description="d", prompt="p", voice_trigger="开始巡逻,执行任务")
-        content = (tmp_path / "skills" / "generated" / "skill_b" / "SKILL.md").read_text()
+        content = (
+            tmp_path / "skills" / "generated" / "skill_b" / "SKILL.md"
+        ).read_text(encoding="utf-8")
         assert "开始巡逻" in content
 
     def test_skill_md_contains_tools_section(self, tmp_path):
         tool = _make_tool(tmp_path)
         tool.execute(name="skill_c", description="d", prompt="p", tools_section="web_search")
-        content = (tmp_path / "skills" / "generated" / "skill_c" / "SKILL.md").read_text()
+        content = (
+            tmp_path / "skills" / "generated" / "skill_c" / "SKILL.md"
+        ).read_text(encoding="utf-8")
         assert "web_search" in content
 
     def test_tags_in_skill_md(self, tmp_path):
         tool = _make_tool(tmp_path)
         tool.execute(name="skill_d", description="d", prompt="p", tags="robot,sensor")
-        content = (tmp_path / "skills" / "generated" / "skill_d" / "SKILL.md").read_text()
+        content = (
+            tmp_path / "skills" / "generated" / "skill_d" / "SKILL.md"
+        ).read_text(encoding="utf-8")
         assert "robot" in content
 
 

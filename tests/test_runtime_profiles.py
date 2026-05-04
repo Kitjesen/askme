@@ -15,6 +15,8 @@ def test_legacy_profile_defaults_to_text() -> None:
     assert profile.primary_loop == "text"
     assert profile.robot_api is False
     assert profile.has("diagnostics") is True
+    assert profile.has("mission_adapter") is True
+    assert profile.has("mission_runtime") is True
 
 
 def test_legacy_profile_uses_voice_profile() -> None:
@@ -23,6 +25,7 @@ def test_legacy_profile_uses_voice_profile() -> None:
     assert profile == VOICE_PROFILE
     assert profile.primary_loop == "voice"
     assert profile.has("operator_io") is True
+    assert profile.has("mission_adapter") is True
 
 
 def test_legacy_profile_uses_edge_robot_for_voice_robot() -> None:

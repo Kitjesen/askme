@@ -51,7 +51,7 @@ class MemoryModule(Module):
             session_memory=self._session_memory,
             metrics=ota_metrics,
         )
-        self._memory_bridge = MemoryBridge()
+        self._memory_bridge = MemoryBridge(config=cfg)
         self._episodic = EpisodicMemory(llm=llm)
         self._memory_system = MemorySystem(
             llm=llm,

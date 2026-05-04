@@ -19,10 +19,11 @@ _COMPONENT_ALIASES = {
     "perception_runtime": "change_monitor",
     "signal_runtime": "indicators",
     "control_plane": "diagnostics",
+    "mission_runtime": "mission_adapter",
 }
 
 _COMMON_COMPONENTS = frozenset({
-    "memory", "skills", "executor", "vision",
+    "memory", "skills", "executor", "vision", "mission_adapter",
 })
 
 _VOICE_COMPONENTS = _COMMON_COMPONENTS | frozenset({

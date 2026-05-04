@@ -113,6 +113,7 @@ class TestTimeout:
     async def test_timeout_records_error_in_conversation(self):
         """Timeout → tool result in conversation contains error; execute_tools still returns follow-up."""
         async def fake_wait_for(coro, timeout):
+            coro.close()
             raise TimeoutError()
 
         with patch("asyncio.wait_for", new=fake_wait_for):

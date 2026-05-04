@@ -319,8 +319,13 @@ def test_minimax_fallback_to_edge_when_no_local():
         engine._local_tts = None
 
         edge_called = []
-        original_run_async = engine._run_async
-        engine._run_async = lambda coro: edge_called.append(True)
+
+        def fake_run_async(coro):
+            coro.close()
+            edge_called.append(True)
+            return True
+
+        engine._run_async = fake_run_async
 
         gen = engine._get_generation()
         engine._use_minimax_fallback("test", gen)
