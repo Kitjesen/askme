@@ -15,13 +15,14 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CAPTURES_DIR = "data/captures"
+_UTC = timezone.utc  # noqa: UP017 - Sunrise runs Python 3.10, where datetime.UTC is unavailable.
 
 
 class ImageArchive:
@@ -54,7 +55,7 @@ class ImageArchive:
 
         Raises ``OSError`` on disk failure (caller should handle).
         """
-        now = datetime.now(UTC)
+        now = datetime.now(_UTC)
         date_str = now.strftime("%Y%m%d")
         ts_str = now.strftime("%Y%m%d_%H%M%S")
         safe_label = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)

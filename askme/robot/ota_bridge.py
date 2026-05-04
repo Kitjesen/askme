@@ -22,6 +22,7 @@ import requests
 from askme.config import project_root
 
 logger = logging.getLogger(__name__)
+_UTC = dt.timezone.utc  # noqa: UP017 - Sunrise runs Python 3.10, where datetime.UTC is unavailable.
 
 
 class OTABridgeAuthError(RuntimeError):
@@ -721,7 +722,7 @@ class OTABridge:
     async def _sleep_or_stop(self, delay_s: float) -> None:
         try:
             await asyncio.wait_for(self._stop_event.wait(), timeout=delay_s)
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
             return
 
 
@@ -766,7 +767,7 @@ def _get_ip_address() -> str:
 
 
 def _iso_utc_now() -> str:
-    return dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+    return dt.datetime.now(_UTC).isoformat().replace("+00:00", "Z")
 
 
 def _clean_optional(value: Any) -> str | None:

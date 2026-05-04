@@ -210,7 +210,7 @@ class AskmeTerminalUI:
                         line = await asyncio.wait_for(
                             self._input_queue.get(), timeout=_REFRESH_INTERVAL,
                         )
-                    except TimeoutError:
+                    except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                         continue  # re-render with updated status/events
 
                     if line is None:
@@ -333,7 +333,7 @@ class AskmeTerminalUI:
                         self._quit = True
                         turn_task.cancel()
                         break
-                except TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                     pass
 
             reply = await turn_task

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -11,6 +11,7 @@ import requests
 
 _RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 _VALID_RISKS = frozenset(_RISK_ORDER)
+_UTC = timezone.utc  # noqa: UP017 - Sunrise runs Python 3.10, where datetime.UTC is unavailable.
 
 
 @dataclass
@@ -733,5 +734,5 @@ def _new_mission_id() -> str:
 
 
 def _utc_now() -> str:
-    now = datetime.now(UTC)
+    now = datetime.now(_UTC)
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"

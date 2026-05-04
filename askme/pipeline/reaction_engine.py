@@ -329,7 +329,7 @@ class HybridReaction(ReactionBackend):
                 result = result.strip()
                 if result:
                     return result
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                 logger.debug("[HybridReaction] LLM content gen timed out")
             except Exception as exc:
                 logger.debug("[HybridReaction] LLM content gen failed: %s", exc)

@@ -160,7 +160,7 @@ class ChangeDetector:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=self._read_interval)
                 break
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                 pass
 
     # ------------------------------------------------------------------

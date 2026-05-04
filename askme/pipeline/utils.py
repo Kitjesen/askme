@@ -56,6 +56,11 @@ def strip_think_blocks(text: str) -> str:
     return _RE_THINK.sub("", text).strip()
 
 
+def is_timeout_error(exc: BaseException) -> bool:
+    """Return True for asyncio and built-in timeout exceptions across Python versions."""
+    return isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+
+
 # ---------------------------------------------------------------------------
 # Error message factory (item 27) — consistent user-facing voice messages
 # ---------------------------------------------------------------------------
@@ -64,12 +69,14 @@ def classify_llm_error(exc: Exception) -> str:
     """Return a user-facing voice message for an LLM pipeline error."""
     try:
         from openai import APIConnectionError, APITimeoutError
-        if isinstance(exc, (asyncio.TimeoutError, APITimeoutError)):
+        if is_timeout_error(exc) or isinstance(exc, APITimeoutError):
             return "想了一下没想出来，你再说一遍？"
         if isinstance(exc, APIConnectionError):
             return "网络有点问题，基本功能还在。"
     except ImportError:
         pass
+    if is_timeout_error(exc):
+        return "想了一下没想出来，你再说一遍？"
     s = str(exc).lower()
     if "timeout" in s:
         return "响应超时，请再说一遍。"
@@ -80,7 +87,7 @@ def classify_llm_error(exc: Exception) -> str:
 
 def classify_skill_error(exc: Exception, skill_name: str) -> str:
     """Return a user-facing voice message for a skill execution error."""
-    if isinstance(exc, asyncio.TimeoutError):
+    if is_timeout_error(exc):
         return f"{skill_name}执行超时，跳过了。要不要换个方式？"
     s = str(exc).lower()
     if "connect" in s or "network" in s:

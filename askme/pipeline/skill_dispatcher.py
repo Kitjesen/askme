@@ -237,7 +237,7 @@ class SkillDispatcher:
                     if self._current_mission is _mission:
                         self._current_mission = None
                     raise
-                except TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                     logger.warning("agent_task timed out after %.0fs", step_timeout)
                     _mission.state = MissionState.FAILED
                     if self._current_mission is _mission:
@@ -259,7 +259,7 @@ class SkillDispatcher:
                 self._pipeline.execute_skill(skill_name, user_text, combined_context, source=source),
                 timeout=step_timeout,
             )
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
             logger.error("Skill '%s' timed out after %.0fs", skill_name, step_timeout)
             result = f"[超时] 技能 {skill_name} 执行超过 {int(step_timeout)} 秒，已中止。"
             if self._current_mission:
@@ -316,7 +316,7 @@ class SkillDispatcher:
                 steps = await asyncio.wait_for(
                     self._planner.plan(user_text), timeout=_PLANNER_TIMEOUT
                 )
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                 logger.warning("PlannerAgent timed out after %.0fs, falling back", _PLANNER_TIMEOUT)
                 steps = None
             except Exception as exc:

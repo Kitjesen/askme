@@ -8,7 +8,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 _DEGRADED_OTA_STATES = {"auth_error", "degraded"}
+_UTC = timezone.utc  # noqa: UP017 - Sunrise runs Python 3.10, where datetime.UTC is unavailable.
 
 HealthProvider = Callable[[], dict[str, Any]]
 MetricsProvider = Callable[[], dict[str, Any]]
@@ -106,7 +107,7 @@ def build_health_snapshot(
     if recorded_at_raw:
         merged_voice_status["recorded_at"] = str(recorded_at_raw)
     else:
-        _now_rec = datetime.now(UTC)
+        _now_rec = datetime.now(_UTC)
         merged_voice_status["recorded_at"] = (
             _now_rec.strftime("%Y-%m-%dT%H:%M:%S.")
             + f"{_now_rec.microsecond // 1000:03d}Z"
@@ -119,7 +120,7 @@ def build_health_snapshot(
         degraded_reasons.append("ota_bridge")
 
     # ISO 8601 UTC timestamp for this snapshot — lets OTA Agent detect stale payloads.
-    now_utc = datetime.now(UTC)
+    now_utc = datetime.now(_UTC)
     snapshot_at = (
         now_utc.strftime("%Y-%m-%dT%H:%M:%S.")
         + f"{now_utc.microsecond // 1000:03d}Z"
@@ -894,7 +895,7 @@ class AskmeHealthServer:
                 "image_base64": b64,
                 "width": w,
                 "height": h,
-                "timestamp": datetime.now(UTC).isoformat(),
+                "timestamp": datetime.now(_UTC).isoformat(),
             }
         except Exception as exc:
             logger.warning("[Vision] Encode error: %s", exc)
@@ -992,7 +993,7 @@ class AskmeHealthServer:
 
         try:
             await asyncio.wait_for(task, timeout=self._shutdown_timeout_s)
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 

@@ -125,7 +125,7 @@ class ToolExecutor:
                         ),
                         timeout=self._TOOL_TIMEOUT,
                     )
-                except TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                     logger.error(
                         "Tool '%s' timed out after %.0fs", tool_name, self._TOOL_TIMEOUT
                     )

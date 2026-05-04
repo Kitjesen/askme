@@ -241,7 +241,7 @@ class ProactiveAgent:
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=interval)
                     break  # stop_event was set
-                except TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                     pass  # normal — time for next tick
         finally:
             event_task.cancel()
@@ -351,7 +351,7 @@ class ProactiveAgent:
             response = response.strip()
             if response.startswith("ANOMALY|"):
                 return response[8:].strip()
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
             logger.debug("[Proactive] Anomaly check timed out")
         except Exception as exc:
             logger.debug("[Proactive] Anomaly check failed: %s", exc)
@@ -420,7 +420,7 @@ class ProactiveAgent:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=2.0)
                 break
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                 pass
 
     def _read_change_events(self, file_pos: int) -> tuple[int, list[Any]] | None:
@@ -506,7 +506,7 @@ class ProactiveAgent:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=self._event_poll_interval)
                 break
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                 pass
 
     async def _poll_telemetry_events(self) -> None:

@@ -306,7 +306,7 @@ class CancellationToken:
         try:
             await asyncio.wait_for(self._event.wait(), timeout=timeout)
             return True
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
             return False
 
     def reset(self) -> None:

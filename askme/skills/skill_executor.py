@@ -134,7 +134,7 @@ class SkillExecutor:
                     duration_s=duration_s,
                 )
             return result
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
             duration_s = _time.perf_counter() - t_start
             logger.warning("Skill '%s' timed out after %ds", skill.name, timeout)
             if self._metrics is not None:
