@@ -153,7 +153,7 @@ def test_playback_loop_uses_usb_direct_transport(monkeypatch):
         engine._is_playing = False
         return True
 
-    monkeypatch.setattr(engine, "_play_chunk_usb_direct_with_preroll", fake_usb_play)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_speech", fake_usb_play)
     engine._aplay_bin = "aplay"
     try:
         engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
@@ -190,7 +190,7 @@ def test_wait_done_waits_for_usb_direct_chunk_after_buffer_pop(monkeypatch):
         engine._is_playing = False
         return True
 
-    monkeypatch.setattr(engine, "_play_chunk_usb_direct_with_preroll", fake_usb_play)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_speech", fake_usb_play)
     try:
         engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
         engine.start_playback()
@@ -245,6 +245,88 @@ def test_usb_direct_playback_coalesces_chunks_and_adds_preroll(monkeypatch):
     assert np.allclose(chunk[1760:], 0.3)
 
 
+def test_usb_direct_background_prewarm_is_opt_in(monkeypatch):
+    """A separate prewarm stream must not make the first speech stream clip."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    played: dict[str, np.ndarray] = {}
+    warm_calls: list[int] = []
+
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 1000,
+            "usb_direct_preroll_seconds": 0.1,
+            "usb_direct_coalesce_timeout": 0.05,
+        }
+    )
+
+    def fake_warm(chunk):
+        warm_calls.append(len(chunk))
+        return True
+
+    def fake_usb_play(chunk):
+        played["chunk"] = chunk.copy()
+        engine._is_playing = False
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_warming", fake_warm)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_locked", fake_usb_play)
+    try:
+        engine._is_playing = True
+        playback = threading.Thread(target=engine._playback_loop)
+        playback.start()
+        time.sleep(0.06)
+        with engine._buffer_lock:
+            engine.tts_buffer.append(np.ones(10, dtype=np.float32) * 0.2)
+        playback.join(timeout=2.0)
+    finally:
+        engine._is_playing = False
+        engine.shutdown()
+
+    assert not playback.is_alive()
+    assert warm_calls == []
+    chunk = played["chunk"]
+    assert len(chunk) == 100 + 10
+    assert np.max(np.abs(chunk[:100])) < 0.04
+    assert np.allclose(chunk[100:], 0.2)
+
+
+def test_usb_direct_background_prewarm_can_be_enabled(monkeypatch):
+    """Legacy separate prewarm remains available for devices that need it."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    warm_calls: list[int] = []
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 1000,
+            "usb_direct_preroll_seconds": 0.1,
+            "usb_direct_background_prewarm": True,
+        }
+    )
+
+    def fake_warm(chunk):
+        warm_calls.append(len(chunk))
+        engine._is_playing = False
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_warming", fake_warm)
+    try:
+        engine._is_playing = True
+        engine._playback_loop()
+    finally:
+        engine.shutdown()
+
+    assert warm_calls == [100]
+
+
 def test_usb_direct_warm_playback_adds_stream_guard(monkeypatch):
     """Warm USB sessions still need a short guard for new stream start-up."""
     import numpy as np
@@ -280,6 +362,48 @@ def test_usb_direct_warm_playback_adds_stream_guard(monkeypatch):
     assert len(chunk) == 320 + 160
     assert np.max(np.abs(chunk[:320])) < 0.04
     assert np.allclose(chunk[320:], 0.2)
+
+
+def test_usb_direct_speech_leadin_ignores_feedback_warm_state(monkeypatch):
+    """A prior feedback helper must not downgrade the next speech lead-in."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    played: list[np.ndarray] = []
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 1000,
+            "usb_direct_preroll_seconds": 0.1,
+            "usb_direct_speech_leadin_seconds": 0.1,
+            "usb_direct_stream_guard_seconds": 0.02,
+            "usb_direct_coalesce_timeout": 0.05,
+        }
+    )
+
+    def fake_usb_play(chunk):
+        played.append(chunk.copy())
+        engine._last_aplay_close = time.monotonic()
+        if len(played) >= 2:
+            engine._is_playing = False
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_locked", fake_usb_play)
+    try:
+        assert engine.play_feedback_audio(np.ones(10, dtype=np.float32) * 0.1, 1000)
+        engine.tts_buffer.append(np.ones(10, dtype=np.float32) * 0.2)
+        engine._is_playing = True
+        engine._playback_loop()
+    finally:
+        engine.shutdown()
+
+    feedback, speech = played
+    assert len(feedback) == 100 + 10
+    assert len(speech) == 100 + 10
+    assert np.max(np.abs(speech[:100])) < 0.04
+    assert np.allclose(speech[100:], 0.2)
 
 
 def test_playback_loop_falls_back_to_usb_when_aplay_pipe_breaks(monkeypatch):
@@ -319,7 +443,7 @@ def test_playback_loop_falls_back_to_usb_when_aplay_pipe_breaks(monkeypatch):
         return True
 
     monkeypatch.setattr(tts_mod.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(engine, "_play_chunk_usb_direct_with_preroll", fake_usb_play)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_speech", fake_usb_play)
     engine._aplay_bin = "aplay"
     try:
         engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
@@ -354,7 +478,7 @@ def test_auto_transport_uses_usb_when_plughw_has_no_alsa_card(monkeypatch):
         return True
 
     monkeypatch.setattr(engine, "_alsa_output_available", lambda: False)
-    monkeypatch.setattr(engine, "_play_chunk_usb_direct_with_preroll", fake_usb_play)
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_speech", fake_usb_play)
     engine._aplay_bin = "aplay"
     try:
         engine.tts_buffer.append(np.zeros(100, dtype=np.float32))

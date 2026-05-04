@@ -249,6 +249,13 @@ voice:
     # pre-roll and coalesce streamed MiniMax chunks to avoid clipped starts and
     # choppy playback on Sunrise.
     usb_direct_preroll_seconds: 1.5
+    # Keep separate background prewarm disabled while the USB helper opens one
+    # stream per speech burst; the speech burst itself carries the pre-roll.
+    usb_direct_background_prewarm: false
+    # Speech gets an independent lead-in even when a previous helper/chime just
+    # ran, because MCP01 opens a fresh USB stream for each speech burst.
+    usb_direct_speech_leadin_seconds: 1.5
+    usb_direct_stream_guard_seconds: 0.25
     usb_direct_coalesce_timeout: 8.0
 
 # ----------------------------------------------------------

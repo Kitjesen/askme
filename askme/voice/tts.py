@@ -157,6 +157,12 @@ class TTSEngine(TTSBackend):
         self._usb_direct_stream_guard_seconds: float = float(
             config.get("usb_direct_stream_guard_seconds", 0.25)
         )
+        self._usb_direct_speech_leadin_seconds: float = float(
+            config.get("usb_direct_speech_leadin_seconds", self._usb_direct_preroll_seconds)
+        )
+        self._usb_direct_background_prewarm: bool = bool(
+            config.get("usb_direct_background_prewarm", False)
+        )
         self._usb_direct_coalesce_timeout: float = float(
             config.get("usb_direct_coalesce_timeout", 8.0)
         )
@@ -911,6 +917,10 @@ class TTSEngine(TTSBackend):
         """Play one chunk, prepending cold-DAC preroll under the USB session lock."""
         return self._play_chunk_usb_direct_scoped(chunk, preroll_if_cold=True)
 
+    def _play_chunk_usb_direct_speech(self, chunk: np.ndarray) -> bool:
+        """Play TTS speech through a fresh USB stream with a speech-safe lead-in."""
+        return self._play_chunk_usb_direct_scoped(chunk, speech_leadin=True)
+
     def _play_chunk_usb_direct_warming(self, chunk: np.ndarray) -> bool:
         """Play an intentional preroll/prewarm chunk while advertising warm-up state."""
         return self._play_chunk_usb_direct_scoped(chunk, mark_warming=True)
@@ -920,13 +930,18 @@ class TTSEngine(TTSBackend):
         chunk: np.ndarray,
         *,
         preroll_if_cold: bool = False,
+        speech_leadin: bool = False,
         mark_warming: bool = False,
     ) -> bool:
         """Serialize USB ownership, warm-state transition, optional preroll, and playback."""
         with self._usb_audio_session_lock:
             samples = np.asarray(chunk, dtype=np.float32)
             warming_set = False
-            if preroll_if_cold and not self._is_dac_warm():
+            if speech_leadin:
+                leadin = self._usb_direct_speech_leadin_chunk()
+                if len(leadin) > 0:
+                    samples = np.concatenate([leadin, samples])
+            elif preroll_if_cold and not self._is_dac_warm():
                 preroll = self._usb_direct_preroll_chunk()
                 if len(preroll) > 0:
                     samples = np.concatenate([preroll, samples])
@@ -1095,6 +1110,13 @@ class TTSEngine(TTSBackend):
         rng = np.random.RandomState(43)
         return (rng.randn(samples) * (160.0 / 32767.0)).astype(np.float32)
 
+    def _usb_direct_speech_leadin_chunk(self) -> np.ndarray:
+        samples = int(self._sample_rate * self._usb_direct_speech_leadin_seconds)
+        if samples <= 0:
+            return np.empty(0, dtype=np.float32)
+        rng = np.random.RandomState(44)
+        return (rng.randn(samples) * (200.0 / 32767.0)).astype(np.float32)
+
     def _playback_loop(self) -> None:
         """Drain tts_buffer one sentence at a time.
 
@@ -1118,7 +1140,16 @@ class TTSEngine(TTSBackend):
             _use_usb_direct = self._should_use_usb_direct()
             if _use_usb_direct and self._output_transport == "auto":
                 logger.info("TTS playback: ALSA plughw output unavailable; using MCP01 USB direct")
-            if _use_usb_direct and not self._has_buffered_audio() and not self._is_dac_warm():
+            # The libusb helper currently opens a fresh USB stream per speech
+            # burst.  Background prewarm is therefore opt-in: on Sunrise/MCP01 a
+            # separate prewarm stream can falsely mark the next speech stream
+            # warm, then the hardware clips the first phoneme/digit.
+            if (
+                _use_usb_direct
+                and self._usb_direct_background_prewarm
+                and not self._has_buffered_audio()
+                and not self._is_dac_warm()
+            ):
                 preroll = self._usb_direct_preroll_chunk()
                 if len(preroll) > 0:
                     logger.info(
@@ -1228,7 +1259,7 @@ class TTSEngine(TTSBackend):
                         np.clip(chunk, -1.0, 1.0, out=chunk)
 
                     if _use_usb_direct:
-                        self._play_chunk_usb_direct_with_preroll(chunk)
+                        self._play_chunk_usb_direct_speech(chunk)
                     elif _aplay_cmd is not None:
                         pcm = (chunk * 32767).clip(-32768, 32767).astype(np.int16)
                         dur = len(chunk) / self._sample_rate
@@ -1285,7 +1316,7 @@ class TTSEngine(TTSBackend):
                                 _router_ctx = None
                             if self._should_try_usb_direct_fallback():
                                 logger.warning("aplay failed; trying MCP01 direct USB fallback")
-                                self._play_chunk_usb_direct_with_preroll(chunk)
+                                self._play_chunk_usb_direct_speech(chunk)
                     else:
                         if self._audio_router is not None:
                             with self._audio_router.output_session():

@@ -79,6 +79,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, Any]:
     if args.playback:
         tts = TTSEngine(cfg.get("voice", {}).get("tts", {}))
         original_usb_play = tts._play_chunk_usb_direct
+        original_usb_play_speech = tts._play_chunk_usb_direct_speech
         original_usb_play_with_preroll = tts._play_chunk_usb_direct_with_preroll
         original_usb_play_warming = tts._play_chunk_usb_direct_warming
 
@@ -112,8 +113,12 @@ async def run_once(args: argparse.Namespace) -> dict[str, Any]:
             return timed_usb_play
 
         tts._play_chunk_usb_direct = make_timed_usb_play("plain", original_usb_play)  # type: ignore[method-assign]
-        tts._play_chunk_usb_direct_with_preroll = make_timed_usb_play(  # type: ignore[method-assign]
+        tts._play_chunk_usb_direct_speech = make_timed_usb_play(  # type: ignore[method-assign]
             "speech",
+            original_usb_play_speech,
+        )
+        tts._play_chunk_usb_direct_with_preroll = make_timed_usb_play(  # type: ignore[method-assign]
+            "feedback",
             original_usb_play_with_preroll,
         )
         tts._play_chunk_usb_direct_warming = make_timed_usb_play(  # type: ignore[method-assign]
