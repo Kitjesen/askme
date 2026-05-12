@@ -164,6 +164,21 @@ class IntentRouter:
     # the trigger phrase, the input is treated as a question, not a command.
     _QUESTION_SUFFIXES: tuple[str, ...] = ("吗", "么", "呢", "嘛")
 
+    # Query/read-only skills remain valid when ASR adds question punctuation.
+    # Example: "ji dian le?" should still dispatch get_time, while
+    # "navigate to warehouse?" must stay GENERAL to avoid accidental movement.
+    _QUESTION_SAFE_SKILLS: frozenset[str] = frozenset({
+        "get_time",
+        "nav_query",
+        "system_status",
+        "recall_memory",
+        "list_skills",
+        "workspace_info",
+        "list_directory",
+        "patrol_report",
+        "daily_summary",
+    })
+
     def _is_negated(self, text: str, trigger_pos: int) -> bool:
         """Return True if the trigger at trigger_pos is preceded by a negation word."""
         prefix = text[max(0, trigger_pos - 4) : trigger_pos]
@@ -187,6 +202,10 @@ class IntentRouter:
             return True
         # Ends with question particle
         return any(stripped.endswith(q) for q in self._QUESTION_SUFFIXES)
+
+    def _question_context_blocks_skill(self, text: str, skill_name: str) -> bool:
+        """Return whether question punctuation should suppress this skill."""
+        return self._is_question_context(text) and skill_name not in self._QUESTION_SAFE_SKILLS
 
     def _match_voice_trigger(self, text: str) -> str | None:
         """Find the best matching voice trigger, skipping negated and question occurrences.
@@ -216,7 +235,11 @@ class IntentRouter:
             if len(trigger_phrase) < self.MIN_TRIGGER_LENGTH:
                 continue
             pos = text_lower.find(trigger_phrase.lower())
-            if pos >= 0 and not self._is_negated(text_lower, pos) and not self._is_question_context(text_lower):
+            if (
+                pos >= 0
+                and not self._is_negated(text_lower, pos)
+                and not self._question_context_blocks_skill(text_lower, skill_name)
+            ):
                 return skill_name
 
         return None

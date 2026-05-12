@@ -54,6 +54,7 @@ class CloudASR(ASRBackend):
         self._ws = None
         self._task_id: str = ""
         self._result_text: str = ""
+        self._interim_text: str = ""
         self._result_ready = threading.Event()
         self._error: str | None = None
         self._recv_thread: threading.Thread | None = None
@@ -62,6 +63,9 @@ class CloudASR(ASRBackend):
         # Performance tracking
         self._last_ttft: float = 0.0
         self._session_start: float = 0.0
+        self._last_partial_at_epoch_s: float = 0.0
+        self._last_final_at_epoch_s: float = 0.0
+        self._last_session_error: str = ""
 
         if self._enabled and self._api_key:
             logger.info(
@@ -92,16 +96,27 @@ class CloudASR(ASRBackend):
             self._enabled = False
             return False
 
+        create_connection = getattr(websocket, "create_connection", None)
+        if create_connection is None:
+            logger.warning(
+                "CloudASR: incompatible websocket module; install websocket-client",
+            )
+            self._enabled = False
+            return False
+
         self._task_id = str(uuid.uuid4())
         self._result_text = ""
+        self._interim_text = ""
         self._result_ready.clear()
         self._error = None
+        self._last_session_error = ""
         self._session_start = time.monotonic()
         self._last_ttft = 0.0
+        self._last_partial_at_epoch_s = 0.0
+        self._last_final_at_epoch_s = 0.0
 
         try:
-            self._ws = websocket.WebSocket()
-            self._ws.connect(
+            self._ws = create_connection(
                 _WS_URL,
                 header=[f"Authorization: bearer {self._api_key}"],
                 timeout=5,
@@ -135,6 +150,7 @@ class CloudASR(ASRBackend):
             event = ack.get("header", {}).get("event", "")
             if event != "task-started":
                 logger.error("CloudASR: unexpected ack event: %s", event)
+                self._last_session_error = f"unexpected_ack:{event}"
                 self._ws.close()
                 return False
 
@@ -150,6 +166,7 @@ class CloudASR(ASRBackend):
 
         except Exception as exc:
             logger.error("CloudASR: start_session failed: %s", exc)
+            self._last_session_error = str(exc)
             self._cleanup()
             return False
 
@@ -166,6 +183,7 @@ class CloudASR(ASRBackend):
         except Exception as exc:
             logger.warning("CloudASR: feed error: %s", exc)
             self._error = str(exc)
+            self._last_session_error = str(exc)
 
     def finish_session(self, timeout: float = 5.0) -> str:
         """Signal end of audio and wait for final result.
@@ -173,7 +191,7 @@ class CloudASR(ASRBackend):
         Returns the transcribed text, or empty string on error/timeout.
         """
         if not self._session_active or self._ws is None:
-            return self._result_text
+            return self._best_text()
 
         try:
             # Send finish-task
@@ -192,7 +210,7 @@ class CloudASR(ASRBackend):
         # Wait for final result
         self._result_ready.wait(timeout=timeout)
 
-        text = self._result_text.strip()
+        text = self._best_text()
         total_ms = (time.monotonic() - self._session_start) * 1000
         logger.info(
             "CloudASR: result='%s' total=%.0fms ttft=%.0fms",
@@ -236,12 +254,15 @@ class CloudASR(ASRBackend):
                         # sentences, each with sentence_end=true. Concatenate
                         # all final sentences to get the complete transcription.
                         self._result_text += text
+                        self._interim_text = ""
+                        self._last_final_at_epoch_s = time.time()
                         logger.debug("CloudASR: final sentence: '%s'", text[:50])
 
                     elif text:
                         # Interim — show latest partial for this sentence only
                         # (don't append, it will be replaced by the final)
                         self._interim_text = text
+                        self._last_partial_at_epoch_s = time.time()
                         logger.debug("CloudASR: interim: '%s'", text[:50])
 
                 elif event == "task-finished":
@@ -252,13 +273,50 @@ class CloudASR(ASRBackend):
                     err = msg.get("header", {}).get("error_message", "unknown")
                     logger.error("CloudASR: task failed: %s", err)
                     self._error = err
+                    self._last_session_error = err
                     break
 
         except Exception as exc:
             logger.error("CloudASR: receive error: %s", exc)
             self._error = str(exc)
+            self._last_session_error = str(exc)
         finally:
             self._result_ready.set()
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """Return non-secret provider and streaming transcript status."""
+        now = time.time()
+        partial_age_ms = (
+            round((now - self._last_partial_at_epoch_s) * 1000.0, 2)
+            if self._last_partial_at_epoch_s > 0
+            else None
+        )
+        final_age_ms = (
+            round((now - self._last_final_at_epoch_s) * 1000.0, 2)
+            if self._last_final_at_epoch_s > 0
+            else None
+        )
+        return {
+            "provider": "dashscope_paraformer",
+            "endpoint": _WS_URL,
+            "enabled": self._enabled,
+            "available": self.available,
+            "active": self._session_active,
+            "model": self._model,
+            "sample_rate": self._sample_rate,
+            "language_hints": list(self._language_hints),
+            "task_id": self._task_id[:8] if self._task_id else "",
+            "partial_text": self._interim_text,
+            "final_text": self._result_text,
+            "partial_age_ms": partial_age_ms,
+            "final_age_ms": final_age_ms,
+            "first_partial_ms": round(self._last_ttft, 2) if self._last_ttft else None,
+            "last_error": self._last_session_error or self._error or "",
+        }
+
+    def _best_text(self) -> str:
+        """Return the best known text, falling back to the latest interim."""
+        return (self._result_text or self._interim_text).strip()
 
     def _cleanup(self) -> None:
         """Close WebSocket and reset session state."""

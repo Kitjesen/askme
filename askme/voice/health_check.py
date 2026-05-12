@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from askme.config import get_config, project_root
+from askme.voice.minimax_hybrid import check_minimax_hybrid_voice_brain
 
 _ASR_DEFAULT_DIR = "models/asr/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
 _KWS_DEFAULT_DIR = "models/kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
@@ -88,7 +89,7 @@ def run_voice_health(
         "sherpa_onnx": _dependency_available("sherpa_onnx"),
         "edge_tts": _dependency_available("edge_tts"),
         "sounddevice": _dependency_available("sounddevice"),
-        "dashscope": _dependency_available("dashscope"),
+        "websocket_client": _websocket_client_available(),
     }
 
     asr = _check_asr(voice_cfg.get("asr", {}), project, deps)
@@ -97,8 +98,9 @@ def run_voice_health(
     tts = _check_tts(voice_cfg.get("tts", {}), project, deps)
     bridge = _check_runtime_bridge(cfg.get("runtime", {}).get("voice_bridge", {}))
     audio = _check_audio_devices(voice_cfg, deps)
+    voice_brain = check_minimax_hybrid_voice_brain(cfg, deps=deps)
 
-    for check in (asr, vad, kws, tts, bridge, audio):
+    for check in (asr, vad, kws, tts, bridge, audio, voice_brain):
         errors.extend(check.get("errors", []))
         warnings.extend(check.get("warnings", []))
 
@@ -109,7 +111,15 @@ def run_voice_health(
 
     models_ok = bool(asr["ok"] and vad["ok"] and kws["ok"] and tts["model_ok"])
     runtime_bridge_ok = bool(bridge["ok"])
-    voice_ok = bool(config_ok and models_ok and tts["ok"] and runtime_bridge_ok and health_snapshot_ok)
+    voice_brain_ok = bool(voice_brain.get("ok", True))
+    voice_ok = bool(
+        config_ok
+        and models_ok
+        and tts["ok"]
+        and runtime_bridge_ok
+        and voice_brain_ok
+        and health_snapshot_ok
+    )
 
     if live:
         warnings.append(
@@ -125,6 +135,7 @@ def run_voice_health(
         "kws_ok": bool(kws["ok"]),
         "tts_ok": bool(tts["ok"]),
         "runtime_bridge_ok": runtime_bridge_ok,
+        "voice_brain_ok": voice_brain_ok,
         "health_snapshot_ok": health_snapshot_ok,
         "hardware_required": bool(live),
         "live_requested": bool(live),
@@ -138,6 +149,7 @@ def run_voice_health(
             "tts": tts,
             "runtime_bridge": bridge,
             "audio": audio,
+            "voice_brain": voice_brain,
         },
         "health_snapshot": health_snapshot,
     }
@@ -153,6 +165,7 @@ def print_voice_health_summary(payload: dict[str, Any]) -> None:
     print(f"  kws: {_label(payload.get('kws_ok'))}")  # noqa: T201
     print(f"  tts: {_label(payload.get('tts_ok'))}")  # noqa: T201
     print(f"  runtime_bridge: {_label(payload.get('runtime_bridge_ok'))}")  # noqa: T201
+    print(f"  voice_brain: {_label(payload.get('voice_brain_ok', True))}")  # noqa: T201
     print(f"  health_snapshot: {_label(payload.get('health_snapshot_ok'))}")  # noqa: T201
     for warning in payload.get("warnings", []):
         print(f"  warn: {warning}")  # noqa: T201
@@ -399,6 +412,17 @@ def _missing_paths(paths: dict[str, str]) -> dict[str, str]:
 
 def _dependency_available(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
+
+
+def _websocket_client_available() -> bool:
+    """Return True only for the websocket-client package API."""
+    if importlib.util.find_spec("websocket") is None:
+        return False
+    try:
+        import websocket  # type: ignore[import-not-found]
+    except Exception:
+        return False
+    return callable(getattr(websocket, "create_connection", None))
 
 
 def _label(value: object) -> str:

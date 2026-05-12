@@ -2,6 +2,7 @@
 """Test memory consolidation on S100P."""
 import asyncio
 import os
+
 from askme.memory.robotmem_backend import RobotMemBackend
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -94,6 +95,15 @@ class TestMemoryModule:
             mod.build({}, _make_registry())
         return mod
 
+    def _make_module_with_catalog(self, tmp_path):
+        from askme.memory.catalog import KnowledgeCatalog
+        from askme.memory.index_jobs import KnowledgeIndexJobStore
+
+        mod = self._make_module()
+        mod._knowledge_catalog = KnowledgeCatalog(path=tmp_path / "records.json")
+        mod._knowledge_job_store = KnowledgeIndexJobStore(path=tmp_path / "index_jobs.json")
+        return mod
+
     def test_build_creates_memory_components(self):
         mod = self._make_module()
         assert mod.conversation is not None
@@ -116,13 +126,381 @@ class TestMemoryModule:
             mod.llm_client = None
             mod.build(cfg, _make_registry())
 
-        mock_bridge.assert_called_once_with(config=cfg)
+        assert mock_bridge.call_count == 1
+        _, kwargs = mock_bridge.call_args
+        assert kwargs["config"] == cfg
+        assert kwargs["knowledge_catalog"] is mod._knowledge_catalog
 
     def test_health_returns_ok(self):
         mod = self._make_module()
         h = mod.health()
         assert h["status"] == "ok"
         assert "conversation_len" in h
+
+    @pytest.mark.asyncio
+    async def test_knowledge_preview_payload_parses_inline_content(self):
+        mod = self._make_module()
+
+        payload = await mod.preview_payload({
+            "filename": "site.md",
+            "content": "# Floor 1\n- Restroom east",
+            "category": "location",
+        })
+
+        assert payload["parsed"] == 1
+        assert payload["records"][0]["category"] == "location"
+        assert payload["records"][0]["text"] == "Floor 1: Restroom east"
+
+    @pytest.mark.asyncio
+    async def test_knowledge_import_payload_saves_preview_records(self):
+        mod = self._make_module()
+        mod.memory_bridge.save_fact = AsyncMock()
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={"updated": False})
+        mod.memory_bridge.health.return_value = {"backend": "vector"}
+
+        payload = await mod.import_payload({
+            "filename": "site.md",
+            "content": "- Restroom east",
+            "category": "location",
+        })
+
+        assert payload["imported"] == 1
+        mod.memory_bridge.save_fact.assert_awaited_once()
+        text, metadata = mod.memory_bridge.save_fact.await_args.args
+        assert text == "[location] Restroom east"
+        assert metadata["category"] == "location"
+        assert metadata["record_id"].startswith("know_")
+
+    @pytest.mark.asyncio
+    async def test_knowledge_import_payload_upserts_catalog_before_syncing_eligible_records(
+        self,
+        tmp_path,
+    ):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod.memory_bridge.save_fact = AsyncMock()
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={"updated": True})
+        mod.memory_bridge.health.return_value = {"backend": "vector"}
+
+        payload = await mod.import_payload({
+            "filename": "site.json",
+            "content": '[{"record_id":"know_1","text":"Restroom east","category":"location"}]',
+        })
+
+        assert payload["imported"] == 1
+        assert payload["catalog"]["total"] == 1
+        mod.memory_bridge.save_fact.assert_awaited_once()
+        text, metadata = mod.memory_bridge.save_fact.await_args.args
+        assert text == "[location] Restroom east"
+        assert metadata["record_id"] == "know_1"
+        assert metadata["evidence_version"] == 1
+        assert metadata["source_version"] == "1"
+
+    @pytest.mark.asyncio
+    async def test_knowledge_import_payload_does_not_sync_conflicted_records(self, tmp_path):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod.memory_bridge.save_fact = AsyncMock()
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={"updated": True})
+        mod.memory_bridge.health.return_value = {"backend": "vector"}
+
+        payload = await mod.import_payload({
+            "filename": "site.json",
+            "content": (
+                "["
+                '{"record_id":"know_a","text":"Device A east","entity_key":"device:a",'
+                '"fact_key":"location","value":"east","approval_status":"published"},'
+                '{"record_id":"know_b","text":"Device A west","entity_key":"device:a",'
+                '"fact_key":"location","value":"west","approval_status":"published"}'
+                "]"
+            ),
+        })
+
+        assert payload["imported"] == 0
+        assert payload["skipped"] == 2
+        mod.memory_bridge.save_fact.assert_not_awaited()
+        listed = mod._knowledge_catalog.list_records()["records"]
+        assert {record["conflict_set_id"] for record in listed} == {
+            "conflict:device:a:location"
+        }
+
+    @pytest.mark.asyncio
+    async def test_knowledge_list_payload_returns_catalog(self, tmp_path):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._knowledge_catalog.upsert_payloads([{
+            "record_id": "know_1",
+            "text": "Restroom east",
+            "memory_text": "[location] Restroom east",
+            "approval_status": "published",
+        }])
+        mod.memory_bridge.health.return_value = {"backend": "vector"}
+
+        payload = await mod.list_knowledge_payload({"limit": 50})
+
+        assert payload["records"][0]["record_id"] == "know_1"
+        assert payload["total"] == 1
+        assert payload["backend"] == "catalog"
+        assert payload["catalog"]["prompt_eligible"] == 1
+        assert payload["catalog"]["needs_reindex"] == 1
+        assert payload["records"][0]["lifecycle_state"] == "needs_reindex"
+        assert payload["records"][0]["lifecycle_label"] == "需重建索引"
+
+    @pytest.mark.asyncio
+    async def test_memory_search_payload_exposes_answer_policy(self):
+        mod = self._make_module()
+        mod.memory_bridge.retrieve = AsyncMock(return_value="")
+        mod.memory_bridge.health.return_value = {
+            "enabled": True,
+            "backend": "vector",
+            "last_backend": "vector",
+            "last_evidence": [],
+            "last_dropped_evidence": [{"drop_reason": "expired", "text": "old"}],
+            "last_answer_policy": {
+                "state": "stale",
+                "action": "refuse_and_request_update",
+            },
+        }
+
+        payload = await mod.search_payload({"query": "route"})
+
+        assert payload["results"] == []
+        assert payload["rag"]["answer_policy"]["state"] == "stale"
+
+    @pytest.mark.asyncio
+    async def test_knowledge_update_payload_soft_deletes_record(self, tmp_path):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._knowledge_catalog.upsert_payloads([{
+            "record_id": "know_1",
+            "text": "Restroom east",
+            "memory_text": "[location] Restroom east",
+            "approval_status": "published",
+        }])
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={
+            "updated": True,
+            "record_id": "know_1",
+            "patch": {"approval_status": "deleted"},
+        })
+        mod.memory_bridge.health.return_value = {"backend": "vector"}
+
+        payload = await mod.update_knowledge_payload({
+            "record_id": "know_1",
+            "action": "delete",
+        })
+
+        assert payload["updated"] is True
+        assert payload["record"]["approval_status"] == "deleted"
+        _, patch_arg = mod.memory_bridge.update_knowledge_metadata.await_args.args
+        assert patch_arg["approval_status"] == "deleted"
+        assert "deleted_at" in patch_arg
+
+    @pytest.mark.asyncio
+    async def test_knowledge_update_payload_bulk_patches_records(self, tmp_path):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._knowledge_catalog.upsert_payloads([
+            {
+                "record_id": "know_a",
+                "text": "Restroom east",
+                "memory_text": "[location] Restroom east",
+                "approval_status": "published",
+            },
+            {
+                "record_id": "know_b",
+                "text": "Cafe west",
+                "memory_text": "[location] Cafe west",
+                "approval_status": "published",
+            },
+        ])
+        mod.memory_bridge.save_fact = AsyncMock()
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={"updated": True})
+        mod.memory_bridge.health.return_value = {"backend": "vector"}
+
+        payload = await mod.update_knowledge_payload({
+            "action": "bulk_update",
+            "record_ids": ["know_a", "know_b"],
+            "patch": {"owner": "ops"},
+        })
+
+        assert payload["updated"] == 2
+        assert payload["failed"] == 0
+        assert payload["sync"]["indexed"] == 2
+        records = {record["record_id"]: record for record in payload["records"]}
+        assert records["know_a"]["owner"] == "ops"
+        assert mod.memory_bridge.save_fact.await_count == 2
+        assert mod.memory_bridge.update_knowledge_metadata.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_knowledge_resolve_conflict_keeps_selected_record(self, tmp_path):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._knowledge_catalog.upsert_payloads([
+            {
+                "record_id": "know_a",
+                "text": "Device A east",
+                "memory_text": "[equipment] Device A east",
+                "approval_status": "published",
+                "entity_key": "device:a",
+                "fact_key": "location",
+                "value": "east",
+            },
+            {
+                "record_id": "know_b",
+                "text": "Device A west",
+                "memory_text": "[equipment] Device A west",
+                "approval_status": "published",
+                "entity_key": "device:a",
+                "fact_key": "location",
+                "value": "west",
+            },
+        ])
+        mod.memory_bridge.save_fact = AsyncMock()
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={"updated": True})
+        mod.memory_bridge.health.return_value = {"backend": "vector"}
+
+        payload = await mod.update_knowledge_payload({
+            "action": "resolve_conflict",
+            "keep_record_id": "know_a",
+            "operator_id": "ops.lead",
+            "review_note": "site verified east",
+        })
+
+        records = {
+            record["record_id"]: record
+            for record in mod._knowledge_catalog.list_records()["records"]
+        }
+        assert payload["action"] == "resolve_conflict"
+        assert payload["keep_record_id"] == "know_a"
+        assert payload["rejected_record_ids"] == ["know_b"]
+        assert records["know_a"]["conflict_set_id"] == ""
+        assert records["know_a"]["approval_status"] == "published"
+        assert records["know_a"]["approved_by"] == "ops.lead"
+        assert records["know_b"]["approval_status"] == "rejected"
+        assert records["know_b"]["rejected_by"] == "ops.lead"
+        assert payload["sync"]["indexed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_rebuild_knowledge_index_payload_indexes_catalog_candidates(self, tmp_path):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._knowledge_catalog.upsert_payloads([
+            {
+                "record_id": "know_a",
+                "text": "Restroom east",
+                "memory_text": "[location] Restroom east",
+                "approval_status": "published",
+            },
+            {
+                "record_id": "know_b",
+                "text": "Draft note",
+                "memory_text": "[location] Draft note",
+                "approval_status": "draft",
+            },
+        ])
+        mod.memory_bridge.save_fact = AsyncMock()
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={"updated": True})
+        mod.memory_bridge.health.return_value = {"backend": "vector"}
+
+        payload = await mod.update_knowledge_payload({"action": "rebuild_index"})
+
+        assert payload["job"]["type"] == "knowledge_rebuild_index"
+        assert payload["job"]["status"] == "completed"
+        assert payload["job"]["job_id"].startswith("knowledge_rebuild_")
+        assert payload["scanned"] == 2
+        assert payload["eligible"] == 1
+        assert payload["indexed"] == 1
+        assert payload["record_ids"] == ["know_a"]
+        assert payload["index_jobs"][0]["job_id"] == payload["job"]["job_id"]
+        assert payload["index_jobs"][0]["indexed"] == 1
+        mod.memory_bridge.save_fact.assert_awaited_once()
+        text, metadata = mod.memory_bridge.save_fact.await_args.args
+        assert text == "[location] Restroom east"
+        assert metadata["record_id"] == "know_a"
+
+    @pytest.mark.asyncio
+    async def test_rebuild_knowledge_index_job_history_persists(self, tmp_path):
+        from askme.memory.index_jobs import KnowledgeIndexJobStore
+
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._knowledge_catalog.upsert_payloads([{
+            "record_id": "know_a",
+            "text": "Gate A is beside the fountain",
+            "memory_text": "[location] Gate A is beside the fountain",
+            "approval_status": "published",
+        }])
+        mod.memory_bridge.save_fact = AsyncMock()
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={"updated": True})
+        mod.memory_bridge.health.return_value = {"backend": "vector", "last_backend": "vector"}
+
+        payload = await mod.update_knowledge_payload({
+            "action": "rebuild_index",
+            "operator_id": "ops.lead",
+        })
+
+        restarted = KnowledgeIndexJobStore(path=tmp_path / "index_jobs.json")
+        jobs = restarted.list_jobs(limit=5)
+        assert jobs[0]["job_id"] == payload["job"]["job_id"]
+        assert jobs[0]["operator_id"] == "ops.lead"
+        assert jobs[0]["status"] == "completed"
+        assert jobs[0]["record_ids"] == ["know_a"]
+
+    @pytest.mark.asyncio
+    async def test_knowledge_list_payload_exposes_recent_index_jobs(self, tmp_path):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._knowledge_catalog.upsert_payloads([{
+            "record_id": "know_a",
+            "text": "Service desk is on floor one",
+            "memory_text": "[location] Service desk is on floor one",
+            "approval_status": "published",
+        }])
+        mod.memory_bridge.save_fact = AsyncMock()
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={"updated": True})
+        mod.memory_bridge.health.return_value = {"backend": "vector"}
+
+        await mod.update_knowledge_payload({"action": "rebuild_index"})
+        payload = await mod.list_knowledge_payload({"limit": 50})
+
+        assert payload["index_jobs"][0]["type"] == "knowledge_rebuild_index"
+        assert payload["index_jobs"][0]["indexed"] == 1
+        assert payload["operations"]["release_cadence"]["mode"] == "manual"
+        assert payload["operations"]["release_cadence"]["next_release_window"]
+        assert "scheduled_release_automation" in payload["operations"]["missing_product_capabilities"]
+
+    @pytest.mark.asyncio
+    async def test_knowledge_diff_and_rollback_restore_prior_answer_text(self, tmp_path):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._knowledge_catalog.upsert_payloads([{
+            "record_id": "know_a",
+            "text": "Gate A is east",
+            "memory_text": "[location] Gate A is east",
+            "approval_status": "published",
+        }])
+        mod.memory_bridge.save_fact = AsyncMock()
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={"updated": True})
+        mod.memory_bridge.health.return_value = {"backend": "vector"}
+
+        await mod.update_knowledge_payload({
+            "record_id": "know_a",
+            "action": "publish",
+            "patch": {"text": "Gate A is west", "memory_text": "[location] Gate A is west"},
+            "operator_id": "ops.lead",
+        })
+        diff = await mod.update_knowledge_payload({"record_id": "know_a", "action": "diff"})
+        rollback = await mod.update_knowledge_payload({
+            "record_id": "know_a",
+            "action": "rollback",
+            "operator_id": "ops.lead",
+        })
+
+        assert diff["found"] is True
+        assert any(change["field"] == "text" for change in diff["changes"])
+        assert rollback["updated"] is True
+        assert rollback["record"]["text"] == "Gate A is east"
+        assert rollback["action"] == "rollback"
+
+    @pytest.mark.asyncio
+    async def test_start_launches_memory_warmup_task(self):
+        mod = self._make_module()
+        mod.memory_bridge.warmup = AsyncMock()
+
+        await mod.start()
+        await asyncio.gather(mod._warmup_task)
+
+        mod.memory_bridge.warmup.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_stop_no_llm_no_crash(self):
@@ -180,6 +558,249 @@ class TestHealthModule:
         assert h["status"] == "ok"
         assert h["port"] == 8080
 
+    def test_runtime_health_provider_reports_ok_when_children_ok(self):
+        from askme.runtime.modules.health_module import HealthModule
+
+        class HealthyModule:
+            name = "text"
+
+            def health(self):
+                return {"status": "ok", "ready": True}
+
+        registry = _make_registry()
+        registry.register(HealthyModule())
+
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server) as server_cls:
+            HealthModule().build({}, registry)
+
+        provider = server_cls.call_args.kwargs["snapshot_provider"]
+        snapshot = provider()
+
+        assert snapshot["status"] == "ok"
+        assert snapshot["service"] == "askme"
+        assert snapshot["text"] == {"status": "ok", "ready": True}
+        assert snapshot["voice_pipeline_status"]["pipeline_ok"] is True
+
+    def test_runtime_health_provider_exposes_audio_input_snapshot(self):
+        from askme.runtime.modules.health_module import HealthModule
+
+        class TextModule:
+            name = "text"
+
+            def __init__(self):
+                self.text_loop = MagicMock()
+                self.text_loop._audio.status_snapshot.return_value = {
+                    "mode": "text",
+                    "enabled": False,
+                    "output_ready": True,
+                    "pipeline_ok": True,
+                    "input": {
+                        "run_id": "run-1",
+                        "last_peak": 123,
+                        "gate_state": "noise",
+                    },
+                }
+
+            def health(self):
+                return {"status": "ok"}
+
+        registry = _make_registry()
+        registry.register(TextModule())
+
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server) as server_cls:
+            HealthModule().build({}, registry)
+
+        provider = server_cls.call_args.kwargs["snapshot_provider"]
+        snapshot = provider()
+
+        assert snapshot["voice_pipeline_status"]["input"]["run_id"] == "run-1"
+        assert snapshot["voice_pipeline_status"]["input"]["last_peak"] == 123
+        assert snapshot["voice_pipeline_status"]["input"]["gate_state"] == "noise"
+
+    def test_runtime_health_provider_exposes_rag_trust_report(self, tmp_path):
+        from askme.runtime.modules.health_module import HealthModule
+
+        report_path = tmp_path / "rag-trust.json"
+        report_path.write_text(
+            json.dumps({
+                "suite": "askme-rag-trust",
+                "status": "passed",
+                "scenario_count": 2,
+                "passed": 2,
+                "failed": 0,
+                "scenarios": [
+                    {"name": "visitor_wayfinding_grounded", "passed": True},
+                    {"name": "expired_knowledge_refused", "passed": True},
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        registry = _make_registry()
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server) as server_cls:
+            HealthModule().build({"rag_trust": {"report_path": str(report_path)}}, registry)
+
+        provider = server_cls.call_args.kwargs["snapshot_provider"]
+        snapshot = provider()
+
+        assert snapshot["rag_trust"]["status"] == "passed"
+        assert snapshot["rag_trust"]["passed"] == 2
+        assert snapshot["rag_trust"]["scenarios"][0]["name"] == "visitor_wayfinding_grounded"
+
+    def test_runtime_health_provider_exposes_voice_e2e_report(self, tmp_path):
+        from askme.runtime.modules.health_module import HealthModule
+
+        report_path = tmp_path / "voice-e2e.json"
+        report_path.write_text(
+            json.dumps({
+                "suite": "askme-voice-e2e",
+                "status": "passed",
+                "scenario_count": 2,
+                "passed": 2,
+                "failed": 0,
+                "metrics": {
+                    "false_respond_rate": 0,
+                    "tts_first_audio_ms": 360,
+                },
+                "scenarios": [
+                    {
+                        "name": "visitor_wayfinding_grounded",
+                        "passed": True,
+                        "interaction_gate": {"action": "respond"},
+                    },
+                    {
+                        "name": "noise_bystander_casual_recorded_only",
+                        "passed": True,
+                        "interaction_gate": {"action": "record_only"},
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        registry = _make_registry()
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server) as server_cls:
+            HealthModule().build({"voice_e2e": {"report_path": str(report_path)}}, registry)
+
+        provider = server_cls.call_args.kwargs["snapshot_provider"]
+        snapshot = provider()
+
+        assert snapshot["voice_e2e"]["status"] == "passed"
+        assert snapshot["voice_e2e"]["passed"] == 2
+        assert snapshot["voice_e2e"]["metrics"]["false_respond_rate"] == 0
+        assert snapshot["voice_e2e"]["scenarios"][1]["gate_action"] == "record_only"
+
+    def test_runtime_health_provider_exposes_field_operations_report(self, tmp_path):
+        from askme.runtime.modules.health_module import HealthModule
+
+        report_path = tmp_path / "field-ops.json"
+        report_path.write_text(
+            json.dumps({
+                "suite": "askme-field-operations",
+                "status": "passed",
+                "scenario_count": 2,
+                "passed": 2,
+                "failed": 0,
+                "external_services": False,
+                "hardware_dispatch": False,
+                "product_demo": {
+                    "suite_name": "园区机器狗场景演示包",
+                    "demo_ready": True,
+                    "real_integration_ready": False,
+                    "customer_scenario_count": 2,
+                    "blocked_on_real_integrations": ["真实摄像头/VMS 事件流"],
+                },
+                "scenarios": [
+                    {"name": "robot_immobilized_notifies_security", "passed": True},
+                    {"name": "illegal_parking_camera_ingest", "passed": True},
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        registry = _make_registry()
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server) as server_cls:
+            HealthModule().build(
+                {"field_operations": {"scenario_report_path": str(report_path)}},
+                registry,
+            )
+
+        provider = server_cls.call_args.kwargs["snapshot_provider"]
+        snapshot = provider()
+
+        assert snapshot["field_operations"]["status"] == "passed"
+        assert snapshot["field_operations"]["passed"] == 2
+        assert snapshot["field_operations"]["hardware_dispatch"] is False
+        assert snapshot["field_operations"]["product_demo"]["demo_ready"] is True
+        assert snapshot["field_operations"]["product_demo"]["real_integration_ready"] is False
+        assert snapshot["field_operations"]["scenarios"][0]["name"] == (
+            "robot_immobilized_notifies_security"
+        )
+
+    @pytest.mark.parametrize("child_status", ["degraded", "error"])
+    def test_runtime_health_provider_degrades_when_child_unhealthy(self, child_status):
+        from askme.runtime.modules.health_module import HealthModule
+
+        class ChildModule:
+            name = "pipeline"
+
+            def health(self):
+                return {"status": child_status, "detail": "not ready"}
+
+        registry = _make_registry()
+        registry.register(ChildModule())
+
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server) as server_cls:
+            HealthModule().build({}, registry)
+
+        provider = server_cls.call_args.kwargs["snapshot_provider"]
+        snapshot = provider()
+
+        assert snapshot["status"] == "degraded"
+        assert snapshot["pipeline"] == {"status": child_status, "detail": "not ready"}
+
+    def test_runtime_health_provider_degrades_when_child_health_raises(self):
+        from askme.runtime.modules.health_module import HealthModule
+
+        class BrokenModule:
+            name = "skill"
+
+            def health(self):
+                raise RuntimeError("health probe failed")
+
+        registry = _make_registry()
+        registry.register(BrokenModule())
+
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server) as server_cls:
+            HealthModule().build({}, registry)
+
+        provider = server_cls.call_args.kwargs["snapshot_provider"]
+        snapshot = provider()
+
+        assert snapshot["status"] == "degraded"
+        assert snapshot["skill"] == {"status": "error"}
+
     @pytest.mark.asyncio
     async def test_start_calls_server_start_when_enabled(self):
         mod = self._make_module()
@@ -204,7 +825,16 @@ class TestHealthModule:
 
             def __init__(self):
                 self.text_loop = MagicMock()
-                self.text_loop.process_turn = AsyncMock(return_value="reply")
+                self.process_turn_calls: list[tuple[str, bool]] = []
+
+                async def _process_turn(text: str, *, speak: bool = False) -> str:
+                    self.process_turn_calls.append((text, speak))
+                    return "reply"
+
+                self.text_loop.process_turn = _process_turn
+                self.text_loop._audio = MagicMock()
+                self.text_loop._audio.is_busy = False
+                self.text_loop._audio.wait_speaking_done.return_value = True
 
             def health(self):
                 return {"status": "ok"}
@@ -266,8 +896,9 @@ class TestHealthModule:
         registry = _make_registry()
         text_mod = FakeTextModule()
         mission_mod = FakeMissionModule()
+        memory_mod = FakeMemoryModule()
         registry.register(text_mod)
-        registry.register(FakeMemoryModule())
+        registry.register(memory_mod)
         registry.register(FakeSkillModule())
         registry.register(mission_mod)
 
@@ -278,14 +909,25 @@ class TestHealthModule:
         with patch("askme.health_server.AskmeHealthServer", return_value=mock_server):
             mod.build({"app": {"name": "askme-test", "version": "9.9"}}, registry)
 
-        mock_server.set_chat_handler.assert_called_once_with(
-            text_mod.text_loop.process_turn,
-        )
+        mock_server.set_chat_handler.assert_called_once()
         mock_server.set_capabilities_provider.assert_called_once()
         mock_server.set_conversation_provider.assert_called_once()
         mock_server.set_mission_handler.assert_called_once_with(
             mission_mod.mission_service,
         )
+        mock_server.set_memory_handler.assert_called_once_with(memory_mod)
+
+        chat_handler = mock_server.set_chat_handler.call_args.args[0]
+        chat_payload = asyncio.run(chat_handler("hello", speak=True))
+        assert chat_payload["reply"] == "reply"
+        assert chat_payload["spoken"] is True
+        assert chat_payload["evidence"] == []
+        assert chat_payload["rag"]["used_in_answer"] is False
+        assert text_mod.process_turn_calls == [("hello", True)]
+        text_mod.text_loop._audio.speak.assert_not_called()
+        text_mod.text_loop._audio.start_playback.assert_not_called()
+        text_mod.text_loop._audio.wait_speaking_done.assert_not_called()
+        text_mod.text_loop._audio.stop_playback.assert_not_called()
 
         capabilities = mock_server.set_capabilities_provider.call_args.args[0]()
         assert capabilities["app"]["name"] == "askme-test"
@@ -302,6 +944,191 @@ class TestHealthModule:
 
         conversation = mock_server.set_conversation_provider.call_args.args[0]()
         assert conversation == [{"role": "user", "content": "hello"}]
+
+    def test_chat_handler_includes_cognition_metadata_when_text_loop_handles_task(self):
+        from askme.runtime.module import ModuleRegistry
+        from askme.runtime.modules.health_module import HealthModule
+
+        class FakeTextModule:
+            name = "text"
+
+            def __init__(self):
+                self.text_loop = MagicMock()
+                self.text_loop.last_cognition_result = {
+                    "handled": True,
+                    "plan": {
+                        "planning_session_id": "session-1",
+                        "interaction_state": "awaiting_confirmation",
+                    },
+                }
+
+                async def _process_turn(text: str, *, speak: bool = False) -> str:
+                    return "已生成巡检任务草案，请确认后再交给运行时仲裁器。"
+
+                self.text_loop.process_turn = _process_turn
+
+            def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {}
+
+        registry = ModuleRegistry()
+        registry.register(FakeTextModule())
+
+        mod = HealthModule()
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server):
+            mod.build({}, registry)
+
+        chat_handler = mock_server.set_chat_handler.call_args.args[0]
+        chat_payload = asyncio.run(chat_handler("巡检 A 区", speak=False))
+
+        assert chat_payload["reply"].startswith("已生成巡检任务草案")
+        assert chat_payload["cognition"]["handled"] is True
+        assert chat_payload["cognition"]["plan"]["planning_session_id"] == "session-1"
+
+    def test_chat_handler_submits_ready_cognition_plan_to_runtime_handoff(self):
+        from askme.runtime.module import ModuleRegistry
+        from askme.runtime.modules.health_module import HealthModule
+
+        class FakeTextModule:
+            name = "text"
+
+            def __init__(self):
+                self.text_loop = MagicMock()
+                self.text_loop.last_cognition_result = {
+                    "handled": True,
+                    "plan": {
+                        "plan_id": "plan-1",
+                        "planning_session_id": "session-1",
+                        "interaction_state": "ready_for_arbiter",
+                        "handoff_ready": True,
+                    },
+                }
+
+                async def _process_turn(text: str, *, speak: bool = False) -> str:
+                    return "ready"
+
+                self.text_loop.process_turn = _process_turn
+
+            def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {}
+
+        class FakeRuntimeHandoffModule:
+            name = "runtime_handoff"
+
+            def __init__(self):
+                self.seen_plan = None
+
+            def submit_plan_payload(self, plan):
+                self.seen_plan = dict(plan)
+                return {
+                    "accepted": True,
+                    "run": {"run_id": "run-1", "current_state": "completed"},
+                }
+
+            def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {}
+
+        registry = ModuleRegistry()
+        registry.register(FakeTextModule())
+        runtime = FakeRuntimeHandoffModule()
+        registry.register(runtime)
+
+        mod = HealthModule()
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server):
+            mod.build({}, registry)
+
+        chat_handler = mock_server.set_chat_handler.call_args.args[0]
+        chat_payload = asyncio.run(chat_handler("confirm", speak=False))
+
+        assert runtime.seen_plan["plan_id"] == "plan-1"
+        assert chat_payload["runtime"]["accepted"] is True
+        assert chat_payload["cognition"]["runtime"]["run"]["run_id"] == "run-1"
+
+    def test_chat_handler_wayfinding_question_does_not_submit_runtime_task(self):
+        from askme.runtime.module import ModuleRegistry
+        from askme.runtime.modules.health_module import HealthModule
+
+        class FakeTextModule:
+            name = "text"
+
+            def __init__(self):
+                self.text_loop = MagicMock()
+                self.text_loop.last_cognition_result = {
+                    "handled": True,
+                    "intent_type": "visitor_wayfinding",
+                    "plan": {
+                        "planning_session_id": "session-wayfinding",
+                        "interaction_state": "idle",
+                        "handoff_ready": False,
+                    },
+                }
+
+                async def _process_turn(text: str, *, speak: bool = False) -> str:
+                    return "卫生间在 A 区东侧，请沿右侧走廊前行。"
+
+                self.text_loop.process_turn = _process_turn
+
+            def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {}
+
+        class FakeRuntimeHandoffModule:
+            name = "runtime_handoff"
+
+            def __init__(self):
+                self.control_texts: list[str] = []
+                self.submitted = False
+
+            def handle_chat_control(self, text):
+                self.control_texts.append(text)
+                return None
+
+            def submit_plan_payload(self, plan):
+                self.submitted = True
+                return {"accepted": True}
+
+            def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {}
+
+        registry = ModuleRegistry()
+        registry.register(FakeTextModule())
+        runtime = FakeRuntimeHandoffModule()
+        registry.register(runtime)
+
+        mod = HealthModule()
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server):
+            mod.build({}, registry)
+
+        chat_handler = mock_server.set_chat_handler.call_args.args[0]
+        chat_payload = asyncio.run(chat_handler("游客问：卫生间在哪里？", speak=False))
+
+        assert "卫生间" in chat_payload["reply"]
+        assert "runtime" not in chat_payload
+        assert chat_payload["cognition"]["intent_type"] == "visitor_wayfinding"
+        assert runtime.control_texts == ["游客问：卫生间在哪里？"]
+        assert runtime.submitted is False
 
     def test_build_falls_back_to_pipeline_chat_when_text_missing(self):
         from askme.runtime.modules.health_module import HealthModule

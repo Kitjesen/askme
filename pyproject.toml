@@ -15,6 +15,7 @@ dependencies = [
     "numpy>=1.26.0",
     "sherpa-onnx>=1.10.0",
     "requests>=2.31.0",
+    "websocket-client>=1.8.0",
     "fastapi>=0.103.0",
     "uvicorn>=0.23.0",
     "miniaudio>=1.61",
@@ -40,8 +41,10 @@ memory = [
     "mem0ai>=0.1.0",
 ]
 robotmem = [
-    "robotmem>=0.3.0",
-    "jieba>=0.42.1",
+    "robotmem[cjk]>=0.1.3,<0.2",
+]
+mempalace = [
+    "mempalace>=3.3.5,<4",
 ]
 vision = [
     "qp-perception>=0.1.0",

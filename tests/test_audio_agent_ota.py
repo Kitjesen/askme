@@ -58,10 +58,66 @@ def test_audio_agent_updates_ota_metrics_snapshot(monkeypatch) -> None:
     voice_metrics = metrics.snapshot()["voice_pipeline"]
 
     assert snapshot["mode"] == "text"
+    assert snapshot["interaction"]["state"] == "text_mode"
+    assert snapshot["interaction"]["can_talk"] is False
     assert snapshot["pipeline_ok"] is True
     assert voice_metrics["mode"] == "text"
     assert voice_metrics["output_ready"] is True
     assert voice_metrics["tts_backend"] == "edge"
+
+
+def test_audio_agent_status_snapshot_includes_input_diagnostics(monkeypatch) -> None:
+    monkeypatch.setattr("askme.voice.audio_agent.TTSEngine", _DummyTTS)
+
+    metrics = OTABridgeMetrics()
+    agent = AudioAgent(
+        {
+            "voice": {
+                "tts": {"backend": "edge"},
+                "input_device": "hw:1,0",
+                "mic_native_rate": 48000,
+                "mic_channels": 2,
+                "mic_channel_select": 1,
+                "noise_gate_peak": 500,
+                "echo_gate_peak": 30000,
+            }
+        },
+        voice_mode=False,
+        metrics=metrics,
+    )
+
+    agent._record_input_observation(
+        peak=123,
+        rms=12.5,
+        vad_state="silent",
+        gate_state="noise",
+    )
+    snapshot = agent.status_snapshot()
+    input_status = snapshot["input"]
+    media_status = snapshot["media"]
+    voice_turn_status = snapshot["voice_turn"]
+    interaction_status = snapshot["interaction"]
+
+    assert snapshot["run_id"]
+    assert interaction_status["state"] == "text_mode"
+    assert interaction_status["hint"] == "use_text_input"
+    assert media_status["media_transport"] == "local_sounddevice"
+    assert media_status["session_id"] == snapshot["run_id"]
+    assert media_status["participant_count"] == 0
+    assert voice_turn_status["counters"]["barge_in_count"] == 0
+    assert voice_turn_status["current"] is None
+    assert input_status["run_id"] == snapshot["run_id"]
+    assert input_status["device"] == "hw:1,0"
+    assert input_status["native_rate"] == 48000
+    assert input_status["channels"] == 2
+    assert input_status["channel_select"] == 1
+    assert input_status["noise_gate_peak"] == 500
+    assert input_status["echo_gate_peak"] == 30000
+    assert input_status["last_peak"] == 123
+    assert input_status["last_rms"] == 12.5
+    assert input_status["vad_state"] == "silent"
+    assert input_status["gate_state"] == "noise"
+    assert input_status["gate_recommendation"] == "observed_peak_below_noise_gate:123<500"
 
 
 def test_audio_agent_marks_voice_error_for_ota_metrics(monkeypatch) -> None:

@@ -11,6 +11,7 @@ sounddevice>=0.4.6
 soundfile>=0.12.1
 sherpa-onnx>=1.10.0
 miniaudio>=1.61
+websocket-client>=1.8.0
 
 # Embedding server
 sentence-transformers>=2.2.2

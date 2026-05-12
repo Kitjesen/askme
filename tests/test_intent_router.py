@@ -47,11 +47,13 @@ class TestIntentRouter:
         assert intent.type == IntentType.VOICE_TRIGGER
         assert intent.skill_name == "get_time"
 
-    def test_voice_trigger_question_mark_suppressed(self):
+    def test_voice_trigger_question_mark_allows_query_skill(self):
         router = self._make_router(triggers={"现在几点": "get_time"})
-        # Full-width question mark — treated as a question, trigger suppressed
+        # ASR may add question punctuation to query skills; keep read-only
+        # skill routing active for those cases.
         intent = router.route("现在几点了？")
-        assert intent.type == IntentType.GENERAL
+        assert intent.type == IntentType.VOICE_TRIGGER
+        assert intent.skill_name == "get_time"
 
     def test_voice_trigger_no_match(self):
         router = self._make_router(triggers={"现在几点": "get_time"})

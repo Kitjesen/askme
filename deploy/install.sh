@@ -3,10 +3,12 @@
 # Usage: bash deploy/install.sh
 set -e
 
-ASKME_DIR="/home/sunrise/askme"
-SERVICE_FILE="/etc/systemd/system/askme.service"
+ASKME_DIR="${ASKME_DIR:-/home/sunrise/data/inovxio/askme}"
+SERVICE_FILE="${SERVICE_FILE:-/etc/systemd/system/askme.service}"
 
 echo "=== Askme Deploy ==="
+echo "Install dir: $ASKME_DIR"
+echo "Override service env via /etc/default/askme (ASKME_DIR, ASKME_ENV_FILE, ASKME_PYTHON)."
 
 # 1. Install systemd service
 if [ -f deploy/askme.service ]; then
@@ -18,14 +20,14 @@ else
 fi
 
 # 2. Ensure venv and deps
+mkdir -p "$ASKME_DIR"
 if [ ! -d "$ASKME_DIR/.venv" ]; then
     python3 -m venv "$ASKME_DIR/.venv"
     echo "[OK] venv created"
 fi
 
 source "$ASKME_DIR/.venv/bin/activate"
-pip install -q -e "$ASKME_DIR"
-pip install -q robotmem jieba
+pip install -q -e "$ASKME_DIR[robot,robotmem]"
 echo "[OK] dependencies installed"
 
 # 3. Enable and start

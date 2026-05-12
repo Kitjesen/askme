@@ -35,8 +35,8 @@ def _project_root() -> Path:
 
 
 def _load_soul_seed(cfg: dict[str, Any]) -> list[dict[str, str]]:
-    """Load SOUL.md and convert it into a prompt seed."""
-    soul_file = cfg.get("brain", {}).get("soul_file", "SOUL.md")
+    """Load prompts/SOUL.md and convert it into a prompt seed."""
+    soul_file = cfg.get("brain", {}).get("soul_file", "prompts/SOUL.md")
     if not os.path.isabs(soul_file):
         soul_file = str(_project_root() / soul_file)
     if not os.path.isfile(soul_file):
@@ -125,7 +125,9 @@ class PipelineModule(Module):
                 "general_chat_max_safety_level", "normal"
             ),
             max_response_chars=int(brain_cfg.get("max_response_chars", 0)),
+            voice_tts_coalesce=bool(brain_cfg.get("voice_tts_coalesce", False)),
             memory_system=memory_system,
+            rag_policy_templates=brain_cfg.get("rag_policy_templates", {}),
         )
         logger.info("PipelineModule: built")
 

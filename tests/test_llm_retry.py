@@ -158,3 +158,28 @@ async def test_model_chain_no_duplicates(monkeypatch):
     )
     chain = client._model_chain()
     assert chain == ["primary-model", "other-model"]
+
+
+async def test_model_chain_keeps_minimax_fallbacks_within_provider(monkeypatch):
+    """MiniMax voice-brain routing must not silently fail over to another provider."""
+    client = _make_client(
+        monkeypatch,
+        model="MiniMax-M2.7-highspeed",
+        fallback_models=["claude-3-5-sonnet", "MiniMax-M2.5-highspeed"],
+    )
+
+    assert client._model_chain() == [
+        "MiniMax-M2.7-highspeed",
+        "MiniMax-M2.5-highspeed",
+    ]
+
+
+async def test_model_chain_keeps_relay_fallbacks_out_of_minimax_path(monkeypatch):
+    """Non-MiniMax primaries must not unexpectedly route into MiniMax fallbacks."""
+    client = _make_client(
+        monkeypatch,
+        model="claude-3-5-sonnet",
+        fallback_models=["MiniMax-M2.7-highspeed", "claude-3-haiku"],
+    )
+
+    assert client._model_chain() == ["claude-3-5-sonnet", "claude-3-haiku"]

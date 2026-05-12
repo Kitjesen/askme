@@ -29,7 +29,7 @@ class TextModule(Module):
     """Provides TextLoop and CommandHandler to the runtime."""
 
     name = "text"
-    depends_on = ("llm", "memory", "skill", "pipeline")
+    depends_on = ("llm", "memory", "skill", "pipeline", "cognition")
     provides = ("text_io",)
 
     # In ports (auto-wired from provider modules)
@@ -59,6 +59,7 @@ class TextModule(Module):
 
         pipeline_mod = self.pipeline_in
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
+        cognition_handler = registry.get("cognition")
 
         # Reuse voice module's audio if available, else create text-only AudioAgent
         voice_mod = self.voice_in
@@ -94,6 +95,7 @@ class TextModule(Module):
             audio=audio,
             voice_runtime_bridge=voice_runtime_bridge,
             dispatcher=dispatcher,
+            cognition_handler=cognition_handler,
         )
 
         logger.info("TextModule: built")

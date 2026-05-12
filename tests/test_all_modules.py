@@ -515,14 +515,20 @@ class TestHealthModule:
 
 class TestCompositions:
     def test_voice_runtime_builds(self):
-        """voice blueprint = 9 core modules."""
+        """voice blueprint includes cognition and fake runtime handoff."""
         from askme.blueprints.voice import voice
-        assert len(voice._module_classes) == 9
+        names = [mc.name for mc in voice._module_classes]
+        assert "cognition" in names
+        assert "runtime_handoff" in names
+        assert len(voice._module_classes) == 11
 
     def test_voice_perception_extends_voice(self):
         """voice_perception = voice + 4 perception modules."""
         from askme.blueprints.voice_perception import voice_perception
-        assert len(voice_perception._module_classes) == 13
+        names = [mc.name for mc in voice_perception._module_classes]
+        assert "cognition" in names
+        assert "runtime_handoff" in names
+        assert len(voice_perception._module_classes) == 15
 
     def test_text_runtime_has_no_voice(self):
         """text blueprint has no VoiceModule."""
@@ -531,8 +537,10 @@ class TestCompositions:
         assert "voice" not in names
         assert "text" in names
         assert "mission" in names
+        assert "cognition" in names
+        assert "runtime_handoff" in names
         assert "health" in names
-        assert len(text._module_classes) == 8
+        assert len(text._module_classes) == 10
 
     def test_edge_robot_adds_plugins(self):
         """edge_robot = voice_perception + 6 external plugins."""
@@ -541,7 +549,9 @@ class TestCompositions:
         assert "control" in names
         assert "led" in names
         assert "mission" in names
-        assert len(edge_robot._module_classes) == 17
+        assert "cognition" in names
+        assert "runtime_handoff" in names
+        assert len(edge_robot._module_classes) == 19
 
     def test_replace_on_composition(self):
         """Replacing a module in a blueprint should work."""
@@ -568,7 +578,8 @@ class TestCompositions:
         smaller = voice.without(TextModule)
         names = [mc.name for mc in smaller._module_classes]
         assert "text" not in names
-        assert len(smaller._module_classes) == 8
+        assert "cognition" in names
+        assert len(smaller._module_classes) == 10
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -578,8 +589,9 @@ class TestCompositions:
 
 class TestModuleExports:
     def test_all_18_modules_importable(self):
-        """All 18 modules should be importable from the package."""
+        """All module classes should be importable from the package."""
         from askme.runtime.modules import (
+            CognitionModule,
             ControlModule,
             ExecutorModule,
             HealthModule,
@@ -592,6 +604,7 @@ class TestModuleExports:
             ProactiveModule,
             PulseModule,
             ReactionModule,
+            RuntimeHandoffModule,
             SafetyModule,
             SkillModule,
             TelegramModule,
@@ -600,21 +613,22 @@ class TestModuleExports:
             VoiceModule,
         )
         modules = [
+            CognitionModule,
             LLMModule, ToolsModule, PulseModule, MemoryModule,
             MissionModule, PerceptionModule, SafetyModule, PipelineModule,
             SkillModule, ExecutorModule, VoiceModule, TextModule,
             ControlModule, LEDModule, ProactiveModule, ReactionModule,
-            HealthModule, TelegramModule,
+            RuntimeHandoffModule, HealthModule, TelegramModule,
         ]
-        assert len(modules) == 18
+        assert len(modules) == 20
         for mod_cls in modules:
             assert hasattr(mod_cls, "name")
             assert hasattr(mod_cls, "build")
 
     def test_all_in_dunder_all(self):
-        """__all__ should list all 18 module classes."""
+        """__all__ should list all module classes."""
         import askme.runtime.modules as pkg
-        assert len(pkg.__all__) == 18
+        assert len(pkg.__all__) == 20
 
 
 # ══════════════════════════════════════════════════════════════════════

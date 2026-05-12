@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sunrise audio sentinel: product speaker playback -> room mic -> local ASR.
+"""Sunrise audio sentinel: product speaker playback -> room mic -> ASR.
 
 The script intentionally tests the hardware-critical path only.  It prebuffers
 TTS by default so MiniMax/network latency cannot consume the recording window,
@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import threading
 import time
@@ -27,9 +26,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from askme.config import get_config
 from askme.voice.asr import ASREngine
+from askme.voice.cloud_asr import CloudASR
 from askme.voice.mic_input import MicInput
 from askme.voice.tts import TTSEngine
-
 
 _DIGIT_ALIASES = {
     "0": "\u96f6",
@@ -158,6 +157,70 @@ def transcribe_local(samples: np.ndarray, sample_rate: int, cfg: dict[str, Any])
     return engine.recognizer.get_result(stream).strip(), (time.perf_counter() - started) * 1000.0
 
 
+def transcribe_cloud(
+    samples: np.ndarray,
+    sample_rate: int,
+    cfg: dict[str, Any],
+    *,
+    timeout: float,
+    realtime: bool = True,
+) -> tuple[str, float, str]:
+    """Transcribe recorded room-loop audio with the configured CloudASR backend."""
+    started = time.perf_counter()
+    voice_cfg = cfg.get("voice", {}) if isinstance(cfg, dict) else {}
+    cloud_cfg = voice_cfg.get("cloud_asr", {}) if isinstance(voice_cfg, dict) else {}
+    if not isinstance(cloud_cfg, dict):
+        cloud_cfg = {}
+
+    cloud = CloudASR(cloud_cfg)
+    if not cloud.available:
+        return "", 0.0, "Cloud ASR is not enabled or api_key is missing"
+
+    cloud_rate = int(cloud_cfg.get("sample_rate", 16000) or 16000)
+    audio = samples.astype(np.float32, copy=False)
+    if sample_rate != cloud_rate:
+        audio = MicInput._resample_mono(audio, sample_rate, cloud_rate)
+    pcm16 = MicInput.to_int16(audio)
+
+    try:
+        if not cloud.start_session():
+            return "", (time.perf_counter() - started) * 1000.0, "Cloud ASR session did not start"
+        step = max(1, int(cloud_rate * 0.1))
+        for pos in range(0, len(pcm16), step):
+            chunk = pcm16[pos : pos + step]
+            cloud.feed(chunk.tobytes())
+            if realtime:
+                time.sleep(len(chunk) / float(cloud_rate or 1))
+        text = cloud.finish_session(timeout=timeout).strip()
+        return text, (time.perf_counter() - started) * 1000.0, ""
+    except Exception as exc:  # pragma: no cover - network/runtime path
+        try:
+            cloud.cancel_session()
+        except Exception:
+            pass
+        return "", (time.perf_counter() - started) * 1000.0, str(exc)
+
+
+def slice_asr_samples(
+    samples: np.ndarray,
+    sample_rate: int,
+    start_s: float,
+    *,
+    margin_s: float = 0.05,
+) -> tuple[np.ndarray, float]:
+    """Return the ASR slice and its start offset in the original recording."""
+    start_index = max(0, int((start_s - margin_s) * sample_rate))
+    return samples[start_index:], start_index / float(sample_rate or 1)
+
+
+def estimate_speech_start_s(first_play_s: float, tts: TTSEngine) -> float:
+    """Estimate when real speech starts after USB direct lead-in/cushion audio."""
+    leadin = float(getattr(tts, "_usb_direct_speech_leadin_seconds", 0.0) or 0.0)
+    cushion = float(getattr(tts, "_usb_direct_speech_onset_cushion_seconds", 0.0) or 0.0)
+    gap = float(getattr(tts, "_usb_direct_speech_onset_gap_seconds", 0.0) or 0.0)
+    return first_play_s + leadin + cushion + gap
+
+
 def _wait_queue_join(q: Any, timeout: float) -> bool:
     done = threading.Event()
 
@@ -172,6 +235,11 @@ def _wait_queue_join(q: Any, timeout: float) -> bool:
 
 def run_trial(args: argparse.Namespace, cfg: dict[str, Any], trial_index: int) -> dict[str, Any]:
     mic = MicInput.from_config(cfg)
+    voice_cfg = cfg.get("voice", {})
+    try:
+        usb_direct_expected = bool(mic._should_use_usb_direct())
+    except Exception:
+        usb_direct_expected = False
     tts_cfg = dict(cfg.get("voice", {}).get("tts", {}))
     if args.speech_leadin_seconds is not None:
         tts_cfg["usb_direct_speech_leadin_seconds"] = args.speech_leadin_seconds
@@ -181,6 +249,7 @@ def run_trial(args: argparse.Namespace, cfg: dict[str, Any], trial_index: int) -
     errors: list[str] = []
     record_ready = threading.Event()
     record_started_at = [0.0]
+    capture_transport = ["unknown"]
 
     def wrap_play(kind: str, func: Any) -> Any:
         def wrapped(chunk: np.ndarray) -> bool:
@@ -225,6 +294,9 @@ def run_trial(args: argparse.Namespace, cfg: dict[str, Any], trial_index: int) -
         try:
             with mic.open():
                 record_started_at[0] = time.perf_counter()
+                capture_transport[0] = (
+                    "usb_direct" if getattr(mic, "_usb_audio_proc", None) is not None else "sounddevice"
+                )
                 record_ready.set()
                 chunks_needed = max(1, int(args.record_seconds * 1000 / mic._chunk_ms))
                 for _ in range(chunks_needed):
@@ -259,9 +331,43 @@ def run_trial(args: argparse.Namespace, cfg: dict[str, Any], trial_index: int) -
         wav_path = wav_path.with_name(f"{wav_path.stem}_trial{trial_index}{wav_path.suffix}")
     write_wav(wav_path, audio, sample_rate)
 
-    transcript, asr_ms = transcribe_local(audio, sample_rate, cfg)
     play_events.sort(key=lambda event: float(event["start_s"]))
     first_play_s = min((float(event["start_s"]) for event in play_events), default=playback_requested_s)
+    speech_events = [event for event in play_events if event.get("kind") == "speech"]
+    first_speech_play_s = min(
+        (float(event["start_s"]) for event in speech_events),
+        default=first_play_s,
+    )
+    asr_audio = audio
+    asr_audio_start_s = 0.0
+    if not args.no_asr_trim and speech_events:
+        asr_audio, asr_audio_start_s = slice_asr_samples(
+            audio,
+            sample_rate,
+            estimate_speech_start_s(first_speech_play_s, tts),
+        )
+
+    backend = "cloud" if args.cloud_asr else args.asr_backend
+    local_transcript = ""
+    cloud_transcript = ""
+    local_asr_ms = 0.0
+    cloud_asr_ms = 0.0
+    cloud_error = ""
+    if backend in ("local", "both"):
+        local_transcript, local_asr_ms = transcribe_local(asr_audio, sample_rate, cfg)
+    if backend in ("cloud", "both"):
+        cloud_transcript, cloud_asr_ms, cloud_error = transcribe_cloud(
+            asr_audio,
+            sample_rate,
+            cfg,
+            timeout=args.cloud_finish_timeout,
+            realtime=not args.cloud_feed_fast,
+        )
+        if cloud_error:
+            errors.append(cloud_error)
+    asr_source = "cloud" if backend in ("cloud", "both") else "local"
+    transcript = cloud_transcript if asr_source == "cloud" else local_transcript
+
     onset_ms, onset_threshold = detect_onset_ms(
         audio,
         sample_rate,
@@ -281,6 +387,10 @@ def run_trial(args: argparse.Namespace, cfg: dict[str, Any], trial_index: int) -
         "expect_prefix": args.expect_prefix,
         "normalized_transcript": normalize_transcript(transcript),
         "transcript": transcript,
+        "asr_source": asr_source,
+        "asr_backend": backend,
+        "local_transcript": local_transcript,
+        "cloud_transcript": cloud_transcript,
         "prefix_ok": transcript_has_prefix(transcript, args.expect_prefix),
         "signal_ok": signal_ok,
         "peak": peak,
@@ -288,12 +398,20 @@ def run_trial(args: argparse.Namespace, cfg: dict[str, Any], trial_index: int) -
         "min_peak": args.min_peak,
         "max_onset_ms": args.max_onset_ms,
         "speech_leadin_seconds": args.speech_leadin_seconds,
+        "asr_audio_start_s": round(asr_audio_start_s, 3),
+        "asr_audio_seconds": round(len(asr_audio) / float(sample_rate or 1), 3),
         "sample_rate": sample_rate,
+        "input_transport_config": str(voice_cfg.get("input_transport", "auto")),
+        "input_device_config": voice_cfg.get("input_device", None),
+        "input_transport_resolved": capture_transport[0],
+        "usb_direct_expected": usb_direct_expected,
         "record_seconds": args.record_seconds,
         "playback_requested_s": round(playback_requested_s, 3),
         "onset_ms": None if onset_ms is None else round(onset_ms, 1),
         "onset_threshold_peak": onset_threshold,
-        "asr_ms": round(asr_ms, 1),
+        "asr_ms": round(cloud_asr_ms if asr_source == "cloud" else local_asr_ms, 1),
+        "local_asr_ms": round(local_asr_ms, 1),
+        "cloud_asr_ms": round(cloud_asr_ms, 1),
         "play_events": play_events,
         "wav": str(wav_path),
         "errors": errors,
@@ -312,6 +430,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tts-timeout", type=float, default=45.0)
     parser.add_argument("--playback-timeout", type=float, default=45.0)
     parser.add_argument(
+        "--asr-backend",
+        choices=("local", "cloud", "both"),
+        default="local",
+        help="ASR backend used for the pass/fail transcript gate",
+    )
+    parser.add_argument(
+        "--cloud-asr",
+        action="store_true",
+        help="compatibility alias for --asr-backend cloud",
+    )
+    parser.add_argument("--cloud-finish-timeout", type=float, default=8.0)
+    parser.add_argument(
+        "--cloud-feed-fast",
+        action="store_true",
+        help="feed CloudASR as fast as possible instead of pacing the stream in realtime",
+    )
+    parser.add_argument(
+        "--no-asr-trim",
+        action="store_true",
+        help="transcribe the full recording instead of trimming USB wake audio",
+    )
+    parser.add_argument(
         "--speech-leadin-seconds",
         type=float,
         default=None,
@@ -325,6 +465,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.cloud_asr:
+        args.asr_backend = "cloud"
     cfg = get_config()
     trial_results = []
     for trial_index in range(1, max(1, args.trials) + 1):
@@ -332,10 +474,11 @@ def main(argv: list[str] | None = None) -> int:
         result = run_trial(args, cfg, trial_index)
         trial_results.append(result)
         print(
-            "  peak={peak} rms={rms} onset_ms={onset} transcript={text!r} prefix_ok={prefix} signal_ok={signal}".format(
+            "  peak={peak} rms={rms} onset_ms={onset} asr={source} transcript={text!r} prefix_ok={prefix} signal_ok={signal}".format(
                 peak=result["peak"],
                 rms=result["rms"],
                 onset=result["onset_ms"],
+                source=result["asr_source"],
                 text=result["transcript"],
                 prefix=result["prefix_ok"],
                 signal=result["signal_ok"],

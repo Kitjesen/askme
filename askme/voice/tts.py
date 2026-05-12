@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import queue
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from askme.voice.audio_router import AudioRouter
 
 from askme.interfaces.tts import TTSBackend
+from askme.voice.voice_profiles import VoiceProfile, build_voice_profiles, resolve_voice_profile_id
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,17 @@ class TTSEngine(TTSBackend):
     # bypassed for _MINIMAX_BACKOFF_SECONDS seconds to avoid per-call timeout.
     _MINIMAX_FAIL_THRESHOLD = 3
     _MINIMAX_BACKOFF_SECONDS = 300.0  # 5 minutes
+    _MINIMAX_MIN_STREAM_SAMPLES = 2400
+    _SOUND_CUE_SPECS: dict[str, tuple[tuple[float, float], ...]] = {
+        "soft_chime": ((659.25, 0.08), (783.99, 0.1)),
+        "welcome_chime": ((523.25, 0.07), (659.25, 0.07), (880.0, 0.11)),
+        "notice_beep": ((740.0, 0.09),),
+        "emergency_tone": ((880.0, 0.08), (0.0, 0.04), (880.0, 0.08), (0.0, 0.04), (988.0, 0.12)),
+        "quiet_ping": ((587.33, 0.08),),
+        "fault_tone": ((392.0, 0.08), (0.0, 0.035), (330.0, 0.12)),
+        "confirm_chime": ((659.25, 0.07), (523.25, 0.09)),
+        "brand_chime": ((523.25, 0.06), (659.25, 0.06), (783.99, 0.09)),
+    }
 
     # Regex patterns for cleaning text before TTS
     _RE_EMOJI = re.compile(r'[\U00010000-\U0010ffff]')
@@ -113,15 +126,41 @@ class TTSEngine(TTSBackend):
         # MiniMax backend config
         self._minimax_api_key: str = config.get("minimax_api_key", "")
         self._minimax_tts_url: str = config.get("minimax_tts_url", "https://api.minimax.chat/v1")
+        self._minimax_tts_ws_url: str = config.get(
+            "minimax_tts_ws_url", "wss://api.minimax.io/ws/v1/t2a_v2"
+        )
+        self._minimax_tts_transport: str = str(
+            config.get("minimax_tts_transport", "sse")
+        ).lower()
         self._minimax_tts_model: str = config.get("minimax_tts_model", "speech-2.8-hd")
         self._minimax_voice_id: str = config.get("minimax_voice_id", "male-qn-qingse")
         self._minimax_sample_rate: int = int(config.get("minimax_sample_rate", 24000))
+        self._minimax_bitrate: int = int(config.get("minimax_bitrate", 128000))
+        self._minimax_audio_format: str = str(config.get("minimax_audio_format", "pcm"))
         # Voice tuning: speed (0.5-2.0), vol (0-10), pitch (-12 to 12 semitones)
         self._minimax_speed: float = float(config.get("minimax_speed", 1.0))
         self._minimax_vol: float = min(10.0, max(0.0, float(config.get("minimax_vol", 1.0))))
         self._minimax_pitch: int = int(config.get("minimax_pitch", 0))
         # Emotion: "" (auto), happy, sad, angry, fearful, disgusted, surprised, calm
         self._minimax_emotion: str = config.get("minimax_emotion", "")
+        self._voice_profile_cues_enabled = bool(config.get("voice_profile_cues_enabled", True))
+        self._voice_profiles: dict[str, VoiceProfile] = build_voice_profiles(
+            config,
+            default_voice_id=self._minimax_voice_id,
+        )
+        state_path = config.get("voice_profile_state_path") or os.getenv(
+            "ASKME_VOICE_PROFILE_STATE_PATH"
+        )
+        self._voice_profile_state_path: Path | None = Path(state_path) if state_path else None
+        self._voice_profile_persistence_error: str | None = None
+        self._active_voice_profile_id: str = str(
+            config.get("voice_profile", "patrol_default")
+        )
+        persisted_profile_id = self._load_persisted_voice_profile_id()
+        if persisted_profile_id:
+            self._active_voice_profile_id = persisted_profile_id
+        if self._active_voice_profile_id in self._voice_profiles:
+            self._apply_voice_profile(self._voice_profiles[self._active_voice_profile_id])
         self._minimax_leading_silence_preserve_seconds: float = float(
             config.get("minimax_leading_silence_preserve_seconds", 0.16)
         )
@@ -135,6 +174,8 @@ class TTSEngine(TTSBackend):
 
         # Volume multiplier applied to all PCM output (0.0–1.0)
         self._volume: float = float(config.get("volume", 1.0))
+        if self._active_voice_profile_id in self._voice_profiles:
+            self._apply_voice_profile(self._voice_profiles[self._active_voice_profile_id])
 
         # Queues and buffers
         self.tts_text_queue: queue.Queue[tuple[int, str] | None] = queue.Queue()
@@ -180,11 +221,17 @@ class TTSEngine(TTSBackend):
         self._usb_direct_speech_warm_leadin_seconds: float = float(
             config.get("usb_direct_speech_warm_leadin_seconds", 0.12)
         )
+        self._usb_direct_speech_gain: float = float(
+            config.get("usb_direct_speech_gain", 1.0)
+        )
         self._usb_direct_speech_wake_signal_seconds: float = float(
             config.get("usb_direct_speech_wake_signal_seconds", 0.0)
         )
         self._usb_direct_speech_wake_signal_gain: float = float(
             config.get("usb_direct_speech_wake_signal_gain", 0.08)
+        )
+        self._usb_direct_speech_wake_noise_gain: float = float(
+            config.get("usb_direct_speech_wake_noise_gain", 260.0 / 32767.0)
         )
         self._usb_direct_speech_wake_signal_hz: float = float(
             config.get("usb_direct_speech_wake_signal_hz", 880.0)
@@ -236,6 +283,12 @@ class TTSEngine(TTSBackend):
         if self._output_transport not in {"auto", "aplay", "sounddevice", "usb_direct"}:
             logger.warning("Unknown TTS output_transport=%s, using auto", self._output_transport)
             self._output_transport = "auto"
+        if self._minimax_tts_transport not in {"sse", "websocket", "ws"}:
+            logger.warning(
+                "Unknown minimax_tts_transport=%s, using sse",
+                self._minimax_tts_transport,
+            )
+            self._minimax_tts_transport = "sse"
 
         if self._backend == "local":
             self._init_local_tts()
@@ -408,20 +461,29 @@ class TTSEngine(TTSBackend):
             playing = self._is_playing
         return playing or self._has_buffered_audio()
 
-    def wait_done(self, timeout: float = 30.0) -> None:
+    def wait_done(self, timeout: float = 30.0) -> bool:
         """Block until all queued text has been synthesised and played.
 
         Args:
             timeout: Maximum seconds to wait for playback to finish after
                      synthesis is complete.  Prevents infinite blocking when
-                     the audio device is unavailable.
+                     the audio device or TTS backend is unavailable.
         """
-        self.tts_text_queue.join()
         deadline = time.monotonic() + timeout
+        with self.tts_text_queue.all_tasks_done:
+            while self.tts_text_queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "wait_done: timed out after %.1fs waiting for TTS synthesis",
+                        timeout,
+                    )
+                    return False
+                self.tts_text_queue.all_tasks_done.wait(timeout=min(0.05, remaining))
         while self._has_buffered_audio() or self._playback_busy.is_set():
             if time.monotonic() >= deadline:
                 logger.warning("wait_done: timed out after %.1fs waiting for buffer drain", timeout)
-                return
+                return False
             time.sleep(0.05)
         # Wait for the last chunk to finish playing.
         # aplay: proc.communicate() is synchronous, but _aplay_proc is cleared
@@ -429,13 +491,14 @@ class TTSEngine(TTSBackend):
         while self._aplay_proc is not None:
             if time.monotonic() >= deadline:
                 logger.warning("wait_done: timed out after %.1fs waiting for aplay", timeout)
-                return
+                return False
             time.sleep(0.02)
         while self._usb_audio_proc is not None:
             if time.monotonic() >= deadline:
                 logger.warning("wait_done: timed out after %.1fs waiting for MCP01 USB audio", timeout)
-                return
+                return False
             time.sleep(0.02)
+        return True
         # Fallback: wait for any sounddevice stream (non-aplay systems).
         try:
             sd.wait()
@@ -504,6 +567,221 @@ class TTSEngine(TTSBackend):
     def backend(self) -> str:
         """Return the active TTS backend name."""
         return self._backend
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """Return non-secret TTS provider and playback status for health/UI."""
+        with self._playback_lock:
+            playing = self._is_playing
+        with self._buffer_lock:
+            buffered_chunks = len(self.tts_buffer)
+            buffered_samples = int(sum(len(chunk) for chunk in self.tts_buffer))
+        minimax_disabled_remaining_s = max(
+            0.0, self._minimax_disabled_until - time.monotonic()
+        )
+        return {
+            "backend": self._backend,
+            "output_transport": self._output_transport,
+            "sample_rate": self._sample_rate,
+            "is_playing": playing,
+            "playback_busy": self._playback_busy.is_set(),
+            "stop_requested": self._stop_requested.is_set(),
+            "queued_text_items": self.tts_text_queue.qsize(),
+            "buffered_chunks": buffered_chunks,
+            "buffered_samples": buffered_samples,
+            "minimax": {
+                "configured": bool(self._minimax_api_key),
+                "transport": self._minimax_tts_transport,
+                "model": self._minimax_tts_model,
+                "voice_id": self._minimax_voice_id,
+                "active_profile": self._active_voice_profile_id,
+                "active_profile_settings": self._active_voice_profile_settings(),
+                "profile_persistence_status": self._voice_profile_persistence_status(),
+                "profile_persistence_error": self._voice_profile_persistence_error,
+                "profiles": [profile.to_dict() for profile in self._voice_profiles.values()],
+                "sample_rate": self._minimax_sample_rate,
+                "format": self._minimax_audio_format,
+                "url": self._minimax_tts_url,
+                "ws_url": self._minimax_tts_ws_url,
+                "failure_count": self._minimax_fail_count,
+                "disabled_remaining_s": round(minimax_disabled_remaining_s, 2),
+            },
+        }
+
+    def voice_profiles_payload(self) -> dict[str, Any]:
+        """Return selectable voice styles for the product UI."""
+
+        return {
+            "active_profile": self._active_voice_profile_id,
+            "active_profile_settings": self._active_voice_profile_settings(),
+            "persistence_status": self._voice_profile_persistence_status(),
+            "persistence_error": self._voice_profile_persistence_error,
+            "sound_cues_enabled": self._voice_profile_cues_enabled,
+            "available_sound_cues": sorted(self._SOUND_CUE_SPECS),
+            "profiles": [profile.to_dict() for profile in self._voice_profiles.values()],
+        }
+
+    def set_voice_profile_payload(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Apply a voice style and optionally play its sample sentence."""
+
+        requested_profile_id = str(body.get("profile_id") or body.get("id") or "").strip()
+        profile_id = resolve_voice_profile_id(requested_profile_id)
+        if not profile_id:
+            return {"updated": False, "reason": "missing_profile_id"}
+        profile = self._voice_profiles.get(profile_id)
+        if profile is None:
+            return {
+                "updated": False,
+                "reason": "unknown_profile",
+                "profile_id": requested_profile_id or profile_id,
+                "resolved_profile_id": profile_id,
+                "available": list(self._voice_profiles),
+            }
+        self._apply_voice_profile(profile)
+        self._persist_voice_profile(profile)
+        if body.get("speak_sample"):
+            sound_cue = self.queue_sound_cue(profile.cue)
+            self.speak(str(body.get("sample_text") or profile.sample_text))
+            self.start_playback()
+        else:
+            sound_cue = {"queued": False, "cue": profile.cue, "reason": "speak_sample_disabled"}
+        return {
+            "updated": True,
+            "active_profile": self._active_voice_profile_id,
+            "requested_profile": requested_profile_id,
+            "resolved_profile": profile_id,
+            "profile": profile.to_dict(),
+            "applied_settings": self._active_voice_profile_settings(),
+            "sound_cue": sound_cue,
+            "persistence_status": self._voice_profile_persistence_status(),
+            "persistence_error": self._voice_profile_persistence_error,
+        }
+
+    def queue_sound_cue(self, cue: str) -> dict[str, Any]:
+        """Queue a short local PCM cue before or between spoken responses."""
+
+        cue_id = str(cue or "").strip()
+        if not cue_id or cue_id == "none":
+            return {"queued": False, "cue": cue_id or "none", "reason": "no_cue"}
+        if not self._voice_profile_cues_enabled:
+            return {"queued": False, "cue": cue_id, "reason": "cues_disabled"}
+        samples = self._build_sound_cue(cue_id)
+        if samples is None or len(samples) == 0:
+            return {"queued": False, "cue": cue_id, "reason": "unknown_cue"}
+        with self._buffer_lock:
+            self.tts_buffer.append(samples)
+        return {
+            "queued": True,
+            "cue": cue_id,
+            "sample_rate": self._sample_rate,
+            "samples": int(len(samples)),
+            "duration_s": round(len(samples) / float(self._sample_rate), 3),
+        }
+
+    def _build_sound_cue(self, cue: str) -> np.ndarray | None:
+        spec = self._SOUND_CUE_SPECS.get(cue)
+        if spec is None:
+            return None
+        chunks: list[np.ndarray] = []
+        for freq, duration_s in spec:
+            count = max(1, int(self._sample_rate * duration_s))
+            if freq <= 0:
+                chunks.append(np.zeros(count, dtype=np.float32))
+                continue
+            t = np.linspace(0.0, duration_s, count, endpoint=False, dtype=np.float32)
+            tone = np.sin(2.0 * np.pi * float(freq) * t).astype(np.float32)
+            envelope = np.sin(np.linspace(0.0, np.pi, count, dtype=np.float32))
+            chunks.append((tone * envelope * 0.22).astype(np.float32))
+        gap = np.zeros(max(1, int(self._sample_rate * 0.025)), dtype=np.float32)
+        interleaved: list[np.ndarray] = []
+        for chunk in chunks:
+            interleaved.append(chunk)
+            interleaved.append(gap)
+        if not interleaved:
+            return None
+        samples = np.concatenate(interleaved).astype(np.float32)
+        np.clip(samples, -0.35, 0.35, out=samples)
+        return samples
+
+    def _apply_voice_profile(self, profile: VoiceProfile) -> None:
+        self._active_voice_profile_id = profile.profile_id
+        self._minimax_voice_id = profile.voice_id
+        self.set_speed(profile.speed)
+        self.set_volume(profile.volume)
+        self._minimax_pitch = int(profile.pitch)
+        self._minimax_emotion = profile.emotion
+
+    def _active_voice_profile_settings(self) -> dict[str, Any]:
+        profile = self._voice_profiles.get(self._active_voice_profile_id)
+        if profile is None:
+            return {
+                "profile_id": self._active_voice_profile_id,
+                "voice_id": self._minimax_voice_id,
+                "speed": self.speed,
+                "volume": self.volume,
+                "pitch": self._minimax_pitch,
+                "emotion": self._minimax_emotion,
+                "known_profile": False,
+            }
+        return {
+            "profile_id": profile.profile_id,
+            "label": profile.label,
+            "use_case": profile.use_case,
+            "voice_id": profile.voice_id,
+            "speed": profile.speed,
+            "volume": profile.volume,
+            "pitch": profile.pitch,
+            "emotion": profile.emotion,
+            "category": profile.category,
+            "cue": profile.cue,
+            "known_profile": True,
+        }
+
+    def _voice_profile_persistence_status(self) -> str:
+        if self._voice_profile_state_path is None:
+            return "session_only"
+        if self._voice_profile_persistence_error:
+            return "persistence_failed"
+        return "persistent"
+
+    def _load_persisted_voice_profile_id(self) -> str | None:
+        path = self._voice_profile_state_path
+        if path is None or not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            self._voice_profile_persistence_error = f"load_failed:{exc.__class__.__name__}"
+            return None
+        profile_id = resolve_voice_profile_id(str(payload.get("active_profile") or ""))
+        if profile_id in self._voice_profiles:
+            self._voice_profile_persistence_error = None
+            return profile_id
+        self._voice_profile_persistence_error = "load_failed:unknown_profile"
+        return None
+
+    def _persist_voice_profile(self, profile: VoiceProfile) -> None:
+        path = self._voice_profile_state_path
+        if path is None:
+            self._voice_profile_persistence_error = None
+            return
+        payload = {
+            "active_profile": profile.profile_id,
+            "label": profile.label,
+            "voice_id": profile.voice_id,
+            "speed": profile.speed,
+            "volume": profile.volume,
+            "pitch": profile.pitch,
+            "emotion": profile.emotion,
+            "updated_at": time.time(),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_name(f".{path.name}.tmp")
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path.replace(path)
+            self._voice_profile_persistence_error = None
+        except OSError as exc:
+            self._voice_profile_persistence_error = f"save_failed:{exc.__class__.__name__}"
 
     # ------------------------------------------------------------------
     # Runtime volume / speed control
@@ -581,6 +859,9 @@ class TTSEngine(TTSBackend):
 
         if n < frames:
             outdata[n:, 0] = 0
+        if self._volume != 1.0:
+            outdata[:, 0] *= self._volume
+            np.clip(outdata[:, 0], -1.0, 1.0, out=outdata[:, 0])
 
     # ------------------------------------------------------------------
     # Internal — worker thread
@@ -621,7 +902,7 @@ class TTSEngine(TTSBackend):
                     remaining,
                 )
                 self._use_minimax_fallback(text, generation)
-            elif not self._run_async(self._generate_minimax(text, generation)):
+            elif not self._run_async(self._generate_minimax_transport(text, generation)):
                 # MiniMax failed — track and possibly disable temporarily
                 self._minimax_fail_count += 1
                 if self._minimax_fail_count >= self._MINIMAX_FAIL_THRESHOLD:
@@ -758,6 +1039,113 @@ class TTSEngine(TTSBackend):
     # MiniMax backend (SSE streaming, incremental playback)
     # ------------------------------------------------------------------
 
+    async def _generate_minimax_transport(self, text: str, generation: int) -> bool:
+        """Synthesize through the configured MiniMax streaming transport."""
+        if self._minimax_tts_transport in {"websocket", "ws"}:
+            return await self._generate_minimax_websocket(text, generation)
+        return await self._generate_minimax(text, generation)
+
+    def _minimax_voice_setting(self) -> dict[str, Any]:
+        voice_setting: dict[str, Any] = {
+            "voice_id": self._minimax_voice_id,
+            "speed": self._minimax_speed,
+            "vol": self._minimax_vol,
+            "pitch": self._minimax_pitch,
+        }
+        if self._minimax_emotion:
+            voice_setting["emotion"] = self._minimax_emotion
+        return voice_setting
+
+    def _minimax_audio_setting(self) -> dict[str, Any]:
+        return {
+            "sample_rate": self._minimax_sample_rate,
+            "bitrate": self._minimax_bitrate,
+            "format": self._minimax_audio_format,
+            "channel": 1,
+        }
+
+    def _minimax_decode_audio_chunk(self, hex_audio: str) -> np.ndarray:
+        """Decode a MiniMax hex audio chunk into playback-rate float32 samples."""
+        audio_bytes = bytes.fromhex(hex_audio)
+        if self._minimax_audio_format != "pcm":
+            return self._decode_minimax_encoded_audio(audio_bytes)
+
+        samples = np.frombuffer(audio_bytes, dtype="<i2").astype(np.float32) / 32768.0
+        if self._minimax_sample_rate != self._sample_rate:
+            samples = self._resample(
+                samples, self._minimax_sample_rate, self._sample_rate,
+            )
+        return samples
+
+    def _decode_minimax_encoded_audio(self, audio_bytes: bytes) -> np.ndarray:
+        """Decode a complete non-PCM MiniMax audio payload."""
+        try:
+            import miniaudio
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                f"MiniMax {self._minimax_audio_format} decode requires miniaudio"
+            ) from exc
+        decoded = miniaudio.decode(
+            audio_bytes,
+            nchannels=1,
+            sample_rate=self._sample_rate,
+        )
+        return np.frombuffer(decoded.samples, dtype=np.int16).astype(np.float32) / 32768.0
+
+    def _queue_minimax_encoded_audio(
+        self,
+        encoded_audio: bytearray,
+        pending: list[np.ndarray],
+        state: dict[str, int | bool],
+    ) -> None:
+        """Decode a complete encoded MiniMax stream and queue it."""
+        if not encoded_audio:
+            return
+        samples = self._decode_minimax_encoded_audio(bytes(encoded_audio))
+        self._queue_minimax_samples(samples, pending, state)
+        if pending:
+            self._flush_minimax_pending(pending, state)
+
+    def _queue_minimax_samples(
+        self,
+        samples: np.ndarray,
+        pending: list[np.ndarray],
+        state: dict[str, int | bool],
+    ) -> None:
+        """Queue MiniMax decoded samples in playback-sized chunks."""
+        if len(samples) <= 0:
+            return
+        pending.append(samples)
+        state["pending_len"] = int(state["pending_len"]) + len(samples)
+        if int(state["pending_len"]) >= self._MINIMAX_MIN_STREAM_SAMPLES:
+            self._flush_minimax_pending(pending, state)
+
+    def _flush_minimax_pending(
+        self,
+        pending: list[np.ndarray],
+        state: dict[str, int | bool],
+    ) -> None:
+        if not pending:
+            return
+        chunk = np.concatenate(pending) if len(pending) > 1 else pending[0]
+        if bool(state["first_flush"]):
+            state["first_flush"] = False
+            threshold = max(0.0, self._minimax_onset_threshold)
+            nonzero = np.where(np.abs(chunk) > threshold)[0]
+            if len(nonzero) > 0 and nonzero[0] > 100:
+                preserve = int(
+                    self._sample_rate
+                    * max(0.0, self._minimax_leading_silence_preserve_seconds)
+                )
+                trim = max(0, nonzero[0] - preserve)
+                chunk = chunk[trim:]
+                logger.debug("TTS: trimmed %d leading silence samples", trim)
+        with self._buffer_lock:
+            self.tts_buffer.append(chunk)
+        state["queued_samples"] = int(state["queued_samples"]) + len(chunk)
+        pending.clear()
+        state["pending_len"] = 0
+
     async def _generate_minimax(self, text: str, generation: int) -> bool:
         """Synthesise via MiniMax T2A v2 — SSE hex-PCM stream → incremental buffer."""
         import json as _json
@@ -800,6 +1188,7 @@ class TTSEngine(TTSBackend):
         pending_len = 0
         queued_samples = 0
         _first_flush = True  # trim leading silence from MiniMax's first chunk
+        encoded_audio = bytearray()
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
@@ -827,6 +1216,9 @@ class TTSEngine(TTSBackend):
                             continue
                         hex_audio = data_field.get("audio", "")
                         if not hex_audio:
+                            continue
+                        if self._minimax_audio_format != "pcm":
+                            encoded_audio.extend(bytes.fromhex(hex_audio))
                             continue
                         pcm_bytes = bytes.fromhex(hex_audio)
                         samples = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
@@ -864,6 +1256,11 @@ class TTSEngine(TTSBackend):
                         logger.debug("MiniMax TTS chunk parse: %s", exc)
 
         # Flush any remaining samples
+        if encoded_audio and self._is_generation_current(generation):
+            samples = self._decode_minimax_encoded_audio(bytes(encoded_audio))
+            if len(samples) > 0:
+                pending.append(samples)
+                pending_len += len(samples)
         if pending and self._is_generation_current(generation):
             chunk = np.concatenate(pending) if len(pending) > 1 else pending[0]
             with self._buffer_lock:
@@ -874,6 +1271,105 @@ class TTSEngine(TTSBackend):
             return True
         if queued_samples <= 0:
             logger.warning("MiniMax TTS produced no playable audio; using fallback")
+            return False
+        return True
+
+    async def _generate_minimax_websocket(self, text: str, generation: int) -> bool:
+        """Synthesise via MiniMax T2A WebSocket hex audio stream."""
+        import json as _json
+
+        try:
+            import websocket
+        except ModuleNotFoundError:
+            logger.warning("MiniMax TTS WebSocket requires websocket-client package")
+            return False
+
+        pending: list[np.ndarray] = []
+        state: dict[str, int | bool] = {
+            "pending_len": 0,
+            "queued_samples": 0,
+            "first_flush": True,
+        }
+        encoded_audio = bytearray()
+        ws = None
+
+        try:
+            create_connection = getattr(websocket, "create_connection", None)
+            if create_connection is None:
+                logger.warning("MiniMax TTS WebSocket requires websocket-client")
+                return False
+            ws = create_connection(
+                self._minimax_tts_ws_url,
+                header=[f"Authorization: Bearer {self._minimax_api_key}"],
+                timeout=10,
+            )
+            connected = _json.loads(ws.recv())
+            if connected.get("event") != "connected_success":
+                logger.error("MiniMax TTS WS connect failed: %s", connected)
+                return False
+
+            ws.send(_json.dumps({
+                "event": "task_start",
+                "model": self._minimax_tts_model,
+                "language_boost": "auto",
+                "voice_setting": self._minimax_voice_setting(),
+                "audio_setting": self._minimax_audio_setting(),
+            }))
+            started = _json.loads(ws.recv())
+            if started.get("event") != "task_started":
+                logger.error("MiniMax TTS WS start failed: %s", started)
+                return False
+
+            ws.send(_json.dumps({"event": "task_continue", "text": text}))
+
+            while self._is_generation_current(generation):
+                payload = _json.loads(ws.recv())
+                base_resp = payload.get("base_resp", {})
+                if int(base_resp.get("status_code", 0) or 0) != 0:
+                    logger.error("MiniMax TTS WS error: %s", base_resp)
+                    return False
+                if payload.get("event") == "task_failed":
+                    logger.error("MiniMax TTS WS task failed: %s", payload)
+                    return False
+
+                data = payload.get("data") or {}
+                hex_audio = data.get("audio", "")
+                if hex_audio:
+                    if self._minimax_audio_format == "pcm":
+                        samples = self._minimax_decode_audio_chunk(hex_audio)
+                        self._queue_minimax_samples(samples, pending, state)
+                    else:
+                        encoded_audio.extend(bytes.fromhex(hex_audio))
+                if payload.get("is_final") is True:
+                    break
+
+            try:
+                ws.send(_json.dumps({"event": "task_finish"}))
+                while True:
+                    payload = _json.loads(ws.recv())
+                    if payload.get("event") in {"task_finished", "task_failed"}:
+                        break
+            except Exception as exc:
+                logger.debug("MiniMax TTS WS finish ignored: %s", exc)
+
+        except (_json.JSONDecodeError, ValueError, OSError) as exc:
+            logger.warning("MiniMax TTS WS failed: %s", exc)
+            return False
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+        if encoded_audio and self._is_generation_current(generation):
+            self._queue_minimax_encoded_audio(encoded_audio, pending, state)
+        if pending and self._is_generation_current(generation):
+            self._flush_minimax_pending(pending, state)
+        if not self._is_generation_current(generation):
+            return True
+        if int(state["queued_samples"]) <= 0:
+            logger.warning("MiniMax TTS WS produced no playable audio; using fallback")
             return False
         return True
 
@@ -1025,13 +1521,15 @@ class TTSEngine(TTSBackend):
             samples = np.asarray(chunk, dtype=np.float32)
             warming_set = False
             if speech_leadin:
+                samples = self._apply_usb_direct_speech_gain(samples)
+                speech_samples = samples
                 leadin = self._usb_direct_speech_leadin_chunk(
                     warm=self._is_persistent_usb_stream_warm()
                 )
                 leadin_len = len(leadin)
                 if len(leadin) > 0:
                     samples = np.concatenate([leadin, samples])
-                cushion = self._usb_direct_speech_onset_cushion_chunk(chunk)
+                cushion = self._usb_direct_speech_onset_cushion_chunk(speech_samples)
                 if len(cushion) > 0:
                     samples = np.concatenate(
                         [samples[:leadin_len], cushion, samples[leadin_len:]]
@@ -1056,6 +1554,15 @@ class TTSEngine(TTSBackend):
             finally:
                 if warming_set:
                     self._usb_direct_warming.clear()
+
+    def _apply_usb_direct_speech_gain(self, chunk: np.ndarray) -> np.ndarray:
+        gain = max(0.0, self._usb_direct_speech_gain)
+        if gain == 1.0 or len(chunk) == 0:
+            return chunk
+        boosted = np.asarray(chunk, dtype=np.float32) * gain
+        if gain > 1.0:
+            boosted = np.tanh(boosted)
+        return np.clip(boosted, -1.0, 1.0).astype(np.float32)
 
     def _play_chunk_usb_direct_locked(self, chunk: np.ndarray) -> bool:
         """Play one chunk through MCP01 USB Audio without ALSA/PortAudio."""
@@ -1357,8 +1864,9 @@ class TTSEngine(TTSBackend):
             return np.empty(0, dtype=np.float32)
         wake_samples = int(self._sample_rate * self._usb_direct_speech_wake_signal_seconds)
         gap_samples = int(self._sample_rate * self._usb_direct_speech_wake_gap_seconds)
+        noise_gain = max(0.0, min(1.0, self._usb_direct_speech_wake_noise_gain))
         if wake_samples <= 0:
-            return self._usb_direct_noise_chunk(total_samples, amp=200.0 / 32767.0, seed=seed)
+            return self._usb_direct_noise_chunk(total_samples, amp=noise_gain, seed=seed)
 
         wake_samples = min(wake_samples, total_samples)
         gap_samples = max(0, min(gap_samples, total_samples - wake_samples))
@@ -1371,9 +1879,9 @@ class TTSEngine(TTSBackend):
             gain=self._usb_direct_speech_wake_signal_gain,
         ))
         if gap_samples > 0:
-            parts.append(self._usb_direct_noise_chunk(gap_samples, amp=260.0 / 32767.0, seed=seed + 1))
+            parts.append(self._usb_direct_noise_chunk(gap_samples, amp=noise_gain, seed=seed + 1))
         if hold_samples > 0:
-            parts.append(self._usb_direct_noise_chunk(hold_samples, amp=260.0 / 32767.0, seed=seed + 2))
+            parts.append(self._usb_direct_noise_chunk(hold_samples, amp=noise_gain, seed=seed + 2))
         return np.concatenate(parts) if len(parts) > 1 else parts[0]
 
     def _usb_direct_noise_chunk(self, samples: int, *, amp: float, seed: int) -> np.ndarray:
@@ -1500,6 +2008,10 @@ class TTSEngine(TTSBackend):
                 _preroll_n = int(self._sample_rate * 1.5)
                 _rng = np.random.RandomState(42)  # deterministic for consistency
                 _preroll_bytes = (_rng.randn(_preroll_n) * 200).astype(np.int16).tobytes()
+
+            if _aplay_cmd is None and not _use_usb_direct:
+                self._play_sounddevice_stream_until_stopped()
+                return
 
             # Persistent aplay process state — one process per utterance,
             # all chunks piped into its stdin without restart.
@@ -1661,6 +2173,37 @@ class TTSEngine(TTSBackend):
             # the audio device is unavailable or throws.
             with self._playback_lock:
                 self._is_playing = False
+
+    def _play_sounddevice_stream_until_stopped(self) -> None:
+        """Play buffered audio through one continuous PortAudio stream."""
+        stream_kwargs = {
+            "samplerate": self._sample_rate,
+            "device": self._output_device,
+            "channels": 1,
+            "dtype": "float32",
+            "callback": self.play_audio_callback,
+        }
+
+        def _run() -> None:
+            with sd.OutputStream(**stream_kwargs):
+                while self._is_playing:
+                    if self._stop_requested.is_set():
+                        self._stop_requested.clear()
+                        self._clear_audio_buffer()
+                        self._playback_busy.clear()
+                        logger.info("TTS playback: stop_requested, skipping queued audio")
+                        continue
+                    if self._has_buffered_audio():
+                        self._playback_busy.set()
+                    else:
+                        self._playback_busy.clear()
+                    time.sleep(0.02)
+
+        if self._audio_router is not None:
+            with self._audio_router.output_session():
+                _run()
+        else:
+            _run()
 
     # ------------------------------------------------------------------
     # Generation tracking

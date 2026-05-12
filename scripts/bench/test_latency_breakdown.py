@@ -3,13 +3,15 @@
 import asyncio
 import sys
 import time
+
 sys.path.insert(0, ".")
 
 from askme.config import get_config
 from askme.llm.client import LLMClient
 
+
 async def main():
-    cfg = get_config()
+    get_config()
     client = LLMClient()
 
     messages = [

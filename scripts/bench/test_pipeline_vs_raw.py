@@ -7,15 +7,17 @@ import os
 import sys
 import time
 import wave
+
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import sounddevice as sd
 from scipy.signal import resample_poly
+
 from askme.config import get_config
-from askme.voice.mic_input import MicInput
 from askme.voice.asr import ASREngine
+from askme.voice.mic_input import MicInput
 
 cfg = get_config()
 DURATION = 6
@@ -103,6 +105,7 @@ for label, audio in [("Pipeline", pipeline_audio), ("Raw", raw_16k)]:
 # Play both back
 print("\n=== Playback ===", flush=True)
 import subprocess
+
 for label, path in [("Pipeline", "/tmp/pipeline_output.wav"), ("Raw", "/tmp/raw_output.wav")]:
     print(f"  Playing {label}...", flush=True)
     # Resample to 48k for aplay

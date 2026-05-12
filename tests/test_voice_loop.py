@@ -3,7 +3,9 @@ import asyncio
 import pytest
 
 from askme.llm.intent_router import Intent, IntentType
+from askme.pipeline.proactive.base import ProactiveResult
 from askme.pipeline.voice_loop import VoiceLoop
+from askme.voice.interaction_gate import InteractionGate
 
 
 class _Router:
@@ -21,6 +23,7 @@ class _Pipeline:
         self.skill_calls: list[tuple[str, str]] = []
         self.pending_calls: list[str] = []
         self.pending_reply_map: dict[str, str] = {}
+        self._episodic = _Episodic()
 
     def has_pending_tool_approval(self) -> bool:
         return False
@@ -44,6 +47,22 @@ class _Pipeline:
         return "skill"
 
 
+class _SpeakingPipeline(_Pipeline):
+    def __init__(self, audio: "_Audio") -> None:
+        super().__init__()
+        self.audio = audio
+        self.memory_results: list[str] = []
+
+    async def process(self, user_text: str, *, memory_task=None):
+        self.process_calls.append(user_text)
+        if memory_task is not None:
+            self.memory_results.append(await memory_task)
+        reply = f"pipeline reply: {user_text}"
+        await self.audio.speak_and_wait(reply)
+        self.last_spoken_text = reply
+        return reply
+
+
 class _Audio:
     awaiting_confirmation = False
 
@@ -52,6 +71,7 @@ class _Audio:
         self.spoken: list[str] = []
         self._muted = False
         self._drained = 0
+        self.ack_count = 0
 
     def listen_loop(self):
         self._calls += 1
@@ -60,7 +80,7 @@ class _Audio:
         return "exit"
 
     def acknowledge(self) -> None:
-        return
+        self.ack_count += 1
 
     def speak(self, text: str) -> None:
         self.spoken.append(text)
@@ -91,6 +111,24 @@ class _Audio:
         return self._muted
 
 
+class _Episodic:
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, str]] = []
+
+    def log(self, kind: str, text: str) -> None:
+        self.entries.append((kind, text))
+
+
+class _NeverAddressed:
+    def is_addressed(self, text: str) -> bool:
+        return False
+
+
+class _BystanderThenCommand:
+    def is_addressed(self, text: str) -> bool:
+        return text == "exit"
+
+
 class _Bridge:
     def handle_voice_text(self, text: str):
         return {
@@ -109,6 +147,58 @@ class _ExplodingBridge:
     def handle_voice_text(self, text: str):
         self.calls.append(text)
         raise RuntimeError("runtime bridge offline")
+
+
+class _SkillBridge:
+    def __init__(self, skill_name: str) -> None:
+        self.skill_name = skill_name
+        self.calls: list[str] = []
+
+    def handle_voice_text(self, text: str):
+        self.calls.append(text)
+        return {
+            "handled": True,
+            "turn": {
+                "action_type": "skill",
+                "skill_name": self.skill_name,
+            },
+        }
+
+
+class _Dispatcher:
+    def __init__(self, *, active_agent_once: bool = False) -> None:
+        self.dispatch_calls: list[tuple[str, str, str]] = []
+        self.general_calls: list[tuple[str, str]] = []
+        self.cancel_calls = 0
+        self._active_agent_once = active_agent_once
+        self._active_checks = 0
+
+    @property
+    def has_active_agent_task(self) -> bool:
+        if not self._active_agent_once:
+            return False
+        self._active_checks += 1
+        return self._active_checks == 1
+
+    async def dispatch(self, skill_name: str, user_text: str, *, source: str = "") -> None:
+        self.dispatch_calls.append((skill_name, user_text, source))
+
+    async def handle_general(self, user_text: str, *, source: str = "", memory_task=None) -> None:
+        self.general_calls.append((user_text, source))
+
+    def cancel_active_agent_task(self) -> bool:
+        self.cancel_calls += 1
+        return False
+
+
+class _Proactive:
+    def __init__(self, result: ProactiveResult) -> None:
+        self.result = result
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def run(self, skill_name: str, user_text: str, audio, *, source: str):
+        self.calls.append((skill_name, user_text, source))
+        return self.result
 
 
 @pytest.mark.asyncio
@@ -162,6 +252,190 @@ async def test_voice_loop_falls_back_to_local_pipeline_when_runtime_bridge_fails
 
     assert bridge.calls == ["inspect zone"]
     assert pipeline.process_calls == ["inspect zone"]
+
+
+@pytest.mark.asyncio
+async def test_general_turn_with_dispatcher_uses_handle_general() -> None:
+    """listen_loop → router GENERAL → dispatcher.handle_general, not pipeline.process."""
+    pipeline = _Pipeline()
+    audio = _Audio()
+    dispatcher = _Dispatcher()
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        audio=audio,
+        dispatcher=dispatcher,
+    )
+
+    await loop.run()
+
+    assert dispatcher.general_calls == [("inspect zone", "voice")]
+    assert pipeline.process_calls == []
+    assert audio.ack_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_general_voice_turn_flows_through_pipeline_to_tts() -> None:
+    """listen_loop -> router GENERAL -> pipeline.process -> audio.speak_and_wait."""
+    audio = _Audio()
+    pipeline = _SpeakingPipeline(audio)
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        audio=audio,
+    )
+
+    await loop.run()
+
+    assert pipeline.process_calls == ["inspect zone"]
+    assert pipeline.memory_results == [""]
+    assert audio.ack_count >= 1
+    assert audio.spoken == ["pipeline reply: inspect zone"]
+
+
+@pytest.mark.asyncio
+async def test_interaction_gate_records_bystander_speech_without_reply() -> None:
+    pipeline = _Pipeline()
+    audio = _Audio()
+    texts = ["我们去那边看看", "exit"]
+    call_idx = 0
+
+    def _listen():
+        nonlocal call_idx
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        audio=audio,
+    )
+    loop.set_address_detector(_BystanderThenCommand())  # type: ignore[arg-type]
+    loop.set_interaction_gate(InteractionGate({"enabled": True}))
+
+    await loop.run()
+
+    assert pipeline.process_calls == []
+    assert audio.ack_count == 1  # only the exit command is acknowledged
+    assert any(
+        kind == "perception" and "ambient_speech" in text
+        for kind, text in pipeline._episodic.entries
+    )
+
+
+@pytest.mark.asyncio
+async def test_interaction_gate_answers_wayfinding_even_without_wake_word() -> None:
+    audio = _Audio()
+    pipeline = _SpeakingPipeline(audio)
+    texts = ["请问厕所在哪里", "exit"]
+    call_idx = 0
+
+    def _listen():
+        nonlocal call_idx
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        audio=audio,
+    )
+    loop.set_address_detector(_BystanderThenCommand())  # type: ignore[arg-type]
+    loop.set_interaction_gate(InteractionGate({"enabled": True}))
+
+    await loop.run()
+
+    assert pipeline.process_calls == ["请问厕所在哪里"]
+    assert audio.ack_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_voice_trigger_dispatches_enriched_text_through_proactive() -> None:
+    """listen_loop → trigger route → proactive enrichment → dispatcher.dispatch."""
+    pipeline = _Pipeline()
+    audio = _Audio()
+    dispatcher = _Dispatcher()
+    texts = ["去仓库A", "exit"]
+    call_idx = 0
+
+    def _listen():
+        nonlocal call_idx
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(
+        router=_RouterWithTrigger({"去仓库A": "navigate"}),
+        pipeline=pipeline,
+        audio=audio,
+        dispatcher=dispatcher,
+    )
+    loop._proactive = _Proactive(ProactiveResult(enriched_text="导航到仓库A", proceed=True))
+
+    await loop.run()
+
+    assert loop._proactive.calls == [("navigate", "去仓库A", "voice")]
+    assert dispatcher.dispatch_calls == [("navigate", "导航到仓库A", "voice")]
+    assert dispatcher.general_calls == []
+    assert pipeline.process_calls == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_bridge_skill_result_dispatches_without_proactive() -> None:
+    """A runtime-resolved skill is dispatched locally and skips proactive routing."""
+    pipeline = _Pipeline()
+    audio = _Audio()
+    dispatcher = _Dispatcher()
+    bridge = _SkillBridge("get_time")
+    texts = ["几点了", "exit"]
+    call_idx = 0
+
+    def _listen():
+        nonlocal call_idx
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(
+        router=_RouterWithTrigger({"几点了": "get_time"}),
+        pipeline=pipeline,
+        audio=audio,
+        voice_runtime_bridge=bridge,
+        dispatcher=dispatcher,
+    )
+    loop._proactive = _Proactive(ProactiveResult(enriched_text="should not run", proceed=True))
+
+    await loop.run()
+
+    assert bridge.calls == ["几点了"]
+    assert loop._proactive.calls == []
+    assert dispatcher.dispatch_calls == [("get_time", "几点了", "runtime")]
+
+
+@pytest.mark.asyncio
+async def test_agent_busy_gate_blocks_general_turn_and_speaks_status() -> None:
+    """An active background agent blocks new general turns with a spoken status."""
+    pipeline = _Pipeline()
+    audio = _Audio()
+    dispatcher = _Dispatcher(active_agent_once=True)
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        audio=audio,
+        dispatcher=dispatcher,
+    )
+
+    await loop.run()
+
+    assert dispatcher.general_calls == []
+    assert pipeline.process_calls == []
+    assert "正在处理中，说够了可取消。" in audio.spoken
 
 
 # ── Voice control: stop_speaking / mute_mic / unmute_mic ────────────────────

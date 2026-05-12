@@ -5,7 +5,7 @@
 避免与 LingTu 服务端口冲突。
 
 导航通过 move_tool 的 _go_to_lingtu() 路由到 LingTu REST API：
-  NAV_GATEWAY_URL=http://localhost:5050
+  NAV_GATEWAY_URL=http://localhost:8088
 
 Usage::
 

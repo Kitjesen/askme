@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Test raw WebSocket connection to DashScope."""
-import os
-import websocket
 import json
+import os
+
+import websocket
 
 api_key = os.environ.get("DASHSCOPE_API_KEY", "")
 print(f"API key: {'set' if api_key else 'MISSING'}", flush=True)

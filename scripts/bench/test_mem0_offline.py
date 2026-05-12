@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Test Mem0 in fully offline mode (infer=False, no LLM calls)."""
-import os
 import shutil
 import time
+
 from mem0 import Memory
 
 # Clean slate

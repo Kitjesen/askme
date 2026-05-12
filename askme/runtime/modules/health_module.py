@@ -11,9 +11,14 @@ Canonical wiring::
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+from inspect import Parameter, signature
+from pathlib import Path
 from typing import Any
 
+from askme.config import project_root
 from askme.runtime.module import Module, ModuleRegistry
 
 logger = logging.getLogger(__name__)
@@ -23,23 +28,56 @@ class HealthModule(Module):
     """Provides the AskmeHealthServer to the runtime."""
 
     name = "health"
-    depends_on = ("memory", "pipeline", "skill", "text", "mission")
-    provides = ("health_http", "http_chat", "capabilities", "missions")
+    depends_on = (
+        "memory",
+        "pipeline",
+        "skill",
+        "text",
+        "mission",
+        "cognition",
+        "runtime_handoff",
+    )
+    provides = ("health_http", "http_chat", "capabilities", "missions", "runtime_handoff")
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        from askme.health_server import AskmeHealthServer
+        from askme.health_server import AskmeHealthServer, build_health_snapshot
 
         health_cfg = cfg.get("health_server", {})
 
         # Collect health from all registered modules in the runtime.
         def _runtime_health_provider() -> dict[str, Any]:
-            result: dict[str, Any] = {"status": "ok", "service": "askme"}
+            components: dict[str, dict[str, Any]] = {}
+            degraded_components: list[str] = []
             for mod_name, mod in registry.items():
                 try:
-                    result[mod_name] = mod.health()
+                    module_health = mod.health()
                 except Exception:
-                    result[mod_name] = {"status": "error"}
-            return result
+                    module_health = {"status": "error"}
+                components[mod_name] = module_health
+                if module_health.get("status") in {"degraded", "error"}:
+                    degraded_components.append(mod_name)
+
+            snapshot = build_health_snapshot(
+                app_name=cfg.get("app", {}).get("name", "askme"),
+                app_version=str(cfg.get("app", {}).get("version", "unknown")),
+                model_name=self._model_name(cfg, registry),
+                metrics_snapshot=self._metrics_snapshot(registry),
+                active_skills=self._active_skill_names(registry),
+                voice_status=self._voice_status(registry),
+                ota_status=self._ota_status(registry),
+                voice_bridge=self._voice_bridge_status(registry),
+            )
+            snapshot["components"] = components
+            snapshot.update(components)
+            snapshot["rag_trust"] = self._rag_trust_report(cfg)
+            snapshot["voice_e2e"] = self._voice_e2e_report(cfg)
+            snapshot["field_operations"] = self._field_operations_report(cfg)
+            if degraded_components:
+                snapshot["status"] = "degraded"
+                reasons = list(snapshot.get("degraded_reasons", []))
+                reasons.extend(f"component:{name}" for name in degraded_components)
+                snapshot["degraded_reasons"] = reasons
+            return snapshot
 
         self.server = AskmeHealthServer(
             health_cfg,
@@ -73,12 +111,105 @@ class HealthModule(Module):
         if mission_handler is not None and hasattr(self.server, "set_mission_handler"):
             self.server.set_mission_handler(mission_handler)
 
+        cognition_handler = self._cognition_handler(registry)
+        if cognition_handler is not None and hasattr(self.server, "set_cognition_handler"):
+            self.server.set_cognition_handler(cognition_handler)
+
+        runtime_handler = self._runtime_handler(registry)
+        if runtime_handler is not None and hasattr(self.server, "set_runtime_handler"):
+            self.server.set_runtime_handler(runtime_handler)
+
+        memory_handler = self._memory_handler(registry)
+        if memory_handler is not None and hasattr(self.server, "set_memory_handler"):
+            self.server.set_memory_handler(memory_handler)
+
+        voice_handler = self._voice_handler(registry)
+        if voice_handler is not None and hasattr(self.server, "set_voice_handler"):
+            self.server.set_voice_handler(voice_handler)
+
+        field_operations_handler = self._field_operations_handler(cfg)
+        if hasattr(self.server, "set_field_operations_handler"):
+            self.server.set_field_operations_handler(field_operations_handler)
+
     def _chat_handler(self, registry: ModuleRegistry) -> Any | None:
         text_mod = registry.get("text")
         text_loop = getattr(text_mod, "text_loop", None) if text_mod else None
+        runtime_handler = self._runtime_handler(registry)
         process_turn = getattr(text_loop, "process_turn", None)
         if callable(process_turn):
-            return process_turn
+            accepts_speak = self._call_accepts_keyword(process_turn, "speak")
+
+            async def _handle_text_chat(
+                text: str,
+                *,
+                speak: bool = False,
+            ) -> dict[str, Any] | str:
+                runtime_control = await self._maybe_handle_runtime_control(
+                    runtime_handler,
+                    text,
+                )
+                if runtime_control is not None:
+                    return runtime_control
+
+                if accepts_speak:
+                    reply = await process_turn(text, speak=speak)
+                    rag_payload = self._rag_evidence_payload(registry)
+                    self._attach_rag_to_last_assistant(registry, rag_payload)
+                    cognition_result = self._last_cognition_result(text_loop)
+                    if cognition_result is not None:
+                        runtime_result = await self._maybe_submit_runtime_handoff(
+                            runtime_handler,
+                            cognition_result,
+                        )
+                        if runtime_result is not None:
+                            cognition_result["runtime"] = runtime_result
+                        payload = {
+                            "reply": reply,
+                            "cognition": cognition_result,
+                            "evidence": rag_payload["evidence"],
+                            "rag": rag_payload["rag"],
+                        }
+                        if runtime_result is not None:
+                            payload["runtime"] = runtime_result
+                        if speak:
+                            payload["spoken"] = bool(isinstance(reply, str) and reply.strip())
+                        return payload
+                    if not speak:
+                        return {
+                            "reply": reply,
+                            "evidence": rag_payload["evidence"],
+                            "rag": rag_payload["rag"],
+                        }
+                    return {
+                        "reply": reply,
+                        "spoken": bool(isinstance(reply, str) and reply.strip()),
+                        "evidence": rag_payload["evidence"],
+                        "rag": rag_payload["rag"],
+                    }
+
+                reply = await process_turn(text)
+                rag_payload = self._rag_evidence_payload(registry)
+                self._attach_rag_to_last_assistant(registry, rag_payload)
+                if not speak:
+                    return {
+                        "reply": reply,
+                        "evidence": rag_payload["evidence"],
+                        "rag": rag_payload["rag"],
+                    }
+                payload: dict[str, Any] = {"reply": reply, "spoken": False}
+                try:
+                    payload["spoken"] = await self._speak_text_loop_reply(
+                        text_loop,
+                        reply,
+                    )
+                except Exception as exc:
+                    logger.warning("HealthModule: HTTP chat speak failed: %s", exc)
+                    payload["speak_error"] = str(exc)
+                payload["evidence"] = rag_payload["evidence"]
+                payload["rag"] = rag_payload["rag"]
+                return payload
+
+            return _handle_text_chat
 
         pipeline_mod = registry.get("pipeline")
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
@@ -87,12 +218,166 @@ class HealthModule(Module):
             return process
         return None
 
+    def _voice_handler(self, registry: ModuleRegistry) -> Any | None:
+        voice_mod = registry.get("voice")
+        audio = getattr(voice_mod, "audio", None) if voice_mod else None
+        return getattr(audio, "tts", None) if audio is not None else None
+
+    def _field_operations_handler(self, cfg: dict[str, Any]) -> Any:
+        from askme.pipeline.field_operations import FieldOperationsService
+
+        field_cfg = dict(cfg.get("field_operations", {}) or {})
+        llm_client = None
+        if field_cfg.get("llm_narrative_enabled"):
+            try:
+                from askme.llm.client import LLMClient
+
+                llm_client = LLMClient()
+            except Exception as exc:
+                logger.warning("HealthModule: field LLM narrative disabled: %s", exc)
+        return FieldOperationsService(config=field_cfg, llm_client=llm_client)
+
+    async def _maybe_handle_runtime_control(
+        self,
+        runtime_handler: Any | None,
+        text: str,
+    ) -> dict[str, Any] | None:
+        if runtime_handler is None:
+            return None
+        handle = getattr(runtime_handler, "handle_chat_control", None)
+        if not callable(handle):
+            return None
+        try:
+            result = handle(text)
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as exc:
+            logger.warning("HealthModule: runtime control failed: %s", exc)
+            return None
+        if not isinstance(result, dict) or not result.get("handled"):
+            return None
+        return {
+            "reply": str(result.get("reply", "")),
+            "runtime": result.get("runtime", result),
+        }
+
+    async def _maybe_submit_runtime_handoff(
+        self,
+        runtime_handler: Any | None,
+        cognition_result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if runtime_handler is None:
+            return None
+        plan = cognition_result.get("plan")
+        if not isinstance(plan, dict) or not bool(plan.get("handoff_ready")):
+            return None
+        submit = getattr(runtime_handler, "submit_plan_payload", None)
+        if not callable(submit):
+            return None
+        try:
+            result = submit(plan)
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as exc:
+            logger.warning("HealthModule: runtime handoff failed: %s", exc)
+            return {"accepted": False, "error": str(exc)}
+        return dict(result) if isinstance(result, dict) else None
+
+    @staticmethod
+    def _last_cognition_result(text_loop: Any) -> dict[str, Any] | None:
+        result = getattr(text_loop, "last_cognition_result", None)
+        return dict(result) if isinstance(result, dict) else None
+
+    @staticmethod
+    def _call_accepts_keyword(func: Any, name: str) -> bool:
+        try:
+            parameters = signature(func).parameters
+        except (TypeError, ValueError):
+            return True
+        if name in parameters:
+            return True
+        return any(
+            param.kind == Parameter.VAR_KEYWORD
+            for param in parameters.values()
+        )
+
+    async def _speak_text_loop_reply(self, text_loop: Any, reply: str) -> bool:
+        if not isinstance(reply, str) or not reply.strip():
+            return False
+        audio = getattr(text_loop, "_audio", None) if text_loop is not None else None
+        if audio is None:
+            raise RuntimeError("runtime text loop has no audio output")
+
+        if not bool(getattr(audio, "is_busy", False)):
+            audio.speak(reply.strip())
+            audio.start_playback()
+        try:
+            done = await asyncio.to_thread(audio.wait_speaking_done)
+            if done is False:
+                raise TimeoutError("TTS playback did not finish within timeout")
+        finally:
+            audio.stop_playback()
+        return True
+
     def _conversation_snapshot(self, registry: ModuleRegistry) -> list[dict[str, Any]]:
         conversation = self._conversation(registry)
         history = getattr(conversation, "history", None)
         if not isinstance(history, list):
             return []
         return [dict(msg) for msg in history if isinstance(msg, dict)]
+
+    def _rag_evidence_payload(self, registry: ModuleRegistry) -> dict[str, Any]:
+        mem_mod = registry.get("memory")
+        bridge = getattr(mem_mod, "memory_bridge", None) if mem_mod else None
+        health = {}
+        health_fn = getattr(bridge, "health", None)
+        if callable(health_fn):
+            try:
+                payload = health_fn()
+                if isinstance(payload, dict):
+                    health = payload
+            except Exception as exc:
+                logger.debug("HealthModule: memory RAG snapshot failed: %s", exc)
+        evidence = health.get("last_evidence")
+        dropped = health.get("last_dropped_evidence")
+        answer_policy = health.get("last_answer_policy")
+        return {
+            "evidence": evidence if isinstance(evidence, list) else [],
+            "rag": {
+                "backend": health.get("last_backend") or health.get("backend") or "",
+                "configured_backend": health.get("backend") or "",
+                "retrieve_ms": health.get("last_retrieve_ms"),
+                "fallback_reason": health.get("last_fallback_reason") or "",
+                "dropped_evidence": dropped if isinstance(dropped, list) else [],
+                "answer_policy": answer_policy if isinstance(answer_policy, dict) else {},
+                "used_in_answer": bool(evidence),
+            },
+        }
+
+    def _attach_rag_to_last_assistant(
+        self,
+        registry: ModuleRegistry,
+        rag_payload: dict[str, Any],
+    ) -> None:
+        evidence = rag_payload.get("evidence")
+        rag = rag_payload.get("rag")
+        if not evidence and not rag:
+            return
+        conversation = self._conversation(registry)
+        history = getattr(conversation, "history", None)
+        if not isinstance(history, list):
+            return
+        for msg in reversed(history):
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                msg["evidence"] = evidence if isinstance(evidence, list) else []
+                msg["rag"] = rag if isinstance(rag, dict) else {}
+                save = getattr(conversation, "_save", None)
+                if callable(save):
+                    try:
+                        save()
+                    except Exception as exc:
+                        logger.debug("HealthModule: conversation RAG save failed: %s", exc)
+                return
 
     def _conversation(self, registry: ModuleRegistry) -> Any | None:
         mem_mod = registry.get("memory")
@@ -104,11 +389,317 @@ class HealthModule(Module):
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
         return getattr(pipeline, "_conversation", None)
 
+    def _memory_handler(self, registry: ModuleRegistry) -> Any | None:
+        return registry.get("memory")
+
+    def _audio(self, registry: ModuleRegistry) -> Any | None:
+        voice_mod = registry.get("voice")
+        audio = getattr(voice_mod, "audio", None) if voice_mod else None
+        if audio is not None:
+            return audio
+
+        text_mod = registry.get("text")
+        text_loop = getattr(text_mod, "text_loop", None) if text_mod else None
+        return getattr(text_loop, "_audio", None)
+
+    def _voice_status(self, registry: ModuleRegistry) -> dict[str, Any]:
+        audio = self._audio(registry)
+        status_snapshot = getattr(audio, "status_snapshot", None)
+        if callable(status_snapshot):
+            try:
+                status = status_snapshot()
+                if isinstance(status, dict):
+                    return status
+            except Exception as exc:
+                logger.debug("HealthModule: audio status snapshot failed: %s", exc)
+
+        has_voice = "voice" in registry
+        return {
+            "mode": "voice" if has_voice else "text",
+            "enabled": has_voice,
+            "input_ready": False,
+            "output_ready": not has_voice,
+            "pipeline_ok": not has_voice,
+        }
+
+    def _metrics_snapshot(self, registry: ModuleRegistry) -> dict[str, Any]:
+        llm_mod = registry.get("llm")
+        metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else None
+        snapshot = getattr(metrics, "snapshot", None)
+        if callable(snapshot):
+            try:
+                payload = snapshot()
+                if isinstance(payload, dict):
+                    return payload
+            except Exception as exc:
+                logger.debug("HealthModule: OTA metrics snapshot failed: %s", exc)
+        return {"uptime_seconds": 0.0, "conversation_count": 0}
+
+    def _active_skill_names(self, registry: ModuleRegistry) -> list[str]:
+        skill_mod = registry.get("skill")
+        skill_manager = getattr(skill_mod, "skill_manager", None) if skill_mod else None
+        get_enabled = getattr(skill_manager, "get_enabled", None)
+        if not callable(get_enabled):
+            return []
+        try:
+            return [
+                getattr(skill, "name", str(skill))
+                for skill in get_enabled()
+            ]
+        except Exception as exc:
+            logger.debug("HealthModule: active skill snapshot failed: %s", exc)
+            return []
+
+    def _ota_status(self, registry: ModuleRegistry) -> dict[str, Any]:
+        llm_mod = registry.get("llm")
+        metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else None
+        status_snapshot = getattr(metrics, "status_snapshot", None)
+        if callable(status_snapshot):
+            try:
+                payload = status_snapshot()
+                if isinstance(payload, dict):
+                    return payload
+            except Exception as exc:
+                logger.debug("HealthModule: OTA status snapshot failed: %s", exc)
+        return {"enabled": False, "registered": False, "state": "disabled"}
+
+    def _voice_bridge_status(self, registry: ModuleRegistry) -> dict[str, Any] | None:
+        voice_mod = registry.get("voice")
+        bridge = getattr(voice_mod, "voice_runtime_bridge", None) if voice_mod else None
+        if bridge is None:
+            text_mod = registry.get("text")
+            text_loop = getattr(text_mod, "text_loop", None) if text_mod else None
+            bridge = getattr(text_loop, "_voice_runtime_bridge", None)
+        status_snapshot = getattr(bridge, "status_snapshot", None)
+        if callable(status_snapshot):
+            try:
+                payload = status_snapshot()
+                if isinstance(payload, dict):
+                    return payload
+            except Exception as exc:
+                logger.debug("HealthModule: voice bridge snapshot failed: %s", exc)
+        return None
+
+    def _rag_trust_report(self, cfg: dict[str, Any]) -> dict[str, Any]:
+        report_path = self._rag_trust_report_path(cfg)
+        if not report_path.exists():
+            return {
+                "status": "missing",
+                "report_path": str(report_path),
+                "suite": "askme-rag-trust",
+                "scenario_count": 0,
+                "passed": 0,
+                "failed": 0,
+                "scenarios": [],
+            }
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {
+                "status": "error",
+                "report_path": str(report_path),
+                "error": str(exc),
+                "suite": "askme-rag-trust",
+                "scenario_count": 0,
+                "passed": 0,
+                "failed": 0,
+                "scenarios": [],
+            }
+        scenarios = payload.get("scenarios")
+        if not isinstance(scenarios, list):
+            scenarios = []
+        return {
+            "status": str(payload.get("status") or "unknown"),
+            "report_path": str(report_path),
+            "suite": str(payload.get("suite") or "askme-rag-trust"),
+            "scenario_count": int(payload.get("scenario_count") or len(scenarios)),
+            "passed": int(payload.get("passed") or 0),
+            "failed": int(payload.get("failed") or 0),
+            "generated_at": payload.get("generated_at"),
+            "external_services": bool(payload.get("external_services", False)),
+            "scenarios": [
+                {
+                    "name": str(item.get("name") or ""),
+                    "passed": bool(item.get("passed")),
+                }
+                for item in scenarios[:20]
+                if isinstance(item, dict)
+            ],
+        }
+
+    @staticmethod
+    def _rag_trust_report_path(cfg: dict[str, Any]) -> Path:
+        raw = (
+            cfg.get("rag_trust", {}).get("report_path")
+            or cfg.get("health_server", {}).get("rag_trust_report_path")
+            or "artifacts/rag_trust/scenario-evaluation.json"
+        )
+        path = Path(str(raw))
+        if not path.is_absolute():
+            path = project_root() / path
+        return path
+
+    def _voice_e2e_report(self, cfg: dict[str, Any]) -> dict[str, Any]:
+        report_path = self._voice_e2e_report_path(cfg)
+        if not report_path.exists():
+            return {
+                "status": "missing",
+                "report_path": str(report_path),
+                "suite": "askme-voice-e2e",
+                "scenario_count": 0,
+                "passed": 0,
+                "failed": 0,
+                "metrics": {},
+                "scenarios": [],
+            }
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {
+                "status": "error",
+                "report_path": str(report_path),
+                "error": str(exc),
+                "suite": "askme-voice-e2e",
+                "scenario_count": 0,
+                "passed": 0,
+                "failed": 0,
+                "metrics": {},
+                "scenarios": [],
+            }
+        scenarios = payload.get("scenarios")
+        if not isinstance(scenarios, list):
+            scenarios = []
+        metrics = payload.get("metrics")
+        return {
+            "status": str(payload.get("status") or "unknown"),
+            "report_path": str(report_path),
+            "suite": str(payload.get("suite") or "askme-voice-e2e"),
+            "scenario_count": int(payload.get("scenario_count") or len(scenarios)),
+            "passed": int(payload.get("passed") or 0),
+            "failed": int(payload.get("failed") or 0),
+            "generated_at": payload.get("generated_at"),
+            "external_services": bool(payload.get("external_services", False)),
+            "metrics": metrics if isinstance(metrics, dict) else {},
+            "scenarios": [
+                {
+                    "name": str(item.get("name") or ""),
+                    "passed": bool(item.get("passed")),
+                    "gate_action": str(
+                        (item.get("interaction_gate") or {}).get("action") or ""
+                    ),
+                }
+                for item in scenarios[:20]
+                if isinstance(item, dict)
+            ],
+        }
+
+    @staticmethod
+    def _voice_e2e_report_path(cfg: dict[str, Any]) -> Path:
+        raw = (
+            cfg.get("voice_e2e", {}).get("report_path")
+            or cfg.get("health_server", {}).get("voice_e2e_report_path")
+            or "artifacts/voice_e2e/scenario-evaluation.json"
+        )
+        path = Path(str(raw))
+        if not path.is_absolute():
+            path = project_root() / path
+        return path
+
+    def _field_operations_report(self, cfg: dict[str, Any]) -> dict[str, Any]:
+        report_path = self._field_operations_report_path(cfg)
+        if not report_path.exists():
+            return {
+                "status": "missing",
+                "report_path": str(report_path),
+                "suite": "askme-field-operations",
+                "scenario_count": 0,
+                "passed": 0,
+                "failed": 0,
+                "external_services": False,
+                "hardware_dispatch": False,
+                "scenarios": [],
+            }
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {
+                "status": "error",
+                "report_path": str(report_path),
+                "error": str(exc),
+                "suite": "askme-field-operations",
+                "scenario_count": 0,
+                "passed": 0,
+                "failed": 0,
+                "external_services": False,
+                "hardware_dispatch": False,
+                "scenarios": [],
+            }
+        scenarios = payload.get("scenarios")
+        if not isinstance(scenarios, list):
+            scenarios = []
+        product_demo = payload.get("product_demo")
+        if not isinstance(product_demo, dict):
+            product_demo = {}
+        return {
+            "status": str(payload.get("status") or "unknown"),
+            "report_path": str(report_path),
+            "suite": str(payload.get("suite") or "askme-field-operations"),
+            "scenario_count": int(payload.get("scenario_count") or len(scenarios)),
+            "passed": int(payload.get("passed") or 0),
+            "failed": int(payload.get("failed") or 0),
+            "generated_at": payload.get("generated_at"),
+            "external_services": bool(payload.get("external_services", False)),
+            "hardware_dispatch": bool(payload.get("hardware_dispatch", False)),
+            "product_demo": {
+                "suite_name": str(product_demo.get("suite_name") or ""),
+                "demo_ready": bool(product_demo.get("demo_ready", False)),
+                "real_integration_ready": bool(product_demo.get("real_integration_ready", False)),
+                "customer_scenario_count": int(product_demo.get("customer_scenario_count") or 0),
+                "blocked_on_real_integrations": list(
+                    product_demo.get("blocked_on_real_integrations") or []
+                )[:10],
+            },
+            "scenarios": [
+                {
+                    "name": str(item.get("name") or ""),
+                    "passed": bool(item.get("passed")),
+                }
+                for item in scenarios[:20]
+                if isinstance(item, dict)
+            ],
+        }
+
+    @staticmethod
+    def _field_operations_report_path(cfg: dict[str, Any]) -> Path:
+        raw = (
+            cfg.get("field_operations", {}).get("scenario_report_path")
+            or cfg.get("health_server", {}).get("field_operations_report_path")
+            or "artifacts/field_operations/scenario-evaluation.json"
+        )
+        path = Path(str(raw))
+        if not path.is_absolute():
+            path = project_root() / path
+        return path
+
+    def _model_name(self, cfg: dict[str, Any], registry: ModuleRegistry) -> str:
+        llm_mod = registry.get("llm")
+        client = getattr(llm_mod, "client", None) if llm_mod else None
+        model = getattr(client, "model", None)
+        if model:
+            return str(model)
+        return str(cfg.get("brain", {}).get("model", "unknown"))
+
     def _mission_handler(self, registry: ModuleRegistry) -> Any | None:
         mission_mod = registry.get("mission")
         if mission_mod is None:
             return None
         return getattr(mission_mod, "mission_service", None)
+
+    def _cognition_handler(self, registry: ModuleRegistry) -> Any | None:
+        return registry.get("cognition")
+
+    def _runtime_handler(self, registry: ModuleRegistry) -> Any | None:
+        return registry.get("runtime_handoff")
 
     def _capabilities_snapshot(
         self,

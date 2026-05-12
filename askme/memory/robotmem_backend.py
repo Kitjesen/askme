@@ -22,6 +22,13 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _context_value(memory: dict[str, Any], key: str) -> Any:
+    context = memory.get("context") or {}
+    if isinstance(context, dict):
+        return context.get(key)
+    return None
+
+
 class RobotMemBackend:
     """RobotMem wrapper with the same API as MemoryBridge backends.
 
@@ -96,8 +103,16 @@ class RobotMemBackend:
         Returns a formatted context string (``- item`` per line),
         or empty string on failure / no results.
         """
+        items = await self.retrieve_items(text)
+        if items:
+            logger.info("[Memory] RobotMem found %d items.", len(items))
+            return "\n".join(f"- {item['text']}" for item in items)
+        return ""
+
+    async def retrieve_items(self, text: str) -> list[dict[str, Any]]:
+        """Retrieve relevant memories as structured evidence items."""
         if not self._ensure_robotmem():
-            return ""
+            return []
         try:
             logger.debug("[Memory] RobotMem searching for: %s", text[:60])
             memories = await asyncio.wait_for(
@@ -106,26 +121,30 @@ class RobotMemBackend:
             )
             if not memories:
                 logger.debug("[Memory] RobotMem no relevant memories found.")
-                return ""
+                return []
 
             items = []
             for m in memories:
                 content = m.get("content", "")
                 if content:
-                    items.append(content)
-            if items:
-                logger.info("[Memory] RobotMem found %d items.", len(items))
-                return "\n".join(f"- {item}" for item in items)
-            return ""
+                    items.append({
+                        "text": content,
+                        "backend": "robotmem",
+                        "source": _context_value(m, "source") or "robotmem",
+                        "category": _context_value(m, "category"),
+                        "score": m.get("score") or m.get("confidence"),
+                        "metadata": m.get("context") or {},
+                    })
+            return items
         except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
             logger.warning(
                 "[Memory] RobotMem retrieval timed out (%.1fs).",
                 self._retrieve_timeout,
             )
-            return ""
+            return []
         except Exception as exc:
             logger.debug("[Memory] RobotMem retrieve failed: %s", exc)
-            return ""
+            return []
 
     async def save(self, user_text: str, assistant_text: str) -> None:
         """Persist a conversation exchange to robotmem.
@@ -149,6 +168,24 @@ class RobotMemBackend:
             logger.debug("[Memory] RobotMem saved conversation turn.")
         except Exception as exc:
             logger.debug("[Memory] RobotMem save failed: %s", exc)
+
+    async def save_fact(self, text: str, metadata: dict[str, Any] | None = None) -> None:
+        """Persist one externally curated knowledge fact to robotmem."""
+        if not self._ensure_robotmem():
+            return
+        clean = str(text or "").strip()
+        if not clean:
+            return
+        context = {
+            "source": "knowledge_import",
+            "robot": "thunder",
+            **(metadata or {}),
+        }
+        try:
+            await asyncio.to_thread(self._rm.learn, clean, context=context)
+            logger.debug("[Memory] RobotMem saved imported fact.")
+        except Exception as exc:
+            logger.debug("[Memory] RobotMem save_fact failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Memory consolidation (background, requires LLM)

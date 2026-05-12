@@ -3,10 +3,12 @@
 import asyncio
 import sys
 import time
+
 sys.path.insert(0, ".")
 
-from askme.config import get_config
 from askme.blueprints.text import text
+from askme.config import get_config
+
 
 async def main():
     cfg = get_config()

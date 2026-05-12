@@ -103,33 +103,34 @@ def test_drain_buffers_invalidates_inflight_generation(monkeypatch):
 
 
 def test_playback_loop_uses_configured_output_device(monkeypatch):
-    """_playback_loop passes the configured output_device to sd.play."""
-    import numpy as np
-
+    """_playback_loop passes the configured output_device to OutputStream."""
     import askme.voice.tts as tts_mod
     from askme.voice.tts import TTSEngine
 
-    played_kwargs: dict[str, object] = {}
+    stream_kwargs: dict[str, object] = {}
 
-    def fake_play(data, samplerate, device=None):
-        played_kwargs["device"] = device
-        # Stop playback loop after the first chunk so the test terminates.
-        engine._is_playing = False
+    class FakeOutputStream:
+        def __init__(self, **kwargs):
+            stream_kwargs.update(kwargs)
 
-    monkeypatch.setattr(tts_mod.sd, "play", fake_play)
-    monkeypatch.setattr(tts_mod.sd, "wait", lambda: None)
+        def __enter__(self):
+            engine._is_playing = False
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(tts_mod.sd, "OutputStream", FakeOutputStream)
 
     engine = TTSEngine({"backend": "edge", "output_device": 3})
-    engine._aplay_bin = None  # disable aplay so we exercise the sd.play branch
+    engine._aplay_bin = None  # disable aplay so we exercise sounddevice streaming
     try:
-        # Queue a real audio chunk so the loop doesn't spin on empty buffer.
-        engine.tts_buffer.append(np.zeros(100, dtype=np.float32))
         engine._is_playing = True
         engine._playback_loop()
     finally:
         engine.shutdown()
 
-    assert played_kwargs.get("device") == 3
+    assert stream_kwargs.get("device") == 3
 
 
 def test_playback_loop_uses_usb_direct_transport(monkeypatch):
@@ -204,6 +205,34 @@ def test_wait_done_waits_for_usb_direct_chunk_after_buffer_pop(monkeypatch):
 
     assert finished.is_set()
     assert elapsed >= 0.10
+
+
+def test_wait_done_times_out_while_synthesis_queue_is_busy(monkeypatch):
+    """A stuck TTS backend must not make one-shot CLI playback hang forever."""
+    from askme.voice.tts import TTSEngine
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_generate(self, _text, _generation):
+        started.set()
+        release.wait(timeout=1.0)
+
+    engine = TTSEngine({"backend": "edge"})
+    try:
+        monkeypatch.setattr(engine, "_generate_audio", types.MethodType(fake_generate, engine))
+        engine.speak("slow synthesis")
+        assert started.wait(timeout=1.0)
+
+        start = time.monotonic()
+        done = engine.wait_done(timeout=0.05)
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+        engine.shutdown()
+
+    assert done is False
+    assert elapsed < 0.3
 
 
 def test_usb_direct_playback_coalesces_chunks_and_adds_preroll(monkeypatch):
@@ -297,8 +326,6 @@ def test_usb_direct_background_prewarm_is_opt_in(monkeypatch):
 
 def test_usb_direct_background_prewarm_can_be_enabled(monkeypatch):
     """Legacy separate prewarm remains available for devices that need it."""
-    import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     warm_calls: list[int] = []
@@ -524,6 +551,39 @@ def test_usb_direct_speech_path_inserts_cushion_between_leadin_and_speech(monkey
     assert np.allclose(chunk[350:], 0.5)
 
 
+def test_usb_direct_speech_gain_boosts_only_speech_body(monkeypatch):
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    played: dict[str, np.ndarray] = {}
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 1000,
+            "usb_direct_speech_leadin_seconds": 0.1,
+            "usb_direct_speech_gain": 8.0,
+        }
+    )
+
+    def fake_usb_play(chunk):
+        played["chunk"] = chunk.copy()
+        return True
+
+    monkeypatch.setattr(engine, "_play_chunk_usb_direct_locked", fake_usb_play)
+    try:
+        speech = np.ones(100, dtype=np.float32) * 0.1
+        assert engine._play_chunk_usb_direct_speech(speech)
+    finally:
+        engine.shutdown()
+
+    chunk = played["chunk"]
+    assert np.max(np.abs(chunk[:100])) < 0.04
+    assert np.all(chunk[100:] > 0.6)
+    assert np.max(np.abs(chunk[100:])) <= 1.0
+
+
 def test_usb_direct_speech_leadin_can_include_wake_signal():
     """A shaped wake signal can open MCP01's speaker gate before speech."""
     import numpy as np
@@ -551,6 +611,33 @@ def test_usb_direct_speech_leadin_can_include_wake_signal():
     assert 0.07 <= np.max(np.abs(leadin[:200])) <= 0.11
     assert 0.0 < np.max(np.abs(leadin[200:250])) < 0.03
     assert 0.0 < np.max(np.abs(leadin[250:])) < 0.03
+
+
+def test_usb_direct_speech_leadin_can_be_silent_when_wake_gains_are_zero():
+    """Sunrise can keep the timing guard without an audible pre-speech artifact."""
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "output_transport": "usb_direct",
+            "sample_rate": 1000,
+            "usb_direct_speech_leadin_seconds": 0.5,
+            "usb_direct_speech_wake_signal_seconds": 0.2,
+            "usb_direct_speech_wake_signal_gain": 0.0,
+            "usb_direct_speech_wake_noise_gain": 0.0,
+            "usb_direct_speech_wake_gap_seconds": 0.05,
+        }
+    )
+    try:
+        leadin = engine._usb_direct_speech_leadin_chunk()
+    finally:
+        engine.shutdown()
+
+    assert len(leadin) == 500
+    assert np.max(np.abs(leadin)) == 0.0
 
 
 def test_usb_direct_speech_leadin_shortens_when_stream_is_warm():

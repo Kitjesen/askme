@@ -2,6 +2,7 @@
 """Minimal TTS test — no blueprint, no asyncio, just speak."""
 import sys
 import time
+
 sys.path.insert(0, ".")
 
 from askme.config import get_config

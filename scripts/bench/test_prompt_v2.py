@@ -32,7 +32,8 @@ SYSTEM_A = (
 )
 
 # Strategy B: Same but instructions in user preamble (system empty)
-SYSTEM_B_MSGS = lambda q: [
+def SYSTEM_B_MSGS(q):
+    return [
     {"role": "user", "content": "请扮演Thunder语音助手"},
     {"role": "assistant", "content": "好的，我是Thunder，穹沛科技的语音助手。请问有什么想聊的？"},
     {"role": "user", "content": (

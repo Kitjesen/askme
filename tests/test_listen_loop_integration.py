@@ -6,6 +6,7 @@ without any real audio devices, ASR models, or TTS engines.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
@@ -162,6 +163,15 @@ class TestListenLoopIntegration:
             result = agent.listen_loop()
 
             assert result == "你好世界"
+            voice_turn = agent.status_snapshot()["voice_turn"]
+            latest = voice_turn["latest"]
+            stages = {stage["name"]: stage for stage in latest["stages"]}
+            assert latest["status"] == "accepted"
+            assert latest["media_transport"] == "local_sounddevice"
+            assert stages["first_audio_frame"]
+            assert stages["vad_start"]["metadata"]["peak"] == 2000
+            assert stages["vad_end"]["metadata"]["peak"] == 2000
+            assert stages["asr_final"]["metadata"]["asr_source"] == "local"
             asr.start_session.assert_called_once()
             asr.finish_and_get_result.assert_called_once()
             agent._test_metrics.mark_voice_listen_started.assert_called_once()
@@ -186,6 +196,8 @@ class TestListenLoopIntegration:
             result = agent.listen_loop()
 
             assert result is None
+            voice_turn = agent.status_snapshot()["voice_turn"]
+            assert voice_turn["latest"]["status"] == "timeout"
             asr.reset.assert_called()
 
     def test_barge_in_stops_tts_and_feeds_buffer(self):
@@ -229,6 +241,11 @@ class TestListenLoopIntegration:
             result = agent.listen_loop()
 
             assert result == "停下来"
+            voice_turn = agent.status_snapshot()["voice_turn"]
+            latest = voice_turn["latest"]
+            stages = {stage["name"]: stage for stage in latest["stages"]}
+            assert voice_turn["counters"]["barge_in_count"] == 1
+            assert stages["barge_in_confirmed"]["metadata"]["peak"] == 3000
             agent.tts.stop_immediately.assert_called_once()
             agent.tts.drain_buffers.assert_called_once()
             # Buffer was fed to ASR
@@ -390,6 +407,39 @@ class TestListenLoopIntegration:
                 pass
             # The echo-gated frames should have triggered buffer_pre_roll
             assert mic.buffer_pre_roll.call_count >= 1
+
+    def test_stop_playback_starts_input_cooldown_and_resets_state(self):
+        """Normal playback stop resets listen state and starts the post-TTS cooldown."""
+        with _agent_ctx() as agent:
+            agent._post_tts_input_cooldown_s = 1.0
+
+            before = time.monotonic()
+            agent.stop_playback()
+
+            assert agent._input_cooldown_until >= before + 0.9
+            agent._vad_ctrl.reset.assert_called_once()
+            agent._asr_mgr.reset.assert_called_once()
+
+    def test_post_tts_cooldown_discards_frames_without_preroll(self):
+        """Cooldown frames are thrown away instead of becoming ASR pre-roll."""
+        with _agent_ctx() as agent:
+            mic = _setup_mic_open(agent)
+            proc = agent._audio_proc
+            vad = agent._vad_ctrl
+            asr = agent._asr_mgr
+
+            agent._asr_timeout = 0.01
+            agent._input_cooldown_until = time.monotonic() + 1.0
+            mic.read_chunk.return_value = _CHUNK
+            asr.check_endpoint.return_value = None
+
+            result = agent.listen_loop()
+
+            assert result is None
+            proc.process.assert_not_called()
+            vad.feed.assert_not_called()
+            mic.buffer_pre_roll.assert_not_called()
+            assert mic.pre_roll.clear.call_count >= 1
 
     def test_check_endpoint_returns_valid_text(self):
         """Local ASR endpoint detected mid-speech returns text immediately."""

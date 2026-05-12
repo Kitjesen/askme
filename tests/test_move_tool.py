@@ -27,7 +27,7 @@ class TestCallRuntimeApi:
         assert "error" in result
 
     def test_env_url_override(self, monkeypatch):
-        monkeypatch.setenv("DOG_NAV_SERVICE_URL", "http://myhost:9999")
+        monkeypatch.setenv("NAV_GATEWAY_URL", "http://myhost:9999")
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"ok": true}'
         mock_resp.__enter__ = lambda s: s
@@ -87,7 +87,7 @@ class TestGoTo:
 
     def test_service_unavailable_returns_friendly_message(self):
         with patch("askme.tools.move_tool._call_runtime_api",
-                   return_value={"error": "服务不可达 (nav:5090): refused"}):
+                   return_value={"error": "服务不可达 (nav:8088): refused"}):
             result = self.tool._go_to("厨房")
         assert "[导航不可用]" in result
         assert "厨房" in result

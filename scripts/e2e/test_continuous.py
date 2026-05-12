@@ -1,6 +1,6 @@
 """Continuous test: send multiple queries, play TTS responses.
 
-Runs through a set of test prompts to verify SOUL.md character,
+Runs through a set of test prompts to verify prompts/SOUL.md character,
 Edge TTS, and VLM integration in sequence.
 """
 
@@ -15,8 +15,9 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from askme.brain.llm_client import LLMClient
-from askme.voice.tts import TTSEngine
+
 from askme.config import get_config
+from askme.voice.tts import TTSEngine
 
 # Test prompts — various scenarios for Thunder
 TEST_PROMPTS = [
@@ -29,12 +30,12 @@ TEST_PROMPTS = [
 
 
 def _load_soul_seed() -> list[dict[str, str]]:
-    """Load SOUL.md and convert to prompt seed."""
+    """Load prompts/SOUL.md and convert to prompt seed."""
     import os
-    soul_path = os.path.join(os.path.dirname(__file__), "..", "SOUL.md")
+    soul_path = os.path.join(os.path.dirname(__file__), "..", "..", "prompts", "SOUL.md")
     if not os.path.isfile(soul_path):
         return []
-    with open(soul_path, "r", encoding="utf-8") as f:
+    with open(soul_path, encoding="utf-8") as f:
         raw = f.read()
     brief = re.sub(r"^#+\s+.*$", "", raw, flags=re.MULTILINE)
     brief = re.sub(r"\n{3,}", "\n\n", brief).strip()
@@ -107,7 +108,7 @@ async def run_continuous():
         tts.start_playback()
         tts.wait_done()
         tts.stop_playback()
-        print(f"  TTS done.")
+        print("  TTS done.")
 
         # Brief pause between turns
         await asyncio.sleep(1.0)

@@ -6,8 +6,10 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from enum import Enum
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 
@@ -42,6 +44,7 @@ from .audio_router import AudioRouter
 from .kws import KWSEngine
 from .mic_input import MicInput
 from .tts import TTSEngine
+from .turn_trace import VoiceTurnTraceRecorder
 from .vad_controller import (
     _BARGE_IN_HOLD_S,  # noqa: F401 — re-exported for tests
     _MAX_SPEECH_DURATION,  # noqa: F401 — re-exported for tests
@@ -123,6 +126,30 @@ class AudioAgent:
         # without repeating the wake word.  0 = require wake word every time.
         self._wake_timeout: float = float(voice_cfg.get("wake_timeout", 30.0))
         self._last_interaction_time: float = 0.0
+        self._post_tts_input_cooldown_s: float = max(
+            0.0,
+            float(voice_cfg.get("post_tts_input_cooldown_s", 0.0)),
+        )
+        self._ready_chime_enabled: bool = bool(voice_cfg.get("ready_chime_enabled", False))
+        self._ready_chime_min_interval_s: float = max(
+            0.0,
+            float(voice_cfg.get("ready_chime_min_interval_s", 8.0)),
+        )
+        self._last_ready_chime_at: float = 0.0
+        self._ready_chime_generation: int = 0
+        self._input_cooldown_until: float = 0.0
+        self._input_cooldown_log_next: float = 0.0
+        self._run_id: str = uuid4().hex[:16]
+        self._input_state_lock = threading.Lock()
+        self._input_level_window: deque[tuple[float, int, float]] = deque(maxlen=200)
+        self._input_last_peak: int = 0
+        self._input_last_rms: float = 0.0
+        self._input_last_observed_at: float = 0.0
+        self._input_vad_state: str = "idle"
+        self._input_gate_state: str = "open"
+        self._input_asr_timeouts: int = 0
+        self._input_last_failure_reason: str | None = None
+        self._turn_traces = VoiceTurnTraceRecorder()
 
         # -- Input engines (only in voice mode) --
         self._asr_timeout: float = voice_cfg.get("asr", {}).get(
@@ -148,6 +175,7 @@ class AudioAgent:
 
         # -- New modular components --
         self._mic = MicInput.from_config(config, audio_router=audio_router)
+        self._media_transport = self._resolve_media_transport_label(voice_cfg)
         self._audio_proc = AudioProcessor(voice_cfg)
         self._vad_ctrl = VADController(voice_cfg)
         self._asr_mgr = ASRManager(voice_cfg)
@@ -176,6 +204,7 @@ class AudioAgent:
 
         # -- Output engine --
         self.tts = TTSEngine(voice_cfg.get("tts", {}), audio_router=audio_router)
+        logger.info("AudioAgent run_id=%s mode=%s", self._run_id, "voice" if voice_mode else "text")
         self._refresh_voice_metrics()
 
     # ------------------------------------------------------------------
@@ -193,18 +222,24 @@ class AudioAgent:
         self._refresh_voice_metrics()
 
     def start_playback(self) -> None:
+        self._ready_chime_generation += 1
         self._agent_state = AgentState.SPEAKING
+        self._turn_traces.mark("tts_playback_started")
         self.tts.start_playback()
         self._refresh_voice_metrics()
 
     def stop_playback(self) -> None:
         self.tts.stop_playback()
+        self._begin_post_tts_input_cooldown()
         self._agent_state = AgentState.IDLE
+        self._turn_traces.mark("playback_done")
         self._refresh_voice_metrics()
+        self._schedule_ready_chime()
 
-    def wait_speaking_done(self, timeout: float = 30.0) -> None:
-        self.tts.wait_done(timeout=timeout)
+    def wait_speaking_done(self, timeout: float = 30.0) -> bool:
+        done = self.tts.wait_done(timeout=timeout)
         self._refresh_voice_metrics()
+        return done
 
     async def speak_and_wait(self, text: str) -> None:
         """Speak text and wait for TTS to finish (voice mode convenience).
@@ -230,6 +265,56 @@ class AudioAgent:
         """Immediately stop TTS playback mid-chunk (barge-in support)."""
         self.tts.stop_immediately()
         self._refresh_voice_metrics()
+
+    def _begin_post_tts_input_cooldown(self) -> None:
+        """Briefly discard mic input after playback so TTS tail is not re-ASR'd."""
+        if self._post_tts_input_cooldown_s <= 0:
+            return
+        self._input_cooldown_until = max(
+            self._input_cooldown_until,
+            time.monotonic() + self._post_tts_input_cooldown_s,
+        )
+        self._reset_listening_state()
+
+    def _reset_listening_state(self) -> None:
+        """Clear VAD/ASR state after local playback or known false input."""
+        try:
+            self._vad_ctrl.reset()
+        except Exception as exc:
+            logger.debug("VAD reset failed during input cooldown (ignored): %s", exc)
+        try:
+            self._asr_mgr.reset()
+        except Exception as exc:
+            logger.debug("ASR reset failed during input cooldown (ignored): %s", exc)
+
+    def _in_post_tts_input_cooldown(self) -> float:
+        """Return remaining post-TTS input cooldown seconds, or 0 when inactive."""
+        remaining = self._input_cooldown_until - time.monotonic()
+        return remaining if remaining > 0 else 0.0
+
+    def _schedule_ready_chime(self) -> None:
+        """Play a subtle cue when the mic is ready after TTS/cooldown."""
+        if not self._ready_chime_enabled or not self.voice_mode or self._muted:
+            return
+        generation = self._ready_chime_generation
+        delay = self._in_post_tts_input_cooldown()
+
+        def _run() -> None:
+            if delay > 0:
+                time.sleep(delay)
+            now = time.monotonic()
+            if generation != self._ready_chime_generation:
+                return
+            if self._muted or self.is_busy or self._agent_state == AgentState.SPEAKING:
+                return
+            if self._in_post_tts_input_cooldown() > 0:
+                return
+            if now - self._last_ready_chime_at < self._ready_chime_min_interval_s:
+                return
+            self._last_ready_chime_at = now
+            self._play_chime("ready")
+
+        threading.Thread(target=_run, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Volume / speed control
@@ -311,6 +396,20 @@ class AudioAgent:
         self.tts.speak("抱歉，出现了问题，请重试。")
         self._refresh_voice_metrics()
 
+    def _start_voice_turn_trace(self) -> None:
+        self._turn_traces.start(
+            source="microphone",
+            media_transport=self._media_transport,
+            metadata={
+                "input_transport": getattr(self._mic, "_input_transport", None),
+                "sample_rate": getattr(self._mic, "sample_rate", None),
+                "native_rate": getattr(self._mic, "_native_rate", None),
+                "channels": getattr(self._mic, "_native_channels", None),
+                "channel_select": getattr(self._mic, "_channel_select", None),
+                "asr_provider": self._asr_provider_label(),
+            },
+        )
+
     # ------------------------------------------------------------------
     # Microphone listen loop
     # ------------------------------------------------------------------
@@ -325,6 +424,7 @@ class AudioAgent:
         if self.asr is None or self.vad is None:
             raise RuntimeError("listen_loop requires voice_mode=True")
 
+        self._start_voice_turn_trace()
         self._metrics.mark_voice_listen_started()
         self._refresh_voice_metrics()
 
@@ -355,6 +455,7 @@ class AudioAgent:
                         self.woken_up = False
                         self._refresh_voice_metrics()
                         if not self._wait_for_wake_word_mic(mic_ctx):
+                            self._turn_traces.finish("wake_word_not_detected")
                             return None
                         self._play_chime("wake")
 
@@ -392,13 +493,41 @@ class AudioAgent:
                     if time.monotonic() > deadline:
                         logger.info("ASR timeout: no speech detected within %.0fs.", self._asr_timeout)
                         asr.reset()
+                        self._mark_input_failure("asr_timeout")
+                        self._turn_traces.finish("timeout")
                         self._refresh_voice_metrics()
                         return None
 
                     raw = mic_ctx.read_chunk()
+                    self._turn_traces.mark(
+                        "first_audio_frame",
+                        chunk_samples=len(raw),
+                        sample_rate=mic_ctx.sample_rate,
+                    )
+                    cooldown_remaining = self._in_post_tts_input_cooldown()
+                    if cooldown_remaining > 0:
+                        raw_i16 = (raw * 32768).clip(-32768, 32767).astype(np.int16)
+                        self._record_input_observation(
+                            peak=int(np.max(np.abs(raw_i16))) if len(raw_i16) else 0,
+                            rms=self._rms_int16(raw_i16),
+                            vad_state="cooldown",
+                            gate_state="cooldown",
+                        )
+                        now = time.monotonic()
+                        if now >= self._input_cooldown_log_next:
+                            logger.info(
+                                "MIC input suppressed for %.1fs after TTS playback",
+                                cooldown_remaining,
+                            )
+                            self._input_cooldown_log_next = now + 0.5
+                        self._reset_listening_state()
+                        mic_ctx.pre_roll.clear()
+                        continue
+
                     tts_active = self.tts.is_active()
                     result = proc.process(raw, tts_active=tts_active, speech_active=vad.speech_active)
                     samples_f32, samples_i16, peak, echo_gated = result
+                    rms = self._rms_int16(samples_i16)
 
                     # Periodic volume logging
                     now = time.monotonic()
@@ -412,6 +541,12 @@ class AudioAgent:
                         _vol_log_next = now + _vol_log_interval
 
                     if echo_gated:
+                        self._record_input_observation(
+                            peak=peak,
+                            rms=rms,
+                            vad_state="gated",
+                            gate_state="echo",
+                        )
                         mic_ctx.buffer_pre_roll(raw)
                         continue
 
@@ -420,19 +555,36 @@ class AudioAgent:
                     # Only gates silence→speech transition; during speech all audio passes
                     # to keep Cloud ASR stream continuous.
                     if proc.is_noise_gated(peak) and not vad.speech_active:
+                        self._record_input_observation(
+                            peak=peak,
+                            rms=rms,
+                            vad_state="silent",
+                            gate_state="noise",
+                        )
                         mic_ctx.buffer_pre_roll(raw)
                         continue
 
                     event = vad.feed(samples_i16, peak, tts_active=tts_active)
+                    self._record_input_observation(
+                        peak=peak,
+                        rms=rms,
+                        vad_state="speech" if vad.speech_active else "silent",
+                        gate_state="open",
+                    )
 
                     if event == VADEvent.SILENCE:
                         mic_ctx.buffer_pre_roll(raw)
-                        # Keep cloud ASR warm with silence audio
+                        # Keep cloud ASR connected; actual silence feeding is configurable.
                         if asr._cloud_active:
                             asr.feed_cloud_only(samples_i16)
 
                     elif event == VADEvent.SPEECH_START:
                         deadline = time.monotonic() + self._asr_timeout
+                        self._turn_traces.mark(
+                            "vad_start",
+                            peak=peak,
+                            rms=rms,
+                        )
                         self._agent_state = AgentState.LISTENING
                         self._refresh_voice_metrics()
                         asr.start_session()
@@ -445,6 +597,7 @@ class AudioAgent:
                         asr.feed_audio(samples_f32, samples_i16, mic_ctx.sample_rate)
 
                     elif event == VADEvent.BARGE_IN_CONFIRMED:
+                        self._turn_traces.mark_barge_in(peak=peak, rms=rms)
                         self._agent_state = AgentState.LISTENING
                         self._refresh_voice_metrics()
                         self.tts.drain_buffers()
@@ -461,22 +614,41 @@ class AudioAgent:
 
                     elif event == VADEvent.SPEECH_END:
                         logger.info("VAD: speech end")
+                        self._turn_traces.mark("vad_end", peak=peak, rms=rms)
                         cloud_result = asr.finish_and_get_result(self.awaiting_confirmation)
                         if cloud_result and not cloud_result.is_noise:
-                            return self._accept_result(cloud_result.text)
+                            return self._accept_result(
+                                cloud_result.text,
+                                asr_source=cloud_result.source,
+                                asr_latency_ms=cloud_result.latency_ms,
+                            )
                         if cloud_result and cloud_result.is_noise:
                             logger.info("ASR noise filtered: '%s'", cloud_result.text)
+                            self._mark_input_failure("asr_noise_filtered")
+                            self._turn_traces.finish(
+                                "noise_filtered",
+                                asr_source=cloud_result.source,
+                            )
                             asr.reset()
                             deadline = time.monotonic() + self._asr_timeout
                             vad.reset()
+                            self._start_voice_turn_trace()
                             continue
 
                     elif event == VADEvent.MAX_DURATION_EXCEEDED:
                         logger.warning("VAD: max speech duration exceeded, forcing endpoint")
                         forced = asr.force_endpoint()
                         if forced and not forced.is_noise:
-                            return self._accept_result(forced.text)
+                            return self._accept_result(
+                                forced.text,
+                                asr_source=forced.source,
+                                asr_latency_ms=forced.latency_ms,
+                                forced_endpoint=True,
+                            )
+                        self._mark_input_failure("asr_forced_empty")
                         deadline = time.monotonic() + self._asr_timeout
+                        self._turn_traces.finish("forced_empty")
+                        self._start_voice_turn_trace()
                         continue
 
                     # Check local ASR endpoint (runs every iteration during speech)
@@ -485,36 +657,198 @@ class AudioAgent:
                         # Finish cloud session and prefer cloud result over local
                         cloud_result = asr.finish_and_get_result(self.awaiting_confirmation)
                         if cloud_result and not cloud_result.is_noise:
-                            return self._accept_result(cloud_result.text)
+                            return self._accept_result(
+                                cloud_result.text,
+                                asr_source=cloud_result.source,
+                                asr_latency_ms=cloud_result.latency_ms,
+                            )
                         # Fall back to local ASR result
                         is_noise = self._asr_mgr.is_noise(
                             ep_result.text, self.awaiting_confirmation
                         )
                         if not is_noise:
-                            return self._accept_result(ep_result.text)
+                            return self._accept_result(
+                                ep_result.text,
+                                asr_source=ep_result.source,
+                                asr_latency_ms=ep_result.latency_ms,
+                            )
                         else:
                             logger.info("ASR noise filtered: '%s'", ep_result.text)
+                            self._mark_input_failure("asr_noise_filtered")
+                            self._turn_traces.finish(
+                                "noise_filtered",
+                                asr_source=ep_result.source,
+                            )
                             asr.reset()
                             vad.reset()
                             deadline = time.monotonic() + self._asr_timeout
+                            self._start_voice_turn_trace()
 
         except Exception as exc:
             self._metrics.mark_voice_error(str(exc))
+            self._mark_input_failure(str(exc))
+            self._turn_traces.finish("error", error=str(exc))
             self._refresh_voice_metrics(pipeline_ok=False)
             raise
 
         return None
 
-    def _accept_result(self, text: str) -> str:
+    def _accept_result(
+        self,
+        text: str,
+        *,
+        asr_source: str = "",
+        asr_latency_ms: float | None = None,
+        forced_endpoint: bool = False,
+    ) -> str:
         """Accept a recognized text result: log, queue, update state."""
+        self._turn_traces.mark(
+            "asr_final",
+            asr_source=asr_source,
+            asr_latency_ms=asr_latency_ms,
+            forced_endpoint=forced_endpoint,
+            text_chars=len(text),
+        )
+        self._turn_traces.finish(
+            "accepted",
+            asr_source=asr_source,
+            text_chars=len(text),
+        )
         logger.info("Recognized: %s", text)
         self.audio_queue.put(text)
         self._metrics.mark_voice_input(text)
+        self._clear_input_failure()
         self._agent_state = AgentState.PROCESSING
         self._last_interaction_time = time.monotonic()
         self._refresh_voice_metrics()
         self._asr_mgr.reset()
         return text
+
+    @staticmethod
+    def _rms_int16(samples_int16: np.ndarray) -> float:
+        if len(samples_int16) == 0:
+            return 0.0
+        values = samples_int16.astype(np.float64)
+        return round(float(np.sqrt(np.mean(values * values))), 2)
+
+    def _record_input_observation(
+        self,
+        *,
+        peak: int,
+        rms: float,
+        vad_state: str,
+        gate_state: str,
+    ) -> None:
+        now = time.monotonic()
+        with self._input_state_lock:
+            self._input_last_peak = int(max(peak, 0))
+            self._input_last_rms = float(max(rms, 0.0))
+            self._input_last_observed_at = now
+            self._input_vad_state = vad_state
+            self._input_gate_state = gate_state
+            self._input_level_window.append(
+                (now, self._input_last_peak, self._input_last_rms)
+            )
+
+    def _mark_input_failure(self, reason: str) -> None:
+        with self._input_state_lock:
+            if reason == "asr_timeout":
+                self._input_asr_timeouts += 1
+            self._input_last_failure_reason = str(reason)
+            self._input_vad_state = "timeout" if reason == "asr_timeout" else self._input_vad_state
+
+    def _clear_input_failure(self) -> None:
+        with self._input_state_lock:
+            self._input_last_failure_reason = None
+
+    def _input_status_snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        cutoff = now - 10.0
+        with self._input_state_lock:
+            while self._input_level_window and self._input_level_window[0][0] < cutoff:
+                self._input_level_window.popleft()
+            peaks = [peak for _observed_at, peak, _rms in self._input_level_window]
+            rms_values = [rms for _observed_at, _peak, rms in self._input_level_window]
+            peak_max_10s = max(
+                peaks,
+                default=self._input_last_peak,
+            )
+            peak_p50_10s = self._percentile(peaks, 50)
+            peak_p95_10s = self._percentile(peaks, 95)
+            rms_p50_10s = self._percentile(rms_values, 50)
+            rms_p95_10s = self._percentile(rms_values, 95)
+            sample_count_10s = len(peaks)
+            last_observed_age_s = (
+                round(now - self._input_last_observed_at, 2)
+                if self._input_last_observed_at > 0
+                else None
+            )
+            last_peak = self._input_last_peak
+            last_rms = self._input_last_rms
+            vad_state = self._input_vad_state
+            gate_state = self._input_gate_state
+            asr_timeouts = self._input_asr_timeouts
+            last_failure_reason = self._input_last_failure_reason
+
+        noise_gate_peak = int(getattr(self._audio_proc, "noise_gate_peak", self._noise_gate_peak))
+        gate_recommendation = None
+        if noise_gate_peak > 0 and 0 < peak_max_10s < noise_gate_peak:
+            gate_recommendation = (
+                f"observed_peak_below_noise_gate:{peak_max_10s}<{noise_gate_peak}"
+            )
+
+        tts_is_active = getattr(self.tts, "is_active", None)
+        if callable(tts_is_active):
+            try:
+                tts_active = bool(tts_is_active())
+            except Exception:
+                tts_active = self.is_busy
+        else:
+            tts_active = self.is_busy
+
+        return {
+            "run_id": self._run_id,
+            "device": self._input_device,
+            "transport": getattr(self._mic, "_input_transport", "auto"),
+            "sample_rate": self._mic.sample_rate,
+            "native_rate": getattr(self._mic, "_native_rate", None),
+            "channels": getattr(self._mic, "_native_channels", None),
+            "channel_select": getattr(self._mic, "_channel_select", None),
+            "chunk_ms": getattr(self._mic, "_chunk_ms", None),
+            "chunk_samples": self._mic.chunk_samples,
+            "mic_open": self._mic.is_open,
+            "noise_gate_peak": noise_gate_peak,
+            "echo_gate_peak": self._echo_gate_peak,
+            "last_peak": last_peak,
+            "peak_max_10s": peak_max_10s,
+            "peak_p50_10s": peak_p50_10s,
+            "peak_p95_10s": peak_p95_10s,
+            "last_rms": last_rms,
+            "rms_p50_10s": rms_p50_10s,
+            "rms_p95_10s": rms_p95_10s,
+            "sample_count_10s": sample_count_10s,
+            "last_observed_age_s": last_observed_age_s,
+            "vad_state": vad_state,
+            "gate_state": gate_state,
+            "tts_active": tts_active,
+            "cooldown_remaining_s": round(self._in_post_tts_input_cooldown(), 2),
+            "asr_timeouts": asr_timeouts,
+            "last_failure_reason": last_failure_reason,
+            "gate_recommendation": gate_recommendation,
+        }
+
+    @staticmethod
+    def _percentile(values: list[int] | list[float], percentile: float) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(float(value) for value in values)
+        if len(ordered) == 1:
+            return round(ordered[0], 2)
+        index = (max(0.0, min(percentile, 100.0)) / 100.0) * (len(ordered) - 1)
+        lo = int(index)
+        hi = min(lo + 1, len(ordered) - 1)
+        frac = index - lo
+        return round(ordered[lo] * (1.0 - frac) + ordered[hi] * frac, 2)
 
     # ------------------------------------------------------------------
     # Wake word detection
@@ -582,6 +916,7 @@ class AudioAgent:
                 "wake": self._chime_wake,
                 "error": self._chime_error,
                 "thinking": self._chime_thinking,
+                "ready": self._chime_ready,
             }
             gen = generators.get(event, self._chime_acknowledge)
             audio = gen()
@@ -681,6 +1016,16 @@ class AudioAgent:
 
         return audio
 
+    def _chime_ready(self) -> np.ndarray:
+        """Single soft tone used after playback when the mic is ready again."""
+        sr = self._SR
+        note_dur = 0.09
+        n = int(sr * note_dur)
+        t = np.linspace(0, note_dur, n, endpoint=False, dtype=np.float32)
+        tone = 0.22 * np.sin(2 * np.pi * 659.25 * t)
+        tone *= np.exp(-t * 18)
+        return tone.astype(np.float32)
+
     def _chime_wake(self) -> np.ndarray:
         """Three-note ascending pentatonic arpeggio — bright, alert."""
         sr = self._SR
@@ -775,6 +1120,7 @@ class AudioAgent:
 
     def _refresh_voice_metrics(self, **overrides: Any) -> dict[str, Any]:
         snapshot = {
+            "run_id": self._run_id,
             "mode": "voice" if self.voice_mode else "text",
             "enabled": self.voice_mode,
             "input_ready": bool(
@@ -795,7 +1141,84 @@ class AudioAgent:
             "tts_backend": self.tts.backend,
             "tts_busy": self.is_busy,
             "agent_state": self._agent_state.value,
+            "interaction": self._interaction_status_snapshot(),
+            "media": self._media_status_snapshot(),
+            "voice_turn": self._turn_traces.snapshot(),
+            "asr": self._asr_mgr.status_snapshot(),
+            "tts": self.tts.status_snapshot(),
+            "input": self._input_status_snapshot(),
         }
         snapshot.update(overrides)
         self._metrics.update_voice_state(**snapshot)
         return snapshot
+
+    def _interaction_status_snapshot(self) -> dict[str, Any]:
+        cooldown_remaining = round(self._in_post_tts_input_cooldown(), 2)
+        input_ready = bool(
+            self.voice_mode and self.asr is not None and self.vad is not None
+        )
+        output_ready = self.tts is not None
+        if self._muted:
+            state = "muted"
+            can_talk = False
+            hint = "mic_muted"
+        elif not self.voice_mode:
+            state = "text_mode"
+            can_talk = False
+            hint = "use_text_input"
+        elif not input_ready or not output_ready:
+            state = "not_ready"
+            can_talk = False
+            hint = "voice_pipeline_not_ready"
+        elif self._agent_state == AgentState.SPEAKING or self.is_busy:
+            state = "speaking"
+            can_talk = True
+            hint = "barge_in_allowed"
+        elif cooldown_remaining > 0:
+            state = "cooldown"
+            can_talk = False
+            hint = "wait_for_ready_cue"
+        elif self._agent_state == AgentState.LISTENING:
+            state = "listening"
+            can_talk = True
+            hint = "keep_speaking"
+        elif self._agent_state == AgentState.PROCESSING:
+            state = "processing"
+            can_talk = False
+            hint = "thinking"
+        else:
+            state = "ready_to_talk"
+            can_talk = True
+            hint = "speak_now"
+        return {
+            "state": state,
+            "can_talk": can_talk,
+            "hint": hint,
+            "ready_chime_enabled": self._ready_chime_enabled,
+            "cooldown_remaining_s": cooldown_remaining,
+        }
+
+    def _media_status_snapshot(self) -> dict[str, Any]:
+        return {
+            "media_transport": self._media_transport,
+            "room_id": "",
+            "participant_count": 1 if self.voice_mode else 0,
+            "packet_loss": None,
+            "jitter_ms": None,
+            "input_transport": getattr(self._mic, "_input_transport", "auto"),
+            "output_transport": getattr(self.tts, "_output_transport", "auto"),
+            "session_id": self._run_id,
+        }
+
+    def _asr_provider_label(self) -> str:
+        cloud = getattr(self._asr_mgr, "_cloud", None)
+        if getattr(cloud, "available", False) is True:
+            return "cloud+local"
+        return "local"
+
+    @staticmethod
+    def _resolve_media_transport_label(voice_cfg: dict[str, Any]) -> str:
+        transport = str(voice_cfg.get("input_transport", "sounddevice")).lower()
+        if transport in {"auto", "sounddevice"}:
+            return "local_sounddevice"
+        return f"local_{transport}"

@@ -174,6 +174,29 @@ class TestRenderPrometheusMetrics:
         assert "askme_voice_pipeline_ok" in result
         assert "1" in result
 
+    def test_voice_input_metrics(self):
+        snapshot = {
+            "voice_pipeline_status": {
+                "input": {
+                    "last_peak": 123,
+                    "peak_max_10s": 456,
+                    "peak_p95_10s": 400,
+                    "last_rms": 12.5,
+                    "rms_p95_10s": 88.8,
+                    "asr_timeouts": 2,
+                    "sample_count_10s": 7,
+                }
+            }
+        }
+        result = render_prometheus_metrics(snapshot)
+        assert "askme_voice_input_last_peak 123" in result
+        assert "askme_voice_input_peak_max_10s 456" in result
+        assert "askme_voice_input_peak_p95_10s 400" in result
+        assert "askme_voice_input_last_rms 12.5" in result
+        assert "askme_voice_input_rms_p95_10s 88.8" in result
+        assert "askme_voice_input_asr_timeouts 2" in result
+        assert "askme_voice_input_sample_count_10s 7" in result
+
     def test_ota_bridge_registered(self):
         snapshot = {"ota_bridge_status": {"enabled": True, "registered": True}}
         result = render_prometheus_metrics(snapshot)

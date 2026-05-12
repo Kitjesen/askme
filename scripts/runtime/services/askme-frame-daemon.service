@@ -1,0 +1,17 @@
+[Unit]
+Description=Askme Frame Capture Daemon (ROS2 → shared file)
+After=orbbec-camera.service
+Requires=orbbec-camera.service
+
+[Service]
+Type=simple
+User=sunrise
+Environment=ROS_DOMAIN_ID=0
+Environment=ASKME_DIR=/home/sunrise/data/inovxio/askme
+EnvironmentFile=-/etc/default/askme
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec python3 "${ASKME_DIR}/scripts/runtime/bridges/frame_daemon.py" --rate 5'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

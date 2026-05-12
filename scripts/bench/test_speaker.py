@@ -10,11 +10,13 @@ def log(msg):
     print(msg, flush=True)
 
 from askme.config import get_config
+
 cfg = get_config()
 tts_cfg = cfg.get("voice", {}).get("tts", {})
 log(f"TTS backend={tts_cfg.get('backend')}")
 
 from askme.voice.tts import TTSEngine
+
 tts = TTSEngine(tts_cfg)
 
 log("start_playback()...")

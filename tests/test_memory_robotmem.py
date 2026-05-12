@@ -1,5 +1,6 @@
 """Tests for RobotMem backend integration."""
 
+import asyncio
 import time
 from unittest.mock import MagicMock, patch
 
@@ -370,6 +371,68 @@ class TestBridgeRobotmemBackend:
             result = await bridge.retrieve("test")
 
         assert result == "- test memory"
+
+    @pytest.mark.asyncio
+    async def test_bridge_robotmem_init_timeout_falls_back_without_blocking(self):
+        from askme.memory.bridge import MemoryBridge
+
+        vs_patch, vs_mock = self._patch_vector_store()
+        with self._patch_config(backend="robotmem"), vs_patch:
+            bridge = MemoryBridge()
+        bridge._retrieve_timeout = 0.01
+        bridge._mem0_failed = True
+        bridge._store = vs_mock
+
+        async def fake_to_thread(func, *args, **kwargs):
+            if getattr(func, "__name__", "") == "_ensure_robotmem":
+                await asyncio.sleep(10)
+                return True
+            return func(*args, **kwargs)
+
+        started = time.perf_counter()
+        with patch("askme.memory.bridge.asyncio.to_thread", side_effect=fake_to_thread):
+            result = await bridge.retrieve("test")
+
+        assert result == ""
+        assert time.perf_counter() - started < 0.5
+
+    @pytest.mark.asyncio
+    async def test_bridge_mem0_init_timeout_is_bounded_by_retrieve_timeout(self):
+        from askme.memory.bridge import MemoryBridge
+
+        vs_patch, vs_mock = self._patch_vector_store()
+        with self._patch_config(backend="robotmem"), vs_patch:
+            bridge = MemoryBridge()
+        bridge._retrieve_timeout = 0.01
+        bridge._robotmem_failed = True
+        bridge._store = vs_mock
+
+        async def fake_to_thread(func, *args, **kwargs):
+            if getattr(func, "__name__", "") == "_ensure_mem0":
+                await asyncio.sleep(10)
+                return True
+            return func(*args, **kwargs)
+
+        started = time.perf_counter()
+        with patch("askme.memory.bridge.asyncio.to_thread", side_effect=fake_to_thread):
+            result = await bridge.retrieve("test")
+
+        assert result == ""
+        assert time.perf_counter() - started < 0.5
+
+    @pytest.mark.asyncio
+    async def test_bridge_retrieve_skips_cold_backend_while_warmup_active(self):
+        from askme.memory.bridge import MemoryBridge
+
+        vs_patch, vs_mock = self._patch_vector_store()
+        with self._patch_config(backend="robotmem"), vs_patch:
+            bridge = MemoryBridge()
+        bridge._warmup_active = True
+
+        with patch.object(bridge, "_ensure_robotmem", side_effect=AssertionError):
+            result = await bridge.retrieve("test")
+
+        assert result == ""
 
     @pytest.mark.asyncio
     async def test_bridge_save_routes_to_robotmem(self):

@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import uuid
+
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -125,7 +126,7 @@ ws.send(json.dumps({
 done.wait(timeout=10)
 ws.close()
 
-print(f"\n=== Result ===", flush=True)
+print("\n=== Result ===", flush=True)
 print(f"  Cloud ASR: '{result_text}'", flush=True)
 if result_text:
     print("  ✓ Pipeline audio recognized by DashScope!", flush=True)

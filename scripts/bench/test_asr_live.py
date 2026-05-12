@@ -3,6 +3,7 @@
 import os
 import sys
 import time
+
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -15,9 +16,11 @@ DURATION = 5
 TARGET_RATE = 16000
 
 from askme.config import get_config
+
 cfg = get_config()
 asr_cfg = cfg.get("voice", {}).get("asr", {})
 from askme.voice.asr import ASREngine
+
 engine = ASREngine(asr_cfg)
 
 def run_asr(audio_16k):
@@ -46,7 +49,7 @@ ms1 = (time.perf_counter() - t0) * 1000
 print(f"Result: '{text1}' ({ms1:.0f}ms)", flush=True)
 
 # Method 2: Record directly at 16kHz (ALSA auto-resample)
-print(f"\n=== Method 2: Force 16kHz (ALSA resample) ===", flush=True)
+print("\n=== Method 2: Force 16kHz (ALSA resample) ===", flush=True)
 print(f"Recording {DURATION}s... SPEAK NOW!", flush=True)
 try:
     rec16 = sd.rec(int(DURATION * 16000), samplerate=16000, channels=1, dtype="float32", device=DEVICE)
@@ -61,6 +64,6 @@ except Exception as e:
     print(f"Failed: {e}", flush=True)
     text2 = "N/A"
 
-print(f"\n=== Comparison ===", flush=True)
+print("\n=== Comparison ===", flush=True)
 print(f"  48kHz→resample: '{text1}'", flush=True)
 print(f"  Force 16kHz:    '{text2}'", flush=True)

@@ -23,10 +23,61 @@ _SERVICE_PORTS: dict[str, int] = {
     "telemetry": 5060,
     "safety":    5070,
     "control":   5080,
-    "nav":       5090,
+    "nav":       8088,
     "arm":       5100,
     "ops":       5110,
 }
+
+_SERVICE_ENV_URLS: dict[str, str] = {
+    "control": "DOG_CONTROL_SERVICE_URL",
+    "safety": "DOG_SAFETY_SERVICE_URL",
+    "nav": "NAV_GATEWAY_URL",
+}
+
+_SERVICE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
+    "control": ("dog_control",),
+    "safety": ("dog_safety",),
+    "nav": ("nav_gateway", "dog_nav"),
+}
+
+
+def _service_base_url(service: str) -> str:
+    """Resolve service URL with canonical env vars before localhost fallback."""
+    env_key = _SERVICE_ENV_URLS.get(service)
+    if env_key and os.environ.get(env_key):
+        return os.environ[env_key].rstrip("/")
+
+    try:
+        runtime_cfg = get_section("runtime")
+        for cfg_key in _SERVICE_CONFIG_KEYS.get(service, ()):
+            base_url = runtime_cfg.get(cfg_key, {}).get("base_url", "")
+            if base_url:
+                return str(base_url).rstrip("/")
+    except Exception:
+        pass
+
+    return f"http://localhost:{_SERVICE_PORTS[service]}"
+
+
+def _runtime_bearer_token() -> str:
+    """Resolve runtime auth token with current env names before legacy fallback."""
+    for key in ("RUNTIME_BEARER_TOKEN", "NOVA_DOG_RUNTIME_API_KEY"):
+        value = os.environ.get(key, "")
+        if value:
+            return value
+
+    try:
+        runtime_cfg = get_section("runtime")
+        api_key = runtime_cfg.get("api_key", "")
+        if api_key:
+            return str(api_key)
+        voice_bridge_key = runtime_cfg.get("voice_bridge", {}).get("api_key", "")
+        if voice_bridge_key:
+            return str(voice_bridge_key)
+    except Exception:
+        pass
+
+    return os.environ.get("RUNTIME_API_KEY", "")
 
 
 class RobotApiTool(BaseTool):
@@ -40,7 +91,7 @@ class RobotApiTool(BaseTool):
       - telemetry (5060): sensor data, health metrics, battery, IMU
       - safety    (5070): estop state, safety policy
       - control   (5080): posture, motion capabilities (stand/sit/move)
-      - nav       (5090): navigation tasks, map management
+      - nav       (8088): navigation tasks, map management
       - arm       (5100): robot arm control (if equipped)
       - ops       (5110): OTA updates, config management
     """
@@ -53,7 +104,7 @@ class RobotApiTool(BaseTool):
         "  telemetry(5060) — 传感器数据、电量、IMU健康\n"
         "  safety(5070) — 急停状态、安全策略\n"
         "  control(5080) — 姿态/运动（站立/坐下/移动）\n"
-        "  nav(5090) — 导航任务、地图管理\n"
+        "  nav(8088) — 导航任务、地图管理\n"
         "  arm(5100) — 机械臂控制\n"
         "  ops(5110) — OTA更新、配置管理"
     )
@@ -105,23 +156,21 @@ class RobotApiTool(BaseTool):
         if not path:
             return "[Error] path 不能为空，如 /api/v1/missions"
 
-        port = _SERVICE_PORTS[service]
-        url = f"http://localhost:{port}{path}"
+        base_url = _service_base_url(service)
+        if not path.startswith("/"):
+            path = "/" + path
+        url = f"{base_url}{path}"
         method = method.upper()
 
         # Build request
         data: bytes | None = None
         headers: dict[str, str] = {"Accept": "application/json"}
 
-        # Optional Bearer auth from runtime config
-        try:
-            api_key = get_section("runtime").get("api_key", "")
-            if not api_key:
-                api_key = os.environ.get("RUNTIME_API_KEY", "")
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-        except Exception:
-            pass
+        token = _runtime_bearer_token()
+        if token:
+            headers["Authorization"] = (
+                token if token.lower().startswith("bearer ") else f"Bearer {token}"
+            )
 
         if body is not None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -155,7 +204,7 @@ class RobotApiTool(BaseTool):
             )
         except urllib.error.URLError as exc:
             return (
-                f"[Error] {service} 服务不可达 (localhost:{port}): {exc.reason}。"
+                f"[Error] {service} 服务不可达 ({base_url}): {exc.reason}。"
                 "请确认服务是否已启动。"
             )
         except (TimeoutError, OSError):

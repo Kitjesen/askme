@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from urllib import error, parse, request
 
 from askme.pipeline.alert_dispatcher import AlertDispatcher
+from askme.pipeline.incident_alerts import INCIDENT_ALERTS, format_incident_alert
 
 if TYPE_CHECKING:
     from askme.llm.client import LLMClient
@@ -38,6 +39,9 @@ _ALERT_TEMPLATES: dict[str, str] = {
     "mission.completed": "任务已完成。",
     "mission.canceled": "任务已取消。",
 }
+
+# Product incident topics use fixed customer-facing announcements.
+_ALERT_TEMPLATES.update({topic: template.voice for topic, template in INCIDENT_ALERTS.items()})
 
 # Topics that warrant spoken alerts (subset of all telemetry topics)
 _ALERT_TOPICS = set(_ALERT_TEMPLATES.keys())
@@ -540,12 +544,25 @@ class ProactiveAgent:
             event_severity = event.get("severity", "info")
             message = self._format_alert(topic, event_payload)
             if message:
+                alert_payload = dict(event_payload) if isinstance(event_payload, dict) else {}
+                incident = format_incident_alert(topic, alert_payload)
+                if incident:
+                    event_severity = str(incident["severity"])
+                    alert_payload.update(
+                        {
+                            "dingtalk_message": incident["dingtalk"],
+                            "operator_action": incident["operator_action"],
+                            "archive_required": incident["archive_required"],
+                            "notification_group": incident.get("notification_group", "security"),
+                            "event_id": event_id,
+                        }
+                    )
                 logger.info("[Proactive] Alert event: %s [%s] → %s", topic, event_severity, message[:40])
                 await self._speak_alert(
                     message,
                     severity=event_severity,
                     topic=topic,
-                    payload=event_payload,
+                    payload=alert_payload,
                 )
                 self._topic_last_spoken[topic] = now
 
@@ -586,6 +603,9 @@ class ProactiveAgent:
     @staticmethod
     def _format_alert(topic: str, payload: dict[str, Any]) -> str | None:
         """Format a telemetry event into a spoken Chinese message."""
+        incident = format_incident_alert(topic, payload)
+        if incident:
+            return str(incident["voice"])
         template = _ALERT_TEMPLATES.get(topic)
         if not template:
             return None

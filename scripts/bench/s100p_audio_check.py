@@ -9,6 +9,7 @@ libusb so hardware health is not confused with kernel module health.
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import tempfile
@@ -29,6 +30,7 @@ else:
 ROOT = Path(__file__).resolve().parents[2]
 USB_PROBE_SOURCE = Path(__file__).with_name("mcp01_usb_audio_libusb.c")
 USB_PROBE_BINARY = Path(tempfile.gettempdir()) / "mcp01_usb_audio_libusb"
+USB_CAPTURE_RE = re.compile(r"\bcapture_done\b.*?\brms=([0-9]+(?:\.[0-9]+)?)\s+max_abs=(\d+)")
 
 
 def run(cmd: list[str], *, timeout: int = 15) -> subprocess.CompletedProcess[str]:
@@ -42,6 +44,26 @@ def print_result(label: str, result: subprocess.CompletedProcess[str]) -> None:
     if output:
         for line in output.splitlines()[-8:]:
             print(f"    {line}", flush=True)
+
+
+def parse_usb_capture_metrics(output: str) -> tuple[float, int] | None:
+    match = USB_CAPTURE_RE.search(output)
+    if match is None:
+        return None
+    return float(match.group(1)), int(match.group(2))
+
+
+def usb_capture_signal_ok(
+    result: subprocess.CompletedProcess[str],
+    *,
+    min_peak: int,
+    min_rms: float,
+) -> tuple[bool, tuple[float, int] | None]:
+    metrics = parse_usb_capture_metrics(result.stdout + "\n" + result.stderr)
+    if result.returncode != 0 or metrics is None:
+        return False, metrics
+    rms, peak = metrics
+    return rms >= min_rms and peak >= min_peak, metrics
 
 
 def mcp01_present() -> bool:
@@ -174,7 +196,14 @@ def compile_usb_probe() -> Path | None:
     return USB_PROBE_BINARY
 
 
-def direct_usb_probe(*, play_ms: int, capture_ms: int, amp: int) -> bool:
+def direct_usb_probe(
+    *,
+    play_ms: int,
+    capture_ms: int,
+    amp: int,
+    min_peak: int,
+    min_rms: float,
+) -> bool:
     print("\n=== MCP01 Direct USB Probe (libusb, bypass ALSA) ===", flush=True)
     if not mcp01_present():
         print("  skipped: MCP01 17ef:a03b not visible in lsusb", flush=True)
@@ -194,8 +223,19 @@ def direct_usb_probe(*, play_ms: int, capture_ms: int, amp: int) -> bool:
         str(amp),
     ]
     result = run(cmd, timeout=max(10, (play_ms + capture_ms) // 1000 + 10))
-    print_result("MCP01 direct USB play+capture", result)
-    return result.returncode == 0
+    print_result("MCP01 direct USB transport", result)
+    signal_ok, metrics = usb_capture_signal_ok(result, min_peak=min_peak, min_rms=min_rms)
+    if metrics is None:
+        print("  MCP01 direct USB capture signal: not verified (missing capture_done metrics)", flush=True)
+    else:
+        rms, peak = metrics
+        status = "OK" if signal_ok else "FAIL"
+        print(
+            f"  MCP01 direct USB capture signal: {status} "
+            f"(rms={rms:.2f}, peak={peak}, min_rms={min_rms:.2f}, min_peak={min_peak})",
+            flush=True,
+        )
+    return signal_ok
 
 
 def parse_args() -> argparse.Namespace:
@@ -209,6 +249,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--play-ms", type=int, default=3000, help="Direct USB probe playback duration.")
     parser.add_argument("--capture-ms", type=int, default=3000, help="Direct USB probe capture duration.")
     parser.add_argument("--amp", type=int, default=9000, help="Direct USB probe sine amplitude.")
+    parser.add_argument(
+        "--usb-min-peak",
+        type=int,
+        default=1000,
+        help="Minimum direct USB capture peak required to mark capture signal healthy.",
+    )
+    parser.add_argument(
+        "--usb-min-rms",
+        type=float,
+        default=30.0,
+        help="Minimum direct USB capture RMS required to mark capture signal healthy.",
+    )
     return parser.parse_args()
 
 
@@ -228,13 +280,22 @@ def main() -> int:
     usb_ok = False
     should_usb_probe = args.usb_probe == "always" or (args.usb_probe == "auto" and not alsa_available)
     if should_usb_probe:
-        usb_ok = direct_usb_probe(play_ms=args.play_ms, capture_ms=args.capture_ms, amp=args.amp)
+        usb_ok = direct_usb_probe(
+            play_ms=args.play_ms,
+            capture_ms=args.capture_ms,
+            amp=args.amp,
+            min_peak=args.usb_min_peak,
+            min_rms=args.usb_min_rms,
+        )
 
     print("\n=== Summary ===", flush=True)
     print(f"  ALSA/PortAudio devices: {'available' if alsa_available else 'unavailable'}", flush=True)
     print(f"  ALSA recording: {'ok' if recording_ok else 'not verified'}", flush=True)
     print(f"  ALSA speaker: {'ok' if speaker_ok else 'not verified'}", flush=True)
-    print(f"  MCP01 direct USB: {'ok' if usb_ok else 'not verified'}", flush=True)
+    print(
+        f"  MCP01 direct USB capture signal: {'ok' if usb_ok else 'failed/not verified'}",
+        flush=True,
+    )
 
     if alsa_available:
         return 0 if (recording_ok or speaker_ok) else 1

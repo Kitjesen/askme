@@ -58,6 +58,34 @@ def test_sunrise_audio_doctor_reports_ok_for_guarded_usb_direct_config(monkeypat
     assert payload["checks"]["usb"]["mcp01_audio_tree_ok"] is True
 
 
+def test_sunrise_audio_doctor_output_shape_accounts_for_speech_gain(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(doctor.Path, "exists", lambda self: str(self) == "/proc/asound/cards")
+    monkeypatch.setattr(
+        doctor.Path,
+        "read_text",
+        lambda self, **_kwargs: "--- no soundcards ---\n",
+    )
+
+    payload = doctor.run_sunrise_audio_doctor(
+        _config(
+            tmp_path,
+            usb_direct_speech_gain=8.0,
+            usb_direct_speech_leadin_seconds=1.25,
+            usb_direct_speech_wake_signal_seconds=1.05,
+            usb_direct_speech_wake_signal_gain=0.28,
+            usb_direct_speech_onset_cushion_seconds=0.35,
+            usb_direct_speech_onset_cushion_gain=0.45,
+        ),
+        command_runner=_fake_runner,
+    )
+
+    assert payload["status"] == "ok"
+    output = payload["checks"]["usb_output_shape"]
+    assert output["active_leadin_samples"] == output["cold_leadin_samples"]
+    assert output["final_shape_ok"] is True
+    assert output["first_token_guard_ok"] is True
+
+
 def test_sunrise_audio_doctor_flags_short_first_token_guard(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(doctor.Path, "exists", lambda self: str(self) == "/proc/asound/cards")
     monkeypatch.setattr(
@@ -78,6 +106,41 @@ def test_sunrise_audio_doctor_flags_short_first_token_guard(monkeypatch, tmp_pat
 
     assert payload["status"] == "degraded"
     assert any("first real speech begins" in error for error in payload["errors"])
+
+
+def test_sunrise_audio_doctor_allows_short_quiet_start_with_warning(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(doctor.Path, "exists", lambda self: str(self) == "/proc/asound/cards")
+    monkeypatch.setattr(
+        doctor.Path,
+        "read_text",
+        lambda self, **_kwargs: "--- no soundcards ---\n",
+    )
+
+    payload = doctor.run_sunrise_audio_doctor(
+        _config(
+            tmp_path,
+            usb_direct_quiet_start=True,
+            usb_direct_speech_leadin_seconds=0.25,
+            usb_direct_speech_warm_leadin_seconds=0.25,
+            usb_direct_speech_wake_signal_seconds=1.05,
+            usb_direct_speech_wake_signal_gain=0.0,
+            usb_direct_speech_wake_noise_gain=0.0,
+            usb_direct_speech_onset_cushion_seconds=0.0,
+            usb_direct_speech_onset_cushion_gain=0.0,
+        ),
+        command_runner=_fake_runner,
+    )
+
+    assert payload["status"] == "ok"
+    output = payload["checks"]["usb_output_shape"]
+    assert output["quiet_start"] is True
+    assert output["first_token_guard_ok"] is True
+    assert output["speech_offset_seconds"] == pytest.approx(0.25)
+    assert output["cold_leadin_peak"] == 0
+    assert any("quiet start accepts" in warning for warning in payload["warnings"])
 
 
 def test_sunrise_audio_doctor_rejects_trusting_persistent_stream_warmth(tmp_path: Path) -> None:

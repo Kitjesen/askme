@@ -32,8 +32,13 @@ memU/target/
 Thumbs.db
 
 # Temp / dev artifacts
+archive/
+artifacts/
+output/
+.codex/
 .tmp/
 .omc/
+.omx/
 dev-loop-logs/
 dev-loop*.log
 *.log
@@ -43,12 +48,17 @@ tests/tmp/
 
 # Claude Code
 .claude/scheduled_tasks.lock
+.claude/settings.local.json
 
 # Generated docs (keep source .md/.py, ignore binaries)
 docs/*.pptx
 docs/voice_samples/
 .claude/worktrees/
 memU/
+
+# Frontend/video generated artifacts
+video-lab/node_modules/
+video-lab/out/
 
 # Audio fixtures and one-off bench artifacts (never commit recordings)
 *.wav

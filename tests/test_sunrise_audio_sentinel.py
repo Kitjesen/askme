@@ -67,6 +67,33 @@ def test_summarize_trials_requires_signal_when_present():
     ) == {"trials": 3, "passes": 1, "required_passes": 2, "passed": False}
 
 
+def test_summarize_trials_does_not_accept_signal_without_transcript():
+    sentinel = _load_sentinel()
+
+    assert sentinel.summarize_trials(
+        [
+            {"prefix_ok": False, "signal_ok": True},
+            {"prefix_ok": False, "signal_ok": True},
+            {"prefix_ok": False, "signal_ok": True},
+        ]
+    ) == {"trials": 3, "passes": 0, "required_passes": 2, "passed": False}
+
+
+def test_slice_asr_samples_skips_usb_wake_audio_with_margin():
+    sentinel = _load_sentinel()
+    samples = np.arange(1000, dtype=np.float32)
+
+    sliced, start_s = sentinel.slice_asr_samples(
+        samples,
+        sample_rate=1000,
+        start_s=0.4,
+        margin_s=0.05,
+    )
+
+    assert start_s == 0.35
+    assert sliced[0] == 350
+
+
 def test_detect_onset_ms_returns_none_when_signal_too_low():
     sentinel = _load_sentinel()
     sample_rate = 1000

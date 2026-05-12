@@ -4,7 +4,7 @@ Downloads and samples frames from an industrial scene video,
 sends each frame to VisionBridge VLM pipeline, prints detections.
 
 Usage:
-    python scripts/test_vlm_video.py [path/to/video.mp4]
+    python scripts/e2e/test_vlm_video.py [path/to/video.mp4]
 """
 
 import asyncio
@@ -78,6 +78,7 @@ def call_vlm_sync(vision, frame: np.ndarray) -> str:
 
 async def analyze_video(video_path: str) -> None:
     from askme.brain.vision_bridge import VisionBridge
+
     from askme.config import get_config
 
     cfg = get_config()

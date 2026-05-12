@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import shlex
 import subprocess
 import urllib.error
@@ -177,19 +178,31 @@ def _http_allowlist() -> list[str]:
         cfg = list(get_section("tools").get("http_allowlist", []))
     except Exception:
         cfg = []
-    # Auto-append runtime service base_urls (dog_safety, dog_control, voice_bridge)
+    # Auto-append configured runtime service base URLs so GET diagnostics work
+    # while generic writes are still blocked below by runtime identity.
     try:
         runtime_cfg = get_section("runtime")
-        for svc in ("dog_safety", "dog_control", "voice_bridge"):
+        for svc in (
+            "arbiter",
+            "telemetry",
+            "dog_safety",
+            "dog_control",
+            "nav_gateway",
+            "dog_nav",
+            "arm",
+            "ops",
+            "voice_bridge",
+        ):
             url = runtime_cfg.get(svc, {}).get("base_url", "")
             if url:
                 cfg.append(url.rstrip("/"))
     except Exception:
         pass
+    cfg.extend(_robot_runtime_base_urls())
     # Auto-include standard runtime service ports on localhost
-    for port in (5050, 5060, 5070, 5080, 5090, 5100, 5110):
+    for port in (5050, 5060, 5070, 5080, 8088, 5100, 5110):
         cfg.append(f"http://localhost:{port}")
-    return cfg
+    return list(dict.fromkeys(cfg))
 
 
 def _is_url_allowed(url: str, allowlist: list[str]) -> bool:
@@ -201,6 +214,138 @@ def _is_url_allowed(url: str, allowlist: list[str]) -> bool:
         parsed = urllib.parse.urlparse(url)
         return parsed.hostname in ("localhost", "127.0.0.1", "::1")
     return any(url.startswith(prefix) for prefix in allowlist)
+
+
+_ROBOT_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_ROBOT_RUNTIME_PORTS = {5050, 5060, 5070, 5080, 8088, 5100, 5110}
+_ROBOT_RUNTIME_ENV_URLS = (
+    "RUNTIME_ARBITER_URL",
+    "RUNTIME_TELEMETRY_URL",
+    "DOG_SAFETY_SERVICE_URL",
+    "DOG_CONTROL_SERVICE_URL",
+    "NAV_GATEWAY_URL",
+    "DOG_NAV_SERVICE_URL",
+    "DOG_ARM_SERVICE_URL",
+    "DOG_OPS_SERVICE_URL",
+)
+_ROBOT_RUNTIME_CONFIG_KEYS = (
+    "arbiter",
+    "telemetry",
+    "dog_safety",
+    "dog_control",
+    "nav_gateway",
+    "dog_nav",
+    "arm",
+    "ops",
+)
+
+
+def _robot_runtime_base_urls() -> set[str]:
+    """Return configured runtime service base URLs used to identify robot writes."""
+    urls = {
+        value.rstrip("/")
+        for key in _ROBOT_RUNTIME_ENV_URLS
+        if (value := os.environ.get(key, "").strip())
+    }
+    try:
+        runtime_cfg = get_section("runtime")
+        for key in _ROBOT_RUNTIME_CONFIG_KEYS:
+            section = runtime_cfg.get(key, {})
+            if isinstance(section, dict):
+                base_url = str(section.get("base_url", "")).strip()
+                if base_url:
+                    urls.add(base_url.rstrip("/"))
+    except Exception:
+        pass
+    return urls
+
+
+def _same_service_base(url: str, base_url: str) -> bool:
+    """Return True when url is inside a configured service base URL."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        base = urllib.parse.urlparse(base_url)
+    except Exception:
+        return False
+    if not parsed.scheme or not parsed.hostname or not base.scheme or not base.hostname:
+        return False
+    if parsed.scheme.lower() != base.scheme.lower():
+        return False
+    if (parsed.hostname or "").lower() != (base.hostname or "").lower():
+        return False
+    parsed_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    base_port = base.port or (443 if base.scheme == "https" else 80)
+    if parsed_port != base_port:
+        return False
+    base_path = (base.path or "/").rstrip("/")
+    if not base_path:
+        return True
+    return parsed.path == base_path or parsed.path.startswith(base_path + "/")
+
+
+def _is_robot_runtime_url(url: str) -> bool:
+    """Return True when url points at a robot runtime service."""
+    parsed = urllib.parse.urlparse(url)
+    try:
+        if parsed.port in _ROBOT_RUNTIME_PORTS:
+            return True
+    except ValueError:
+        return False
+    return any(_same_service_base(url, base_url) for base_url in _robot_runtime_base_urls())
+
+
+def _is_robot_write_url(method: str, url: str) -> bool:
+    """Return True for generic writes aimed at robot runtime services."""
+    if method.upper() not in _ROBOT_WRITE_METHODS:
+        return False
+    return _is_robot_runtime_url(url)
+
+
+def _extract_http_urls(text: str) -> list[str]:
+    """Extract HTTP(S) URLs from shell snippets without trying to parse the shell."""
+    return [
+        match.rstrip(".,;)]}'\"")
+        for match in re.findall(r"https?://[^\s\"'<>]+", text, flags=re.IGNORECASE)
+    ]
+
+
+def _command_uses_robot_write_http(command: str) -> bool:
+    """Detect curl/wget/python snippets that write directly to robot runtime APIs."""
+    urls = [url for url in _extract_http_urls(command) if _is_robot_runtime_url(url)]
+    if not urls:
+        return False
+
+    cmd_lower = command.lower()
+    method_pattern = r"(?:-x|--request|--method(?:=|\s+))\s*['\"]?(post|put|patch|delete)\b"
+    has_write_method = re.search(method_pattern, cmd_lower) is not None
+    has_write_payload = re.search(
+        r"(?:^|\s)(?:-d|--data(?:-[\w-]+)?|--json|--form|--post-data|--post-file)(?:=|\s|$)",
+        cmd_lower,
+    ) is not None or any(token in cmd_lower for token in (" data=", ".data ="))
+    has_python_write_call = re.search(
+        r"(?:requests|httpx)\s*\.\s*(post|put|patch|delete)\s*\(",
+        cmd_lower,
+    ) is not None
+    has_python_request_write_call = (
+        re.search(r"(?:requests|httpx)\s*\.\s*request\s*\(", cmd_lower) is not None
+        and re.search(r"['\"](post|put|patch|delete)['\"]", cmd_lower) is not None
+    )
+    has_python_method_kwarg = re.search(
+        r"method\s*=\s*['\"]?(post|put|patch|delete)\b",
+        cmd_lower,
+    ) is not None
+    has_http_client_write = re.search(
+        r"\.request\s*\(\s*['\"](post|put|patch|delete)['\"]",
+        cmd_lower,
+    ) is not None
+    return (
+        has_write_method
+        or has_write_payload
+        or has_python_write_call
+        or has_python_request_write_call
+        or has_python_method_kwarg
+        or has_http_client_write
+    )
 
 
 class HttpRequestTool(BaseTool):
@@ -261,6 +406,13 @@ class HttpRequestTool(BaseTool):
         if not url:
             return "[Error] URL is required."
 
+        method = method.upper()
+        if _is_robot_write_url(method, url):
+            return (
+                "[Error] Robot runtime write requests are blocked through "
+                "http_request. Use safety-gated robot tools instead."
+            )
+
         allowlist = _http_allowlist()
         if not _is_url_allowed(url, allowlist):
             allowed_display = ", ".join(allowlist) if allowlist else "localhost only"
@@ -270,7 +422,6 @@ class HttpRequestTool(BaseTool):
                 " 请在 config.yaml tools.http_allowlist 中添加。"
             )
 
-        method = method.upper()
         data: bytes | None = None
         req_headers: dict[str, str] = {"Accept": "application/json"}
         if headers:
@@ -338,16 +489,16 @@ class NavStatusTool(BaseTool):
 
 
 class NavDispatchTool(BaseTool):
-    """Dispatch a navigation task to cortex_nav service → LingTu.
+    """Dispatch a navigation task to Thunder nav-gateway.
 
     This is the actual execution tool for the navigate/mapping/follow_person
     skills.  Without this, skills could only confirm — not execute.
 
-    Requires NAV_GATEWAY_URL environment variable pointing to cortex_nav
-    (e.g. http://localhost:5070).
+    Requires NAV_GATEWAY_URL environment variable pointing to nav-gateway
+    (e.g. http://localhost:8088).
     """
 
-    # capability strings expected by cortex_nav._resolve_navigation_mode()
+    # capability strings expected by the nav-gateway capability router
     _CAPABILITY_MAP: dict[str, str] = {
         "navigate":      "nav.semantic.execute",
         "mapping":       "nav.mapping.start",
@@ -408,7 +559,7 @@ class NavDispatchTool(BaseTool):
         if not url:
             return (
                 "[导航] 导航服务未配置。"
-                "请设置 NAV_GATEWAY_URL 环境变量，例如: http://localhost:5070"
+                "请设置 NAV_GATEWAY_URL 环境变量，例如: http://localhost:8088"
             )
         if not destination and task_type != "follow_person":
             return "[Error] 目标位置不能为空"
@@ -626,6 +777,12 @@ class SandboxedBashTool(BaseTool):
     def _is_command_safe(self, command: str) -> str | None:
         """Return error message if command is blocked, None if safe."""
         cmd_lower = command.strip().lower()
+
+        if _command_uses_robot_write_http(command):
+            return (
+                "[安全拒绝] 机器人 runtime 写请求不能通过 bash/curl/wget/python "
+                "绕过安全工具。请使用 robot_api 或专用安全门控工具。"
+            )
 
         # Exact match block
         for blocked in self._BLOCKED_COMMANDS:

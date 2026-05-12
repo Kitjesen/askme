@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from askme.perception.interaction_provider import FileInteractionPerceptionProvider
 from askme.perception.vision_bridge import VisionBridge
 from askme.runtime.module import In, Module, ModuleRegistry, Out
 from askme.schemas.messages import DetectionFrame
@@ -32,6 +33,13 @@ class PerceptionModule(Module):
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         self.vision_bridge = VisionBridge()
+        perception_cfg = cfg.get("perception", {}) if isinstance(cfg, dict) else {}
+        interaction_cfg = (
+            perception_cfg.get("interaction_provider", {})
+            if isinstance(perception_cfg, dict)
+            else {}
+        )
+        self.interaction_provider = FileInteractionPerceptionProvider(interaction_cfg)
 
         self.change_detector = None
         # In[DetectionFrame] auto-wired to PulseModule by _auto_wire()
@@ -77,4 +85,23 @@ class PerceptionModule(Module):
             if self.change_detector is not None
             else False
         )
-        return {"status": "ok", "change_detector_active": cd_active}
+        return {
+            "status": "ok",
+            "change_detector_active": cd_active,
+            "interaction_provider_enabled": self.interaction_provider.enabled,
+            "interaction_snapshot_available": hasattr(
+                getattr(self, "vision_bridge", None),
+                "interaction_snapshot",
+            ),
+        }
+
+    def interaction_snapshot(self) -> dict[str, Any]:
+        """Best-effort multimodal context for the voice InteractionGate."""
+        provider_payload = self.interaction_provider.snapshot()
+        if provider_payload.get("reason") != "provider_disabled":
+            return provider_payload
+        snapshot = getattr(getattr(self, "vision_bridge", None), "interaction_snapshot", None)
+        if callable(snapshot):
+            payload = snapshot()
+            return payload if isinstance(payload, dict) else {}
+        return {"source": "perception", "reason": "vision_bridge_unavailable"}

@@ -101,7 +101,7 @@ class TestMicInputOpen:
         mock_stream.read.return_value = (np.zeros((1600, 1), dtype=np.float32), None)
         mock_stream_cls.return_value = mock_stream
 
-        mic = MicInput(device=0, sample_rate=16000)
+        mic = MicInput(device=0, sample_rate=16000, input_transport="sounddevice")
         assert mic.is_open is False
         with mic.open():
             assert mic.is_open is True
@@ -191,3 +191,33 @@ class TestMicInputUsbDirect:
             assert mic.is_open is True
         finally:
             mic._usb_audio_proc = None
+
+    def test_alsa_input_requires_configured_channel_count(self, monkeypatch):
+        mic = MicInput(mic_native_rate=48000, mic_channels=2)
+
+        monkeypatch.setattr("askme.voice.mic_input.os.name", "posix")
+        monkeypatch.setattr(
+            "askme.voice.mic_input.Path.read_text",
+            lambda self, **_kwargs: " 1 [MCP01 ]: USB-Audio - MCP01\n",
+        )
+        monkeypatch.setattr(
+            "askme.voice.mic_input.sd.query_devices",
+            lambda *args, **_kwargs: [{"name": "MCP01", "max_input_channels": 1}],
+        )
+
+        assert mic._alsa_input_available() is False
+
+    def test_alsa_input_accepts_matching_channel_count(self, monkeypatch):
+        mic = MicInput(mic_native_rate=48000, mic_channels=2)
+
+        monkeypatch.setattr("askme.voice.mic_input.os.name", "posix")
+        monkeypatch.setattr(
+            "askme.voice.mic_input.Path.read_text",
+            lambda self, **_kwargs: " 0 [HKMIC ]: USB-Audio - HKMIC\n",
+        )
+        monkeypatch.setattr(
+            "askme.voice.mic_input.sd.query_devices",
+            lambda *args, **_kwargs: [{"name": "HKMIC", "max_input_channels": 2}],
+        )
+
+        assert mic._alsa_input_available() is True

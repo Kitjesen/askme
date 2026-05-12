@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from askme.tools.builtin_tools import NavDispatchTool, NavStatusTool
+from askme.tools.move_tool import MoveRobotTool
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -97,7 +98,7 @@ class TestRequestBody:
             captured["body"] = json.loads(req.data.decode("utf-8"))
             return response_mock
 
-        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:5070"}):
+        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:8088"}):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 tool.execute(**kwargs)
 
@@ -129,7 +130,7 @@ class TestRequestBody:
 
     def test_post_endpoint_path(self, tool: NavDispatchTool) -> None:
         cap = self._capture_request(tool, destination="出口", task_type="navigate")
-        assert cap["url"] == "http://localhost:5070/api/v1/navigation/dispatch"
+        assert cap["url"] == "http://localhost:8088/api/v1/navigation/dispatch"
 
     def test_mission_id_is_generated(self, tool: NavDispatchTool) -> None:
         cap = self._capture_request(tool, destination="出口", task_type="navigate")
@@ -137,7 +138,7 @@ class TestRequestBody:
         assert isinstance(mid, str) and len(mid) == 16
 
     def test_response_parsed_correctly(self, tool: NavDispatchTool) -> None:
-        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:5070"}):
+        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:8088"}):
             response_mock = MagicMock()
             response_mock.__enter__ = lambda s: s
             response_mock.__exit__ = MagicMock(return_value=False)
@@ -161,7 +162,7 @@ class TestErrorHandling:
         assert "NAV_GATEWAY_URL" in result
 
     def test_empty_destination_for_navigate(self, tool: NavDispatchTool) -> None:
-        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:5070"}):
+        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:8088"}):
             result = tool.execute(destination="", task_type="navigate")
         assert "[Error]" in result
 
@@ -172,7 +173,7 @@ class TestErrorHandling:
         response_mock.read.return_value = json.dumps(
             {"session": {"mission_id": "f1", "state": "submitted"}}
         ).encode()
-        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:5070"}):
+        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:8088"}):
             with patch("urllib.request.urlopen", return_value=response_mock):
                 result = tool.execute(destination="", task_type="follow_person")
         assert "[Error]" not in result
@@ -182,14 +183,14 @@ class TestErrorHandling:
             url="http://x", code=422, msg="Unprocessable",
             hdrs=MagicMock(), fp=MagicMock(read=lambda n: b"invalid payload"),
         )
-        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:5070"}):
+        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:8088"}):
             with patch("urllib.request.urlopen", side_effect=err):
                 result = tool.execute(destination="X", task_type="navigate")
         assert "422" in result
 
     def test_url_error_reported(self, tool: NavDispatchTool) -> None:
         err = urllib.error.URLError(reason="Connection refused")
-        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:5070"}):
+        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:8088"}):
             with patch("urllib.request.urlopen", side_effect=err):
                 result = tool.execute(destination="X", task_type="navigate")
         assert "不可达" in result
@@ -210,11 +211,11 @@ class TestNavStatusTool:
             captured_url.append(url)
             return response_mock
 
-        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:5070"}):
+        with patch.dict("os.environ", {"NAV_GATEWAY_URL": "http://localhost:8088"}):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 status_tool.execute()
 
-        assert captured_url[0] == "http://localhost:5070/api/v1/navigation/status"
+        assert captured_url[0] == "http://localhost:8088/api/v1/navigation/status"
 
     def test_no_url_returns_error(self, status_tool: NavStatusTool) -> None:
         with patch.dict("os.environ", {}, clear=True):
@@ -222,3 +223,70 @@ class TestNavStatusTool:
             os.environ.pop("NAV_GATEWAY_URL", None)
             result = status_tool.execute()
         assert "未配置" in result
+
+
+class TestMoveRobotNavigation:
+    def test_move_robot_is_dangerous(self) -> None:
+        assert MoveRobotTool.safety_level == "dangerous"
+
+    def test_go_to_uses_nav_gateway_dispatch_when_nav_url_set(self) -> None:
+        tool = MoveRobotTool()
+        captured: dict[str, Any] = {}
+
+        response_mock = MagicMock()
+        response_mock.__enter__ = lambda s: s
+        response_mock.__exit__ = MagicMock(return_value=False)
+        response_mock.read.return_value = json.dumps(
+            {"session": {"mission_id": "nav123", "state": "submitted"}}
+        ).encode()
+
+        def fake_urlopen(req: urllib.request.Request, timeout: int) -> Any:
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            return response_mock
+
+        with patch.dict(
+            "os.environ",
+            {"NAV_GATEWAY_URL": "http://localhost:8088"},
+            clear=True,
+        ):
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                result = tool.execute(action="go_to", target="仓库A")
+
+        assert captured["url"] == "http://localhost:8088/api/v1/navigation/dispatch"
+        assert captured["body"]["requested_capability"] == "nav.semantic.execute"
+        assert captured["body"]["parameters"] == {"semantic_target": "仓库A"}
+        assert "/api/v1/instruction" not in captured["url"]
+        assert "nav123" in result
+
+    def test_lingtu_instruction_url_is_ignored_for_navigation_writes(self) -> None:
+        tool = MoveRobotTool()
+        captured: dict[str, Any] = {}
+
+        response_mock = MagicMock()
+        response_mock.__enter__ = lambda s: s
+        response_mock.__exit__ = MagicMock(return_value=False)
+        response_mock.read.return_value = json.dumps(
+            {"session": {"mission_id": "nav456", "state": "submitted"}}
+        ).encode()
+
+        def fake_urlopen(req: urllib.request.Request, timeout: int) -> Any:
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            return response_mock
+
+        with patch.dict(
+            "os.environ",
+            {
+                "LINGTU_INSTRUCTION_URL": "http://lingtu.internal:9000",
+                "NAV_GATEWAY_URL": "http://localhost:8088",
+            },
+            clear=True,
+        ):
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                result = tool.execute(action="go_to", target="dock")
+
+        assert captured["url"] == "http://localhost:8088/api/v1/navigation/dispatch"
+        assert captured["body"]["parameters"] == {"semantic_target": "dock"}
+        assert "/api/v1/instruction" not in captured["url"]
+        assert "nav456" in result

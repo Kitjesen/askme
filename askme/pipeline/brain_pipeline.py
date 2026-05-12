@@ -97,9 +97,11 @@ class BrainPipeline:
         voice_model: str | None = None,
         general_tool_max_safety_level: str = "normal",
         max_response_chars: int = 0,
+        voice_tts_coalesce: bool = False,
         agent_shell: ThunderAgentShell | None = None,
         memory_system: MemorySystem | None = None,
         qp_memory: Any = None,
+        rag_policy_templates: dict[str, str] | None = None,
         # ── Decoupled sub-component injection (Protocol types) ────────────
         # Pass pre-built instances for testing or custom implementations.
         # When None (default) the components are constructed from the raw args above.
@@ -159,6 +161,7 @@ class BrainPipeline:
                 vision=vision,
                 qp_memory=qp_memory,
                 memory_system=memory_system,
+                rag_policy_templates=rag_policy_templates,
             )
 
             # StreamProcessor (LLM streaming + TTS)
@@ -182,6 +185,7 @@ class BrainPipeline:
                     splitter=splitter,
                     general_tool_max_safety_level=general_tool_max_safety_level,
                     max_response_chars=max_chars,
+                    voice_tts_coalesce=voice_tts_coalesce,
                     voice_model=voice_model,
                     cancel_token=self._cancel_token,
                 )

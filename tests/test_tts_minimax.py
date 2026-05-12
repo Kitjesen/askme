@@ -61,6 +61,24 @@ class _FakeClient:
         pass
 
 
+class _FakeWebSocket:
+    def __init__(self, responses: list[dict]):
+        self._responses = [json.dumps(item) for item in responses]
+        self.sent: list[dict] = []
+        self.closed = False
+
+    def recv(self):
+        if not self._responses:
+            raise OSError("no more websocket responses")
+        return self._responses.pop(0)
+
+    def send(self, payload):
+        self.sent.append(json.loads(payload))
+
+    def close(self):
+        self.closed = True
+
+
 def _hex_pcm(n_samples: int = 100) -> str:
     """Generate hex-encoded PCM data (little-endian int16)."""
     samples = np.zeros(n_samples, dtype="<i2")
@@ -71,6 +89,137 @@ def _hex_pcm(n_samples: int = 100) -> str:
 def _sse_data(audio_hex: str, status: int = 1) -> str:
     payload = {"data": {"audio": audio_hex, "status": status}}
     return f"data:{json.dumps(payload)}"
+
+
+def test_tts_status_snapshot_exposes_provider_without_secret():
+    engine = _make_engine(
+        backend="minimax",
+        minimax_api_key="test-minimax-key",
+        minimax_tts_model="speech-2.8-hd",
+        minimax_voice_id="male-qn-qingse",
+    )
+    try:
+        snapshot = engine.status_snapshot()
+
+        assert snapshot["backend"] == "minimax"
+        assert snapshot["minimax"]["configured"] is True
+        assert snapshot["minimax"]["transport"] == "sse"
+        assert snapshot["minimax"]["model"] == "speech-2.8-hd"
+        assert snapshot["queued_text_items"] == 0
+        assert snapshot["buffered_chunks"] == 0
+        assert "test-minimax-key" not in repr(snapshot)
+    finally:
+        engine.shutdown()
+
+
+async def test_minimax_websocket_streaming_queues_audio():
+    """MiniMax WebSocket backend: task events decode hex chunks and queue audio."""
+    engine = _make_engine(
+        backend="minimax",
+        minimax_api_key="test-key",
+        minimax_tts_transport="websocket",
+    )
+    try:
+        ws = _FakeWebSocket([
+            {"event": "connected_success", "base_resp": {"status_code": 0}},
+            {"event": "task_started", "base_resp": {"status_code": 0}},
+            {
+                "event": "task_continued",
+                "data": {"audio": _hex_pcm(2600)},
+                "is_final": True,
+                "base_resp": {"status_code": 0},
+            },
+            {"event": "task_finished", "base_resp": {"status_code": 0}},
+        ])
+
+        gen = engine._get_generation()
+        with patch("websocket.create_connection", return_value=ws) as connect:
+            result = await engine._generate_minimax_transport("hello", gen)
+
+        assert result is True
+        assert engine._has_buffered_audio()
+        connect.assert_called_once()
+        assert ws.closed is True
+        assert [item["event"] for item in ws.sent] == [
+            "task_start",
+            "task_continue",
+            "task_finish",
+        ]
+    finally:
+        engine.shutdown()
+
+
+async def test_minimax_websocket_error_returns_false():
+    """MiniMax WebSocket non-zero base_resp triggers fallback."""
+    engine = _make_engine(
+        backend="minimax",
+        minimax_api_key="test-key",
+        minimax_tts_transport="websocket",
+    )
+    try:
+        ws = _FakeWebSocket([
+            {"event": "connected_success", "base_resp": {"status_code": 0}},
+            {"event": "task_started", "base_resp": {"status_code": 0}},
+            {
+                "event": "task_failed",
+                "base_resp": {"status_code": 1004, "status_msg": "auth failed"},
+            },
+        ])
+
+        gen = engine._get_generation()
+        with patch("websocket.create_connection", return_value=ws):
+            result = await engine._generate_minimax_transport("hello", gen)
+
+        assert result is False
+        assert not engine._has_buffered_audio()
+        assert ws.closed is True
+    finally:
+        engine.shutdown()
+
+
+async def test_minimax_websocket_mp3_accumulates_before_decode(monkeypatch):
+    """MiniMax WebSocket MP3 chunks are accumulated before decode."""
+    engine = _make_engine(
+        backend="minimax",
+        minimax_api_key="test-key",
+        minimax_tts_transport="websocket",
+        minimax_audio_format="mp3",
+    )
+    try:
+        ws = _FakeWebSocket([
+            {"event": "connected_success", "base_resp": {"status_code": 0}},
+            {"event": "task_started", "base_resp": {"status_code": 0}},
+            {
+                "event": "task_continued",
+                "data": {"audio": b"abc".hex()},
+                "is_final": False,
+                "base_resp": {"status_code": 0},
+            },
+            {
+                "event": "task_continued",
+                "data": {"audio": b"def".hex()},
+                "is_final": True,
+                "base_resp": {"status_code": 0},
+            },
+            {"event": "task_finished", "base_resp": {"status_code": 0}},
+        ])
+        seen: dict[str, bytes] = {}
+
+        def fake_decode(audio_bytes: bytes) -> np.ndarray:
+            seen["audio_bytes"] = audio_bytes
+            return np.ones(2600, dtype=np.float32)
+
+        monkeypatch.setattr(engine, "_decode_minimax_encoded_audio", fake_decode)
+
+        gen = engine._get_generation()
+        with patch("websocket.create_connection", return_value=ws):
+            result = await engine._generate_minimax_transport("hello", gen)
+
+        assert result is True
+        assert seen["audio_bytes"] == b"abcdef"
+        assert engine._has_buffered_audio()
+    finally:
+        engine.shutdown()
 
 
 async def test_minimax_sse_streaming_queues_audio():

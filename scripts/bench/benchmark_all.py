@@ -13,9 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import queue
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -75,7 +73,7 @@ async def bench_pulse() -> dict:
     """Pulse topic subscription latency."""
     results = {"available": False}
     try:
-        from askme.robot.pulse import Pulse, _RCLPY_AVAILABLE
+        from askme.robot.pulse import _RCLPY_AVAILABLE, Pulse
         if not _RCLPY_AVAILABLE:
             print("  Pulse: rclpy not available (skip)")
             return {"pulse": results}
@@ -102,7 +100,7 @@ async def bench_pulse() -> dict:
         print("  Pulse: waiting for 20 msgs...")
         try:
             await asyncio.wait_for(received.wait(), timeout=10.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             print(f"  Pulse: timeout, got {len(latencies)} msgs")
 
         await pulse.stop()
@@ -214,7 +212,7 @@ def bench_perception() -> dict:
             times = []
             for _ in range(100):
                 t0 = time.perf_counter()
-                with open(DAEMON_DETECTIONS_PATH, "r", encoding="utf-8") as f:
+                with open(DAEMON_DETECTIONS_PATH, encoding="utf-8") as f:
                     data = json.load(f)
                 times.append((time.perf_counter() - t0) * 1000)
             times.sort()
@@ -278,7 +276,7 @@ def bench_memory() -> dict:
         # Get messages speed
         t0 = time.perf_counter()
         for _ in range(100):
-            msgs = conv.get_messages(system_prompt="test")
+            conv.get_messages(system_prompt="test")
         get_ms = (time.perf_counter() - t0) / 100 * 1000
         results["get_messages_ms"] = round(get_ms, 3)
         print(f"  Memory get_messages: {get_ms:.3f}ms (avg 100 calls)")
@@ -321,12 +319,12 @@ def bench_voice_estimate(all_results: dict) -> dict:
             "tts_ttfb_ms": round(tts_ttfb, 1) if tts_ttfb else "N/A",
             "estimated_total_ms": round(total, 1),
         }
-        print(f"\n  Voice pipeline estimate:")
+        print("\n  Voice pipeline estimate:")
         print(f"    VAD hold:   ~{vad_ms}ms")
         print(f"    ASR:         {asr_ms}ms")
         print(f"    LLM TTFT:    {llm_ttft:.0f}ms  ← bottleneck")
         print(f"    TTS TTFB:    {tts_ttfb or 'N/A'}ms")
-        print(f"    ─────────────────────")
+        print("    ─────────────────────")
         print(f"    Total:      ~{total:.0f}ms to first spoken word")
 
     except Exception as e:
@@ -377,7 +375,7 @@ async def main():
             all_results[name.lower()] = {"fatal_error": str(e)}
 
     # Voice pipeline estimate
-    print(f"\n[7/7] Voice Pipeline Estimate")
+    print("\n[7/7] Voice Pipeline Estimate")
     all_results.update(bench_voice_estimate(all_results))
 
     # Save

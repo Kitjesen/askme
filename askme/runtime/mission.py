@@ -281,10 +281,17 @@ class MissionService:
         )
         return {"mission": plan.to_dict(), "drafted": True}
 
-    def submit_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def submit_from_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        trusted_confirmation: bool = False,
+    ) -> dict[str, Any]:
         plan = self._plan_from_payload(payload)
         dry_run = bool(payload.get("dry_run", True))
-        confirmed = bool(payload.get("confirmed", False) or payload.get("confirm", False))
+        confirmed = trusted_confirmation and bool(
+            payload.get("confirmed", False) or payload.get("confirm", False)
+        )
         return self.submit(plan, dry_run=dry_run, confirmed=confirmed)
 
     def submit(

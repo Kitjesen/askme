@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Debug TTS playback in full pipeline."""
 import asyncio
-import time
 import sys
+import time
+
 sys.path.insert(0, ".")
 
-from askme.config import get_config
 from askme.blueprints.voice import voice
+from askme.config import get_config
 
 
 async def main():

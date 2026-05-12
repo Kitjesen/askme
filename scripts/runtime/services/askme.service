@@ -1,0 +1,22 @@
+[Unit]
+Description=askme 语音 AI 助手（Thunder 机器狗语音控制）
+After=network.target sound.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=sunrise
+WorkingDirectory=/home/sunrise/data/inovxio/askme
+Environment=ASKME_DIR=/home/sunrise/data/inovxio/askme
+EnvironmentFile=-/etc/default/askme
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && set -a; [ -f "${ASKME_ENV_FILE:-${ASKME_DIR}/.env}" ] && . "${ASKME_ENV_FILE:-${ASKME_DIR}/.env}"; set +a; cd "${ASKME_DIR}" && exec "${ASKME_PYTHON:-${ASKME_DIR}/.venv/bin/python}" -m askme --legacy --voice'
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# 语音硬件权限
+SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target

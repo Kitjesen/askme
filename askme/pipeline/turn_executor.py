@@ -163,6 +163,7 @@ class TurnExecutor:
         _trace = _tracer.start_trace("voice_turn" if source == "voice" else "text_turn")
         set_log_context(trace_id=_trace.id, session_id=source)
         logger.info("Processing: %s", user_text[:60])
+        is_voice = source == "voice"
 
         if self._cancel_token is not None and self._cancel_token.is_set():
             logger.warning("[TurnExecutor] cancel_token set — skipping turn")
@@ -184,7 +185,8 @@ class TurnExecutor:
                 logger.info("[TurnExecutor] pre_turn hook requested turn skip")
                 return ""
 
-        self._audio.drain_buffers()
+        if is_voice:
+            self._audio.drain_buffers()
 
         if self._dog_safety and self._dog_safety.is_configured():
             self._track_task(
@@ -216,13 +218,37 @@ class TurnExecutor:
         if scene_desc:
             self._log_episode("perception", scene_desc)
 
+        rag_policy = self._memory_answer_policy()
         system_prompt = self._prompt_builder.build_system_prompt(
             context_str,
             scene_desc=scene_desc,
             user_text=user_text,
+            rag_policy=rag_policy,
         )
 
         self._conversation.add_user_message(user_text)
+        forced_rag_reply = self._prompt_builder.build_forced_rag_reply(rag_policy)
+        if forced_rag_reply:
+            logger.info("[TurnExecutor] RAG policy forced deterministic reply")
+            self._conversation.add_assistant_message(forced_rag_reply)
+            self._last_spoken_text = forced_rag_reply
+            if self._hooks:
+                await self._hooks.fire_post_turn(_ctx, forced_rag_reply)
+            if self._mem is not None:
+                self._track_task(
+                    self._mem.save_to_vector(user_text, forced_rag_reply),
+                    name="mem_save",
+                )
+            elif self._memory is not None:
+                self._track_task(
+                    self._memory.save(user_text, forced_rag_reply),
+                    name="mem_save",
+                )
+            if is_voice:
+                self._audio.speak(forced_rag_reply)
+                await asyncio.to_thread(self._audio.wait_speaking_done)
+            self._log_episode("action", f"回复: {forced_rag_reply[:100]}")
+            return forced_rag_reply
 
         # Start compress AFTER add_user_message so the new user message is always
         # included in maybe_compress's recent[-KEEP_RECENT:] snapshot and never lost.
@@ -239,7 +265,8 @@ class TurnExecutor:
 
         self._log_episode("command", f"用户说: {user_text}")
 
-        self._audio.start_playback()
+        if is_voice:
+            self._audio.start_playback()
         try:
             async with self._llm_semaphore:
                 full_response = await self._stream_processor.stream_with_tools(
@@ -274,7 +301,7 @@ class TurnExecutor:
                     self._memory.save(user_text, full_response), name="mem_save"
                 )
 
-            if source == "voice":
+            if is_voice:
                 await asyncio.to_thread(self._audio.wait_speaking_done)
 
             self._log_episode("action", f"回复: {full_response[:100]}")
@@ -317,7 +344,8 @@ class TurnExecutor:
         except Exception as exc:
             logger.error("LLM pipeline error: %s", exc)
             self._log_episode("error", f"LLM错误: {exc}")
-            self._audio.speak(classify_llm_error(exc))
+            if is_voice:
+                self._audio.speak(classify_llm_error(exc))
             error_msg = f"[系统错误] {type(exc).__name__}"
             last_role = (
                 self._conversation.history[-1].get("role")
@@ -329,7 +357,8 @@ class TurnExecutor:
             self._conversation.add_assistant_message(error_msg)
             return error_msg
         finally:
-            self._audio.stop_playback()
+            if is_voice:
+                self._audio.stop_playback()
             _tracer.finish_trace()
 
     async def shutdown(self) -> None:
@@ -350,6 +379,20 @@ class TurnExecutor:
         if not self._vision._vision_cfg.get("auto_capture", False):
             return None
         return asyncio.create_task(self._vision.describe_scene())
+
+    def _memory_answer_policy(self) -> dict[str, Any] | None:
+        health = getattr(self._memory, "health", None)
+        if not callable(health):
+            return None
+        try:
+            snapshot = health()
+        except Exception as exc:
+            logger.debug("[TurnExecutor] Memory health unavailable for RAG policy: %s", exc)
+            return None
+        if not isinstance(snapshot, dict):
+            return None
+        policy = snapshot.get("last_answer_policy")
+        return policy if isinstance(policy, dict) else None
 
     def _classify_error_message(self, exc: Exception) -> str:
         """Return a user-facing voice message for an LLM pipeline error."""

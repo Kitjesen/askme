@@ -62,7 +62,7 @@ class CreateSkillTool(BaseTool):
         "\n- write_file：创建/写入文件（工作区内）"
         "\n- web_search：搜索互联网"
         "\n- web_fetch：抓取网页内容"
-        "\n- http_request：调用任意 REST API"
+        "\n- http_request：调用 REST API（机器人 runtime 写请求会被阻断）"
         "\n- robot_api：调用 Thunder runtime 服务"
         "\n- get_current_time：获取当前时间"
         "\n- read_file：读取 data/ 目录下的文件"

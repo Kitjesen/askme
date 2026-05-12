@@ -1,0 +1,18 @@
+[Unit]
+Description=Rerun visualization bridge for Thunder (streams ROS2 topics to Rerun viewer)
+After=network.target brainstem-ros2-bridge.service
+Wants=brainstem-ros2-bridge.service
+
+[Service]
+Type=simple
+User=sunrise
+Environment=ASKME_DIR=/home/sunrise/data/inovxio/askme
+EnvironmentFile=-/etc/default/askme
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec "${ASKME_PYTHON:-${ASKME_DIR}/.venv/bin/python}" "${ASKME_DIR}/scripts/runtime/bridges/rerun_bridge.py" --addr 0.0.0.0:9876'
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

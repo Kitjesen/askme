@@ -1,7 +1,7 @@
 """Live chat test: MiniMax LLM + TTS through askme pipeline.
 
 Simulates the text_loop flow with real MiniMax backend.
-Usage: python scripts/test_live_chat.py
+Usage: python scripts/e2e/test_live_chat.py
 """
 
 import asyncio
@@ -13,10 +13,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 os.environ.setdefault("ASKME_CONFIG_PATH", "config.yaml")
 
 from dotenv import load_dotenv
+
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
-from askme.config import get_config
 from askme.brain.llm_client import LLMClient
+
+from askme.config import get_config
 from askme.pipeline.brain_pipeline import _ThinkFilter
 
 
@@ -71,7 +73,7 @@ async def chat_round(client, messages, label="", model=None):
         print()
 
         total = time.perf_counter() - t0
-        print(f"  ---")
+        print("  ---")
         print(f"  TTFT: {ttft:.2f}s | Total: {total:.2f}s | Raw: {len(raw)} chars | Clean: {len(clean_acc.strip())} chars")
 
         if tool_calls:
@@ -98,7 +100,7 @@ async def main():
     user_prefix = brain_cfg.get("user_prefix", "")
     seed = brain_cfg.get("prompt_seed", [])
 
-    # Load SOUL.md if available
+    # Load prompts/SOUL.md if available
     soul_file = brain_cfg.get("soul_file", "")
     soul_content = ""
     if soul_file and os.path.isfile(soul_file):

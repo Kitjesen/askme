@@ -163,6 +163,13 @@ mcp = FastMCP(
     lifespan=app_lifespan,
 )
 
+# When this file is launched with ``python -m askme.mcp.server``, Python executes
+# it as ``__main__``. The tool/resource modules import ``askme.mcp.server`` to get
+# the shared ``mcp`` instance, so without this alias they register on a second
+# module instance and the running server exposes an empty catalog.
+if __name__ == "__main__":
+    sys.modules["askme.mcp.server"] = sys.modules[__name__]
+
 # Import tool/resource modules to trigger @mcp.tool()/@mcp.resource() registration.
 # These MUST be imported after `mcp` is defined.
 import askme.mcp.resources.health_resources as _hr  # noqa: E402, F401

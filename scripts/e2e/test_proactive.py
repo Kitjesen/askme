@@ -11,8 +11,9 @@ if sys.platform == "win32":
 
 from askme.brain.llm_client import LLMClient
 from askme.brain.vision_bridge import VisionBridge
-from askme.voice.tts import TTSEngine
+
 from askme.config import get_config
+from askme.voice.tts import TTSEngine
 
 
 async def main():
@@ -49,7 +50,7 @@ async def main():
         scan_dur = time.monotonic() - t0
 
         if not scene:
-            print(f"  No scene captured (vision unavailable)")
+            print("  No scene captured (vision unavailable)")
             continue
 
         print(f"  Scene: {scene}")
@@ -97,17 +98,17 @@ async def main():
                     tts.wait_done()
                     tts.stop_playback()
                 else:
-                    print(f"  Status: 正常")
+                    print("  Status: 正常")
             except Exception as e:
                 print(f"  Anomaly check failed: {e}")
         else:
-            print(f"  First scan — establishing baseline")
+            print("  First scan — establishing baseline")
 
         scene_history.append(scene)
 
         # Brief pause between ticks
         if tick < 3:
-            print(f"  Waiting 5s for next tick...")
+            print("  Waiting 5s for next tick...")
             await asyncio.sleep(5)
 
     # Final report

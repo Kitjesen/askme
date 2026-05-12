@@ -34,6 +34,21 @@ from askme.constants import (
 logger = logging.getLogger(__name__)
 
 
+def _count_persons(objects: list[dict[str, Any]]) -> int:
+    total = 0
+    for item in objects:
+        label = str(
+            item.get("label")
+            or item.get("class_id")
+            or item.get("class")
+            or item.get("name")
+            or ""
+        ).strip().lower()
+        if label in {"person", "human", "visitor", "\u4eba", "\u6e38\u5ba2"}:
+            total += 1
+    return total
+
+
 # ---------------------------------------------------------------------------
 # ROS2 frame grabber — persistent subscriber, grabs latest frame on demand
 # ---------------------------------------------------------------------------
@@ -209,6 +224,54 @@ class VisionBridge:
             return dets
         except (FileNotFoundError, ValueError, KeyError):
             return None
+
+    def interaction_snapshot(self, max_age: float = 2.0) -> dict[str, Any]:
+        """Return camera evidence for the voice InteractionGate.
+
+        The snapshot is intentionally conservative: if the daemon is missing or
+        stale we still return the timestamp/reason, so the gate can avoid using
+        old visual facts as proof that a nearby person is addressing the robot.
+        """
+        import json as _json
+
+        try:
+            with open(DAEMON_DETECTIONS_PATH) as f:
+                data = _json.load(f)
+        except (FileNotFoundError, ValueError, OSError):
+            return {
+                "source": "vision_daemon",
+                "reason": "daemon_missing",
+                "observed_at": None,
+                "objects": [],
+            }
+
+        observed_at = float(data.get("timestamp", 0.0) or 0.0)
+        frame_width = float(data.get("frame_width") or data.get("width") or 1280.0)
+        stale = observed_at <= 0.0 or time.time() - observed_at > max_age
+        detections = data.get("detections", [])
+        objects = [dict(item) for item in detections if isinstance(item, dict)]
+        for item in objects:
+            bbox = item.get("bbox")
+            if len(bbox or []) == 4 and item.get("distance_m") is None:
+                cx = (float(bbox[0]) + float(bbox[2])) / 2.0
+                cy = (float(bbox[1]) + float(bbox[3])) / 2.0
+                depth_m = self.read_depth_at(int(cx), int(cy))
+                if depth_m is not None:
+                    item["distance_m"] = round(depth_m, 2)
+            if len(bbox or []) == 4 and item.get("angle_deg") is None:
+                center_x = (float(bbox[0]) + float(bbox[2])) / 2.0
+                item["angle_deg"] = round(((center_x / max(frame_width, 1.0)) - 0.5) * 70.0, 2)
+                item["frame_width"] = frame_width
+
+        return {
+            "source": "vision_daemon",
+            "snapshot_id": str(data.get("frame_id") or data.get("id") or ""),
+            "observed_at": observed_at or None,
+            "reason": "stale" if stale else "fresh",
+            "objects": objects,
+            "person_count": _count_persons(objects),
+            "frame_width": frame_width,
+        }
 
     def _ensure_detector(self) -> bool:
         """Attempt to create ``YoloSegTracker`` + ``WeightedTargetSelector`` (once).

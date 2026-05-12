@@ -144,6 +144,15 @@ class TestEstop:
 # ── TestSkillExecution ────────────────────────────────────────────────────────
 
 class TestSkillExecution:
+    async def test_disabled_skill_is_blocked_before_executor(self):
+        skill = _make_skill_def("dog_control", enabled=False)
+        gate = _make_gate(skill=skill)
+
+        result = await gate.execute_skill("dog_control", "stand up")
+
+        assert "Disabled" in result
+        gate._skill_executor.execute.assert_not_awaited()
+
     async def test_successful_execution_returns_result(self):
         skill = _make_skill_def("patrol")
         gate = _make_gate(skill=skill, executor_result="Patrol complete.")

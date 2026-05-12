@@ -10,6 +10,7 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from askme.brain.llm_client import LLMClient
+
 from askme.config import get_config
 
 MODEL = "claude-opus-4-6"

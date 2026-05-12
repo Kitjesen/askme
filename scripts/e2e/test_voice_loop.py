@@ -5,12 +5,10 @@ complete pipeline: ASR → IntentRouter → BrainPipeline → TTS playback.
 """
 
 import asyncio
-import io
-import sys
+import logging
 import time
 import wave
 
-import logging
 import numpy as np
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -54,10 +52,11 @@ def asr_on_wavfile(wav_path: str, asr) -> str:
 
 
 async def run_voice_loop_test():
-    from askme.blueprints.voice import voice as voice_blueprint
     from askme.brain.intent_router import IntentType
-    from askme.voice.asr import ASREngine
+
+    from askme.blueprints.voice import voice as voice_blueprint
     from askme.config import get_config
+    from askme.voice.asr import ASREngine
 
     cfg = get_config()
 
@@ -65,7 +64,7 @@ async def run_voice_loop_test():
     print("Full Voice Loop Test (no microphone)")
     print("=" * 55)
 
-    # Init full app (loads SOUL.md, TTS, LLM, etc.)
+    # Init full app (loads prompts/SOUL.md, TTS, LLM, etc.)
     app = await voice_blueprint.build(cfg)
 
     # Init ASR for wav file test
@@ -88,7 +87,7 @@ async def run_voice_loop_test():
         print(f"  {wav_name} → \"{text}\"")
 
     # ── Phase 2: Injected text → full pipeline ─────────────
-    print(f"\n[Phase 2] Injected queries → Router → LLM → TTS")
+    print("\n[Phase 2] Injected queries → Router → LLM → TTS")
     print("─" * 50)
 
     for query in INJECTED_QUERIES:
@@ -126,7 +125,7 @@ async def run_voice_loop_test():
         # Wait for TTS to finish
         audio.wait_speaking_done()
         audio.stop_playback()
-        print(f"  TTS done.")
+        print("  TTS done.")
         await asyncio.sleep(0.5)
 
     await app.stop()

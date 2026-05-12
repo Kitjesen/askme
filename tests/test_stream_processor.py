@@ -90,11 +90,26 @@ class TestConsumeLlmStream:
         assert "Second chunk." in full
 
     @pytest.mark.asyncio
-    async def test_audio_speak_called_for_text(self):
+    async def test_audio_speak_called_for_voice(self):
         proc = _make_processor()
         chunks = [_make_chunk("Hello, world! How are you doing?")]
         await proc.consume_llm_stream(_stream_chunks(chunks), source="voice")
         proc._audio.speak.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_text_mode_does_not_speak_or_drain_audio(self):
+        proc = _make_processor()
+        tc0 = _make_tool_call_delta(0, id="tc-1", name="nav", arguments="{}")
+        chunks = [
+            _make_chunk("Hello, world! How are you doing today?"),
+            _make_chunk(tool_calls=[tc0]),
+        ]
+        full, tool_calls = await proc.consume_llm_stream(_stream_chunks(chunks), source="text")
+
+        assert "Hello, world!" in full
+        assert tool_calls[0]["name"] == "nav"
+        proc._audio.speak.assert_not_called()
+        proc._audio.drain_buffers.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_none_content_ignored(self):
@@ -180,6 +195,7 @@ class TestConsumeLlmStream:
         speak_calls = [c[0][0] for c in audio.speak.call_args_list]
         # Truncation hint should NOT appear in text mode
         assert not any(StreamProcessor.TRUNCATION_HINT in s for s in speak_calls)
+        audio.speak.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_flush_at_end_emits_buffered_content(self):
@@ -189,6 +205,48 @@ class TestConsumeLlmStream:
         chunks = [_make_chunk("Hello")]
         full, _ = await proc.consume_llm_stream(_stream_chunks(chunks))
         assert "Hello" in full
+
+    @pytest.mark.asyncio
+    async def test_voice_tts_coalesce_speaks_once(self):
+        audio = MagicMock()
+        splitter = MagicMock()
+        splitter.feed.side_effect = lambda text: [text] if text else []
+        splitter.flush.return_value = ""
+        proc = _make_processor(
+            audio=audio,
+            splitter=splitter,
+            voice_tts_coalesce=True,
+        )
+        chunks = [_make_chunk("First sentence. "), _make_chunk("Second sentence.")]
+
+        full, _ = await proc.consume_llm_stream(_stream_chunks(chunks), source="voice")
+
+        assert "First sentence." in full
+        assert "Second sentence." in full
+        audio.speak.assert_called_once_with("First sentence. Second sentence.")
+
+    @pytest.mark.asyncio
+    async def test_voice_tts_coalesce_discards_pending_text_on_tool_call(self):
+        audio = MagicMock()
+        splitter = MagicMock()
+        splitter.feed.side_effect = lambda text: [text] if text else []
+        splitter.flush.return_value = ""
+        proc = _make_processor(
+            audio=audio,
+            splitter=splitter,
+            voice_tts_coalesce=True,
+        )
+        tc0 = _make_tool_call_delta(0, id="tc-1", name="nav", arguments="{}")
+        chunks = [
+            _make_chunk("Pending spoken text. "),
+            _make_chunk(tool_calls=[tc0]),
+        ]
+
+        _, tool_calls = await proc.consume_llm_stream(_stream_chunks(chunks), source="voice")
+
+        assert tool_calls[0]["name"] == "nav"
+        audio.drain_buffers.assert_called()
+        audio.speak.assert_not_called()
 
 
 class TestSetAudio:

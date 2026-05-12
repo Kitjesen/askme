@@ -1,15 +1,17 @@
 [Unit]
-Description=Askme Voice AI Assistant
-After=network.target
-Wants=network.target
+Description=Askme S100P Edge Robot Assistant
+After=network.target sound.target
+Wants=network.target sound.target
 
 [Service]
 Type=simple
 User=sunrise
 Group=sunrise
-WorkingDirectory=/home/sunrise/askme
-EnvironmentFile=/home/sunrise/askme/.env
-ExecStart=/home/sunrise/askme/.venv/bin/python -m askme.blueprints.voice
+SupplementaryGroups=audio
+WorkingDirectory=/home/sunrise/data/inovxio/askme
+Environment=ASKME_DIR=/home/sunrise/data/inovxio/askme
+EnvironmentFile=-/etc/default/askme
+ExecStart=/bin/bash -lc 'set -a; [ -f "${ASKME_ENV_FILE:-${ASKME_DIR}/.env}" ] && . "${ASKME_ENV_FILE:-${ASKME_DIR}/.env}"; set +a; cd "${ASKME_DIR}"; exec "${ASKME_PYTHON:-${ASKME_DIR}/.venv/bin/python}" -m askme.blueprints.edge_robot'
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

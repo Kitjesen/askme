@@ -7,8 +7,8 @@ without triggering person-detection refusals.
 
 import asyncio
 import logging
-import sys
 import os
+import sys
 
 # ── suppress noisy logs ──────────────────────────────────────────────────────
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -93,7 +93,7 @@ def make_industrial_scene(w: int = 640, h: int = 480):
 
     # ── try to add text labels with PIL (optional) ────────────────────────────
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw
 
         # Convert BGR → RGB for PIL
         rgb = img[:, :, ::-1].copy()
@@ -120,6 +120,7 @@ def make_industrial_scene(w: int = 640, h: int = 480):
 
 async def main():
     from askme.brain.vision_bridge import VisionBridge
+
     from askme.config import get_config
 
     cfg = get_config()
@@ -159,9 +160,8 @@ async def main():
     print("\n[VLM] Sending mock industrial scene to relay...")
 
     # Monkey-patch _ensure_vlm_client to log raw response before cleaning
-    original_call_vlm = None  # will capture inside
-
     import base64
+
     import cv2 as _cv2
 
     _, buf = _cv2.imencode(".jpg", mock_frame, [_cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -223,7 +223,7 @@ async def main():
     raw = await asyncio.to_thread(_call_raw)
     cleaned = VisionBridge._clean_vlm_response(raw)
 
-    print(f"\n=== raw VLM response ===")
+    print("\n=== raw VLM response ===")
     print(f"RAW: {raw}")
     print(f"\nCLEANED: {repr(cleaned)}")
 

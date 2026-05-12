@@ -1,16 +1,17 @@
 """Benchmark TTFT (Time To First Token) across models on the relay.
 
-Usage: python scripts/bench_ttft.py
+Usage: python scripts/bench/bench_ttft.py
 """
 
 import asyncio
-import time
-import sys
 import os
+import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from dotenv import load_dotenv
+
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 from openai import AsyncOpenAI

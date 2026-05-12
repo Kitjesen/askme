@@ -111,6 +111,54 @@ def test_bash_valid_subdir_cwd(bash_tool: SandboxedBashTool) -> None:
     assert "ok" in result
 
 
+def test_bash_blocks_curl_robot_runtime_write(
+    bash_tool: SandboxedBashTool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NAV_GATEWAY_URL", "http://nav-gateway.internal:19090")
+    result = bash_tool._is_command_safe(
+        "curl -X POST http://nav-gateway.internal:19090/api/v1/navigation/dispatch -d '{}'"
+    )
+    assert result is not None
+    assert "runtime" in result
+
+
+def test_bash_blocks_wget_robot_runtime_delete(bash_tool: SandboxedBashTool) -> None:
+    result = bash_tool._is_command_safe(
+        "wget --method=DELETE http://localhost:8088/api/v1/navigation/tasks/abc"
+    )
+    assert result is not None
+    assert "runtime" in result
+
+
+def test_bash_blocks_python_robot_runtime_write_snippet(
+    bash_tool: SandboxedBashTool,
+) -> None:
+    result = bash_tool._is_command_safe(
+        f"{sys.executable} -c \"import requests; requests.post("
+        "'http://localhost:5080/api/v1/control/executions', json={})\""
+    )
+    assert result is not None
+    assert "runtime" in result
+
+
+def test_bash_blocks_python_requests_request_robot_runtime_write(
+    bash_tool: SandboxedBashTool,
+) -> None:
+    result = bash_tool._is_command_safe(
+        f"{sys.executable} -c \"import requests; requests.request("
+        "'POST', 'http://localhost:5080/api/v1/control/executions')\""
+    )
+    assert result is not None
+    assert "runtime" in result
+
+
+def test_bash_allows_curl_robot_runtime_get_diagnostic(
+    bash_tool: SandboxedBashTool,
+) -> None:
+    result = bash_tool._is_command_safe("curl http://localhost:8088/api/v1/navigation/status")
+    assert result is None
+
+
 # ── WriteFileTool: sandbox escape prevention ─────────────────────────────────
 
 
@@ -167,7 +215,7 @@ def test_http_allowlist_includes_runtime_ports() -> None:
     with patch("askme.tools.builtin_tools.get_section", return_value={}):
         allowlist = _http_allowlist()
 
-    for port in (5050, 5060, 5070, 5080, 5090, 5100, 5110):
+    for port in (5050, 5060, 5070, 5080, 8088, 5100, 5110):
         assert f"http://localhost:{port}" in allowlist, f"Port {port} missing from allowlist"
 
 
@@ -201,3 +249,14 @@ def test_http_allowlist_includes_runtime_base_urls() -> None:
 
     assert "http://192.168.1.10:5070" in allowlist
     assert "http://192.168.1.10:5080" in allowlist
+
+
+def test_http_allowlist_includes_runtime_env_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Runtime env URLs are auto-added for diagnostic GET reads."""
+    from askme.tools.builtin_tools import _http_allowlist
+
+    monkeypatch.setenv("NAV_GATEWAY_URL", "http://nav-gateway.internal:19090")
+    with patch("askme.tools.builtin_tools.get_section", return_value={}):
+        allowlist = _http_allowlist()
+
+    assert "http://nav-gateway.internal:19090" in allowlist

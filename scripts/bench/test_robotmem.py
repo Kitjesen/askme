@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test RobotMem on S100P."""
 import time
+
 from robotmem import RobotMemory
 
 mem = RobotMemory(collection="askme_test7", embed_backend="onnx")

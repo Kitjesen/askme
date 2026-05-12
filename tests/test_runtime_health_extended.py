@@ -104,6 +104,17 @@ class TestMergeVoicePipelineStatus:
         result = merge_voice_pipeline_status({"last_input_chars": "42"}, {})
         assert result["last_input_chars"] == 42
 
+    def test_input_status_defaults_to_empty_dict(self):
+        result = merge_voice_pipeline_status({}, {})
+        assert result["input"] == {}
+
+    def test_input_status_is_preserved(self):
+        result = merge_voice_pipeline_status(
+            {"input": {"last_peak": 42, "gate_state": "noise"}},
+            {},
+        )
+        assert result["input"] == {"last_peak": 42, "gate_state": "noise"}
+
 
 # ── RuntimeHealthSnapshot ────────────────────────────────────────────────────
 

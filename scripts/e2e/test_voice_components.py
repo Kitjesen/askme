@@ -20,11 +20,11 @@ import numpy as np
 
 def test_asr_offline():
     """Test ASR on bundled test wav files."""
-    import wave
     import os
+    import wave
 
-    from askme.voice.asr import ASREngine
     from askme.config import get_config
+    from askme.voice.asr import ASREngine
 
     cfg = get_config()
     asr_cfg = cfg.get("voice", {}).get("asr", {})
@@ -98,8 +98,8 @@ def test_asr_offline():
 
 def test_vad():
     """Test VAD on synthetic audio."""
-    from askme.voice.vad import VADEngine
     from askme.config import get_config
+    from askme.voice.vad import VADEngine
 
     cfg = get_config()
     vad_cfg = cfg.get("voice", {}).get("vad", {})
@@ -130,8 +130,8 @@ def test_vad():
 
 def test_kws():
     """Test KWS model loading."""
-    from askme.voice.kws import KWSEngine
     from askme.config import get_config
+    from askme.voice.kws import KWSEngine
 
     cfg = get_config()
     kws_cfg = cfg.get("voice", {}).get("kws", {})
@@ -158,9 +158,9 @@ def test_live_mic():
     """Live microphone → VAD + ASR test. Speak and see real-time transcription."""
     import sounddevice as sd
 
+    from askme.config import get_config
     from askme.voice.asr import ASREngine
     from askme.voice.vad import VADEngine
-    from askme.config import get_config
 
     cfg = get_config()
     asr_cfg = cfg.get("voice", {}).get("asr", {})

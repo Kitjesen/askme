@@ -3,20 +3,19 @@
 
 No human needed — uses speaker→mic loopback for automated testing.
 """
-import asyncio
 import os
 import subprocess
 import sys
 import threading
 import time
-import wave
+
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from askme.config import get_config
-from askme.voice.mic_input import MicInput
 from askme.voice.asr import ASREngine
+from askme.voice.mic_input import MicInput
 
 cfg = get_config()
 

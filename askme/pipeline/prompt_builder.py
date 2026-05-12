@@ -6,6 +6,8 @@ import datetime
 import logging
 from typing import TYPE_CHECKING, Any
 
+from askme.pipeline.rag_policy import forced_rag_reply
+
 if TYPE_CHECKING:
     from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.session import SessionMemory
@@ -20,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 class PromptBuilder:
     """Assembles system prompts and prepares message lists for LLM calls."""
+
+    _DEFAULT_RAG_POLICY_REPLIES = {
+        "filtered": "我找到了相关资料，但还不能作为可靠依据。请管理员先复核知识。",
+        "stale": "这条知识已经过期，我不能按旧信息回答。请先刷新问答可用性。",
+        "conflict": "我查到的信息互相冲突，不能给出确定结论。请管理员确认保留哪一条。",
+        "unapproved": "相关知识还没有审批发布，不能用于回答。请先完成审批。",
+        "no_evidence": "我这里没有可靠依据，不能直接回答。请补充位置或让管理员上传知识。",
+    }
 
     def __init__(
         self,
@@ -36,6 +46,7 @@ class PromptBuilder:
         vision: VisionBridge | None,
         qp_memory: Any,
         memory_system: MemorySystem | None = None,
+        rag_policy_templates: dict[str, str] | None = None,
     ) -> None:
         self._base_prompt = base_prompt
         self._prompt_seed = prompt_seed
@@ -49,6 +60,11 @@ class PromptBuilder:
         self._vision = vision
         self._qp_memory = qp_memory
         self._memory_system = memory_system
+        self._rag_policy_templates = {
+            str(key).strip(): str(value).strip()
+            for key, value in (rag_policy_templates or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
 
     def build_l0_runtime_block(self) -> str:
         """Return a compact L0 runtime truth block from authoritative services.
@@ -69,6 +85,7 @@ class PromptBuilder:
         *,
         scene_desc: str = "",
         user_text: str = "",
+        rag_policy: dict[str, Any] | None = None,
     ) -> str:
         """Assemble system prompt with episodic knowledge, session summaries, and memory context."""
         l0 = self.build_l0_runtime_block()
@@ -115,6 +132,10 @@ class PromptBuilder:
         if context_str:
             prompt += f"\nRelevant memory:\n{context_str}"
 
+        policy_block = self._format_rag_policy_block(rag_policy)
+        if policy_block:
+            prompt += f"\n{policy_block}"
+
         if self._vision and self._vision.available:
             prompt += "\n视觉能力: 已启用"
             if scene_desc:
@@ -139,6 +160,10 @@ class PromptBuilder:
                 prompt += f"\n可用技能: {skill_catalog}"
 
         return prompt
+
+    def build_forced_rag_reply(self, policy: dict[str, Any] | None) -> str:
+        """Return a deterministic customer-facing reply when RAG policy forbids answering."""
+        return forced_rag_reply(policy, templates=self._rag_policy_templates)
 
     def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Inject prompt seed and user format prefix for relay compatibility.
@@ -166,6 +191,7 @@ class PromptBuilder:
         # CAN and SHOULD call tools for factual queries.
         if self._prompt_seed:
             result = list(self._prompt_seed)
+            system_prompt = str(messages[0].get("content", "")) if messages else ""
 
             tool_defs = self._tools.get_definitions(
                 max_safety_level=self._general_tool_max_safety_level
@@ -187,6 +213,20 @@ class PromptBuilder:
                     "content": "明白，需要真实数据时我会调用工具获取。",
                 })
 
+            rag_policy_block = self._extract_system_section(system_prompt, "[知识回答策略]")
+            if rag_policy_block:
+                result.append({
+                    "role": "user",
+                    "content": (
+                        "当前回合必须遵守以下知识回答策略，尤其不能把未通过审核、过期、"
+                        f"冲突或无证据的内容当作事实回答:\n{rag_policy_block}"
+                    ),
+                })
+                result.append({
+                    "role": "assistant",
+                    "content": "明白，我会按知识回答策略处理证据不足、冲突或过期的情况。",
+                })
+
             rest = [m for m in messages if m.get("role") != "system"]
         else:
             result = [messages[0]] if messages else []
@@ -203,3 +243,65 @@ class PromptBuilder:
 
         result.extend(rest)
         return result
+
+    def _format_rag_policy_block(self, policy: dict[str, Any] | None) -> str:
+        if not isinstance(policy, dict) or not policy:
+            return ""
+        state = str(policy.get("state") or "").strip()
+        action = str(policy.get("action") or "").strip()
+        reason = str(policy.get("reason") or "").strip()
+        message = str(policy.get("message") or "").strip()
+        required_operator_action = str(policy.get("required_operator_action") or "").strip()
+        if not state and not action:
+            return ""
+
+        rule = (
+            "只能把 Relevant memory 中通过审核且未过期的内容当作可引用事实；"
+            "不能用被过滤、过期、冲突或未审批的知识补全答案。"
+        )
+        if state == "grounded":
+            rule += " 当前有可用证据，回答必须贴合证据；证据不足的部分要说明不确定。"
+        elif state == "conflict":
+            rule += " 当前相关知识存在冲突，必须说明无法给出确定结论，并请用户确认或更新知识。"
+        elif state == "stale":
+            rule += " 当前相关知识过期或版本不匹配，必须拒绝确定性回答，并请求重新同步或更新知识。"
+        elif state == "unapproved":
+            rule += " 当前相关知识未审批或已删除，必须拒绝把它作为事实回答。"
+        elif state in {"no_evidence", "filtered"}:
+            rule += (
+                " 当前没有可用证据；如果用户询问站点、设备、路线、SOP、巡检或客户业务事实，"
+                "必须说明没有可靠依据，不能编造。"
+            )
+
+        reply_template = self._rag_policy_templates.get(state, "")
+        if reply_template:
+            rule += (
+                " 对外回复优先使用 customer_reply_template 的含义，保持口语、简短、可执行；"
+                "不要把 state、action、reason 等内部字段念给用户。"
+            )
+
+        lines = [
+            "[知识回答策略]",
+            f"state: {state or 'unknown'}",
+            f"action: {action or 'unknown'}",
+            f"reason: {reason or '-'}",
+        ]
+        if required_operator_action:
+            lines.append(f"required_operator_action: {required_operator_action}")
+        if message:
+            lines.append(f"message: {message}")
+        if reply_template:
+            lines.append(f"customer_reply_template: {reply_template}")
+        lines.append(f"rule: {rule}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _extract_system_section(system_prompt: str, heading: str) -> str:
+        start = system_prompt.find(heading)
+        if start < 0:
+            return ""
+        section = system_prompt[start:].strip()
+        next_heading = section.find("\n[", len(heading))
+        if next_heading > 0:
+            section = section[:next_heading].strip()
+        return section

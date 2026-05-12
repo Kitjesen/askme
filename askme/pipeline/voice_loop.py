@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from askme.pipeline.external_turns import record_external_turn
 from askme.pipeline.trace import get_tracer
 from askme.voice.address_detector import AddressDetector
 from askme.voice.audio_router import AudioErrorKind, AudioRouter
+from askme.voice.interaction_gate import InteractionAction, InteractionDecision, InteractionGate
+from askme.voice.perception_context import InteractionPerceptionSnapshot
 
 if TYPE_CHECKING:
     from askme.llm.intent_router import IntentRouter
@@ -61,10 +64,22 @@ class VoiceLoop:
             pipeline=pipeline, dispatcher=dispatcher
         )
         self._address_detector = AddressDetector()  # default disabled; app.py wires the real one
+        self._interaction_gate = InteractionGate()
+        self._interaction_perception_provider: Callable[[], Any] | None = None
+        self._last_interaction_decision: dict[str, Any] | None = None
+        self._last_interaction_perception: dict[str, Any] | None = None
 
     def set_address_detector(self, detector: AddressDetector) -> None:
         """Wire the address detector after construction."""
         self._address_detector = detector
+
+    def set_interaction_gate(self, gate: InteractionGate) -> None:
+        """Wire the real-world interaction gate after construction."""
+        self._interaction_gate = gate
+
+    def set_interaction_perception_provider(self, provider: Callable[[], Any] | None) -> None:
+        """Wire a best-effort provider for vision/audio-source/pose context."""
+        self._interaction_perception_provider = provider
 
     async def run(self) -> None:
         """Block until Ctrl+C or too many consecutive errors."""
@@ -117,9 +132,40 @@ class VoiceLoop:
                     else:
                         continue
 
-                # Address detection: skip if not talking to the robot
-                if not self._address_detector.is_addressed(user_text):
-                    logger.info("Address filter: '%s' not for robot, ignoring", user_text[:30])
+                # Interaction gate: separate ambient speech from real user turns.
+                addressed = self._address_detector.is_addressed(user_text)
+                perception_snapshot = self._get_interaction_perception()
+                gate_decision = self._interaction_gate.evaluate(
+                    user_text,
+                    addressed=addressed,
+                    perception=perception_snapshot,
+                )
+                self._last_interaction_decision = _decision_to_dict(
+                    gate_decision,
+                    addressed=addressed,
+                )
+                self._last_interaction_perception = _snapshot_to_dict(perception_snapshot)
+                _trace.metadata["interaction_gate"] = {
+                    "action": gate_decision.action.value,
+                    "reason": gate_decision.reason,
+                    "confidence": gate_decision.confidence,
+                    "addressed": addressed,
+                    "perception": self._last_interaction_perception,
+                }
+                if gate_decision.action in (
+                    InteractionAction.IGNORE,
+                    InteractionAction.RECORD_ONLY,
+                ):
+                    self._record_environment_speech(user_text, gate_decision)
+                    continue
+                if gate_decision.action in (
+                    InteractionAction.CLARIFY,
+                    InteractionAction.DEFER,
+                    InteractionAction.REFUSE,
+                ):
+                    self._record_environment_speech(user_text, gate_decision)
+                    if gate_decision.reply:
+                        await self._audio.speak_and_wait(gate_decision.reply)
                     continue
 
                 # Immediate audio feedback — user knows we heard them
@@ -454,6 +500,49 @@ class VoiceLoop:
         from askme.pipeline.proactive.slot_utils import slot_present
         return slot_present(skill, user_text, self._pipeline)
 
+    def _record_environment_speech(
+        self,
+        user_text: str,
+        decision: InteractionDecision,
+    ) -> None:
+        """Best-effort ambient speech record without creating a chat turn."""
+        logger.info(
+            "InteractionGate: %s (%s, %.2f): %r",
+            decision.action.value,
+            decision.reason,
+            decision.confidence,
+            user_text[:80],
+        )
+        if not decision.should_record_environment:
+            return
+        episodic = getattr(self._pipeline, "_episodic", None)
+        log = getattr(episodic, "log", None)
+        if callable(log):
+            log(
+                "perception",
+                (
+                    "ambient_speech "
+                    f"action={decision.action.value} "
+                    f"reason={decision.reason} "
+                    f"text={user_text[:120]}"
+                ),
+            )
+
+    def _get_interaction_perception(self) -> InteractionPerceptionSnapshot | dict[str, Any] | None:
+        if self._interaction_perception_provider is None:
+            return None
+        try:
+            return self._interaction_perception_provider()
+        except Exception as exc:
+            logger.debug("Interaction perception provider failed: %s", exc)
+            return InteractionPerceptionSnapshot.unknown("provider_error")
+
+    def interaction_status_snapshot(self) -> dict[str, Any]:
+        return {
+            "last_decision": dict(self._last_interaction_decision or {}),
+            "last_perception": dict(self._last_interaction_perception or {}),
+        }
+
     async def _maybe_handle_runtime_bridge(self, user_text: str) -> bool:
         """Try the runtime bridge first and fall back locally on bridge failures."""
         if self._voice_runtime_bridge is None:
@@ -517,3 +606,26 @@ class VoiceLoop:
             skill_name,
         )
         return False
+
+
+def _decision_to_dict(
+    decision: InteractionDecision,
+    *,
+    addressed: bool,
+) -> dict[str, Any]:
+    return {
+        "action": decision.action.value,
+        "reason": decision.reason,
+        "confidence": decision.confidence,
+        "addressed": addressed,
+        "should_record_environment": decision.should_record_environment,
+    }
+
+
+def _snapshot_to_dict(snapshot: Any) -> dict[str, Any]:
+    if snapshot is None:
+        return {}
+    if hasattr(snapshot, "to_dict"):
+        payload = snapshot.to_dict()
+        return payload if isinstance(payload, dict) else {}
+    return dict(snapshot) if isinstance(snapshot, dict) else {}

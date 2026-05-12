@@ -9,11 +9,13 @@ Usage::
 
 from askme.runtime.module import Runtime
 from askme.runtime.modules import (
+    CognitionModule,
     HealthModule,
     LLMModule,
     MemoryModule,
     MissionModule,
     PipelineModule,
+    RuntimeHandoffModule,
     SkillModule,
     TextModule,
     ToolsModule,
@@ -25,6 +27,8 @@ voice = (
     + Runtime.use(ToolsModule)
     + Runtime.use(MemoryModule)
     + Runtime.use(MissionModule)
+    + Runtime.use(CognitionModule)
+    + Runtime.use(RuntimeHandoffModule)
     + Runtime.use(PipelineModule)
     + Runtime.use(SkillModule)
     + Runtime.use(VoiceModule)

@@ -16,7 +16,10 @@ from askme.voice.asr_manager import (
 # ---------------------------------------------------------------------------
 
 
-def _make_manager(cloud_available: bool = False) -> ASRManager:
+def _make_manager(
+    cloud_available: bool = False,
+    config: dict[str, object] | None = None,
+) -> ASRManager:
     """Create an ASRManager with mocked backends."""
     with (
         patch("askme.voice.asr_manager.ASREngine") as mock_asr_cls,
@@ -45,7 +48,7 @@ def _make_manager(cloud_available: bool = False) -> ASRManager:
         mock_punct.restore.side_effect = lambda t: t + "."
         mock_punct_cls.return_value = mock_punct
 
-        mgr = ASRManager({})
+        mgr = ASRManager(config or {})
 
     # Expose mocks for test assertions
     mgr._test_mocks = {  # type: ignore[attr-defined]
@@ -171,6 +174,33 @@ class TestCloudLocalFallback:
         assert result is not None
         assert result.source == "local"
         assert "\u672c\u5730\u7ed3\u679c" in result.text
+
+    def test_local_fallback_when_cloud_whitespace(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+
+        mocks["cloud"].finish_session.return_value = "   "
+        mocks["asr"].get_result.return_value = "\u672c\u5730\u7ed3\u679c"
+
+        mgr.start_session()
+        result = mgr.finish_and_get_result()
+
+        assert result is not None
+        assert result.source == "local"
+
+    def test_finish_uses_configured_cloud_timeout(self):
+        mgr = _make_manager(
+            cloud_available=True,
+            config={"cloud_asr": {"finish_timeout": 8.5}},
+        )
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+
+        mocks["cloud"].finish_session.return_value = "\u4e91\u7aef\u7ed3\u679c"
+
+        mgr.start_session()
+        mgr.finish_and_get_result()
+
+        mocks["cloud"].finish_session.assert_called_once_with(timeout=8.5)
 
     def test_local_fallback_when_cloud_unavailable(self):
         mgr = _make_manager(cloud_available=False)
@@ -309,6 +339,46 @@ class TestCheckEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# Status snapshot
+# ---------------------------------------------------------------------------
+
+
+class TestStatusSnapshot:
+    """Verify ASR health details are safe to expose to UI/health checks."""
+
+    def test_status_snapshot_reports_local_provider_by_default(self):
+        mgr = _make_manager(cloud_available=False)
+
+        snapshot = mgr.status_snapshot()
+
+        assert snapshot["provider"] == "local"
+        assert snapshot["recognition_active"] is False
+        assert snapshot["cloud_active"] is False
+        assert snapshot["local"]["provider"] == "sherpa_onnx"
+        assert snapshot["local"]["available"] is True
+
+    def test_status_snapshot_embeds_cloud_snapshot_when_available(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+        mocks["cloud"].status_snapshot.return_value = {
+            "provider": "dashscope_paraformer",
+            "available": True,
+            "partial_text": "partial",
+            "first_partial_ms": 87.5,
+        }
+
+        mgr.start_session()
+        snapshot = mgr.status_snapshot()
+
+        assert snapshot["provider"] == "cloud+local"
+        assert snapshot["recognition_active"] is True
+        assert snapshot["cloud_active"] is True
+        assert snapshot["cloud"]["partial_text"] == "partial"
+        assert snapshot["cloud"]["first_partial_ms"] == 87.5
+        assert snapshot["elapsed_ms"] is not None
+
+
+# ---------------------------------------------------------------------------
 # Session guard tests
 # ---------------------------------------------------------------------------
 
@@ -356,6 +426,27 @@ class TestSessionGuards:
         mgr.feed_audio(f32, i16, 16000)
 
         mocks["stream"].accept_waveform.assert_called_once_with(16000, f32)
+        mocks["cloud"].feed.assert_called_once()
+
+    def test_preconnected_cloud_does_not_feed_silence_by_default(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+
+        mgr.preconnect_cloud()
+        mgr.feed_cloud_only(np.zeros(160, dtype=np.int16))
+
+        mocks["cloud"].feed.assert_not_called()
+
+    def test_preconnected_cloud_can_feed_silence_when_enabled(self):
+        mgr = _make_manager(
+            cloud_available=True,
+            config={"cloud_asr": {"feed_silence": True}},
+        )
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+
+        mgr.preconnect_cloud()
+        mgr.feed_cloud_only(np.zeros(160, dtype=np.int16))
+
         mocks["cloud"].feed.assert_called_once()
 
     def test_cloud_start_failure_falls_back(self):

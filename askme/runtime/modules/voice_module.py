@@ -55,6 +55,7 @@ class VoiceModule(Module):
         from askme.voice.address_detector import AddressDetector
         from askme.voice.audio_agent import AudioAgent
         from askme.voice.audio_router import AudioRouter
+        from askme.voice.interaction_gate import InteractionGate
         from askme.voice.runtime_bridge import VoiceRuntimeBridge
 
         llm_mod = self.llm_in
@@ -123,6 +124,16 @@ class VoiceModule(Module):
             cfg.get("voice", {}).get("address_detection", {})
         )
         self._voice_loop.set_address_detector(self._address_detector)
+        self._interaction_gate = InteractionGate(
+            cfg.get("voice", {}).get("interaction_gate", {})
+        )
+        self._voice_loop.set_interaction_gate(self._interaction_gate)
+        self._interaction_perception_provider = _build_interaction_perception_provider(
+            registry
+        )
+        self._voice_loop.set_interaction_perception_provider(
+            self._interaction_perception_provider
+        )
 
         self._task: asyncio.Task[None] | None = None
         logger.info("VoiceModule: built")
@@ -177,6 +188,11 @@ class VoiceModule(Module):
         return self._address_detector
 
     @property
+    def interaction_gate(self) -> Any:
+        """The InteractionGate instance."""
+        return self._interaction_gate
+
+    @property
     def audio_router(self) -> Any:
         """The AudioRouter instance."""
         return self._audio_router
@@ -185,4 +201,69 @@ class VoiceModule(Module):
         return {
             "status": "ok",
             "voice_mode": True,
+            "interaction_gate": {
+                "enabled": bool(getattr(self._interaction_gate, "enabled", False)),
+                "min_asr_confidence": getattr(
+                    self._interaction_gate,
+                    "min_asr_confidence",
+                    None,
+                ),
+                "max_perception_age_s": getattr(
+                    self._interaction_gate,
+                    "max_perception_age_s",
+                    None,
+                ),
+                "max_interaction_distance_m": getattr(
+                    self._interaction_gate,
+                    "max_interaction_distance_m",
+                    None,
+                ),
+                **self._voice_loop.interaction_status_snapshot(),
+            },
         }
+
+
+def _build_interaction_perception_provider(registry: ModuleRegistry) -> Any:
+    def _provider() -> dict[str, Any] | None:
+        perception_mod = registry.get("perception")
+        snapshot = getattr(perception_mod, "interaction_snapshot", None)
+        if callable(snapshot):
+            payload = snapshot()
+            if isinstance(payload, dict):
+                return payload
+
+        cognition_mod = registry.get("cognition")
+        world_state = getattr(cognition_mod, "world_state", None)
+        scene_fact = (
+            world_state.get_fact("scene.objects", include_stale=True)
+            if hasattr(world_state, "get_fact")
+            else None
+        )
+        if scene_fact is not None:
+            objects = scene_fact.value if isinstance(scene_fact.value, list) else []
+            return {
+                "source": scene_fact.source or "cognition_world_state",
+                "observed_at": scene_fact.observed_at,
+                "reason": "stale" if scene_fact.is_stale() else "fresh",
+                "objects": [dict(item) for item in objects if isinstance(item, dict)],
+            }
+
+        world_snapshot = getattr(world_state, "snapshot", None)
+        if callable(world_snapshot):
+            payload = world_snapshot()
+            if isinstance(payload, dict):
+                scene = payload.get("scene")
+                return {
+                    "source": "cognition_world_state",
+                    "observed_at": scene.get("observed_at") if isinstance(scene, dict) else None,
+                    "reason": (
+                        "snapshot_scene_observed_at"
+                        if isinstance(scene, dict) and scene.get("observed_at") is not None
+                        else "no_scene_fact_timestamp"
+                    ),
+                    "objects": scene.get("objects", []) if isinstance(scene, dict) else [],
+                }
+
+        return None
+
+    return _provider

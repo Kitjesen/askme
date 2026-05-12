@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -171,6 +171,53 @@ async def test_tool_execution_error_handled(shell, mock_llm, mock_tools) -> None
     assert isinstance(result, str)
 
 
+@pytest.mark.asyncio
+async def test_tool_execution_timeout_returns_error(shell, monkeypatch) -> None:
+    """A timed-out tool call becomes a tool-result error string."""
+    to_thread = MagicMock(side_effect=asyncio.TimeoutError)
+    monkeypatch.setattr("askme.agent_shell.thunder_agent_shell.asyncio.to_thread", to_thread)
+    shell._allowed_tools = {"bash"}
+
+    result = await shell._execute_tool({
+        "id": "c1",
+        "name": "bash",
+        "arguments": '{"command": "sleep"}',
+    })
+
+    assert "[Error]" in result
+    assert "超时" in result
+
+
+@pytest.mark.asyncio
+async def test_tool_call_speaks_voice_label_and_updates_current_action(
+    shell,
+    mock_llm,
+    mock_tools,
+    mock_audio,
+) -> None:
+    """Known tool voice labels are spoken before tool execution."""
+    call_count = 0
+    mock_tools.get_agent_allowed_names.return_value = {"bash"}
+    mock_tools.get_voice_labels.return_value = {"bash": "运行命令"}
+    mock_tools.execute.return_value = "ok"
+
+    async def _stream_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield _make_tool_call_chunk(0, "c1", "bash", '{"command": "echo ok"}')
+        else:
+            yield _make_chunk("完成。")
+
+    mock_llm.chat_stream.side_effect = _stream_side_effect
+
+    await shell.run_task("运行命令")
+
+    spoken = [call.args[0] for call in mock_audio.speak.call_args_list]
+    assert any("正在运行命令" in msg for msg in spoken)
+    assert shell._current_action == "正在运行命令"
+
+
 # ── Iteration limit ───────────────────────────────────────────────────────────
 
 
@@ -206,6 +253,17 @@ async def test_timeout_returns_gracefully(shell, mock_llm) -> None:
 
     result = await shell.run_task("slow task", timeout=0.1)
     assert "超时" in result or "timeout" in result.lower() or isinstance(result, str)
+
+
+@pytest.mark.asyncio
+async def test_run_task_returns_error_message_when_loop_raises(shell) -> None:
+    """Unexpected loop failures are converted into user-facing error text."""
+    shell._run_agent_loop = AsyncMock(side_effect=RuntimeError("boom"))
+
+    result = await shell.run_task("broken task")
+
+    assert "任务执行出错" in result
+    assert "boom" in result
 
 
 # ── Allowed tools ─────────────────────────────────────────────────────────────
@@ -353,6 +411,88 @@ async def test_spawn_child_agent_empty_task(mock_llm, mock_tools, tmp_path) -> N
     )
     result = await root._spawn_child_agent(json.dumps({"task": ""}))
     assert "[Error]" in result
+
+
+@pytest.mark.asyncio
+async def test_spawn_child_agent_invalid_json(mock_llm, mock_tools, tmp_path) -> None:
+    """Malformed spawn_agent arguments are rejected without raising."""
+    root = ThunderAgentShell(
+        llm_client=mock_llm,
+        tool_registry=mock_tools,
+        audio=None,
+        workspace=tmp_path,
+        _depth=0,
+    )
+
+    result = await root._spawn_child_agent("{not-json")
+
+    assert "[Error]" in result
+    assert "JSON" in result
+
+
+@pytest.mark.asyncio
+async def test_spawn_child_agent_wraps_child_failure(mock_llm, mock_tools, tmp_path) -> None:
+    """A child run_task exception is returned as a child-task failure string."""
+    import json
+
+    root = ThunderAgentShell(
+        llm_client=mock_llm,
+        tool_registry=mock_tools,
+        audio=None,
+        workspace=tmp_path,
+        _depth=0,
+    )
+
+    async def _fail_run_task(self, task, *, context=None, timeout=30.0):
+        raise RuntimeError("child broke")
+
+    with patch.object(ThunderAgentShell, "run_task", _fail_run_task):
+        result = await root._spawn_child_agent(json.dumps({"task": "child task"}))
+
+    assert "[子任务失败]" in result
+    assert "child broke" in result
+
+
+@pytest.mark.asyncio
+async def test_spawn_child_agent_child_is_silent_and_receives_context(
+    mock_llm,
+    mock_tools,
+    mock_audio,
+    tmp_path,
+) -> None:
+    """spawn_agent creates a silent child and passes context with the fixed timeout."""
+    import json
+
+    root = ThunderAgentShell(
+        llm_client=mock_llm,
+        tool_registry=mock_tools,
+        audio=mock_audio,
+        workspace=tmp_path,
+        _depth=0,
+    )
+    captured: dict[str, object] = {}
+
+    async def _capture_run_task(self, task, *, context=None, timeout=30.0):
+        captured["audio"] = self._audio
+        captured["depth"] = self._depth
+        captured["task"] = task
+        captured["context"] = context
+        captured["timeout"] = timeout
+        return "child ok"
+
+    with patch.object(ThunderAgentShell, "run_task", _capture_run_task):
+        result = await root._spawn_child_agent(
+            json.dumps({"task": "child task", "context": "use repo docs"})
+        )
+
+    assert "[子任务完成]" in result
+    assert captured == {
+        "audio": None,
+        "depth": 1,
+        "task": "child task",
+        "context": {"上下文": "use repo docs"},
+        "timeout": 30.0,
+    }
 
 
 @pytest.mark.asyncio

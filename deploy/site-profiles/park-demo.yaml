@@ -1,0 +1,82 @@
+site:
+  site_id: inovx-demo-park
+  name: Inovx Demo Park
+  map_version: 2026-05-demo
+
+responder_groups:
+  security:
+    name: Security DingTalk Group
+    webhook_env: ASKME_DINGTALK_SECURITY_WEBHOOK
+    secret_env: ASKME_DINGTALK_SECURITY_SECRET
+  cleaning:
+    name: Cleaning DingTalk Group
+    webhook_env: ASKME_DINGTALK_CLEANING_WEBHOOK
+    secret_env: ASKME_DINGTALK_CLEANING_SECRET
+  operations:
+    name: Operations DingTalk Group
+    webhook_env: ASKME_DINGTALK_OPERATIONS_WEBHOOK
+    secret_env: ASKME_DINGTALK_OPERATIONS_SECRET
+
+zones:
+  main-road-1:
+    name: B区主通道
+    location: B区主通道
+    type: main_channel
+    parking_allowed: false
+  visitor-parking-1:
+    name: 北侧访客停车区
+    location: 北侧停车场
+    type: parking_area
+    parking_allowed: true
+  guide-01:
+    name: 游客中心路引点
+    location: 游客中心入口
+    type: help_point
+    help_point_id: guide-01
+  north-window-01:
+    name: 北侧窗户巡查点
+    location: A区北侧窗户
+    type: perimeter_window
+  warehouse-a:
+    name: A区仓储间
+    location: A区仓储间
+    type: smoke_risk_area
+  trash-c-02:
+    name: C区垃圾桶02
+    location: C区步道
+    type: trash_bin_station
+
+devices:
+  camera-main-road-1:
+    name: B区主通道摄像头
+    source: camera
+    camera_id: cam-main-road-1
+    zone_id: main-road-1
+    secret_env: ASKME_FIELD_CAMERA_MAIN_ROAD_SECRET
+  camera-guide-01:
+    name: 游客中心路引摄像头
+    source: camera
+    camera_id: cam-guide-01
+    zone_id: guide-01
+    secret_env: ASKME_FIELD_CAMERA_GUIDE_SECRET
+  smoke-warehouse-a:
+    name: A区仓储间烟温传感器
+    source: sensor
+    sensor_type: smoke_temperature
+    zone_id: warehouse-a
+    secret_env: ASKME_FIELD_SMOKE_WAREHOUSE_SECRET
+  robot-thunder-1:
+    name: Thunder 机器狗
+    source: robot
+    robot_id: thunder-1
+    zone_id: main-road-1
+    secret_env: ASKME_FIELD_ROBOT_THUNDER_SECRET
+
+thresholds:
+  parking_duration_s: 120
+  night_stranger_dwell_s: 10
+  fire_temperature_c: 60
+  smoke_level: 0.7
+  trash_fill_ratio: 0.8
+  crowd_person_count: 5
+  crowd_duration_min: 30

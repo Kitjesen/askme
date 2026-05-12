@@ -156,6 +156,8 @@ def merge_voice_pipeline_status(
     merged["tts_backend"] = tts_backend
     merged["tts_busy"] = bool(merged.get("tts_busy", False))
     merged["last_input_chars"] = int(merged.get("last_input_chars", 0) or 0)
+    input_status = merged.get("input")
+    merged["input"] = input_status if isinstance(input_status, dict) else {}
     merged["pipeline_ok"] = bool(
         merged.get("pipeline_ok", output_ready and (not enabled or input_ready))
     )

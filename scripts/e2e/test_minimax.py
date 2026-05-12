@@ -1,6 +1,6 @@
 """Quick smoke test for MiniMax LLM + TTS integration.
 
-Usage: python scripts/test_minimax.py
+Usage: python scripts/e2e/test_minimax.py
 """
 
 import asyncio
@@ -12,11 +12,11 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from dotenv import load_dotenv
+
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 import httpx
 from openai import AsyncOpenAI
-
 
 API_KEY = os.environ.get("MINIMAX_API_KEY", "")
 BASE_URL = "https://api.minimax.chat/v1"

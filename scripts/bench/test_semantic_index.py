@@ -2,8 +2,8 @@
 """Test L5 Semantic Index on S100P — indexes L3 knowledge, unified search."""
 import asyncio
 import os
-import sys
 import shutil
+import sys
 import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -28,6 +28,7 @@ async def main():
     cfg.get_config = patched
 
     from openai import AsyncOpenAI
+
     from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.semantic_index import SemanticIndex
 

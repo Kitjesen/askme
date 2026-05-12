@@ -13,6 +13,7 @@ from askme.voice import health_check
 
 def test_voice_health_reports_ok_with_complete_local_models(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(health_check, "_dependency_available", lambda _name: True)
+    monkeypatch.setattr(health_check, "_websocket_client_available", lambda: True)
     config = _voice_config(tmp_path, kws_keywords=["thunder @thunder"])
     _write_voice_models(tmp_path, include_kws=True)
 
@@ -27,12 +28,15 @@ def test_voice_health_reports_ok_with_complete_local_models(monkeypatch, tmp_pat
     assert payload["tts_ok"] is True
     assert payload["hardware_required"] is False
     assert payload["checks"]["vad"]["configured_key"] == "model_path"
+    assert payload["checks"]["dependencies"]["websocket_client"] is True
+    assert "dashscope" not in payload["checks"]["dependencies"]
     assert payload["health_snapshot"]["pipeline_ok"] is True
     assert payload["health_snapshot"]["wake_word_enabled"] is True
 
 
 def test_voice_health_flags_missing_vad_model(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(health_check, "_dependency_available", lambda _name: True)
+    monkeypatch.setattr(health_check, "_websocket_client_available", lambda: True)
     config = _voice_config(tmp_path)
     _write_voice_models(tmp_path, include_vad=False)
 
@@ -46,6 +50,7 @@ def test_voice_health_flags_missing_vad_model(monkeypatch, tmp_path: Path) -> No
 
 def test_voice_health_treats_empty_kws_keywords_as_disabled(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(health_check, "_dependency_available", lambda _name: True)
+    monkeypatch.setattr(health_check, "_websocket_client_available", lambda: True)
     config = _voice_config(tmp_path, kws_keywords=[])
     _write_voice_models(tmp_path, include_kws=False)
 
@@ -56,6 +61,26 @@ def test_voice_health_treats_empty_kws_keywords_as_disabled(monkeypatch, tmp_pat
     assert payload["checks"]["kws"]["enabled"] is False
     assert payload["health_snapshot"]["wake_word_enabled"] is False
     assert payload["health_snapshot"]["woken_up"] is True
+
+
+def test_websocket_client_check_rejects_legacy_websocket_package(monkeypatch) -> None:
+    monkeypatch.setattr(health_check.importlib.util, "find_spec", lambda name: object())
+
+    class LegacyWebsocket:
+        pass
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "websocket":
+            return LegacyWebsocket()
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    assert health_check._websocket_client_available() is False
 
 
 def test_cli_runtime_voice_health_json(monkeypatch, capsys) -> None:

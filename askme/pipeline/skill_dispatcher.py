@@ -154,11 +154,12 @@ class SkillDispatcher:
 
     async def _speak_voice(self, text: str, source: str) -> None:
         """Speak text. In voice mode, also wait for playback to finish."""
+        if source != "voice":
+            return
         self._audio.speak(text)
-        if source == "voice":
-            self._audio.start_playback()
-            await asyncio.to_thread(self._audio.wait_speaking_done)
-            self._audio.stop_playback()
+        self._audio.start_playback()
+        await asyncio.to_thread(self._audio.wait_speaking_done)
+        self._audio.stop_playback()
 
     # ── Public API (called by loops) ──────────────────────────────
 

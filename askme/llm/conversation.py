@@ -89,9 +89,20 @@ class ConversationManager:
         self._trim()
         self._save()
 
-    def add_assistant_message(self, content: str) -> None:
+    def add_assistant_message(
+        self,
+        content: str,
+        *,
+        evidence: list[dict[str, Any]] | None = None,
+        rag: dict[str, Any] | None = None,
+    ) -> None:
         """Append an assistant message and persist."""
-        self.history.append({"role": "assistant", "content": content})
+        message: dict[str, Any] = {"role": "assistant", "content": content}
+        if evidence is not None:
+            message["evidence"] = evidence
+        if rag is not None:
+            message["rag"] = rag
+        self.history.append(message)
         self._trim()
         self._save()
 

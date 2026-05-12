@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test microphone on S100P."""
-import sounddevice as sd
 import numpy as np
+import sounddevice as sd
 
 # List input devices
 devices = sd.query_devices()

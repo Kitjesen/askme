@@ -1,10 +1,11 @@
-"""Tests for PromptBuilder — system prompt assembly and message preparation."""
+﻿"""Tests for PromptBuilder — system prompt assembly and message preparation."""
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
 from askme.pipeline.prompt_builder import PromptBuilder
+from askme.pipeline.rag_policy import forced_rag_reply
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -21,6 +22,7 @@ def _make_builder(
     vision=None,
     qp_memory=None,
     memory_system=None,
+    rag_policy_templates: dict[str, str] | None = None,
     general_tool_max_safety_level: str = "normal",
 ) -> PromptBuilder:
     if tools is None:
@@ -42,6 +44,7 @@ def _make_builder(
         vision=vision,
         qp_memory=qp_memory,
         memory_system=memory_system,
+        rag_policy_templates=rag_policy_templates,
     )
 
 
@@ -102,6 +105,82 @@ class TestBuildSystemPrompt:
         result = pb.build_system_prompt("Some memory context")
         assert "Some memory context" in result
         assert "Relevant memory" in result
+
+    def test_rag_policy_conflict_adds_answer_guard(self):
+        pb = _make_builder()
+        result = pb.build_system_prompt(
+            "Evidence A says location one. Evidence B says location two.",
+            rag_policy={
+                "state": "conflict",
+                "action": "clarify",
+                "reason": "conflict:device-a:location",
+                "message": "Relevant knowledge is conflicting.",
+                "required_operator_action": "resolve_conflict",
+            },
+        )
+        assert "state: conflict" in result
+        assert "action: clarify" in result
+        assert "required_operator_action: resolve_conflict" in result
+        assert "Relevant knowledge is conflicting." in result
+
+    def test_rag_policy_uses_configured_customer_reply_template(self):
+        pb = _make_builder(
+            rag_policy_templates={
+                "stale": "This knowledge is expired. Please refresh it first.",
+            }
+        )
+        result = pb.build_system_prompt(
+            "",
+            rag_policy={
+                "state": "stale",
+                "action": "refuse_and_request_update",
+                "reason": "expired",
+                "required_operator_action": "refresh_knowledge",
+            },
+        )
+        assert "customer_reply_template" in result
+        assert "This knowledge is expired. Please refresh it first." in result
+        assert "required_operator_action: refresh_knowledge" in result
+
+    def test_build_forced_rag_reply_uses_template_for_blocking_state(self):
+        pb = _make_builder(
+            rag_policy_templates={"conflict": "Please ask an operator to resolve this conflict."}
+        )
+        result = pb.build_forced_rag_reply({
+            "state": "conflict",
+            "action": "clarify",
+            "reason": "conflict",
+        })
+        assert result == "Please ask an operator to resolve this conflict."
+
+    def test_build_forced_rag_reply_does_not_block_grounded_or_soft_no_evidence(self):
+        pb = _make_builder()
+        assert pb.build_forced_rag_reply({"state": "grounded", "action": "answer"}) == ""
+        assert pb.build_forced_rag_reply({
+            "state": "no_evidence",
+            "action": "clarify_or_refuse",
+        }) == ""
+
+    def test_build_forced_rag_reply_can_force_explicit_no_evidence_refusal(self):
+        pb = _make_builder()
+        result = pb.build_forced_rag_reply({
+            "state": "no_evidence",
+            "action": "refuse",
+        })
+        assert result == forced_rag_reply({"state": "no_evidence", "action": "refuse"})
+
+    def test_rag_policy_no_evidence_keeps_guard_in_prompt(self):
+        pb = _make_builder()
+        result = pb.build_system_prompt(
+            "",
+            rag_policy={
+                "state": "no_evidence",
+                "action": "clarify_or_refuse",
+                "reason": "no_retrieval_hits",
+            },
+        )
+        assert "state: no_evidence" in result
+        assert "reason: no_retrieval_hits" in result
 
     def test_episodic_knowledge_included(self):
         episodic = MagicMock()
@@ -303,6 +382,25 @@ class TestPrepareMessages:
         result = pb.prepare_messages(msgs)
         contents = " ".join(m.get("content", "") for m in result)
         assert "get_time" in contents
+
+    def test_with_seed_preserves_rag_policy_from_system_prompt(self):
+        seed = [{"role": "user", "content": "SEED"}, {"role": "assistant", "content": "OK"}]
+        pb = _make_builder(prompt_seed=seed)
+        system_prompt = pb.build_system_prompt(
+            "",
+            rag_policy={
+                "state": "stale",
+                "action": "refuse_and_request_update",
+                "reason": "expired",
+            },
+        )
+        result = pb.prepare_messages([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "where is gate A?"},
+        ])
+        contents = "\n".join(m.get("content", "") for m in result)
+        assert "state: stale" in contents
+        assert "reason: expired" in contents
 
     def test_with_seed_no_tools_no_extra_exchange(self):
         seed = [{"role": "user", "content": "SEED"}, {"role": "assistant", "content": "OK"}]

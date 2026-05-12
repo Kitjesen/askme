@@ -81,6 +81,31 @@ class TestAvailable:
         assert asr.available is False
 
 
+class TestStatusSnapshot:
+    def test_snapshot_exposes_provider_without_secret(self):
+        asr = _make_asr()
+
+        snapshot = asr.status_snapshot()
+
+        assert snapshot["provider"] == "dashscope_paraformer"
+        assert snapshot["endpoint"].startswith("wss://dashscope.aliyuncs.com/")
+        assert snapshot["model"] == "paraformer-realtime-v2"
+        assert snapshot["available"] is True
+        assert "test-key-123" not in repr(snapshot)
+
+    def test_snapshot_reports_latest_partial_and_final_text(self):
+        asr = _make_asr()
+        asr._interim_text = "partial text"
+        asr._result_text = "final text"
+        asr._last_ttft = 123.45
+
+        snapshot = asr.status_snapshot()
+
+        assert snapshot["partial_text"] == "partial text"
+        assert snapshot["final_text"] == "final text"
+        assert snapshot["first_partial_ms"] == 123.45
+
+
 # ── start_session without websocket ──────────────────────────────────────────
 
 class TestStartSession:
@@ -104,13 +129,22 @@ class TestStartSession:
     def test_start_session_returns_false_on_connection_error(self):
         asr = _make_asr()
         mock_ws_module = MagicMock()
-        mock_ws = MagicMock()
-        mock_ws.connect.side_effect = OSError("connection refused")
-        mock_ws_module.WebSocket.return_value = mock_ws
+        mock_ws_module.create_connection.side_effect = OSError("connection refused")
 
         with patch.dict("sys.modules", {"websocket": mock_ws_module}):
             result = asr.start_session()
         assert result is False
+
+    def test_start_session_disables_incompatible_websocket_package(self):
+        asr = _make_asr()
+        mock_ws_module = MagicMock()
+        del mock_ws_module.create_connection
+
+        with patch.dict("sys.modules", {"websocket": mock_ws_module}):
+            result = asr.start_session()
+
+        assert result is False
+        assert asr._enabled is False
 
 
 # ── feed ──────────────────────────────────────────────────────────────────────
@@ -143,6 +177,7 @@ class TestFeed:
         asr._session_active = True
         asr.feed(b"\x00")
         assert asr._error is not None
+        assert asr.status_snapshot()["last_error"] == "ws closed"
 
 
 # ── finish_session ────────────────────────────────────────────────────────────
@@ -159,6 +194,13 @@ class TestFinishSession:
         asr._session_active = False
         result = asr.finish_session()
         assert result == "已积累的文字"
+
+    def test_returns_latest_interim_when_no_final_text(self):
+        asr = _make_asr()
+        asr._interim_text = "interim text"
+        asr._session_active = False
+        result = asr.finish_session()
+        assert result == "interim text"
 
     def test_finish_session_cleans_up(self):
         asr = _make_asr()
@@ -255,6 +297,7 @@ class TestReceiveLoop:
         asr = self._run_receive_loop_with_messages(messages)
         # Interim should NOT be in _result_text
         assert "interim" not in asr._result_text
+        assert asr.finish_session(timeout=0.01) == "interim"
 
     def test_bytes_messages_skipped(self):
         """Bytes messages should be skipped without crashing."""

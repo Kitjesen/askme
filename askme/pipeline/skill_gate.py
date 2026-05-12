@@ -146,6 +146,9 @@ class SkillGate:
         skill = self._skill_manager.get(skill_name)
         if not skill:
             return f"[Skill] Not found: {skill_name}"
+        if getattr(skill, "enabled", True) is False:
+            logger.warning("[SkillGate] disabled skill blocked: %s", skill_name)
+            return f"[Skill] Disabled: {skill_name}"
 
         if self._dog_safety and self._dog_safety.is_configured():
             estop_state = await asyncio.to_thread(self._dog_safety.query_estop_state)

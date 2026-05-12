@@ -2,7 +2,9 @@
 """Benchmark Pulse DDS in-process latency on S100P."""
 import asyncio
 import time
+
 from askme.robot.pulse import Pulse
+
 
 async def main():
     pulse = Pulse({"enabled": True, "node_name": "askme_bench"})
@@ -24,7 +26,7 @@ async def main():
 
     try:
         await asyncio.wait_for(received.wait(), timeout=15.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         print(f"Timeout, got {len(latencies)} msgs")
 
     await pulse.stop()
@@ -32,7 +34,7 @@ async def main():
     if latencies:
         latencies.sort()
         n = len(latencies)
-        print(f"\n=== Pulse DDS In-Process Benchmark ===")
+        print("\n=== Pulse DDS In-Process Benchmark ===")
         print(f"Messages: {n}")
         print(f"Avg:  {sum(latencies)/n:.3f}ms")
         print(f"Min:  {latencies[0]:.3f}ms")

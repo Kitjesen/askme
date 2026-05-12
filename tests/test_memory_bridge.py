@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from askme.memory.bridge import MemoryBridge
+from askme.memory.catalog import KnowledgeCatalog
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -148,6 +149,12 @@ class TestRetrieve:
         assert "仓库A温度异常" in result
         assert "仓库B正常" in result
         mock_mem0.search.assert_called_once_with("仓库情况", user_id="robot")
+        health = bridge.health()
+        assert health["last_backend"] == "mem0"
+        assert health["last_retrieved_items"] == 2
+        assert health["retrieve_count"] == 1
+        assert health["last_evidence"][0]["backend"] == "mem0"
+        assert "仓库A" in health["last_evidence"][0]["text"]
 
     @pytest.mark.asyncio
     async def test_mem0_retrieve_empty_results(self):
@@ -195,6 +202,43 @@ class TestRetrieve:
         result = await bridge.retrieve("test")
         assert "fallback result" in result
         vs.search.assert_called_once()
+        health = bridge.health()
+        assert health["last_backend"] == "vector"
+        assert health["fallback_count"] >= 1
+        assert health["last_evidence"][0]["backend"] == "vector"
+        assert health["last_evidence"][0]["text"] == "fallback result"
+
+    @pytest.mark.asyncio
+    async def test_fallback_evidence_exposes_catalog_record_traceability(self, tmp_path):
+        bridge, vs = _make_bridge()
+        bridge._knowledge_catalog = KnowledgeCatalog(path=tmp_path / "records.json")
+        bridge._knowledge_catalog.upsert_payloads([{
+            "record_id": "route_gate_a",
+            "text": "visitor desk is near gate A",
+            "memory_text": "[route] visitor desk is near gate A",
+            "approval_status": "published",
+        }])
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[{
+            "text": "visitor desk is near gate A",
+            "score": 0.92,
+            "metadata": {
+                "record_id": "route_gate_a",
+                "approval_status": "published",
+                "source": "route.md",
+                "category": "route",
+                "evidence_version": 1,
+            },
+        }])
+
+        await bridge.retrieve("gate A")
+        evidence = bridge.health()["last_evidence"][0]
+
+        assert evidence["record_id"] == "route_gate_a"
+        assert evidence["source_record_id"] == "route_gate_a"
+        assert evidence["evidence_version"] == 1
 
     @pytest.mark.asyncio
     async def test_fallback_filters_low_score(self):
@@ -208,6 +252,303 @@ class TestRetrieve:
 
         result = await bridge.retrieve("test")
         assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_fallback_filters_unapproved_knowledge(self):
+        bridge, vs = _make_bridge()
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[
+            {
+                "text": "draft location",
+                "score": 0.8,
+                "metadata": {"approval_status": "draft", "source": "site.md"},
+            },
+        ])
+
+        result = await bridge.retrieve("location")
+        health = bridge.health()
+
+        assert result == ""
+        assert health["last_evidence"] == []
+        assert health["last_dropped_evidence"][0]["drop_reason"] == "approval_status:draft"
+        assert health["last_dropped_evidence"][0]["used_in_prompt"] is False
+
+    @pytest.mark.asyncio
+    async def test_fallback_filters_deleted_knowledge(self):
+        bridge, vs = _make_bridge()
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[{
+            "text": "deleted location",
+            "score": 0.8,
+            "metadata": {"approval_status": "deleted", "source": "site.md"},
+        }])
+
+        result = await bridge.retrieve("location")
+        health = bridge.health()
+
+        assert result == ""
+        assert health["last_dropped_evidence"][0]["drop_reason"] == "approval_status:deleted"
+        assert health["last_answer_policy"]["state"] == "unapproved"
+        assert health["last_answer_policy"]["action"] == "refuse"
+        assert health["last_answer_policy"]["required_operator_action"] == "approve_or_publish"
+
+    @pytest.mark.asyncio
+    async def test_fallback_filters_conflict_set_knowledge(self):
+        bridge, vs = _make_bridge()
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[{
+            "text": "conflicted location",
+            "score": 0.99,
+            "metadata": {
+                "approval_status": "published",
+                "conflict_set_id": "conflict:device:a:location",
+                "source": "site.md",
+            },
+        }])
+
+        result = await bridge.retrieve("location")
+        health = bridge.health()
+
+        assert result == ""
+        assert health["last_dropped_evidence"][0]["drop_reason"] == (
+            "conflict:conflict:device:a:location"
+        )
+        assert health["last_answer_policy"]["required_operator_action"] == "resolve_conflict"
+
+    @pytest.mark.asyncio
+    async def test_fallback_filters_stale_catalog_version(self, tmp_path):
+        bridge, vs = _make_bridge()
+        bridge._knowledge_catalog = KnowledgeCatalog(path=tmp_path / "records.json")
+        bridge._knowledge_catalog.upsert_payloads([{
+            "record_id": "know_1",
+            "text": "Restroom east",
+            "memory_text": "[location] Restroom east",
+            "approval_status": "published",
+            "metadata": {"record_id": "know_1", "approval_status": "published"},
+        }])
+        bridge._knowledge_catalog.update_metadata(
+            "know_1",
+            {"expires_at": "2099-01-01T00:00:00+00:00"},
+        )
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[{
+            "text": "stale location",
+            "score": 0.8,
+            "metadata": {
+                "record_id": "know_1",
+                "approval_status": "published",
+                "evidence_version": 1,
+                "source": "site.md",
+            },
+        }])
+
+        result = await bridge.retrieve("location")
+        health = bridge.health()
+
+        assert result == ""
+        assert health["last_dropped_evidence"][0]["drop_reason"] == (
+            "catalog_evidence_version:1->2"
+        )
+        assert health["last_answer_policy"]["state"] == "stale"
+        assert health["last_answer_policy"]["required_operator_action"] == "refresh_knowledge"
+
+    @pytest.mark.asyncio
+    async def test_fallback_filters_catalog_deleted_record(self, tmp_path):
+        bridge, vs = _make_bridge()
+        bridge._knowledge_catalog = KnowledgeCatalog(path=tmp_path / "records.json")
+        bridge._knowledge_catalog.upsert_payloads([{
+            "record_id": "know_1",
+            "text": "Restroom east",
+            "memory_text": "[location] Restroom east",
+            "approval_status": "published",
+            "metadata": {"record_id": "know_1", "approval_status": "published"},
+        }])
+        bridge._knowledge_catalog.update_metadata("know_1", {"approval_status": "deleted"})
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[{
+            "text": "deleted catalog location",
+            "score": 0.8,
+            "metadata": {
+                "record_id": "know_1",
+                "approval_status": "published",
+                "evidence_version": 1,
+                "source": "site.md",
+            },
+        }])
+
+        result = await bridge.retrieve("location")
+        health = bridge.health()
+
+        assert result == ""
+        assert health["last_dropped_evidence"][0]["drop_reason"] == "catalog_status:deleted"
+        assert health["last_answer_policy"]["state"] == "unapproved"
+
+    @pytest.mark.asyncio
+    async def test_fallback_filters_expired_knowledge(self):
+        bridge, vs = _make_bridge()
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[
+            {
+                "text": "expired route",
+                "score": 0.8,
+                "metadata": {
+                    "approval_status": "published",
+                    "expires_at": "2000-01-01T00:00:00+00:00",
+                    "source": "route.md",
+                },
+            },
+        ])
+
+        result = await bridge.retrieve("route")
+        health = bridge.health()
+
+        assert result == ""
+        assert health["last_evidence"] == []
+        assert health["last_dropped_evidence"][0]["drop_reason"] == "expired"
+        assert health["last_answer_policy"]["required_operator_action"] == "refresh_knowledge"
+
+    @pytest.mark.asyncio
+    async def test_dropped_evidence_exposes_catalog_record_traceability(self):
+        bridge, vs = _make_bridge()
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[{
+            "text": "expired route",
+            "score": 0.8,
+            "metadata": {
+                "record_id": "route_old",
+                "approval_status": "published",
+                "expires_at": "2000-01-01T00:00:00+00:00",
+                "source": "route.md",
+            },
+        }])
+
+        await bridge.retrieve("route")
+        dropped = bridge.health()["last_dropped_evidence"][0]
+
+        assert dropped["record_id"] == "route_old"
+        assert dropped["source_record_id"] == "route_old"
+
+    @pytest.mark.asyncio
+    async def test_fallback_keeps_published_unexpired_knowledge(self):
+        bridge, vs = _make_bridge()
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[
+            {
+                "text": "fresh route",
+                "score": 0.8,
+                "metadata": {
+                    "approval_status": "published",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "source": "route.md",
+                    "category": "route",
+                },
+            },
+        ])
+
+        result = await bridge.retrieve("route")
+        health = bridge.health()
+
+        assert "fresh route" in result
+        assert health["last_evidence"][0]["source"] == "route.md"
+        assert health["last_evidence"][0]["category"] == "route"
+        assert health["last_evidence"][0]["freshness_state"] == "fresh"
+        assert health["last_answer_policy"]["state"] == "grounded"
+
+    @pytest.mark.asyncio
+    async def test_fallback_filters_conflicting_knowledge(self):
+        bridge, vs = _make_bridge()
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[
+            {
+                "text": "设备 A 在东门",
+                "score": 0.9,
+                "metadata": {
+                    "approval_status": "published",
+                    "entity_key": "equipment:a",
+                    "fact_key": "location",
+                    "value": "east_gate",
+                    "source": "site-a.md",
+                },
+            },
+            {
+                "text": "设备 A 在西门",
+                "score": 0.88,
+                "metadata": {
+                    "approval_status": "published",
+                    "entity_key": "equipment:a",
+                    "fact_key": "location",
+                    "value": "west_gate",
+                    "source": "site-b.md",
+                },
+            },
+        ])
+
+        result = await bridge.retrieve("设备 A 在哪里")
+        health = bridge.health()
+
+        assert result == ""
+        assert health["last_evidence"] == []
+        reasons = {item["drop_reason"] for item in health["last_dropped_evidence"]}
+        assert reasons == {"conflict:equipment:a:location"}
+        assert all(item["used_in_prompt"] is False for item in health["last_dropped_evidence"])
+        assert health["last_answer_policy"]["state"] == "conflict"
+        assert health["last_answer_policy"]["action"] == "clarify"
+
+    @pytest.mark.asyncio
+    async def test_fallback_keeps_consistent_duplicate_knowledge(self):
+        bridge, vs = _make_bridge()
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[
+            {
+                "text": "设备 A 在东门",
+                "score": 0.9,
+                "metadata": {
+                    "approval_status": "published",
+                    "entity_key": "equipment:a",
+                    "fact_key": "location",
+                    "value": "east_gate",
+                    "source": "site-a.md",
+                },
+            },
+            {
+                "text": "设备 A 靠近东门",
+                "score": 0.88,
+                "metadata": {
+                    "approval_status": "published",
+                    "entity_key": "equipment:a",
+                    "fact_key": "location",
+                    "value": "east_gate",
+                    "source": "site-b.md",
+                },
+            },
+        ])
+
+        result = await bridge.retrieve("设备 A 在哪里")
+        health = bridge.health()
+
+        assert "设备 A 在东门" in result
+        assert "设备 A 靠近东门" in result
+        assert health["last_dropped_evidence"] == []
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_both_unavailable(self):
@@ -292,6 +633,59 @@ class TestSave:
 
         await bridge.save("user", "assistant")  # should not raise
         vs.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_save_fact_to_vectorstore(self):
+        bridge, vs = _make_bridge()
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+
+        await bridge.save_fact("配电室在二楼", {"category": "location", "source": "site.md"})
+
+        vs.add.assert_called_once()
+        text, metadata = vs.add.call_args[0]
+        assert text == "配电室在二楼"
+        assert metadata["type"] == "knowledge"
+        assert metadata["category"] == "location"
+        vs.save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_list_knowledge_reads_vector_catalog(self):
+        bridge, vs = _make_bridge()
+        vs.size = 1
+        vs.list_records.return_value = [{
+            "index": 0,
+            "text": "site fact",
+            "metadata": {
+                "record_id": "know_1",
+                "category": "location",
+                "source": "site.md",
+                "approval_status": "published",
+            },
+        }]
+
+        payload = await bridge.list_knowledge(limit=20)
+
+        assert payload["backend"] == "vector"
+        assert payload["total"] == 1
+        assert payload["records"][0]["record_id"] == "know_1"
+        vs.list_records.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_knowledge_metadata_patches_and_saves(self):
+        bridge, vs = _make_bridge()
+        vs.update_metadata.return_value = True
+
+        payload = await bridge.update_knowledge_metadata(
+            "know_1",
+            {"approval_status": "deleted", "ignored": True},
+        )
+
+        assert payload["updated"] is True
+        assert payload["patch"] == {"approval_status": "deleted"}
+        vs.update_metadata.assert_called_once_with("know_1", {"approval_status": "deleted"})
+        vs.save.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

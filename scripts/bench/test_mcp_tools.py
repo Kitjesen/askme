@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Test all MCP tools and resources — verifies registration and basic function."""
 import json
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -14,7 +14,7 @@ def test_registration():
     tools = mcp._tool_manager._tools if hasattr(mcp, '_tool_manager') else {}
     resources = mcp._resource_manager._resources if hasattr(mcp, '_resource_manager') else {}
 
-    print(f"=== MCP Registration ===")
+    print("=== MCP Registration ===")
     print(f"Tools: {len(tools)}")
     for name in sorted(tools.keys()):
         t = tools[name]

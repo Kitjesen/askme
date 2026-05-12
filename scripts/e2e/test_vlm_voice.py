@@ -4,7 +4,7 @@ Reads an industrial video, samples frames, sends each to VLM,
 then speaks the detection result aloud via EdgeTTS.
 
 Usage:
-    python scripts/test_vlm_voice.py [path/to/video.mp4]
+    python scripts/e2e/test_vlm_voice.py [path/to/video.mp4]
 """
 
 import asyncio
@@ -73,6 +73,7 @@ def build_patrol_report(ts: float, detected: str) -> str:
 
 async def run(video_path: str) -> None:
     from askme.brain.vision_bridge import VisionBridge
+
     from askme.config import get_config
     from askme.voice.tts import TTSEngine
 

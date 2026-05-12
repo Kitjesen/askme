@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Test each audio output device — play beep on each, user tells which one sounds."""
 import subprocess
-import numpy as np
-import wave
 import time
+import wave
+
+import numpy as np
 
 # Generate beep
 sr = 48000
@@ -29,7 +30,7 @@ for dev, label in devices:
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
-            print(f"  OK (played successfully)")
+            print("  OK (played successfully)")
         else:
             print(f"  FAILED: {result.stderr.strip()[:100]}")
     except Exception as e:

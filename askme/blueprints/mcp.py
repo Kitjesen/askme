@@ -10,6 +10,7 @@ Usage::
 
 from askme.runtime.module import Runtime
 from askme.runtime.modules import (
+    CognitionModule,
     ControlModule,
     ExecutorModule,
     HealthModule,
@@ -18,6 +19,7 @@ from askme.runtime.modules import (
     MissionModule,
     PipelineModule,
     PulseModule,
+    RuntimeHandoffModule,
     SafetyModule,
     SkillModule,
     ToolsModule,
@@ -30,6 +32,8 @@ mcp = (
     + Runtime.use(PulseModule)
     + Runtime.use(MemoryModule)
     + Runtime.use(MissionModule)
+    + Runtime.use(CognitionModule)
+    + Runtime.use(RuntimeHandoffModule)
     + Runtime.use(SafetyModule)
     + Runtime.use(PipelineModule)
     + Runtime.use(SkillModule)

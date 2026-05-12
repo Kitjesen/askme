@@ -100,6 +100,94 @@ def test_post_sends_json_body(tool: HttpRequestTool) -> None:
     assert data["body"]["created"] is True
 
 
+@pytest.mark.parametrize("port", [5050, 5060, 5070, 5080, 8088, 5100, 5110])
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+def test_robot_runtime_writes_are_blocked(tool: HttpRequestTool, port: int, method: str) -> None:
+    with patch(
+        "askme.tools.builtin_tools._http_allowlist",
+        return_value=[f"http://localhost:{port}"],
+    ):
+        with patch("urllib.request.urlopen") as mock_open:
+            result = tool.execute(
+                method=method,
+                url=f"http://localhost:{port}/api/v1/dangerous",
+                body={"ok": True},
+            )
+
+    assert "[Error]" in result
+    assert "Robot runtime write requests are blocked" in result
+    mock_open.assert_not_called()
+
+
+def test_robot_runtime_write_block_uses_configured_service_identity(
+    tool: HttpRequestTool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NAV_GATEWAY_URL", "http://nav-gateway.internal:19090")
+    with patch(
+        "askme.tools.builtin_tools._http_allowlist",
+        return_value=["http://nav-gateway.internal:19090"],
+    ):
+        with patch("urllib.request.urlopen") as mock_open:
+            result = tool.execute(
+                method="POST",
+                url="http://nav-gateway.internal:19090/api/v1/navigation/dispatch",
+                body={"semantic_target": "dock"},
+            )
+
+    assert "[Error]" in result
+    assert "Robot runtime write requests are blocked" in result
+    mock_open.assert_not_called()
+
+
+def test_robot_runtime_get_diagnostic_read_stays_allowed(
+    tool: HttpRequestTool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NAV_GATEWAY_URL", "http://nav-gateway.internal:19090")
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.headers.get.return_value = "application/json"
+    mock_resp.read.return_value = b'{"state": "idle"}'
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch(
+        "askme.tools.builtin_tools._http_allowlist",
+        return_value=["http://nav-gateway.internal:19090"],
+    ):
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = tool.execute(
+                method="GET",
+                url="http://nav-gateway.internal:19090/api/v1/navigation/status",
+            )
+
+    data = json.loads(result)
+    assert data["status"] == 200
+    assert data["body"]["state"] == "idle"
+
+
+def test_robot_runtime_get_uses_configured_env_allowlist(
+    tool: HttpRequestTool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NAV_GATEWAY_URL", "http://nav-gateway.internal:19090")
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.headers.get.return_value = "application/json"
+    mock_resp.read.return_value = b'{"state": "idle"}'
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("askme.tools.builtin_tools.get_section", return_value={}):
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = tool.execute(
+                method="GET",
+                url="http://nav-gateway.internal:19090/api/v1/navigation/status",
+            )
+
+    data = json.loads(result)
+    assert data["status"] == 200
+    assert data["body"]["state"] == "idle"
+
+
 # ── HTTP error handling ───────────────────────────────────────────────────────
 
 

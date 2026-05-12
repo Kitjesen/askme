@@ -21,7 +21,7 @@ def _make_bridge(
     tmp_path: Path,
     *,
     enabled: bool = True,
-    server_url: str = "http://localhost:5090",
+    server_url: str = "https://ota.example.com/api",
     product: str = "test-dog",
     channel: str = "stable",
     serial_number: str | None = None,

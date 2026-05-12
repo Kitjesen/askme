@@ -87,13 +87,15 @@ static libusb_device_handle *open_mcp01(libusb_context *ctx) {
     return handle;
 }
 
-static void close_claimed(libusb_device_handle *handle, int streaming_iface) {
+static void close_claimed(libusb_device_handle *handle, int streaming_iface, int release_control) {
     if (handle == NULL) return;
     if (streaming_iface >= 0) {
         libusb_set_interface_alt_setting(handle, streaming_iface, 0);
         libusb_release_interface(handle, streaming_iface);
     }
-    libusb_release_interface(handle, IFACE_CONTROL);
+    if (release_control) {
+        libusb_release_interface(handle, IFACE_CONTROL);
+    }
     libusb_close(handle);
 }
 
@@ -145,6 +147,27 @@ static void configure_playback(libusb_device_handle *handle) {
     r = libusb_control_transfer(handle, 0x21, 0x01, 0x0200,
                                 (9 << 8) | IFACE_CONTROL, volume, sizeof(volume), 1000);
     fprintf(stderr, "set speaker volume=max result=%d\n", r);
+}
+
+static void configure_capture(libusb_device_handle *handle) {
+    unsigned char mute = 0;
+    unsigned char volume[2] = {0x00, 0x00};
+    int r;
+
+    r = libusb_control_transfer(handle, 0x21, 0x01, 0x0100,
+                                (10 << 8) | IFACE_CONTROL, &mute, sizeof(mute), 1000);
+    fprintf(stderr, "set microphone mute=0 result=%d\n", r);
+
+    r = libusb_control_transfer(handle, 0xa1, 0x83, 0x0200,
+                                (10 << 8) | IFACE_CONTROL, volume, sizeof(volume), 1000);
+    if (r == (int)sizeof(volume)) {
+        fprintf(stderr, "microphone max volume raw=%02x%02x\n", volume[0], volume[1]);
+        r = libusb_control_transfer(handle, 0x21, 0x01, 0x0200,
+                                    (10 << 8) | IFACE_CONTROL, volume, sizeof(volume), 1000);
+        fprintf(stderr, "set microphone volume=max result=%d\n", r);
+    } else {
+        fprintf(stderr, "get microphone max volume result=%d; leaving current microphone gain\n", r);
+    }
 }
 
 static void fill_play_tone(struct play_state *state, unsigned char *buffer) {
@@ -286,7 +309,7 @@ cleanup:
             libusb_free_transfer(transfers[i]);
         }
     }
-    close_claimed(handle, IFACE_PLAYBACK);
+    close_claimed(handle, IFACE_PLAYBACK, 1);
     libusb_exit(ctx);
     printf("play_done sent_packets=%d errors=%d\n", state.next_packet, state.errors);
     if (result != 0) return result;
@@ -373,7 +396,7 @@ cleanup:
             libusb_free_transfer(transfers[i]);
         }
     }
-    close_claimed(handle, IFACE_PLAYBACK);
+    close_claimed(handle, IFACE_PLAYBACK, 1);
     libusb_exit(ctx);
     printf("play_done sent_packets=%d bytes=%d errors=%d\n",
            state.next_packet, state.pcm_pos, state.errors);
@@ -566,7 +589,7 @@ cleanup:
             libusb_free_transfer(transfers[i]);
         }
     }
-    close_claimed(handle, IFACE_PLAYBACK);
+    close_claimed(handle, IFACE_PLAYBACK, 1);
     libusb_exit(ctx);
     printf("stream_done submitted_packets=%d stdin_bytes=%d silence_packets=%d errors=%d\n",
            state.submitted_packets, state.stdin_bytes, state.silence_packets, state.errors);
@@ -646,6 +669,7 @@ static int run_capture(int ms, FILE *raw_out) {
     struct capture_state state;
     struct libusb_transfer *transfers[CAPTURE_TRANSFERS];
     int result = 0;
+    int control_claimed = 1;
 
     memset(&state, 0, sizeof(state));
     memset(transfers, 0, sizeof(transfers));
@@ -673,6 +697,10 @@ static int run_capture(int ms, FILE *raw_out) {
         libusb_exit(ctx);
         return 3;
     }
+    configure_capture(handle);
+    r = libusb_release_interface(handle, IFACE_CONTROL);
+    fprintf(stderr, "release control interface after microphone config result=%d\n", r);
+    if (r == 0) control_claimed = 0;
 
     for (int i = 0; i < CAPTURE_TRANSFERS; ++i) {
         unsigned char *buffer = calloc(1, CAPTURE_PACKETS_PER_TRANSFER * CAPTURE_PACKET_SIZE);
@@ -715,7 +743,7 @@ cleanup:
             libusb_free_transfer(transfers[i]);
         }
     }
-    close_claimed(handle, IFACE_CAPTURE);
+    close_claimed(handle, IFACE_CAPTURE, control_claimed);
     libusb_exit(ctx);
 
     double rms = 0.0;

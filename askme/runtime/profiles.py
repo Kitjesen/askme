@@ -23,7 +23,7 @@ _COMPONENT_ALIASES = {
 }
 
 _COMMON_COMPONENTS = frozenset({
-    "memory", "skills", "executor", "vision", "mission_adapter",
+    "memory", "skills", "executor", "vision", "mission_adapter", "cognition",
 })
 
 _VOICE_COMPONENTS = _COMMON_COMPONENTS | frozenset({

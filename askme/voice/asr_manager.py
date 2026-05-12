@@ -88,8 +88,13 @@ class ASRManager:
         self._punct = PunctuationRestorer(config.get("punctuation", {}))
 
         # Cloud ASR (optional)
-        self._cloud = CloudASR(config.get("cloud_asr", {}))
+        cloud_config = config.get("cloud_asr", {}) or {}
+        self._cloud = CloudASR(cloud_config)
         self._cloud_active: bool = False
+        self._cloud_finish_timeout: float = float(
+            cloud_config.get("finish_timeout", 8.0)
+        )
+        self._feed_cloud_silence: bool = bool(cloud_config.get("feed_silence", False))
 
         # State
         self._recognition_active: bool = False
@@ -123,8 +128,8 @@ class ASRManager:
         # If preconnect already opened, just keep it
 
     def feed_cloud_only(self, samples_int16: np.ndarray) -> None:
-        """Feed audio to cloud ASR only (during silence, keeps connection warm)."""
-        if self._cloud_active:
+        """Optionally feed silence/noise to a preconnected cloud ASR session."""
+        if self._cloud_active and self._feed_cloud_silence:
             try:
                 self._cloud.feed(samples_int16.tobytes())
             except Exception:
@@ -202,7 +207,9 @@ class ASRManager:
         if self._cloud_active:
             self._cloud_active = False
             try:
-                cloud_text = self._cloud.finish_session(timeout=3.0).strip()
+                cloud_text = self._cloud.finish_session(
+                    timeout=self._cloud_finish_timeout
+                ).strip()
             except Exception as exc:
                 logger.warning("Cloud ASR finish failed, using local: %s", exc)
                 cloud_text = ""
@@ -278,6 +285,39 @@ class ASRManager:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """Return non-secret ASR backend status for health/UI telemetry."""
+        cloud_status: dict[str, Any] = {}
+        cloud_snapshot = getattr(self._cloud, "status_snapshot", None)
+        if callable(cloud_snapshot):
+            try:
+                raw_cloud_status = cloud_snapshot()
+            except Exception as exc:  # pragma: no cover - defensive telemetry
+                raw_cloud_status = {"last_error": str(exc)}
+            if isinstance(raw_cloud_status, dict):
+                cloud_status = raw_cloud_status
+
+        cloud_available = bool(
+            cloud_status.get("available", getattr(self._cloud, "available", False))
+        )
+        local_available = self._asr is not None
+        elapsed_ms = (
+            round((time.monotonic() - self._start_time) * 1000.0, 2)
+            if self._recognition_active and self._start_time > 0
+            else None
+        )
+        return {
+            "provider": "cloud+local" if cloud_available else "local",
+            "recognition_active": self._recognition_active,
+            "cloud_active": self._cloud_active,
+            "elapsed_ms": elapsed_ms,
+            "local": {
+                "provider": "sherpa_onnx",
+                "available": local_available,
+            },
+            "cloud": cloud_status,
+        }
 
     def is_noise(self, text: str, awaiting_confirmation: bool = False) -> bool:
         """Check if *text* is noise/feedback that should be discarded.

@@ -1,12 +1,8 @@
-"""Robot movement tool — dispatches motion commands through runtime services.
+"""Robot movement tool routed through runtime safety services.
 
-Routes movement through the proper safety-checked path:
-- go_to: nav-gateway API (semantic navigation with task tracking)
-- rotate/forward/stop: dog-control-service API (capability dispatch)
-
-DOES NOT directly publish to ROS2 topics — all motion goes through
-runtime services that handle collision avoidance, safety checks, and
-state management.
+Movement commands must flow through runtime services that own planning,
+collision checks, emergency-stop state, and execution policy. This tool does
+not publish directly to ROS2 topics or call vendor instruction endpoints.
 """
 
 from __future__ import annotations
@@ -21,35 +17,46 @@ logger = logging.getLogger(__name__)
 
 
 def _call_runtime_api(
-    service: str, method: str, path: str, body: dict | None = None
+    service: str,
+    method: str,
+    path: str,
+    body: dict | None = None,
 ) -> dict[str, Any]:
-    """Call a runtime service via HTTP. Returns parsed response or error dict."""
+    """Call a runtime service via HTTP and return parsed JSON or an error dict."""
     import os
     import urllib.error
     import urllib.request
 
     port_map = {
         "control": 5080,
-        "nav": 5090,
+        "nav": 8088,
         "safety": 5070,
     }
     port = port_map.get(service)
     if not port:
         return {"error": f"unknown service: {service}"}
 
-    # Check if service URL is configured via env
-    env_key = f"DOG_{'CONTROL' if service == 'control' else service.upper()}_SERVICE_URL"
-    base_url = os.environ.get(env_key, f"http://localhost:{port}")
+    env_keys = {
+        "control": ("DOG_CONTROL_SERVICE_URL",),
+        "nav": ("NAV_GATEWAY_URL", "DOG_NAV_SERVICE_URL"),
+        "safety": ("DOG_SAFETY_SERVICE_URL",),
+    }
+    base_url = next(
+        (os.environ[key].rstrip("/") for key in env_keys.get(service, ()) if os.environ.get(key)),
+        f"http://localhost:{port}",
+    )
 
     url = f"{base_url}{path}"
-    data = json.dumps(body).encode() if body else None
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body else None
     req = urllib.request.Request(
-        url, data=data, method=method,
-        headers={"Content-Type": "application/json"},
+        url,
+        data=data,
+        method=method,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
-            return json.loads(resp.read().decode())
+            return json.loads(resp.read().decode("utf-8"))
     except urllib.error.URLError as exc:
         return {"error": f"服务不可达 ({service}:{port}): {exc.reason}"}
     except Exception as exc:
@@ -62,10 +69,10 @@ class MoveRobotTool(BaseTool):
     name = "move_robot"
     description = (
         "控制机器人运动（通过 runtime 安全层）。支持以下动作：\n"
-        "- action='go_to', target='厨房' → 语义导航（通过 nav-gateway，有路径规划和避障）\n"
-        "- action='rotate', angle=90 → 原地旋转（正=左转，负=右转，单位度）\n"
-        "- action='forward', distance=1.0 → 前进（单位米，负=后退）\n"
-        "- action='stop' → 立即停止\n"
+        "- action='go_to', target='厨房' -> 语义导航（通过 nav-gateway，有路径规划和避障）\n"
+        "- action='rotate', angle=90 -> 原地旋转（正=左转，负=右转，单位度）\n"
+        "- action='forward', distance=1.0 -> 前进（单位米，负=后退）\n"
+        "- action='stop' -> 立即停止\n"
         "注意：rotate/forward 需要 dog-control-service 支持，服务未配置时会返回错误。"
     )
     parameters: dict[str, Any] = {
@@ -91,7 +98,7 @@ class MoveRobotTool(BaseTool):
         },
         "required": ["action"],
     }
-    safety_level = "normal"
+    safety_level = "dangerous"
     agent_allowed = True
     voice_label = "移动机器人"
 
@@ -106,64 +113,36 @@ class MoveRobotTool(BaseTool):
     ) -> str:
         if action == "go_to":
             return self._go_to(target)
-        elif action == "rotate":
+        if action == "rotate":
             return self._dispatch_control("rotate", {"angle_deg": angle})
-        elif action == "forward":
+        if action == "forward":
             return self._dispatch_control("walk_forward", {"distance_m": distance})
-        elif action == "stop":
+        if action == "stop":
             return self._dispatch_control("stop")
-        else:
-            return f"[错误] 未知动作: {action}"
+        return f"[错误] 未知动作: {action}"
 
     def _go_to(self, target: str) -> str:
-        """Semantic navigation — LingTu instruction API or Thunder nav-gateway fallback."""
+        """Semantic navigation via Thunder nav-gateway dispatch path."""
         if not target:
             return "[错误] 请指定目标位置"
-
-        import os
-        nav_gateway_url = os.environ.get("NAV_GATEWAY_URL", "")
-
-        # LingTu mode: NAV_GATEWAY_URL points to LingTu REST API
-        if nav_gateway_url:
-            return self._go_to_lingtu(target, nav_gateway_url)
-
-        # Thunder mode: internal nav-gateway (legacy)
         return self._go_to_thunder(target)
 
-    def _go_to_lingtu(self, target: str, base_url: str) -> str:
-        """Send natural-language instruction to LingTu SemanticPlanner."""
-        import json
-        import urllib.error
-        import urllib.request
-
-        url = f"{base_url.rstrip('/')}/api/v1/instruction"
-        body = json.dumps({"text": target}).encode()
-        req = urllib.request.Request(
-            url, data=body, method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                result = json.loads(resp.read().decode())
-        except urllib.error.URLError as exc:
-            return f"[导航不可用] LingTu API 不可达 ({base_url}): {exc.reason}"
-        except Exception as exc:
-            return f"[导航错误] {exc}"
-
-        if result.get("ok") is False or "error" in result:
-            err = result.get("error", result.get("message", "未知错误"))
-            return f"[导航错误] {err}"
-
-        return f"正在导航到「{target}」"
-
     def _go_to_thunder(self, target: str) -> str:
-        """Semantic navigation via Thunder nav-gateway (legacy path)."""
+        """Dispatch semantic navigation through nav-gateway."""
         from uuid import uuid4
-        result = _call_runtime_api("nav", "POST", "/api/v1/nav/tasks", {
-            "task_type": "SEMANTIC_NAV",
-            "target_name": target,
-            "mission_id": uuid4().hex[:12],
-        })
+
+        mission_id = uuid4().hex[:16]
+        result = _call_runtime_api(
+            "nav",
+            "POST",
+            "/api/v1/navigation/dispatch",
+            {
+                "mission_id": mission_id,
+                "mission_type": "voice_command",
+                "requested_capability": "nav.semantic.execute",
+                "parameters": {"semantic_target": target},
+            },
+        )
 
         if "error" in result:
             err = result["error"]
@@ -171,12 +150,17 @@ class MoveRobotTool(BaseTool):
                 return f"[导航不可用] nav-gateway 未运行。无法导航到 {target}。"
             return f"[导航错误] {err}"
 
-        task_id = result.get("task_id", result.get("id", ""))
+        session = result.get("session", {})
+        task_id = session.get(
+            "mission_id",
+            result.get("task_id", result.get("id", result.get("mission_id", mission_id))),
+        )
         return f"导航任务已下发: 前往{target} (task_id={task_id})"
 
     def _dispatch_control(self, capability: str, params: dict | None = None) -> str:
-        """Dispatch a capability to dog-control-service."""
+        """Dispatch a movement capability to dog-control-service."""
         from uuid import uuid4
+
         body = {
             "mission_id": uuid4().hex[:12],
             "mission_type": "motion_command",
@@ -189,9 +173,9 @@ class MoveRobotTool(BaseTool):
             err = result["error"]
             if "服务不可达" in err:
                 return (
-                    f"[控制不可用] dog-control-service 未运行。"
+                    "[控制不可用] dog-control-service 未运行。"
                     f"无法执行 {capability}。"
-                    f"请确认 runtime 服务已启动。"
+                    "请确认 runtime 服务已启动。"
                 )
             return f"[控制错误] {err}"
 

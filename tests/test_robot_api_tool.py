@@ -23,6 +23,9 @@ class TestMetadata:
     def test_agent_allowed(self):
         assert RobotApiTool.agent_allowed is True
 
+    def test_robot_api_stays_dangerous(self):
+        assert RobotApiTool.safety_level == "dangerous"
+
     def test_required_params(self):
         required = RobotApiTool.parameters["required"]
         assert "service" in required
@@ -86,8 +89,60 @@ class TestSuccessResponses:
             tool.execute(service="control", method="POST", path="/api/v1/posture",
                         body={"posture": "stand"})
         request = mock_open.call_args[0][0]
+        assert request.get_method() == "POST"
+        assert request.full_url == "http://localhost:5080/api/v1/posture"
         assert request.data is not None
         assert b"posture" in request.data
+
+    def test_prefers_canonical_service_env_urls(self, monkeypatch):
+        monkeypatch.setenv("DOG_CONTROL_SERVICE_URL", "http://control-host:5080")
+        monkeypatch.setenv("DOG_SAFETY_SERVICE_URL", "http://safety-host:5070")
+        monkeypatch.setenv("NAV_GATEWAY_URL", "http://nav-host:8088")
+
+        tool = _make_tool()
+        mock_resp = self._mock_urlopen(200, '{"ok": true}')
+        captured: list[str] = []
+
+        def fake_urlopen(req, timeout):
+            captured.append(req.full_url)
+            return mock_resp
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            tool.execute(service="control", method="GET", path="/health")
+            tool.execute(service="safety", method="GET", path="/health")
+            tool.execute(service="nav", method="GET", path="/health")
+
+        assert captured == [
+            "http://control-host:5080/health",
+            "http://safety-host:5070/health",
+            "http://nav-host:8088/health",
+        ]
+
+    def test_prefers_runtime_bearer_token_for_auth(self, monkeypatch):
+        monkeypatch.setenv("RUNTIME_BEARER_TOKEN", "runtime-token")
+        monkeypatch.setenv("NOVA_DOG_RUNTIME_API_KEY", "nova-token")
+        tool = _make_tool()
+        mock_resp = self._mock_urlopen(200, '{"ok": true}')
+
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+            tool.execute(service="nav", method="GET", path="/health")
+
+        request = mock_open.call_args[0][0]
+        assert request.headers["Authorization"] == "Bearer runtime-token"
+
+    def test_legacy_runtime_api_key_still_used(self, monkeypatch):
+        monkeypatch.delenv("RUNTIME_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("NOVA_DOG_RUNTIME_API_KEY", raising=False)
+        monkeypatch.setenv("RUNTIME_API_KEY", "legacy-token")
+        tool = _make_tool()
+        mock_resp = self._mock_urlopen(200, '{"ok": true}')
+
+        with patch("askme.tools.robot_api_tool.get_section", return_value={}):
+            with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+                tool.execute(service="nav", method="GET", path="/health")
+
+        request = mock_open.call_args[0][0]
+        assert request.headers["Authorization"] == "Bearer legacy-token"
 
 
 # ── HTTP error responses ──────────────────────────────────────────────────────
@@ -111,7 +166,7 @@ class TestErrorResponses:
     def test_http_error_returns_status_and_body(self):
         tool = _make_tool()
         exc = urllib.error.HTTPError(
-            url="http://localhost:5090/api/test",
+            url="http://localhost:8088/api/test",
             code=404,
             msg="Not Found",
             hdrs=None,
@@ -137,6 +192,13 @@ class TestServicePortMapping:
         for svc in expected_services:
             assert svc in _SERVICE_PORTS
 
-    def test_ports_are_in_expected_range(self):
-        for svc, port in _SERVICE_PORTS.items():
-            assert 5000 <= port <= 6000, f"{svc} port {port} out of range"
+    def test_ports_match_canonical_runtime_map(self):
+        assert _SERVICE_PORTS == {
+            "arbiter": 5050,
+            "telemetry": 5060,
+            "safety": 5070,
+            "control": 5080,
+            "nav": 8088,
+            "arm": 5100,
+            "ops": 5110,
+        }

@@ -6,6 +6,7 @@ Saves raw 48kHz and resampled 16kHz wavs for inspection.
 """
 import time
 import wave
+
 import numpy as np
 import sounddevice as sd
 
@@ -62,6 +63,7 @@ print(f"\nSaved: /tmp/hkmic_raw_48k.wav ({DURATION}s, 48kHz)", flush=True)
 
 # Resample to 16kHz
 from scipy.signal import resample_poly
+
 audio_16k = resample_poly(raw, up=1, down=3).astype(np.float32)
 pcm16 = (audio_16k * 32768).clip(-32768, 32767).astype(np.int16)
 with wave.open("/tmp/hkmic_raw_16k.wav", "w") as wf:
@@ -73,10 +75,13 @@ print(f"Saved: /tmp/hkmic_raw_16k.wav ({len(audio_16k)/16000:.1f}s, 16kHz)", flu
 
 # Quick ASR test on the resampled audio
 print("\n=== Quick ASR (sherpa-onnx) ===", flush=True)
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from askme.config import get_config
 from askme.voice.asr import ASREngine
+
 cfg = get_config()
 engine = ASREngine(cfg.get("voice", {}).get("asr", {}))
 stream = engine.recognizer.create_stream()
@@ -90,6 +95,7 @@ print(f"  ASR: '{text}'", flush=True)
 # Playback test — play back the recording through speaker
 print("\n=== Playback (play recording back) ===", flush=True)
 import subprocess
+
 r = subprocess.run(["aplay", "-D", "plughw:1,0", "/tmp/hkmic_raw_48k.wav"],
                    capture_output=True, text=True, timeout=15)
 if r.returncode == 0:

@@ -140,11 +140,11 @@ async def test_memory_bridge() -> dict:
 
 async def main():
     from askme.brain.llm_client import LLMClient
+
     from askme.config import get_config
     from askme.voice.tts import TTSEngine
 
     cfg = get_config()
-    brain_cfg = cfg.get("brain", {})
     tts_cfg = cfg.get("voice", {}).get("tts", {})
 
     print("=" * 55)

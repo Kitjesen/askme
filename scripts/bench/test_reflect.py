@@ -2,8 +2,8 @@
 """Test L3 Episodic reflect on S100P."""
 import asyncio
 import os
-import sys
 import shutil
+import sys
 import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -91,7 +91,7 @@ async def main():
     if os.path.isdir(knowledge_dir):
         for kf in sorted(os.listdir(knowledge_dir)):
             path = os.path.join(knowledge_dir, kf)
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 content = f.read()
             print(f"\n--- knowledge/{kf} ---")
             print(content[:300])
@@ -100,7 +100,7 @@ async def main():
     if os.path.isdir(digests_dir):
         for df in sorted(os.listdir(digests_dir)):
             path = os.path.join(digests_dir, df)
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 content = f.read()
             print(f"\n--- digest/{df} ---")
             print(content[:400])

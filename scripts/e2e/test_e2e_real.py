@@ -20,9 +20,9 @@ if sys.platform == "win32":
 import re
 
 from askme.brain.llm_client import LLMClient
-from askme.voice.tts import TTSEngine
-from askme.config import get_config
 
+from askme.config import get_config
+from askme.voice.tts import TTSEngine
 
 _REFUSAL_KEYWORDS = [
     "I can't", "I cannot", "I'm Claude", "I am Claude",
@@ -120,7 +120,7 @@ async def test_vlm_scene():
         if _is_vlm_refusal(result):
             cleaned = _clean_vlm(result)
             if _is_vlm_refusal(cleaned) or len(cleaned) < 5:
-                print(f"  VLM REFUSED (relay blocked). Skipping vision.")
+                print("  VLM REFUSED (relay blocked). Skipping vision.")
                 print(f"  VLM time: {dur:.1f}s")
                 return None, frame
             result = cleaned
@@ -135,12 +135,12 @@ async def test_vlm_scene():
 
 
 def _load_soul_seed() -> list[dict[str, str]]:
-    """Load SOUL.md and convert to prompt seed (mirrors app.py logic)."""
+    """Load prompts/SOUL.md and convert to prompt seed."""
     import os
-    soul_path = os.path.join(os.path.dirname(__file__), "..", "SOUL.md")
+    soul_path = os.path.join(os.path.dirname(__file__), "..", "..", "prompts", "SOUL.md")
     if not os.path.isfile(soul_path):
         return []
-    with open(soul_path, "r", encoding="utf-8") as f:
+    with open(soul_path, encoding="utf-8") as f:
         raw = f.read()
     brief = re.sub(r"^#+\s+.*$", "", raw, flags=re.MULTILINE)
     brief = re.sub(r"\n{3,}", "\n\n", brief).strip()
@@ -158,7 +158,7 @@ async def test_llm_with_scene(scene_desc: str | None):
     brain = cfg.get("brain", {})
     prefix = brain.get("user_prefix", "")
 
-    # Load SOUL.md seed, fallback to config
+    # Load prompts/SOUL.md seed, fallback to config
     seed = _load_soul_seed() or brain.get("prompt_seed", [])
 
     user_text = "报告一下周围环境" if scene_desc else "Thunder，报告状态"
@@ -174,7 +174,7 @@ async def test_llm_with_scene(scene_desc: str | None):
 
     msgs.append({"role": "user", "content": tagged})
 
-    print(f"\n[3] Sending to LLM (Opus 4.6)...")
+    print("\n[3] Sending to LLM (Opus 4.6)...")
     print(f"  Query: {user_text}")
 
     client = LLMClient()
@@ -205,7 +205,7 @@ def test_tts_playback(text: str):
     cfg = get_config()
     tts_cfg = cfg.get("voice", {}).get("tts", {})
 
-    print(f"\n[4] Playing TTS...")
+    print("\n[4] Playing TTS...")
     print(f"  Text: {text[:80]}...")
 
     tts = TTSEngine(tts_cfg)

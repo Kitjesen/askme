@@ -7,9 +7,10 @@ import json
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -31,10 +32,12 @@ _TTS_CONFIG_KEYS = (
     "usb_direct_stream_drain_grace_seconds",
     "usb_direct_preroll_seconds",
     "usb_direct_background_prewarm",
+    "usb_direct_quiet_start",
     "usb_direct_speech_leadin_seconds",
     "usb_direct_speech_warm_leadin_seconds",
     "usb_direct_speech_wake_signal_seconds",
     "usb_direct_speech_wake_signal_gain",
+    "usb_direct_speech_wake_noise_gain",
     "usb_direct_speech_wake_signal_hz",
     "usb_direct_speech_wake_gap_seconds",
     "usb_direct_speech_onset_cushion_seconds",
@@ -287,6 +290,7 @@ def _probe_tts_config(tts_cfg: dict[str, Any]) -> dict[str, Any]:
     persistent = bool(tts_cfg.get("usb_direct_persistent_stream", False))
     trust_warm = bool(tts_cfg.get("usb_direct_trust_persistent_warm_state", False))
     background_prewarm = bool(tts_cfg.get("usb_direct_background_prewarm", False))
+    quiet_start = bool(tts_cfg.get("usb_direct_quiet_start", False))
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -303,6 +307,8 @@ def _probe_tts_config(tts_cfg: dict[str, Any]) -> dict[str, Any]:
     wake_seconds = _float_config(tts_cfg, "usb_direct_speech_wake_signal_seconds", 0.0)
     if wake_seconds <= 0:
         warnings.append("speech lead-in has no active wake signal; dither alone may not open the speaker gate")
+    if quiet_start:
+        warnings.append("usb_direct_quiet_start reduces audible artifacts but may clip the first syllable")
 
     return {
         "checked": True,
@@ -342,9 +348,13 @@ def _probe_usb_output_shape(
         engine._play_chunk_usb_direct_locked = capture  # type: ignore[method-assign]
         try:
             speech = _synthetic_first_token_chunk(engine._sample_rate)
+            expected_speech = engine._apply_usb_direct_speech_gain(speech)
             cold_leadin = engine._usb_direct_speech_leadin_chunk(warm=False)
             warm_leadin = engine._usb_direct_speech_leadin_chunk(warm=True)
-            cushion = engine._usb_direct_speech_onset_cushion_chunk(speech)
+            active_leadin = engine._usb_direct_speech_leadin_chunk(
+                warm=engine._is_persistent_usb_stream_warm()
+            )
+            cushion = engine._usb_direct_speech_onset_cushion_chunk(expected_speech)
             play_ok = engine._play_chunk_usb_direct_speech(speech)
         except Exception as exc:
             return {
@@ -362,27 +372,33 @@ def _probe_usb_output_shape(
     else:
         final = np.empty(0, dtype=np.float32)
 
-    expected_samples = len(cold_leadin) + len(cushion) + len(speech)
-    speech_offset_samples = len(cold_leadin) + len(cushion)
+    expected_samples = len(active_leadin) + len(cushion) + len(expected_speech)
+    speech_offset_samples = len(active_leadin) + len(cushion)
     speech_offset_seconds = speech_offset_samples / float(sample_rate)
     final_shape_ok = bool(
         play_ok
         and len(final) == expected_samples
-        and _segment_equal(final, 0, cold_leadin)
-        and _segment_equal(final, len(cold_leadin), cushion)
-        and _segment_equal(final, speech_offset_samples, speech)
+        and _segment_equal(final, 0, active_leadin)
+        and _segment_equal(final, len(active_leadin), cushion)
+        and _segment_equal(final, speech_offset_samples, expected_speech)
     )
-    first_token_guard_ok = speech_offset_seconds >= guard_min_seconds
+    quiet_start = bool(tts_cfg.get("usb_direct_quiet_start", False))
+    first_token_guard_ok = speech_offset_seconds >= guard_min_seconds or quiet_start
     wake_peak = int(float(np.max(np.abs(cold_leadin))) * 32768) if len(cold_leadin) else 0
 
     errors: list[str] = []
     warnings: list[str] = []
     if not final_shape_ok:
         errors.append("USB speech output shape does not match lead-in + cushion + speech")
-    if not first_token_guard_ok:
+    if speech_offset_seconds < guard_min_seconds and quiet_start:
+        warnings.append(
+            f"quiet start accepts first real speech at {speech_offset_seconds:.3f}s "
+            f"below {guard_min_seconds:.3f}s guard to reduce audible pre-speech noise"
+        )
+    elif not first_token_guard_ok:
         errors.append(
-            "first real speech begins at %.3fs, below %.3fs guard"
-            % (speech_offset_seconds, guard_min_seconds)
+            f"first real speech begins at {speech_offset_seconds:.3f}s, "
+            f"below {guard_min_seconds:.3f}s guard"
         )
     if wake_peak < 1000:
         warnings.append("speech lead-in peak is very low; speaker gate may not wake consistently")
@@ -394,10 +410,12 @@ def _probe_usb_output_shape(
         "input_speech_samples": len(speech),
         "cold_leadin_samples": len(cold_leadin),
         "warm_leadin_samples": len(warm_leadin),
+        "active_leadin_samples": len(active_leadin),
         "onset_cushion_samples": len(cushion),
         "speech_offset_samples": speech_offset_samples,
         "speech_offset_seconds": speech_offset_seconds,
         "guard_min_seconds": guard_min_seconds,
+        "quiet_start": quiet_start,
         "first_token_guard_ok": first_token_guard_ok,
         "expected_final_samples": expected_samples,
         "final_samples": len(final),

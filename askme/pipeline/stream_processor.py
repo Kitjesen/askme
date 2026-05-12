@@ -84,6 +84,7 @@ class StreamProcessor:
         splitter: StreamSplitter,
         general_tool_max_safety_level: int,
         max_response_chars: int,
+        voice_tts_coalesce: bool = False,
         voice_model: str | None = None,
         cancel_token: asyncio.Event | None = None,
     ) -> None:
@@ -94,6 +95,7 @@ class StreamProcessor:
         self._splitter = splitter
         self._general_tool_max_safety_level = general_tool_max_safety_level
         self._max_response_chars = max_response_chars
+        self._voice_tts_coalesce = voice_tts_coalesce
         self._voice_model = voice_model
         self._think_filter = _ThinkFilter()
         self._cancel_token = cancel_token
@@ -137,6 +139,19 @@ class StreamProcessor:
         chars_spoken = 0
         truncated = False
         char_limit = self._max_response_chars if is_voice else 0
+        coalesce_voice = is_voice and self._voice_tts_coalesce
+        voice_chunks: list[str] = []
+        suppress_voice_output = False
+
+        def _queue_voice(text: str) -> None:
+            nonlocal spoke_any
+            if not text or suppress_voice_output:
+                return
+            if coalesce_voice:
+                voice_chunks.append(text)
+            else:
+                self._audio.speak(text)
+            spoke_any = True
 
         async for chunk in stream:
             delta = chunk.choices[0].delta
@@ -154,48 +169,51 @@ class StreamProcessor:
                         if tc.function.arguments:
                             tool_calls_acc[idx]["arguments"] += tc.function.arguments
 
-                if spoke_any:
-                    self._audio.drain_buffers()
+                if is_voice:
+                    suppress_voice_output = True
+                    self._think_filter.reset()
+                    self._splitter.reset()
+                    if spoke_any:
+                        self._audio.drain_buffers()
                     spoke_any = False
+                    voice_chunks.clear()
 
             if delta.content:
                 clean = self._think_filter.feed(delta.content)
                 if clean:
                     full_response += clean
-                    if not truncated:
+                    if is_voice and not truncated:
                         for sentence in self._splitter.feed(clean):
                             if char_limit and chars_spoken + len(sentence) > char_limit:
-                                self._audio.speak(sentence)
-                                self._audio.speak(self.TRUNCATION_HINT)
-                                spoke_any = True
+                                _queue_voice(sentence)
+                                _queue_voice(self.TRUNCATION_HINT)
                                 truncated = True
                                 logger.info(
                                     "Voice truncation at %d chars (limit %d)",
                                     chars_spoken + len(sentence), char_limit,
                                 )
                                 break
-                            self._audio.speak(sentence)
+                            _queue_voice(sentence)
                             chars_spoken += len(sentence)
-                            spoke_any = True
 
         think_tail = self._think_filter.flush()
         if think_tail:
             full_response += think_tail
-            if not truncated:
+            if is_voice and not truncated:
                 for sentence in self._splitter.feed(think_tail):
                     if char_limit and chars_spoken + len(sentence) > char_limit:
-                        self._audio.speak(sentence)
-                        spoke_any = True
+                        _queue_voice(sentence)
                         truncated = True
                         break
-                    self._audio.speak(sentence)
+                    _queue_voice(sentence)
                     chars_spoken += len(sentence)
-                    spoke_any = True
-        if not truncated:
+        if is_voice and not truncated:
             remainder = self._splitter.flush()
             if remainder:
-                self._audio.speak(remainder)
-                spoke_any = True
+                _queue_voice(remainder)
+
+        if coalesce_voice and voice_chunks:
+            self._audio.speak("".join(voice_chunks).strip())
 
         return full_response, tool_calls_acc
 

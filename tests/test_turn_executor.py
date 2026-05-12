@@ -32,6 +32,7 @@ def _make_executor(**kwargs) -> TurnExecutor:
 
     prompt_builder = MagicMock()
     prompt_builder.build_system_prompt = MagicMock(return_value="You are a robot.")
+    prompt_builder.build_forced_rag_reply = MagicMock(return_value="")
     prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs: msgs)
 
     stream_processor = MagicMock()
@@ -97,6 +98,72 @@ class TestProcessHappyPath:
         te._prompt_builder.build_system_prompt.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_passes_memory_answer_policy_to_prompt_builder(self):
+        memory = MagicMock()
+        memory.retrieve = AsyncMock(return_value="")
+        memory.save = AsyncMock()
+        memory.health.return_value = {
+            "last_answer_policy": {
+                "state": "stale",
+                "action": "refuse_and_request_update",
+                "reason": "expired",
+            },
+        }
+        te = _make_executor(memory=memory)
+        await te.process("where is A 区?")
+        _, kwargs = te._prompt_builder.build_system_prompt.call_args
+        assert kwargs["rag_policy"]["state"] == "stale"
+
+    @pytest.mark.asyncio
+    async def test_forced_rag_reply_skips_llm_and_saves_reply(self):
+        memory = MagicMock()
+        memory.retrieve = AsyncMock(return_value="")
+        memory.save = AsyncMock()
+        memory.health.return_value = {
+            "last_answer_policy": {
+                "state": "conflict",
+                "action": "clarify",
+                "reason": "conflict:route",
+            },
+        }
+        prompt_builder = MagicMock()
+        prompt_builder.build_system_prompt = MagicMock(return_value="sys")
+        prompt_builder.build_forced_rag_reply = MagicMock(return_value="这条路线信息有冲突，请管理员确认。")
+        prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs: msgs)
+        stream_processor = MagicMock()
+        stream_processor.stream_with_tools = AsyncMock(return_value="错误的自由回答")
+        te = _make_executor(
+            memory=memory,
+            prompt_builder=prompt_builder,
+            stream_processor=stream_processor,
+        )
+
+        result = await te.process("A 区怎么走？", source="text")
+
+        assert result == "这条路线信息有冲突，请管理员确认。"
+        stream_processor.stream_with_tools.assert_not_called()
+        te._conversation.add_assistant_message.assert_called_once_with(result)
+        await asyncio.gather(*te._pending_tasks, return_exceptions=True)
+        memory.save.assert_called_once_with("A 区怎么走？", result)
+
+    @pytest.mark.asyncio
+    async def test_forced_rag_reply_speaks_in_voice_mode(self):
+        prompt_builder = MagicMock()
+        prompt_builder.build_system_prompt = MagicMock(return_value="sys")
+        prompt_builder.build_forced_rag_reply = MagicMock(return_value="这条知识已过期，请先刷新。")
+        prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs: msgs)
+        stream_processor = MagicMock()
+        stream_processor.stream_with_tools = AsyncMock(return_value="错误回答")
+        te = _make_executor(prompt_builder=prompt_builder, stream_processor=stream_processor)
+
+        result = await te.process("设备在哪里？", source="voice")
+
+        assert result == "这条知识已过期，请先刷新。"
+        te._audio.speak.assert_called_once_with(result)
+        te._audio.wait_speaking_done.assert_called_once()
+        stream_processor.stream_with_tools.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_last_spoken_text_updated(self):
         te = _make_executor()
         await te.process("hello")
@@ -113,6 +180,14 @@ class TestProcessHappyPath:
         te = _make_executor()
         await te.process("hello", source="text")
         te._audio.wait_speaking_done.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_text_source_does_not_touch_audio_playback(self):
+        te = _make_executor()
+        await te.process("hello", source="text")
+        te._audio.drain_buffers.assert_not_called()
+        te._audio.start_playback.assert_not_called()
+        te._audio.stop_playback.assert_not_called()
 
 
 class TestCancelToken:

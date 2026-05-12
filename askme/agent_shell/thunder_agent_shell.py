@@ -79,7 +79,7 @@ def _build_agent_system_prompt(workspace: Path) -> str:
         "  read_file    — 读取文件；path 为绝对路径\n"
         "  web_search   — 搜索网络获取摘要和链接；技术查询建议加版本号（如 'asyncio Python 3.10'）\n"
         "  web_fetch    — 抓取指定网页完整内容；web_search 找到 URL 后用此工具深读\n"
-        "  http_request — 调用 REST API（已预授权 localhost:5050-5110）\n"
+        "  http_request — 调用 REST API（机器人写操作请用 safety-gated robot_api/move_robot）\n"
         "  robot_api    — Thunder runtime 快捷接口：\n"
         "                 service=telemetry  GET /api/v1/health → 电量/温度/IMU\n"
         "                 service=safety     GET /api/v1/safety/modes/estop → 急停状态\n"

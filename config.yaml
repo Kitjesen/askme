@@ -33,10 +33,10 @@ brain:
   minimax_base_url: https://api.minimax.chat/v1
   minimax_model: MiniMax-M2.5-highspeed
   # Character definition file (overrides prompt_seed when present)
-  soul_file: SOUL.md
-  # System prompt template (relay may override, SOUL.md compensates via seed)
+  soul_file: prompts/SOUL.md
+  # System prompt template (relay may override, prompts/SOUL.md compensates via seed)
   system_prompt: "工业巡检机器人Thunder。中文口语，简洁汇报，80字以内。重要规则：如果判断这句话不是在跟你说话（旁人闲聊、背景对话、跟别人说的话），只回复[SILENT]，不说任何其他内容。只有明确跟你对话、下指令、问问题时才正常回答。没有真实传感器数据时绝不编造巡检结果，如实告知。"
-  # Prompt seed: fallback when SOUL.md is absent
+  # Prompt seed: fallback when prompts/SOUL.md is absent
   prompt_seed:
     - role: user
       content: "你是Thunder，穹沛科技的工业巡检机器人，用中文简洁回答。如果听到的话不是在跟你说话（旁人闲聊），只回复[SILENT]。没有真实数据时不编造。"
@@ -44,6 +44,13 @@ brain:
       content: "收到。我是Thunder，穹沛的巡检机器人。不是跟我说话我就保持沉默，没有数据不编造。等待指令。"
   # Format tag prepended to each user message for TTS output control
   user_prefix: "[工业巡检模式：中文口语，80字以内，简洁汇报式，不用markdown，不说英文]"
+  # Product-facing reply templates when RAG/memory cannot safely support an answer.
+  rag_policy_templates:
+    no_evidence: "我这里没有可靠依据，不能直接回答。请补充位置或让管理员上传知识。"
+    filtered: "我找到了相关资料，但还不能作为可靠依据。请管理员先复核知识。"
+    stale: "这条知识已经过期，我不能按旧信息回答。请先刷新问答可用性。"
+    conflict: "我查到的信息互相冲突，不能给出确定结论。请管理员确认保留哪一条。"
+    unapproved: "相关知识还没有审批发布，不能用于回答。请先完成审批。"
   # Max characters to speak in voice mode (0 = unlimited, text mode always unlimited)
   max_response_chars: 200
   # ThunderAgentShell: model for agentic task loops (default: claude-haiku-4-5-20251001)
@@ -59,11 +66,13 @@ memory:
   # Set true to enable; requires sentence-transformers package (pip install askme[embed]).
   # Gracefully degrades to no-op when sentence-transformers is not installed.
   enabled: true
-  # Backend: "mem0" (default), "robotmem", or "vector"
+  # Backend: "mem0" (default), "robotmem", "mempalace", or "vector"
   #   mem0     — Mem0 + Qdrant (pip install mem0ai)
   #   robotmem — robotmem SDK, SQLite + hybrid search (pip install robotmem jieba)
   #   vector   — local VectorStore with sentence-transformers (no server)
   backend: robotmem
+  robotmem_fallback_backend: vector
+  mempalace_fallback_backend: vector
   embed_model: paraphrase-multilingual-MiniLM-L12-v2
   # Timeout (seconds) for embedding server reachability check
   health_check_timeout: 1
@@ -74,6 +83,17 @@ memory:
   # RobotMem settings (used when backend: robotmem)
   robotmem_collection: askme
   # robotmem_db_path: null  # default: ~/.robotmem/memory.db
+  # MemPalace settings (used when backend: mempalace)
+  mempalace_palace_path: data/memory/mempalace
+  mempalace_wing: askme
+  mempalace_room: robot
+  mempalace_n_results: 5
+  mempalace_min_similarity: 0.3
+  knowledge_index_jobs:
+    enabled: true
+    path: data/memory/catalog/index_jobs.json
+    max_history: 100
+    swallow_errors: true
   episodic:
     importance_threshold: 5.0
     reflect_min_events: 5
@@ -105,7 +125,7 @@ voice:
   input_transport: auto
   # HK-MIC native rate is 48kHz 2ch — MicInput resamples to 16kHz mono
   # On Windows Realtek: typically 44100Hz. Set to match your mic's native rate.
-  mic_native_rate: 44100
+  mic_native_rate: 48000
   mic_channels: 2
   mic_channel_select: 0
   mic_highpass_hz: 80
@@ -144,12 +164,18 @@ voice:
   # On sunrise MCP01: noise floor ~100-200, speech ~1000+. Set 0 to disable.
   # HKMIC: noise floor peak=12-17, speech peak=5000+. Gate at 200 cleanly separates.
   # (Old MCP01 had noise~250/speech~340, too close. HKMIC has huge margin.)
-  noise_gate_peak: 50
+  noise_gate_peak: 500
 
-  # Echo gate: suppress mic during TTS playback when peak < threshold
-  # Enables barge-in (user can interrupt) while blocking speaker echo
-  # Speaker echo ~50-500, user speech ~800+. Set 0 to disable.
-  echo_gate_peak: 800
+  # MCP01 direct capture hears playback tail/noise for a few seconds after TTS.
+  # Discard that tail so Sunrise does not recognize its own answer as a user turn.
+  post_tts_input_cooldown_s: 3.0
+
+  # Echo gate: suppress mic during TTS playback when peak < threshold.
+  # Sunrise currently has no separate ALSA/HKMIC input; the MCP01 direct
+  # capture sees the speaker loopback itself, often peaking above 20k. Gate
+  # that echo during playback so the assistant's own answer is not treated as
+  # user barge-in. Set lower only after a real separate user mic is verified.
+  echo_gate_peak: 30000
 
   # Cloud ASR: Alibaba DashScope Paraformer real-time.
   # Much higher accuracy than local sherpa-onnx (CER 1.68% vs ~15%).
@@ -160,12 +186,25 @@ voice:
     model: paraformer-realtime-v2
     sample_rate: 16000
     language_hints: ["zh", "en"]
+    # Wait long enough for final/interim result events on hardware room-loop clips.
+    finish_timeout: 8.0
+    # Do not stream pre-speech silence/noise into a warm cloud session by default.
+    feed_silence: false
 
   # Address detection: filter out bystander chat (not talking to robot).
   # When enabled, casual speech like "走走走吃饭去" is silently ignored.
   # Safe default: uncertain → respond (never miss a real command).
   address_detection:
     enabled: true
+
+  # Interaction gate: separates ambient speech from intentional human-robot
+  # interaction before ASR transcripts enter LLM/task planning.
+  interaction_gate:
+    enabled: true
+    min_asr_confidence: 0.45
+    max_perception_age_s: 2.0
+    max_interaction_distance_m: 4.0
+    sound_angle_tolerance_deg: 35.0
 
   # Audio input filter: DC removal + high-pass before VAD/ASR.
   # Removes low-frequency noise (motor hum, HVAC, ground loop).
@@ -218,12 +257,17 @@ voice:
     voice: zh-CN-YunjianNeural
     rate: "+0%"
     # MiniMax backend settings — 切换 backend: minimax 后生效
-    # SSE流式传输，低延迟，增量播放（不等完整音频）
+    # MiniMax streaming transport: "sse" | "websocket".
+    # WebSocket uses the Speech 2.8 T2A task_start/task_continue/task_finish flow.
     minimax_api_key: ${MINIMAX_API_KEY}
     minimax_tts_url: https://api.minimax.chat/v1
+    minimax_tts_transport: websocket
+    # 中国账号/key 使用 minimaxi.com；Global 账号可改为 api.minimax.io。
+    minimax_tts_ws_url: wss://api.minimaxi.com/ws/v1/t2a_v2
     minimax_tts_model: speech-2.8-turbo
     minimax_voice_id: male-qn-qingse
-    minimax_sample_rate: 24000
+    minimax_sample_rate: 32000
+    minimax_audio_format: mp3
     # Voice tuning (MiniMax)
     # speed: 0.5-2.0 (default 1.0), vol: 0-10 (default 1.0), pitch: -12 to 12 semitones (default 0)
     minimax_speed: 1.0
@@ -231,11 +275,52 @@ voice:
     minimax_pitch: 0
     # emotion: "" (auto), happy, sad, angry, fearful, disgusted, surprised, calm
     minimax_emotion: ""
+    # Selectable customer-facing voice styles. By default they reuse
+    # minimax_voice_id and vary speed/volume/pitch/emotion; set different
+    # voice_id values here for cloned or provider-specific timbres.
+    voice_profile: patrol_default
+    voice_profile_state_path: data/voice/active_voice_profile.json
+    voice_profiles:
+      patrol_default:
+        label: 巡检播报
+        voice_id: male-qn-qingse
+        speed: 1.0
+        volume: 1.0
+        pitch: 0
+        emotion: ""
+      visitor_friendly:
+        label: 游客服务
+        voice_id: male-qn-qingse
+        speed: 0.96
+        volume: 0.95
+        pitch: 1
+        emotion: happy
+      security_clear:
+        label: 安防提醒
+        voice_id: male-qn-qingse
+        speed: 1.0
+        volume: 1.0
+        pitch: -1
+        emotion: calm
+      emergency_short:
+        label: 紧急告警
+        voice_id: male-qn-qingse
+        speed: 1.08
+        volume: 1.0
+        pitch: 0
+        emotion: fearful
+      night_quiet:
+        label: 夜间低扰
+        voice_id: male-qn-qingse
+        speed: 0.9
+        volume: 0.72
+        pitch: -2
+        emotion: calm
     # Preserve enough leading context that short first tokens ("1"/"一") are not
     # thinned out before the USB speaker wake-up protection runs.
     minimax_leading_silence_preserve_seconds: 0.16
     minimax_onset_threshold: 0.0005
-    # Voice cloning: run `python scripts/clone_voice.py <audio> --voice-id <id>`
+    # Voice cloning: run `python scripts/demo/clone_voice.py <audio> --voice-id <id>`
     # then set minimax_voice_id to the cloned voice_id above.
     # Cloned voice expires in 7 days if not used in any T2A call.
     # Common
@@ -248,7 +333,7 @@ voice:
     # Output transport: "auto" uses ALSA/aplay first and falls back to MCP01
     # direct USB playback if Sunrise exposes no ALSA card; "usb_direct" forces
     # the fallback path for the Lenovo MCP01 USB Audio speaker.
-    output_transport: auto
+    output_transport: usb_direct
     # MCP01 wakes slowly when opened through direct USB. Keep one userland USB
     # playback helper alive for the response so the first word does not sit on a
     # fresh stream boundary.
@@ -258,31 +343,37 @@ voice:
     # nonzero idle keepalive is added and verified on Sunrise.
     usb_direct_trust_persistent_warm_state: false
     usb_direct_stream_start_grace_seconds: 0.8
-    usb_direct_stream_drain_grace_seconds: 0.9
+    usb_direct_stream_drain_grace_seconds: 0.15
     # Add pre-roll and coalesce streamed MiniMax chunks to avoid clipped starts
     # and choppy playback on Sunrise.
-    usb_direct_preroll_seconds: 1.05
+    usb_direct_preroll_seconds: 0.0
     # Background prewarm can become stale before speech is ready. Keep speaker
     # wake-up attached to each utterance until a verified idle keepalive exists.
     usb_direct_background_prewarm: false
     # Speech always pays the cold-start guard on Sunrise for now; a live helper
     # alone is not enough to keep the analog output path physically awake.
-    usb_direct_speech_leadin_seconds: 1.25
-    usb_direct_speech_warm_leadin_seconds: 1.25
-    # A very short shaped tone wakes the MCP01 speaker/amp gate. Low-level
-    # dither alone can leave the analog path closed, causing the first syllable
-    # or digit to become the wake-up signal and get clipped.
+    usb_direct_quiet_start: true
+    usb_direct_speech_leadin_seconds: 0.25
+    usb_direct_speech_warm_leadin_seconds: 0.25
+    # MCP01 room-loop capture attenuates actual speech far more than wake tones.
+    # Boost only the speech body with a soft limiter so ASR sees intelligible
+    # content without making the wake/opening tone dominate even further.
+    usb_direct_speech_gain: 8.0
+    # Keep the USB stream open with a silent lead-in. Earlier configs used an
+    # audible shaped tone/noise here to wake the MCP01 amp, but that produced a
+    # pre-speech artifact on every response.
     usb_direct_speech_wake_signal_seconds: 1.05
-    usb_direct_speech_wake_signal_gain: 0.28
+    usb_direct_speech_wake_signal_gain: 0.0
+    usb_direct_speech_wake_noise_gain: 0.0
     usb_direct_speech_wake_signal_hz: 880
     usb_direct_speech_wake_gap_seconds: 0.1
-    # Copy the first audible speech onset at low volume before the real speech.
-    # This sacrificial onset protects very short leading syllables/digits ("一")
-    # from MCP01 soft-start clipping without adding seconds of silence.
-    usb_direct_speech_onset_cushion_seconds: 0.35
-    usb_direct_speech_onset_cushion_gain: 0.45
+    # Disable sacrificial speech onset copy; it is audible before every answer.
+    # Re-enable only if hardware testing shows clipped first syllables.
+    # It stays at 0.0 on Sunrise unless first-syllable clipping returns.
+    usb_direct_speech_onset_cushion_seconds: 0.0
+    usb_direct_speech_onset_cushion_gain: 0.0
     usb_direct_speech_onset_gap_seconds: 0.0
-    usb_direct_stream_guard_seconds: 0.25
+    usb_direct_stream_guard_seconds: 0.0
     usb_direct_coalesce_timeout: 8.0
 
 # ----------------------------------------------------------
@@ -327,7 +418,7 @@ tools:
   #   http_allowlist:
   #     - http://localhost:8080        # dog-control-service
   #     - http://localhost:5070        # dog-safety-service
-  #     - http://localhost:5000        # nav-gateway
+  #     - http://localhost:8088        # nav-gateway
   #     - http://192.168.66.190:8080   # remote robot service
   http_allowlist: []
   default_timeout: 8.0
@@ -370,6 +461,17 @@ proactive:
   scene_history_size: 5
   # Periodic auto-tasks (optional)
   auto_tasks: []
+  alerts:
+    # Incident archive is local evidence for audit and handoff review.
+    incident_archive_path: data/incidents/incident-alerts.jsonl
+    # DingTalk webhook is optional. Configure in deployment-specific config or env-expanded config.
+    dingtalk_webhook: ""
+    # Optional DingTalk robot signing secret. Use ${DINGTALK_SECRET} in deployment configs.
+    dingtalk_secret: ""
+    severity_routes:
+      info: ["voice", "log"]
+      warning: ["voice", "webhook", "log"]
+      error: ["voice", "dingtalk", "webhook", "log"]
   #   - name: "环境播报"
   #     interval: 300
   #     prompt: "用一句话描述当前环境状况"
@@ -430,12 +532,302 @@ ota:
     site_id: ""
 
 # ----------------------------------------------------------
+# Field operations: raw sensor/camera/robot event -> alert workflow
+# ----------------------------------------------------------
+field_operations:
+  # lab keeps local smoke warnings non-blocking; production upgrades every
+  # external-service, live-audio, audit, and hardware evidence gap to a blocker.
+  deployment_mode: ${ASKME_FIELD_DEPLOYMENT_MODE}
+  archive_path: artifacts/field_ops/events.jsonl
+  scenario_report_path: artifacts/field_operations/scenario-evaluation.json
+  # Optional customer site profile. When present, field operations loads map,
+  # devices, responder groups, and scenario thresholds from this file first;
+  # explicit values below still override it.
+  site_profile_path: deploy/site-profiles/park-demo.yaml
+  robot_id: thunder-1
+  robot_name: Thunder
+  # Enable only for low-risk visitor/facility service wording. P0 alerts still
+  # use fixed, audited templates.
+  llm_narrative_enabled: false
+  fire_temperature_c: 60.0
+  smoke_level: 0.7
+  trash_fill_ratio: 0.8
+  crowd_person_count: 5
+  crowd_duration_min: 30.0
+  parking_duration_s: 120.0
+  night_stranger_dwell_s: 10.0
+  max_input_age_s: 30.0
+  min_detection_confidence: 0.55
+  dedupe_window_s: 120.0
+  require_trusted_devices: false
+  device_signature_max_age_s: 300.0
+  device_offline_after_s: 300.0
+  device_registry: {}
+  dingtalk_webhooks:
+    security: ${ASKME_DINGTALK_SECURITY_WEBHOOK}
+    cleaning: ${ASKME_DINGTALK_CLEANING_WEBHOOK}
+    operations: ${ASKME_DINGTALK_OPERATIONS_WEBHOOK}
+  dingtalk_secrets:
+    security: ${ASKME_DINGTALK_SECURITY_SECRET}
+    cleaning: ${ASKME_DINGTALK_CLEANING_SECRET}
+    operations: ${ASKME_DINGTALK_OPERATIONS_SECRET}
+  action_audit:
+    enabled: true
+    path: artifacts/field_ops/field-action-audit.jsonl
+    retry_queue_path: artifacts/field_ops/audit-delivery-retry.jsonl
+    swallow_errors: false
+    hmac_secret: ${ASKME_FIELD_ACTION_AUDIT_HMAC_SECRET}
+    signature_key_id: local-field-action-audit
+  # Demo operator directory for field-event handling. Production should bind
+  # these ids to the enterprise identity system and audit log.
+  operator_directory:
+    mode: demo_config
+    identity_provider: local_config
+    production_binding_required: true
+    production_target: enterprise_sso_or_iam
+    session_operator_header: x-askme-operator-id
+    oidc:
+      issuer: ${ASKME_IAM_OIDC_ISSUER}
+      client_id: ${ASKME_IAM_OIDC_CLIENT_ID}
+      jwks_uri: ${ASKME_IAM_OIDC_JWKS_URI}
+      claim_operator_id: sub
+      claim_roles: roles
+    permissions:
+      operator:
+        - field:event:create
+        - field:event:acknowledge
+        - field:event:request_close
+        - knowledge:read
+        - knowledge:import
+        - knowledge:preview
+        - runtime:read
+        - runtime:pause
+        - runtime:resume
+        - voice:profile:read
+      supervisor:
+        - field:event:create
+        - field:event:acknowledge
+        - field:event:close
+        - field:event:request_close
+        - field:notification:test
+        - knowledge:read
+        - knowledge:import
+        - knowledge:approve
+        - knowledge:delete
+        - knowledge:rollback
+        - knowledge:rebuild
+        - runtime:read
+        - runtime:pause
+        - runtime:resume
+        - runtime:cancel
+        - runtime:advance
+        - voice:profile:read
+        - voice:profile:update
+      admin:
+        - "*"
+  operators:
+    dashboard.operator:
+      roles: [operator]
+    guard-1:
+      roles: [operator]
+    security-1:
+      roles: [operator]
+    cleaning-1:
+      roles: [operator]
+    ops-1:
+      roles: [operator]
+    supervisor-1:
+      roles: [supervisor]
+    admin-1:
+      roles: [admin]
+  site_map:
+    zones:
+      main-road-1:
+        name: B区主通道
+        location: B区主通道
+        type: main_channel
+        parking_allowed: false
+      guide-01:
+        name: 游客中心路引点
+        location: 游客中心门口
+        type: help_point
+        help_point_id: guide-01
+      north-window-01:
+        name: 北侧一层窗户
+        location: 北侧一层窗户
+        type: window
+
+# ----------------------------------------------------------
+# Park space cognition: semantic points, service points, and guide routes.
+# This is the product-facing layer for controlled visitor wayfinding.
+# ----------------------------------------------------------
+space_cognition:
+  park_id: fanmu-chuangyi
+  map_id: fanmu-phase-1
+  points:
+    - point_id: sp-west-gate
+      park_id: fanmu-chuangyi
+      map_id: fanmu-phase-1
+      point_name: 西门问询点
+      point_type: service
+      aliases: [西门, 西门口, 主入口, 问询点]
+      x: 0
+      y: 0
+      z: 0
+      yaw: 0
+      guide_mode: voice
+      accessibility: robot_stop_only
+      enabled: true
+    - point_id: poi-fanmu-coffee
+      park_id: fanmu-chuangyi
+      map_id: fanmu-phase-1
+      point_name: 梵木咖啡
+      point_type: restaurant
+      aliases: [咖啡店, 咖啡馆, 喝咖啡的地方, 咖啡]
+      building: 2号楼
+      floor: 一层
+      x: 80
+      y: 20
+      z: 0
+      yaw: 90
+      guide_mode: escort
+      accessibility: robot_passable
+      opening_hours: site_business_hours
+      enabled: true
+    - point_id: poi-restroom-3f1
+      park_id: fanmu-chuangyi
+      map_id: fanmu-phase-1
+      point_name: 3号楼一层卫生间
+      point_type: restroom
+      aliases: [厕所, 卫生间, 洗手间, 最近厕所]
+      building: 3号楼
+      floor: 一层
+      x: 45
+      y: 5
+      z: 0
+      yaw: 0
+      guide_mode: voice
+      accessibility: indoor_voice_only
+      enabled: true
+    - point_id: poi-parking-east
+      park_id: fanmu-chuangyi
+      map_id: fanmu-phase-1
+      point_name: 东侧停车区
+      point_type: parking
+      aliases: [停车场, 停车区, 停车的地方, 车位]
+      x: 120
+      y: -30
+      z: 0
+      yaw: 0
+      guide_mode: voice
+      accessibility: road_voice_only
+      enabled: true
+  service_points:
+    - service_point_id: guide-west-gate
+      park_id: fanmu-chuangyi
+      map_id: fanmu-phase-1
+      point_id: sp-west-gate
+      service_point_name: 西门问询服务点
+      dwell_seconds: 3
+      idle_prompt: 请站在问询牌前，我可以帮你指路。
+      greeting_prompt: 你好，请问需要指路吗？
+      supported_intents: [wayfinding, escort]
+      enabled: true
+  routes:
+    - route_id: route-west-gate-to-coffee
+      from_point_id: sp-west-gate
+      to_point_id: poi-fanmu-coffee
+      instructions: 梵木咖啡在2号楼一层。从西门沿主通道向前约80米，看到主通道后右转，沿左侧商铺继续前进即可到达。
+      guide_mode: escort
+      distance_m: 95
+      robot_passable: true
+      risk_notes: [人流密集时降低速度, 转角处语音提醒访客跟随]
+      enabled: true
+    - route_id: route-west-gate-to-restroom
+      from_point_id: sp-west-gate
+      to_point_id: poi-restroom-3f1
+      instructions: 最近的卫生间在3号楼一层。从这里沿主通道向前走约45米，看到3号楼入口后进入一层右侧即可到达。
+      guide_mode: voice
+      distance_m: 50
+      robot_passable: false
+      risk_notes: [室内区域首期只语音指路]
+      enabled: true
+
+# ----------------------------------------------------------
+# Perception provider contracts: external algorithms -> InteractionGate
+# ----------------------------------------------------------
+perception:
+  interaction_provider:
+    enabled: false
+    max_age_s: 2.0
+    # External perception daemons may write these JSON files. Askme merges only
+    # fresh facts into the voice interaction gate.
+    paths:
+      pose_gaze: artifacts/perception/pose_gaze.json
+      gesture: artifacts/perception/gesture.json
+      sound_source: artifacts/perception/sound_source.json
+      audio_visual_association: artifacts/perception/audio_visual_association.json
+      approach_dwell: artifacts/perception/approach_dwell.json
+      multi_person_arbitration: artifacts/perception/multi_person_arbitration.json
+
+# ----------------------------------------------------------
 # Health server: HTTP probes for OTA and local diagnostics
 # ----------------------------------------------------------
 health_server:
   enabled: true
-  host: 0.0.0.0
+  # Default to loopback. Binding to 0.0.0.0 requires a control_api_key or an
+  # explicit allow_unsafe_remote=true override.
+  host: 127.0.0.1
   port: 8765
+  control_api_key: ${ASKME_CONTROL_API_KEY}
+  allow_unsafe_remote: false
+
+# ----------------------------------------------------------
+# Cognition: world-state, working memory, safe planning
+# ----------------------------------------------------------
+cognition:
+  enabled: true
+  sync_enabled: true
+  sync_interval_seconds: 1.0
+  scene_stale_after_s: 3.0
+  robot_stale_after_s: 5.0
+  max_event_lines_per_sync: 100
+  max_facts: 200
+  max_events: 100
+  default_stale_after_s: 10.0
+  planning_session_max_items: 20
+  working_memory_enabled: true
+  working_memory_max_items: 80
+  working_memory_retention_seconds: 1800
+  # Keep the planning scratchpad in-memory unless a privacy policy explicitly
+  # enables durable storage in a separate memory service.
+  working_memory_persist_enabled: false
+
+# ----------------------------------------------------------
+# Runtime handoff: confirmed-plan -> fake arbiter TaskRun
+# ----------------------------------------------------------
+runtime_handoff:
+  enabled: true
+  # Safe profiles: fake | shadow | sim. None dispatch hardware.
+  profile: fake
+  fake_auto_complete: true
+  sim_auto_complete: false
+  max_world_state_age_seconds: 30.0
+  max_runs: 50
+  operator_id: askme.operator
+  # Optional persistent runtime audit. Disabled by default for local demos.
+  audit:
+    enabled: false
+    path: artifacts/runtime_handoff/audit.jsonl
+    swallow_errors: true
+  # Product-facing recoverable TaskRun state. Keep enabled in demos so mission
+  # history, reports, and operator actions survive a local service restart.
+  store:
+    enabled: true
+    path: artifacts/runtime_handoff/task_runs.json
+    swallow_errors: true
+  # When true, preflight blocks if dog-safety-service is unavailable/unconfigured.
+  require_dog_safety: false
 
 # ----------------------------------------------------------
 # Runtime: NOVA Dog runtime bridge

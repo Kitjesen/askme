@@ -74,6 +74,32 @@ def test_live_submit_requires_confirmation_before_http(monkeypatch) -> None:
     assert result["mission"]["status"] == "pending_confirmation"
 
 
+def test_payload_confirm_flag_is_not_trusted_by_default(monkeypatch) -> None:
+    service = MissionService({
+        "runtime": {
+            "mission": {
+                "submit_enabled": True,
+                "base_url": "http://arbiter.test",
+            }
+        }
+    })
+
+    def _fail_post(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("untrusted payload confirmation must not call requests.post")
+
+    monkeypatch.setattr("askme.runtime.mission.requests.post", _fail_post)
+
+    result = service.submit_from_payload({
+        "text": "inspect area-a",
+        "dry_run": False,
+        "confirmed": True,
+    })
+
+    assert result["submission"]["submitted"] is False
+    assert result["submission"]["reason"] == "confirmation_required"
+    assert result["mission"]["status"] == "pending_confirmation"
+
+
 def test_live_submit_uses_runtime_create_mission_shape(monkeypatch) -> None:
     service = MissionService({
         "runtime": {

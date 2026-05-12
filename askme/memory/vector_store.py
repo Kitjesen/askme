@@ -149,6 +149,40 @@ class VectorStore:
                 })
             return results
 
+    def list_records(self, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        """Return stored records for admin/catalog views.
+
+        This is intentionally metadata-preserving and does not filter deleted or
+        draft records. Retrieval filtering lives in MemoryBridge.
+        """
+        safe_limit = max(1, min(int(limit), 500))
+        safe_offset = max(0, int(offset))
+        with self._lock:
+            records: list[dict[str, Any]] = []
+            for idx in range(safe_offset, min(len(self._texts), safe_offset + safe_limit)):
+                metadata = dict(self._metadata[idx] or {})
+                records.append({
+                    "index": idx,
+                    "text": self._texts[idx],
+                    "metadata": metadata,
+                })
+            return records
+
+    def update_metadata(self, record_id: str, patch: dict[str, Any]) -> bool:
+        """Update metadata for a stored record by stable ``record_id``."""
+        target = str(record_id or "").strip()
+        if not target:
+            return False
+        with self._lock:
+            for idx, metadata in enumerate(self._metadata):
+                current = metadata if isinstance(metadata, dict) else {}
+                if str(current.get("record_id") or "") != target:
+                    continue
+                current.update(patch)
+                self._metadata[idx] = current
+                return True
+        return False
+
     # -- Persistence ----------------------------------------------------------
 
     def save(self) -> None:

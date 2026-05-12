@@ -412,15 +412,28 @@ class MicInput:
         if "no soundcards" in cards_text:
             return False
 
+        required_channels = max(1, int(self._native_channels or 1))
+        if self._device is not None:
+            try:
+                device_info = sd.query_devices(self._device, kind="input")
+            except Exception:
+                return False
+            if isinstance(device_info, dict):
+                return int(device_info.get("max_input_channels", 0) or 0) >= required_channels
+            return False
+
         try:
             devices = sd.query_devices()
         except Exception:
             return False
 
         if isinstance(devices, dict):
-            return int(devices.get("max_input_channels", 0) or 0) > 0
+            return int(devices.get("max_input_channels", 0) or 0) >= required_channels
         try:
-            return any(int(device.get("max_input_channels", 0) or 0) > 0 for device in devices)
+            return any(
+                int(device.get("max_input_channels", 0) or 0) >= required_channels
+                for device in devices
+            )
         except Exception:
             return False
 

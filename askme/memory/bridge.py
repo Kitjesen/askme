@@ -25,13 +25,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from askme.config import get_config, project_root
+from askme.memory.catalog import KnowledgeCatalog
 from askme.memory.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
+_UTC = timezone(timedelta(0))
 
 
 class MemoryBridge:
@@ -42,6 +46,7 @@ class MemoryBridge:
         config: dict[str, Any] | None = None,
         *,
         data_dir: str | Path | None = None,
+        knowledge_catalog: KnowledgeCatalog | None = None,
     ) -> None:
         """Create a MemoryBridge.
 
@@ -62,8 +67,14 @@ class MemoryBridge:
         )
         self._retrieve_timeout: float = self._mem_cfg.get("retrieve_timeout", 2.0)
 
-        # Backend selection: "mem0" (default), "robotmem", "vector"
+        # Backend selection: "mem0" (default), "robotmem", "mempalace", "vector"
         self._backend: str = self._mem_cfg.get("backend", "mem0")
+        self._robotmem_fallback_backend: str = self._mem_cfg.get(
+            "robotmem_fallback_backend", "mem0"
+        )
+        self._mempalace_fallback_backend: str = self._mem_cfg.get(
+            "mempalace_fallback_backend", "vector"
+        )
 
         # Mem0 instance — lazy init via _ensure_mem0()
         self._mem0: Any = None
@@ -72,6 +83,10 @@ class MemoryBridge:
         # RobotMem backend — lazy init via _ensure_robotmem()
         self._robotmem: Any = None  # RobotMemBackend instance
         self._robotmem_failed: bool = False
+
+        # MemPalace backend - lazy init via _ensure_mempalace()
+        self._mempalace: Any = None
+        self._mempalace_failed: bool = False
 
         # Fallback: local VectorStore (lazy — only init when actually needed)
         if data_dir is not None:
@@ -82,7 +97,26 @@ class MemoryBridge:
             if not resolved.is_absolute():
                 resolved = project_root() / resolved
         self._store_path = resolved / "memory" / "vectors" / "store.json"
+        self._knowledge_catalog = knowledge_catalog or KnowledgeCatalog(config=cfg, data_dir=resolved)
         self._store: VectorStore | None = None
+        self._warmup_active = False
+        self._retrieve_count = 0
+        self._retrieve_error_count = 0
+        self._fallback_count = 0
+        self._last_retrieve_ms: float | None = None
+        self._last_retrieved_items = 0
+        self._last_backend: str | None = None
+        self._last_fallback_reason: str = ""
+        self._last_evidence: list[dict[str, Any]] = []
+        self._last_dropped_evidence: list[dict[str, Any]] = []
+        self._rag_allowed_statuses = {
+            str(status).strip().lower()
+            for status in self._mem_cfg.get(
+                "rag_allowed_approval_statuses",
+                ["", "published", "approved", "active"],
+            )
+        }
+        self._rag_enforce_expiry = bool(self._mem_cfg.get("rag_enforce_expiry", True))
 
         if not self._enabled:
             logger.info("[Memory] Memory disabled in config.")
@@ -182,10 +216,46 @@ class MemoryBridge:
             return False
 
     # ------------------------------------------------------------------
+    # MemPalace lazy initialization
+    # ------------------------------------------------------------------
+
+    def _ensure_mempalace(self) -> bool:
+        """Try to initialise the MemPalace backend. Returns True if ready."""
+        if self._mempalace is not None and self._mempalace.available:
+            return True
+        if not self._enabled or self._mempalace_failed:
+            return False
+        try:
+            from askme.memory.mempalace_backend import MemPalaceBackend
+
+            self._mempalace = MemPalaceBackend(self._mem_cfg, self._brain_cfg)
+            inited = self._mempalace._ensure_mempalace()
+            if not inited:
+                self._mempalace_failed = True
+                self._mempalace = None
+                return False
+            logger.info("[Memory] MemPalace backend ready.")
+            return True
+        except Exception as e:
+            logger.warning("[Memory] MemPalace init failed, falling back: %s", e)
+            self._mempalace_failed = True
+            return False
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def warmup(self) -> None:
+        """Pre-load memory backends in the background without blocking turns."""
+        if not self._enabled or self._warmup_active:
+            return
+        self._warmup_active = True
+        try:
+            await self._warmup_once()
+        finally:
+            self._warmup_active = False
+
+    async def _warmup_once(self) -> None:
         """Pre-load the embedding model in a background thread."""
         if not self._enabled:
             return
@@ -201,10 +271,23 @@ class MemoryBridge:
             except Exception:
                 logger.debug("[Memory] RobotMem warmup failed, trying fallback.")
 
-        if self._backend in ("mem0", "robotmem"):
+        if self._backend == "mempalace":
+            try:
+                inited = await asyncio.to_thread(self._ensure_mempalace)
+                if inited:
+                    await self._mempalace.warmup()
+                    logger.info("[Memory] MemPalace warmup complete.")
+                    return
+            except Exception:
+                logger.debug("[Memory] MemPalace warmup failed, trying fallback.")
+
+        if self._backend in ("mem0", "robotmem", "mempalace"):
             # Try Mem0 (primary for mem0 backend, fallback for robotmem)
             try:
-                inited = await asyncio.to_thread(self._ensure_mem0)
+                if self._backend == "mempalace" and self._mempalace_fallback_backend != "mem0":
+                    inited = False
+                else:
+                    inited = await asyncio.to_thread(self._ensure_mem0)
                 if inited:
                     logger.info("[Memory] Mem0 warmup complete.")
                     return
@@ -231,17 +314,163 @@ class MemoryBridge:
         or an empty string if memory is unavailable / finds nothing.
         """
         if not self._enabled:
+            self._last_evidence = []
+            self._record_retrieve_result("", backend="disabled", elapsed_ms=0.0)
+            return ""
+        started = time.perf_counter()
+        try:
+            result = await asyncio.wait_for(
+                self._retrieve_with_fallbacks(text),
+                timeout=self._retrieve_timeout,
+            )
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            self._record_retrieve_result(
+                result,
+                backend=self._last_backend or self._backend,
+                elapsed_ms=elapsed_ms,
+            )
+            return result
+        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+            logger.warning("[Memory] retrieval timed out (%.1fs).", self._retrieve_timeout)
+            self._retrieve_error_count += 1
+            self._record_retrieve_result(
+                "",
+                backend=self._last_backend or self._backend,
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                fallback_reason="retrieve_timeout",
+            )
+            return ""
+        except Exception as exc:
+            logger.debug("[Memory] retrieve failed: %s", exc)
+            self._retrieve_error_count += 1
+            self._record_retrieve_result(
+                "",
+                backend=self._last_backend or self._backend,
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                fallback_reason=type(exc).__name__,
+            )
+            return ""
+
+    async def _retrieve_with_fallbacks(self, text: str) -> str:
+        """Run backend retrieval under the public retrieve() time budget."""
+        self._last_backend = None
+        self._last_fallback_reason = ""
+        self._last_evidence = []
+        self._last_dropped_evidence = []
+        if (
+            self._warmup_active
+            and self._robotmem is None
+            and self._mempalace is None
+            and self._mem0 is None
+            and self._store is None
+        ):
+            logger.debug("[Memory] Warmup in progress; skipping retrieval for this turn.")
+            self._last_backend = "warmup"
+            self._last_fallback_reason = "warmup_in_progress"
             return ""
 
         # Try configured backend first — use to_thread so lazy init (ONNX load)
         # never blocks the event loop on cold start.
-        if self._backend == "robotmem" and await asyncio.to_thread(self._ensure_robotmem):
-            return await self._robotmem.retrieve(text)
+        if self._backend == "robotmem":
+            try:
+                robotmem_ready = await asyncio.wait_for(
+                    asyncio.to_thread(self._ensure_robotmem),
+                    timeout=self._retrieve_timeout,
+                )
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+                logger.warning(
+                    "[Memory] RobotMem init timed out (%.1fs).",
+                    self._retrieve_timeout,
+                )
+                robotmem_ready = False
+                self._fallback_count += 1
+                self._last_fallback_reason = "robotmem_init_timeout"
+            except Exception as exc:
+                logger.debug("[Memory] RobotMem init failed: %s", exc)
+                robotmem_ready = False
+                self._fallback_count += 1
+                self._last_fallback_reason = "robotmem_init_failed"
+            if robotmem_ready:
+                self._last_backend = "robotmem"
+                if hasattr(type(self._robotmem), "retrieve_items"):
+                    items = await self._robotmem.retrieve_items(text)
+                    items = self._filter_evidence_items(items, backend="robotmem")
+                    self._set_evidence(items, backend="robotmem")
+                    return self._format_evidence(items)
+                result = await self._robotmem.retrieve(text)
+                items = [
+                    {
+                        "text": line.strip().lstrip("- ").strip(),
+                        "backend": "robotmem",
+                        "source": "robotmem",
+                        "category": "",
+                        "score": None,
+                        "metadata": {},
+                    }
+                    for line in str(result).splitlines()
+                    if line.strip()
+                ]
+                items = self._filter_evidence_items(items, backend="robotmem")
+                self._set_evidence(items, backend="robotmem")
+                return self._format_evidence(items)
+            if not self._last_fallback_reason:
+                self._fallback_count += 1
+                self._last_fallback_reason = "robotmem_unavailable"
 
-        if self._backend in ("mem0", "robotmem") and await asyncio.to_thread(self._ensure_mem0):
+        if self._backend == "mempalace":
+            try:
+                mempalace_ready = await asyncio.wait_for(
+                    asyncio.to_thread(self._ensure_mempalace),
+                    timeout=self._retrieve_timeout,
+                )
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+                logger.warning(
+                    "[Memory] MemPalace init timed out (%.1fs).",
+                    self._retrieve_timeout,
+                )
+                mempalace_ready = False
+                self._fallback_count += 1
+                self._last_fallback_reason = "mempalace_init_timeout"
+            except Exception as exc:
+                logger.debug("[Memory] MemPalace init failed: %s", exc)
+                mempalace_ready = False
+                self._fallback_count += 1
+                self._last_fallback_reason = "mempalace_init_failed"
+            if mempalace_ready:
+                self._last_backend = "mempalace"
+                try:
+                    raw_items = await self._mempalace.retrieve_items(text)
+                except Exception as exc:
+                    logger.warning("[Memory] MemPalace retrieval failed, falling back: %s", exc)
+                    raw_items = []
+                    self._fallback_count += 1
+                    self._last_fallback_reason = "mempalace_retrieve_failed"
+                items = self._filter_evidence_items(raw_items, backend="mempalace")
+                if items or self._last_dropped_evidence:
+                    self._set_evidence(items, backend="mempalace")
+                    return self._format_evidence(items)
+                if not self._last_fallback_reason:
+                    self._fallback_count += 1
+                    self._last_fallback_reason = "mempalace_empty"
+            if not self._last_fallback_reason:
+                self._fallback_count += 1
+                self._last_fallback_reason = "mempalace_unavailable"
+
+        use_mem0 = self._backend == "mem0" or (
+            self._backend == "robotmem" and self._robotmem_fallback_backend == "mem0"
+        ) or (
+            self._backend == "mempalace" and self._mempalace_fallback_backend == "mem0"
+        )
+        if use_mem0 and await asyncio.to_thread(self._ensure_mem0):
+            self._last_backend = "mem0"
             return await self._retrieve_mem0(text)
 
         # Fallback to VectorStore
+        if self._backend != "vector":
+            self._fallback_count += 1
+            if not self._last_fallback_reason:
+                self._last_fallback_reason = "vector_fallback"
+        self._last_backend = "vector"
         return await self._retrieve_vector_store(text)
 
     async def save(self, user_text: str, assistant_text: str) -> None:
@@ -257,12 +486,101 @@ class MemoryBridge:
             await self._robotmem.save(user_text, assistant_text)
             return
 
-        if self._backend in ("mem0", "robotmem") and await asyncio.to_thread(self._ensure_mem0):
+        if self._backend == "mempalace" and await asyncio.to_thread(self._ensure_mempalace):
+            await self._mempalace.save(user_text, assistant_text)
+            return
+
+        use_mem0 = self._backend == "mem0" or (
+            self._backend == "robotmem" and self._robotmem_fallback_backend == "mem0"
+        ) or (
+            self._backend == "mempalace" and self._mempalace_fallback_backend == "mem0"
+        )
+        if use_mem0 and await asyncio.to_thread(self._ensure_mem0):
             await self._save_mem0(user_text, assistant_text)
             return
 
         # Fallback to VectorStore
         await self._save_vector_store(user_text, assistant_text)
+
+    async def save_fact(self, text: str, metadata: dict[str, Any] | None = None) -> None:
+        """Persist a curated knowledge fact with optional metadata."""
+        if not self._enabled:
+            return
+        clean = str(text or "").strip()
+        if not clean:
+            return
+
+        if self._backend == "robotmem" and await asyncio.to_thread(self._ensure_robotmem):
+            await self._robotmem.save_fact(clean, metadata or {})
+            return
+
+        if self._backend == "mempalace" and await asyncio.to_thread(self._ensure_mempalace):
+            await self._mempalace.save_fact(clean, metadata or {})
+            return
+
+        use_mem0 = self._backend == "mem0" or (
+            self._backend == "robotmem" and self._robotmem_fallback_backend == "mem0"
+        ) or (
+            self._backend == "mempalace" and self._mempalace_fallback_backend == "mem0"
+        )
+        if use_mem0 and await asyncio.to_thread(self._ensure_mem0):
+            await self._save_mem0(clean, f"[knowledge_import] {metadata or {}}")
+            return
+
+        store = self._ensure_store()
+        if not store or not store.available:
+            return
+        await asyncio.to_thread(store.add, clean, {"type": "knowledge", **(metadata or {})})
+        await asyncio.to_thread(store.save)
+
+    async def list_knowledge(self, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        """List locally indexed knowledge records for admin UI.
+
+        External providers such as RobotMem and Mem0 do not currently expose a
+        stable list/delete contract here, so this view is scoped to the local
+        vector catalog.
+        """
+        if not self._enabled:
+            return {"backend": "disabled", "records": [], "total": 0}
+        store = self._ensure_store()
+        if not store:
+            return {"backend": "vector", "records": [], "total": 0}
+        records = await asyncio.to_thread(store.list_records, limit=limit, offset=offset)
+        return {
+            "backend": "vector",
+            "records": [self._knowledge_catalog_record(record) for record in records],
+            "total": getattr(store, "size", len(records)),
+        }
+
+    async def update_knowledge_metadata(
+        self,
+        record_id: str,
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Patch local knowledge metadata and persist the catalog."""
+        if not self._enabled:
+            return {"updated": False, "error": "memory_disabled"}
+        store = self._ensure_store()
+        if not store:
+            return {"updated": False, "error": "vector_store_unavailable"}
+        allowed = {
+            "approval_status",
+            "category",
+            "source",
+            "owner",
+            "updated_at",
+            "expires_at",
+            "deleted_at",
+            "deleted_reason",
+            "restored_at",
+        }
+        clean_patch = {k: v for k, v in patch.items() if k in allowed}
+        if not clean_patch:
+            return {"updated": False, "error": "empty_patch"}
+        updated = await asyncio.to_thread(store.update_metadata, record_id, clean_patch)
+        if updated:
+            await asyncio.to_thread(store.save)
+        return {"updated": bool(updated), "record_id": record_id, "patch": clean_patch}
 
     def import_existing_data(self) -> int:
         """Scan L3 knowledge/digests and import into vector store.
@@ -309,12 +627,289 @@ class MemoryBridge:
             logger.info("[Memory] Imported %d entries from existing L3 data.", imported)
         return imported
 
+    def health(self) -> dict[str, Any]:
+        """Return runtime-observable RAG backend status."""
+        store = self._store
+        robotmem_available = bool(self._robotmem is not None and self._robotmem.available)
+        mempalace_available = bool(
+            self._mempalace is not None and self._mempalace.available
+        )
+        mem0_available = self._mem0 is not None
+        vector_available = bool(store and store.available)
+        return {
+            "enabled": self._enabled,
+            "backend": self._backend,
+            "available": self.available,
+            "robotmem_ready": robotmem_available,
+            "mempalace_ready": mempalace_available,
+            "mempalace_path": (
+                self._mempalace.palace_path if self._mempalace is not None else ""
+            ),
+            "mem0_ready": mem0_available,
+            "vector_ready": vector_available,
+            "vector_size": int(getattr(store, "size", 0) or 0) if store else 0,
+            "retrieve_count": self._retrieve_count,
+            "retrieve_error_count": self._retrieve_error_count,
+            "fallback_count": self._fallback_count,
+            "last_retrieve_ms": self._last_retrieve_ms,
+            "last_retrieved_items": self._last_retrieved_items,
+            "last_backend": self._last_backend or self._backend,
+            "last_fallback_reason": self._last_fallback_reason,
+            "last_evidence": self._last_evidence,
+            "last_dropped_evidence": self._last_dropped_evidence,
+            "last_answer_policy": self._answer_policy_snapshot(),
+        }
+
+    def _record_retrieve_result(
+        self,
+        result: str,
+        *,
+        backend: str,
+        elapsed_ms: float,
+        fallback_reason: str = "",
+    ) -> None:
+        self._retrieve_count += 1
+        self._last_backend = backend
+        self._last_retrieve_ms = round(float(elapsed_ms), 2)
+        self._last_retrieved_items = len([line for line in result.splitlines() if line.strip()])
+        if fallback_reason:
+            self._last_fallback_reason = fallback_reason
+
+    def _set_evidence(self, items: list[dict[str, Any]], *, backend: str) -> None:
+        self._last_evidence = [
+            {
+                "text": str(item.get("text", ""))[:300],
+                "backend": str(item.get("backend") or backend),
+                "source": str(item.get("source") or backend),
+                "category": str(item.get("category") or ""),
+                "score": item.get("score"),
+                "updated_at": (item.get("metadata") or {}).get("updated_at", ""),
+                "expires_at": (item.get("metadata") or {}).get("expires_at", ""),
+                "approval_status": (item.get("metadata") or {}).get("approval_status", ""),
+                "record_id": (item.get("metadata") or {}).get("record_id", ""),
+                "source_record_id": (item.get("metadata") or {}).get("record_id", ""),
+                "lifecycle_state": (item.get("metadata") or {}).get("lifecycle_state", ""),
+                "needs_reindex": bool((item.get("metadata") or {}).get("needs_reindex", False)),
+                "evidence_version": (item.get("metadata") or {}).get("evidence_version", ""),
+                "freshness_state": item.get("freshness_state", "unknown"),
+                "used_in_prompt": True,
+                "metadata": item.get("metadata") or {},
+            }
+            for item in items
+            if str(item.get("text", "")).strip()
+        ][:5]
+
+    @staticmethod
+    def _knowledge_catalog_record(record: dict[str, Any]) -> dict[str, Any]:
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        return {
+            "index": record.get("index"),
+            "record_id": metadata.get("record_id") or "",
+            "text": record.get("text") or "",
+            "category": metadata.get("category") or metadata.get("type") or "",
+            "source": metadata.get("source") or "",
+            "owner": metadata.get("owner") or "",
+            "updated_at": metadata.get("updated_at") or "",
+            "expires_at": metadata.get("expires_at") or "",
+            "approval_status": metadata.get("approval_status") or "",
+            "content_hash": metadata.get("content_hash") or "",
+            "metadata": metadata,
+        }
+
+    @staticmethod
+    def _format_evidence(items: list[dict[str, Any]]) -> str:
+        return "\n".join(
+            f"- {item['text']}" for item in items if str(item.get("text", "")).strip()
+        )
+
+    def _filter_evidence_items(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        backend: str,
+    ) -> list[dict[str, Any]]:
+        accepted: list[dict[str, Any]] = []
+        dropped: list[dict[str, Any]] = []
+        self._last_dropped_evidence = []
+        now = datetime.now(_UTC)
+        for raw in items:
+            item = dict(raw)
+            metadata = item.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            item["metadata"] = metadata
+            item.setdefault("backend", backend)
+            item.setdefault("source", metadata.get("source") or backend)
+            item.setdefault("category", metadata.get("category") or metadata.get("type") or "")
+
+            drop_reason = self._evidence_drop_reason(metadata, now=now)
+            if drop_reason:
+                dropped.append(self._dropped_evidence_snapshot(item, drop_reason))
+                continue
+            item["freshness_state"] = "fresh" if metadata.get("expires_at") else "no_expiry"
+            accepted.append(item)
+
+        accepted = self._drop_conflicting_evidence(accepted, dropped)
+        self._last_dropped_evidence = dropped[:5]
+        return accepted
+
+    def _drop_conflicting_evidence(
+        self,
+        accepted: list[dict[str, Any]],
+        dropped: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for item in accepted:
+            metadata = item.get("metadata") or {}
+            entity_key = self._normalized_metadata_value(metadata.get("entity_key"))
+            fact_key = self._normalized_metadata_value(metadata.get("fact_key"))
+            value = self._normalized_metadata_value(metadata.get("value"))
+            if not entity_key or not fact_key or not value:
+                continue
+            item["_conflict_value"] = value
+            groups.setdefault((entity_key, fact_key), []).append(item)
+
+        conflicted_ids: set[int] = set()
+        for (entity_key, fact_key), group in groups.items():
+            values = {str(item.get("_conflict_value") or "") for item in group}
+            if len(values) <= 1:
+                continue
+            reason = f"conflict:{entity_key}:{fact_key}"
+            for item in group:
+                conflicted_ids.add(id(item))
+                item.pop("_conflict_value", None)
+                dropped.append(self._dropped_evidence_snapshot(item, reason))
+
+        filtered: list[dict[str, Any]] = []
+        for item in accepted:
+            item.pop("_conflict_value", None)
+            if id(item) not in conflicted_ids:
+                filtered.append(item)
+        return filtered
+
+    def _evidence_drop_reason(
+        self,
+        metadata: dict[str, Any],
+        *,
+        now: datetime,
+    ) -> str:
+        status = str(metadata.get("approval_status", "")).strip().lower()
+        if status and status not in self._rag_allowed_statuses:
+            return f"approval_status:{status}"
+        if str(metadata.get("conflict_set_id") or "").strip():
+            return f"conflict:{metadata.get('conflict_set_id')}"
+        catalog_reason = self._knowledge_catalog.evidence_drop_reason(metadata)
+        if catalog_reason:
+            return catalog_reason
+        if self._rag_enforce_expiry:
+            expires_at = self._parse_evidence_time(metadata.get("expires_at"))
+            if expires_at is not None and expires_at <= now:
+                return "expired"
+        return ""
+
+    @staticmethod
+    def _parse_evidence_time(value: Any) -> datetime | None:
+        if value is None or str(value).strip() == "":
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(value), tz=_UTC)
+            except (OSError, OverflowError, ValueError):
+                return None
+        raw = str(value).strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=_UTC)
+        return parsed.astimezone(_UTC)
+
+    @staticmethod
+    def _normalized_metadata_value(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    @staticmethod
+    def _dropped_evidence_snapshot(item: dict[str, Any], drop_reason: str) -> dict[str, Any]:
+        metadata = item.get("metadata") or {}
+        return {
+            "text": str(item.get("text", ""))[:300],
+            "backend": str(item.get("backend") or ""),
+            "source": str(item.get("source") or ""),
+            "category": str(item.get("category") or ""),
+            "score": item.get("score"),
+            "updated_at": metadata.get("updated_at", ""),
+            "expires_at": metadata.get("expires_at", ""),
+            "approval_status": metadata.get("approval_status", ""),
+            "record_id": metadata.get("record_id", ""),
+            "source_record_id": metadata.get("record_id", ""),
+            "lifecycle_state": metadata.get("lifecycle_state", ""),
+            "needs_reindex": bool(metadata.get("needs_reindex", False)),
+            "evidence_version": metadata.get("evidence_version", ""),
+            "freshness_state": "expired" if drop_reason == "expired" else "rejected",
+            "used_in_prompt": False,
+            "drop_reason": drop_reason,
+            "metadata": metadata,
+        }
+
+    def _answer_policy_snapshot(self) -> dict[str, Any]:
+        if self._last_evidence:
+            return {
+                "state": "grounded",
+                "action": "answer_with_evidence",
+                "reason": "",
+                "message": "Found prompt-eligible evidence.",
+            }
+        if not self._last_dropped_evidence:
+            return {
+                "state": "no_evidence",
+                "action": "clarify_or_refuse",
+                "reason": "no_retrieval_hits",
+                "message": "No prompt-eligible evidence was found.",
+            }
+        reasons = [str(item.get("drop_reason") or "") for item in self._last_dropped_evidence]
+        if any("conflict" in reason for reason in reasons):
+            return {
+                "state": "conflict",
+                "action": "clarify",
+                "required_operator_action": "resolve_conflict",
+                "reason": ",".join(sorted(set(reasons))),
+                "message": "Relevant knowledge is conflicting; do not give a definitive answer.",
+            }
+        if any("expired" in reason or "version" in reason or "stale" in reason for reason in reasons):
+            return {
+                "state": "stale",
+                "action": "refuse_and_request_update",
+                "required_operator_action": "refresh_knowledge",
+                "reason": ",".join(sorted(set(reasons))),
+                "message": "Relevant knowledge is stale or expired; request an update before answering.",
+            }
+        if any("approval_status" in reason or "catalog_status" in reason for reason in reasons):
+            return {
+                "state": "unapproved",
+                "action": "refuse",
+                "required_operator_action": "approve_or_publish",
+                "reason": ",".join(sorted(set(reasons))),
+                "message": "Relevant knowledge is not approved for answering.",
+            }
+        return {
+            "state": "filtered",
+            "action": "clarify_or_refuse",
+            "required_operator_action": "review_knowledge",
+            "reason": ",".join(sorted(set(reasons))),
+            "message": "Retrieved evidence was filtered and cannot be used in the prompt.",
+        }
+
     @property
     def available(self) -> bool:
         """Whether the memory service is initialised and usable."""
         if not self._enabled:
             return False
         if self._robotmem is not None and self._robotmem.available:
+            return True
+        if self._mempalace is not None and self._mempalace.available:
             return True
         if self._mem0 is not None:
             return True
@@ -342,10 +937,23 @@ class MemoryBridge:
                 logger.debug("[Memory] Mem0 no relevant memories found.")
                 return ""
             memories = [r.get("memory", "") for r in results["results"][:5]]
-            items = [m for m in memories if m]
+            items = [
+                {
+                    "text": memory,
+                    "backend": "mem0",
+                    "source": "mem0",
+                    "category": "",
+                    "score": None,
+                    "metadata": {},
+                }
+                for memory in memories
+                if memory
+            ]
             if items:
                 logger.info("[Memory] Mem0 found %d items.", len(items))
-                return "\n".join(f"- {m}" for m in items)
+                items = self._filter_evidence_items(items, backend="mem0")
+                self._set_evidence(items, backend="mem0")
+                return self._format_evidence(items)
             return ""
         except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
             logger.warning("[Memory] Mem0 retrieval timed out (%.1fs).", self._retrieve_timeout)
@@ -380,9 +988,25 @@ class MemoryBridge:
             )
             if results:
                 logger.info("[Memory] VectorStore found %d items.", len(results))
-                return "\n".join(
-                    f"- {item['text']}" for item in results if item.get("score", 0) > 0.3
-                )
+                items = []
+                for item in results:
+                    score = item.get("score", 0)
+                    if score <= 0.3:
+                        continue
+                    metadata = item.get("metadata") or {}
+                    items.append(
+                        {
+                            "text": item.get("text", ""),
+                            "backend": "vector",
+                            "source": metadata.get("source") or "vector",
+                            "category": metadata.get("category") or metadata.get("type") or "",
+                            "score": score,
+                            "metadata": metadata,
+                        }
+                    )
+                items = self._filter_evidence_items(items, backend="vector")
+                self._set_evidence(items, backend="vector")
+                return self._format_evidence(items)
             logger.debug("[Memory] VectorStore no relevant memories found.")
             return ""
         except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041

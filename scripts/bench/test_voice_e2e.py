@@ -14,8 +14,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from askme.config import get_config
-from askme.voice.mic_input import MicInput
 from askme.voice.asr import ASREngine
+from askme.voice.mic_input import MicInput
 
 cfg = get_config()
 mic = MicInput.from_config(cfg)
@@ -40,7 +40,7 @@ t.join(timeout=10)
 audio = np.concatenate(chunks)
 peak = int(np.max(np.abs(audio)) * 32768)
 rms = int(np.sqrt(np.mean(audio ** 2)) * 32768)
-print("  Signal: peak=%d rms=%d" % (peak, rms), flush=True)
+print(f"  Signal: peak={peak} rms={rms}", flush=True)
 
 stream = engine.recognizer.create_stream()
 for i in range(0, len(audio), 1600):
@@ -48,7 +48,7 @@ for i in range(0, len(audio), 1600):
     while engine.recognizer.is_ready(stream):
         engine.recognizer.decode_stream(stream)
 local1 = engine.recognizer.get_result(stream).strip()
-print("  Local ASR: '%s'" % local1, flush=True)
+print(f"  Local ASR: '{local1}'", flush=True)
 
 # ---- Test 2: Beep + record + dual ASR ----
 print("\n=== Test 2: Live Mic (beep cue) ===", flush=True)
@@ -64,7 +64,7 @@ with mic.open():
 audio2 = np.concatenate(chunks2)
 peak2 = int(np.max(np.abs(audio2)) * 32768)
 rms2 = int(np.sqrt(np.mean(audio2 ** 2)) * 32768)
-print("  Signal: peak=%d rms=%d" % (peak2, rms2), flush=True)
+print(f"  Signal: peak={peak2} rms={rms2}", flush=True)
 
 stream2 = engine.recognizer.create_stream()
 for i in range(0, len(audio2), 1600):
@@ -72,7 +72,7 @@ for i in range(0, len(audio2), 1600):
     while engine.recognizer.is_ready(stream2):
         engine.recognizer.decode_stream(stream2)
 local2 = engine.recognizer.get_result(stream2).strip()
-print("  Local ASR: '%s'" % local2, flush=True)
+print(f"  Local ASR: '{local2}'", flush=True)
 
 # Cloud ASR
 cloud_text = ""
@@ -129,15 +129,15 @@ if api_key:
         }))
         done.wait(timeout=10)
         ws.close()
-        print("  Cloud ASR: '%s'" % cloud_text, flush=True)
+        print(f"  Cloud ASR: '{cloud_text}'", flush=True)
     except Exception as exc:
-        print("  Cloud ASR error: %s" % exc, flush=True)
+        print(f"  Cloud ASR error: {exc}", flush=True)
 
 # ---- Test 3: LLM + TTS ----
 asr_text = cloud_text or local2
 if asr_text:
     print("\n=== Test 3: LLM + TTS ===", flush=True)
-    print("  Input: '%s'" % asr_text, flush=True)
+    print(f"  Input: '{asr_text}'", flush=True)
 
     from askme.blueprints.voice import voice
 
@@ -146,7 +146,7 @@ if asr_text:
         await app.start()
         pipeline = app.get("pipeline").brain_pipeline
         resp = await asyncio.wait_for(pipeline.process(asr_text, source="voice"), timeout=30)
-        print("  LLM: '%s'" % resp[:100], flush=True)
+        print(f"  LLM: '{resp[:100]}'", flush=True)
         # TTS is handled by pipeline automatically via voice module
         await asyncio.sleep(3)  # let TTS finish playing
         await app.stop()
@@ -161,7 +161,7 @@ else:
 tts_status = "OK" if asr_text else "skipped"
 print("\n=== Summary ===", flush=True)
 print("  MicInput: 48kHz 2ch -> HPF -> AGC -> 16kHz mono", flush=True)
-print("  Loopback ASR:  '%s'" % local1, flush=True)
-print("  Live Local:    '%s'" % local2, flush=True)
-print("  Live Cloud:    '%s'" % cloud_text, flush=True)
-print("  LLM+TTS:       %s" % tts_status, flush=True)
+print(f"  Loopback ASR:  '{local1}'", flush=True)
+print(f"  Live Local:    '{local2}'", flush=True)
+print(f"  Live Cloud:    '{cloud_text}'", flush=True)
+print(f"  LLM+TTS:       {tts_status}", flush=True)

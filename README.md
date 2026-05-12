@@ -133,9 +133,10 @@ Blueprint 是声明式的"功能包"组合（`Runtime.use(A) + Runtime.use(B)`�
 | `LLM_BASE_URL` | ✅ | relay endpoint，默认 `https://cursor.scihub.edu.kg/api/v1` |
 | `MINIMAX_API_KEY` | ✅ | MiniMax LLM + TTS |
 | `MINIMAX_GROUP_ID` | ✅ | MiniMax 账号 group |
+| `DASHSCOPE_API_KEY` | Cloud ASR 硬门时需要 | Alibaba Cloud/DashScope 实时 ASR |
 | `TTS_VOICE_ID` | 默认 `male-qn-qingse` | TTS 音色 |
 | `LOCAL_EMBED_URL` | 可选 | 本地句向量服务，加速记忆检索 |
-| `NAV_GATEWAY_URL` | 装在机器人才需要 | LingTu 导航网关 |
+| `NAV_GATEWAY_URL` | 装在机器人才需要 | Thunder/nav-gateway 导航网关 |
 | `DOG_CONTROL_SERVICE_URL` | 装在机器人才需要 | 控制服务（站立/坐下/巡检） |
 | `DOG_SAFETY_SERVICE_URL` | 装在机器人才需要 | E-STOP 服务 |
 | `TELEGRAM_BOT_TOKEN` | 可选 | 启用 Telegram 入口（@BotFather 申请） |
@@ -150,7 +151,7 @@ brain:
   model: MiniMax-M2.7-highspeed     # 主力 LLM
   voice_model: MiniMax-M2.7-highspeed  # 语音模式专用（更低 TTFT）
   max_response_chars: 200            # 语音回复上限（避免播报过长）
-  soul_file: SOUL.md                 # 人格定义入口
+  soul_file: prompts/SOUL.md         # 人格定义入口
 
 memory:
   enabled: true
@@ -174,7 +175,7 @@ voice:
 ### 模型文件
 
 ```bash
-python scripts/download_models.py    # 自动下载 sherpa-onnx ASR + silero VAD
+python scripts/dev/download_models.py    # 自动下载 sherpa-onnx ASR + silero VAD
 ```
 
 或手动：
@@ -345,7 +346,7 @@ askme 实现了 [Model Context Protocol](https://modelcontextprotocol.io/) 服�
 
 3. LLM 接下来可以调用 `get_battery`。
 
-详细模式见 `docs/ARCHITECTURE_PATTERNS.md`。
+详细架构见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
 ---
 
@@ -379,9 +380,24 @@ ls .omc/state/sessions/*/traces/
 ### 麦克风/扬声器自检（S100P）
 
 ```bash
+python -m askme runtime voice-health --json
+python -m askme runtime sunrise-voice-readiness --json
+python -m askme runtime sunrise-voice-readiness --require-cloud-asr --json
+python -m askme runtime s100p-readiness-bundle --field --room-loop-trials 3 --json
 python scripts/bench/s100p_audio_check.py
 python scripts/bench/check_output_device.py
 ```
+
+`voice-health` 是纯软件门；`sunrise-voice-readiness` 会额外要求 Sunrise/S100P
+上的 MCP01 USB 音频证据。若在 Windows 开发机或未接 S100P 声卡的主机上返回
+`degraded`，应记录为硬件阻塞，不要当作本地软件链路失败。
+部署策略要求云 ASR 时，加 `--require-cloud-asr`；现场交接优先使用
+`s100p-readiness-bundle --field`，把房间回环、Cloud ASR 现场硬门、健康端点语义、
+Prometheus 健康值、systemd 日志和 change-event/OTREV 闭环证据一起纳入必过门。
+`s100p-readiness-bundle` 会把自动证据和 `manifest.json` 归档到
+`artifacts/s100p/<timestamp>-<hostname>/`，现场验收优先使用这个入口。
+
+S100P 现场验收按 [`docs/OPERATIONS.md`](docs/OPERATIONS.md) 采集证据并签核。
 
 ---
 
@@ -390,9 +406,9 @@ python scripts/bench/check_output_device.py
 ### 1. 复制代码
 
 ```bash
-ssh sunrise@192.168.66.190 "mkdir -p ~/askme"
-rsync -avz --exclude='.git' --exclude='models/' --exclude='data/' \
-  ./ sunrise@192.168.66.190:~/askme/
+REMOTE_DIR=/home/sunrise/data/inovxio/askme
+ssh sunrise@192.168.66.190 "mkdir -p $REMOTE_DIR"
+bash scripts/dev/sync_sunrise.sh
 ```
 
 ### 2. 安装系统依赖（aarch64）
@@ -400,7 +416,7 @@ rsync -avz --exclude='.git' --exclude='models/' --exclude='data/' \
 ```bash
 ssh sunrise@192.168.66.190
 sudo apt-get install libportaudio2 libsndfile1
-cd ~/askme
+cd /home/sunrise/data/inovxio/askme
 pip install -e ".[dev,robot,robotmem]"
 ```
 
@@ -409,10 +425,14 @@ pip install -e ".[dev,robot,robotmem]"
 ### 3. systemd 服务
 
 ```bash
-sudo cp scripts/askme.service /etc/systemd/system/
-sudo systemctl enable --now askme.service
+bash deploy/install.sh
+sudo systemctl start askme.service
+sudo systemctl status askme.service --no-pager
 journalctl -u askme.service -f
 ```
+
+生产入口以 `deploy/askme.service` 为准，运行 `python -m askme.blueprints.edge_robot`。
+`scripts/runtime/services/askme.service` 仅保留为 legacy/manual debug 参考，不作为 S100P 上线入口。
 
 ### S100P 已知坑
 
@@ -453,14 +473,10 @@ askme/
 
 | 文件 | 内容 |
 |---|---|
-| [`SOUL.md`](SOUL.md) | 语音人格定义（身份/风格/边界）— 改人格只动这个文件 |
-| [`docs/CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md) | **配置布局总览** —— `config.yaml` 15 章节 / `.env` 11 变量 / "改 X 动哪里" |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 多进程架构 / DDS topic / 坐标系 / 安全不变量 |
-| [`docs/ASKME_BOUNDARY.md`](docs/ASKME_BOUNDARY.md) | 核心/感知/插件三层边界，不该做什么 |
-| [`docs/PROACTIVE_INTELLIGENCE_PLAN.md`](docs/PROACTIVE_INTELLIGENCE_PLAN.md) | 主动智能 + ReactionEngine 设计 |
-| [`docs/HANDOFF.md`](docs/HANDOFF.md) | 关键模式、陷阱、待完成工作 |
-| [`docs/ARCHITECTURE_PATTERNS.md`](docs/ARCHITECTURE_PATTERNS.md) | 设计模式参考（Blueprint/Module/Backend） |
-| [`docs/archive/`](docs/archive/) | 已完成或被取代的设计稿（LAYER_GAPS、MODULE_MIGRATION_PLAN 等） |
+| [`prompts/SOUL.md`](prompts/SOUL.md) | 语音人格定义（身份/风格/边界）— 改人格只动这个文件 |
+| [`docs/PRODUCT.md`](docs/PRODUCT.md) | 产品定位、客户演示路径、已完成能力、下一步路线 |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 模块边界、语音/RAG/感知/runtime 链路、安全不变量 |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | 配置、启动、S100P 验收、证据包、排障 |
 
 ---
 
@@ -473,7 +489,7 @@ A: `sudo apt-get install libportaudio2`（Linux）或 `brew install portaudio`�
 A: 跑 `python scripts/bench/s100p_audio_check.py`，确认 `voice.input_device` 索引。Windows Realtek 一般 `null` 即可，S100P HKMIC 一般为 0。
 
 **Q: `models/vad/silero_vad.onnx failed. File doesn't exist`**
-A: 跑 `python scripts/download_models.py`，或手动从 silero-vad 仓库下载。
+A: 跑 `python scripts/dev/download_models.py`，或手动从 silero-vad 仓库下载。
 
 **Q: LLM 响应慢 / 超时**
 A: `config.yaml` 里调小 `brain.timeout`，或换更轻的 `voice_model` (`MiniMax-M2.5-highspeed`)。

@@ -125,7 +125,6 @@ async def main():
         has_md = any(c in full for c in ["**", "- ", "# ", "```"])
         mentions_dev = any(w in full for w in ["开发者", "编程", "写代码", "调试"])
         mentions_thunder = "Thunder" in full or "thunder" in full.lower()
-        told_joke = len(full) > 20 and "笑话" not in full.lower().replace("笑话", "")
         short = len(full) <= 80
 
         score = 0

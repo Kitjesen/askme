@@ -187,6 +187,19 @@ class TestDispatchAudioFeedback:
         mock_audio.speak.assert_called_once()
         mock_audio.start_playback.assert_called_once()
 
+    async def test_second_dispatch_text_source_is_audio_silent(self):
+        """Text/API dispatch must not queue TTS while continuing a mission."""
+        skill = _make_skill()
+        dispatcher, _, _, mock_audio = _make_dispatcher(skill=skill)
+
+        await dispatcher.dispatch("navigate", "鍘讳粨搴?", source="text")
+        mock_audio.speak.reset_mock()
+        mock_audio.start_playback.reset_mock()
+
+        await dispatcher.dispatch("navigate", "鍐嶅幓浠撳簱", source="text")
+        mock_audio.speak.assert_not_called()
+        mock_audio.start_playback.assert_not_called()
+
     async def test_audio_message_includes_step_number_and_skill(self):
         """speak() for step 2 must contain the step number AND the skill name."""
         skill = _make_skill("navigate")

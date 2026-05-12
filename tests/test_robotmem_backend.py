@@ -163,6 +163,30 @@ class TestRetrieve:
         assert "valid memory" in result
 
     @pytest.mark.asyncio
+    async def test_retrieve_items_returns_evidence_metadata(self):
+        backend, rm = _make_backend_with_rm()
+        rm.recall.return_value = [
+            {
+                "content": "restroom is near gate A",
+                "score": 0.91,
+                "context": {"source": "site.md", "category": "location"},
+            }
+        ]
+
+        items = await backend.retrieve_items("restroom")
+
+        assert items == [
+            {
+                "text": "restroom is near gate A",
+                "backend": "robotmem",
+                "source": "site.md",
+                "category": "location",
+                "score": 0.91,
+                "metadata": {"source": "site.md", "category": "location"},
+            }
+        ]
+
+    @pytest.mark.asyncio
     async def test_returns_empty_on_timeout(self):
         import asyncio
         backend, rm = _make_backend_with_rm()
@@ -206,6 +230,19 @@ class TestSave:
         backend, rm = _make_backend_with_rm()
         rm.learn.side_effect = OSError("write error")
         await backend.save("q", "a")  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_save_fact_calls_learn_with_metadata(self):
+        backend, rm = _make_backend_with_rm()
+        await backend.save_fact("洗手间在一楼东侧", {"category": "location", "source": "site.md"})
+
+        rm.learn.assert_called_once()
+        text = rm.learn.call_args[0][0]
+        context = rm.learn.call_args.kwargs["context"]
+        assert text == "洗手间在一楼东侧"
+        assert context["source"] == "site.md"
+        assert context["category"] == "location"
+        assert context["robot"] == "thunder"
 
 
 # ── close ─────────────────────────────────────────────────────────────────────

@@ -11,6 +11,8 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
+import json
 from unittest.mock import AsyncMock
 
 # ── Fixture helpers ────────────────────────────────────────────────
@@ -111,6 +113,94 @@ class TestAddToolExchange:
         assert mtime_before == mtime_after, (
             "History file must not be modified by add_tool_exchange()"
         )
+
+
+# ── _trim strips transient tool exchanges ──────────────────────────
+
+
+class TestTrimStripsToolExchange:
+    def test_regular_turn_strips_tool_exchange_from_persisted_history(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """The next regular assistant message removes transient tool context."""
+        conv = _make_conv(tmp_path, monkeypatch)
+        conv.add_user_message("请查天气")
+        conv.add_tool_exchange(
+            [_tool_call("call_weather", "weather")],
+            [_tool_result("call_weather", "晴")],
+        )
+
+        assert [m["role"] for m in conv.history] == ["user", "assistant", "tool"]
+
+        conv.add_assistant_message("天气晴朗。")
+
+        assert conv.history == [
+            {"role": "user", "content": "请查天气"},
+            {"role": "assistant", "content": "天气晴朗。"},
+        ]
+
+        history_file = tmp_path / "data" / "conv.json"
+        with history_file.open(encoding="utf-8") as fh:
+            persisted = json.load(fh)
+        assert persisted == conv.history
+
+    def test_max_history_applies_after_tool_exchange_is_stripped(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """max_history counts only durable user/assistant text messages."""
+        conv = _make_conv(tmp_path, monkeypatch, max_history=4)
+        conv.add_user_message("u0")
+        conv.add_assistant_message("a0")
+        conv.add_user_message("u1")
+        conv.add_tool_exchange([_tool_call()], [_tool_result()])
+        conv.add_assistant_message("a1")
+        conv.add_user_message("u2")
+        conv.add_assistant_message("a2")
+
+        assert conv.history == [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+        ]
+
+    async def test_session_memory_receives_only_dropped_text_messages(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Dropped tool context is not forwarded to SessionMemory summaries."""
+        conv = _make_conv(tmp_path, monkeypatch, max_history=2)
+        session_memory = AsyncMock()
+        conv._session_memory = session_memory
+        conv.history = [
+            {"role": "user", "content": "old user"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tool_call("c1")],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "tool result"},
+            {"role": "assistant", "content": "old assistant"},
+            {"role": "user", "content": "new user"},
+            {"role": "assistant", "content": "new assistant"},
+        ]
+
+        conv._trim()
+        await asyncio.sleep(0)
+
+        assert conv.history == [
+            {"role": "user", "content": "new user"},
+            {"role": "assistant", "content": "new assistant"},
+        ]
+        session_memory.summarize_and_save.assert_awaited_once_with([
+            {"role": "user", "content": "old user"},
+            {"role": "assistant", "content": "old assistant"},
+        ])
 
 
 # ── maybe_compress with pending tool_calls ─────────────────────────
