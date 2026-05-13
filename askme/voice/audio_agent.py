@@ -792,7 +792,13 @@ class AudioAgent:
 
         noise_gate_peak = int(getattr(self._audio_proc, "noise_gate_peak", self._noise_gate_peak))
         gate_recommendation = None
-        if noise_gate_peak > 0 and 0 < peak_max_10s < noise_gate_peak:
+        if sample_count_10s == 0:
+            gate_recommendation = "no_microphone_frames_observed:listen_loop_not_sampling_input"
+        elif peak_max_10s <= 1:
+            gate_recommendation = (
+                "microphone_captured_silence:check_input_device_permission_or_physical_mute"
+            )
+        elif noise_gate_peak > 0 and peak_max_10s < noise_gate_peak:
             gate_recommendation = (
                 f"observed_peak_below_noise_gate:{peak_max_10s}<{noise_gate_peak}"
             )

@@ -170,6 +170,86 @@ def _device_max_input_channels(device: int | str | None, *, fallback: int = 1) -
         return fallback
 
 
+def _channel_metrics(
+    captured: np.ndarray,
+    *,
+    start_frame: int,
+    end_frame: int,
+    sample_rate: int,
+    frequency_hz: float,
+    min_capture_peak: int,
+) -> list[dict[str, Any]]:
+    """Return per-channel capture evidence for loopback diagnosis."""
+    if captured.size == 0:
+        return []
+    if captured.ndim == 1:
+        channels = captured.reshape(-1, 1)
+    else:
+        channels = captured
+    rows: list[dict[str, Any]] = []
+    for channel_index in range(channels.shape[1]):
+        samples = channels[:, channel_index].astype(np.float32, copy=False)
+        peak = int(float(np.max(np.abs(samples))) * 32768) if len(samples) else 0
+        rms = int(float(np.sqrt(np.mean(samples * samples))) * 32768) if len(samples) else 0
+        segment = samples[start_frame:end_frame] if len(samples) >= end_frame else samples
+        correlation = 0.0
+        if len(segment) > 0:
+            ref_t = np.arange(len(segment), dtype=np.float32) / float(sample_rate)
+            reference = np.sin(2.0 * np.pi * frequency_hz * ref_t).astype(np.float32)
+            denom = float(np.linalg.norm(segment) * np.linalg.norm(reference))
+            if denom > 0:
+                correlation = abs(float(np.dot(segment, reference)) / denom)
+        rows.append(
+            {
+                "channel": channel_index,
+                "peak": peak,
+                "rms": rms,
+                "tone_correlation": round(correlation, 3),
+                "signal_ok": bool(peak >= min_capture_peak),
+                "tone_detected": bool(peak >= min_capture_peak and correlation >= 0.12),
+            }
+        )
+    return rows
+
+
+def _best_channel(metrics: list[dict[str, Any]]) -> int:
+    if not metrics:
+        return 0
+    best = max(
+        metrics,
+        key=lambda row: (
+            bool(row.get("tone_detected")),
+            float(row.get("tone_correlation") or 0.0),
+            int(row.get("peak") or 0),
+            int(row.get("rms") or 0),
+        ),
+    )
+    return int(best.get("channel") or 0)
+
+
+def _loopback_failure_reason(
+    *,
+    playback_ok: bool,
+    playback_error: str,
+    peak: int,
+    min_capture_peak: int,
+    tone_detected: bool,
+) -> str:
+    if not playback_ok:
+        if "Illegal combination of I/O devices" in playback_error:
+            return "input_output_hostapi_mismatch"
+        if "Invalid sample rate" in playback_error:
+            return "invalid_sample_rate_for_device"
+        return "playback_or_record_stream_failed"
+    if peak <= 1:
+        return "microphone_captured_silence"
+    if peak < min_capture_peak:
+        return "microphone_signal_below_threshold"
+    if not tone_detected:
+        return "captured_signal_not_matching_test_tone"
+    return ""
+
+
 def run_audio_loopback(
     *,
     input_device: int | str | None = None,
@@ -235,12 +315,18 @@ def run_audio_loopback(
         captured = np.empty((0, 1), dtype=np.float32)
         playback_error = str(exc)
 
-    if captured.ndim == 2 and captured.shape[1] > 1:
-        channel_energy = np.sqrt(np.mean(captured * captured, axis=0))
-        channel_index = int(np.argmax(channel_energy))
+    channels = _channel_metrics(
+        captured,
+        start_frame=start_frame,
+        end_frame=end_frame,
+        sample_rate=resolved_sample_rate,
+        frequency_hz=frequency_hz,
+        min_capture_peak=min_capture_peak,
+    )
+    channel_index = _best_channel(channels)
+    if captured.ndim == 2 and captured.shape[1] > channel_index:
         mono = captured[:, channel_index].astype(np.float32, copy=False)
     else:
-        channel_index = 0
         mono = captured.reshape(-1).astype(np.float32, copy=False)
     peak = int(float(np.max(np.abs(mono))) * 32768) if len(mono) else 0
     rms = int(float(np.sqrt(np.mean(mono * mono))) * 32768) if len(mono) else 0
@@ -256,7 +342,14 @@ def run_audio_loopback(
 
     signal_ok = bool(playback_ok and peak >= min_capture_peak)
     tone_detected = bool(signal_ok and correlation >= 0.12)
-    status = "ok" if playback_ok and signal_ok else "degraded"
+    status = "ok" if playback_ok and signal_ok and tone_detected else "degraded"
+    failure_reason = _loopback_failure_reason(
+        playback_ok=playback_ok,
+        playback_error=playback_error,
+        peak=peak,
+        min_capture_peak=min_capture_peak,
+        tone_detected=tone_detected,
+    )
 
     wav_path = str(wav_out) if wav_out else ""
     if wav_path:
@@ -280,6 +373,7 @@ def run_audio_loopback(
         "signal_ok": signal_ok,
         "tone_detected": tone_detected,
         "tone_correlation": round(correlation, 3),
+        "failure_reason": failure_reason,
         "peak": peak,
         "rms": rms,
         "min_capture_peak": min_capture_peak,
@@ -288,6 +382,7 @@ def run_audio_loopback(
         "output_device": output_dev,
         "input_channels": input_channels,
         "selected_input_channel": channel_index,
+        "channel_metrics": channels,
         "output_channels": output_channels,
         "record_seconds": total_seconds,
         "tone_seconds": tone_seconds,
@@ -295,6 +390,165 @@ def run_audio_loopback(
         "wav_out": wav_path,
         "replay_ok": replay_ok,
         "replay_error": replay_error,
+    }
+
+
+def _input_devices(devices: list[dict[str, Any]]) -> list[int]:
+    return [int(device["index"]) for device in devices if device.get("is_input")]
+
+
+def _output_devices(devices: list[dict[str, Any]]) -> list[int]:
+    return [int(device["index"]) for device in devices if device.get("is_output")]
+
+
+def _hostapi_index_by_device(devices: list[dict[str, Any]]) -> dict[int, int]:
+    mapping: dict[int, int] = {}
+    for device in devices:
+        try:
+            mapping[int(device["index"])] = int(device.get("hostapi") or 0)
+        except Exception:
+            continue
+    return mapping
+
+
+def _normalise_device_list(values: list[int | str] | tuple[int | str, ...] | None) -> list[int]:
+    result: list[int] = []
+    for value in values or []:
+        coerced = _coerce_device(value)
+        if isinstance(coerced, int) and coerced not in result:
+            result.append(coerced)
+    return result
+
+
+def _candidate_routes(
+    devices: list[dict[str, Any]],
+    *,
+    input_devices: list[int] | None,
+    output_devices: list[int] | None,
+    include_all_pairs: bool,
+    max_routes: int,
+) -> list[tuple[int, int]]:
+    inputs = input_devices or _input_devices(devices)
+    outputs = output_devices or _output_devices(devices)
+    hostapi_by_device = _hostapi_index_by_device(devices)
+    routes: list[tuple[int, int]] = []
+    for input_device in inputs:
+        for output_device in outputs:
+            same_hostapi = (
+                hostapi_by_device.get(input_device) is not None
+                and hostapi_by_device.get(input_device) == hostapi_by_device.get(output_device)
+            )
+            if not include_all_pairs and not same_hostapi:
+                continue
+            route = (input_device, output_device)
+            if route not in routes:
+                routes.append(route)
+            if len(routes) >= max_routes:
+                return routes
+    return routes
+
+
+def run_audio_route_scan(
+    *,
+    input_devices: list[int | str] | tuple[int | str, ...] | None = None,
+    output_devices: list[int | str] | tuple[int | str, ...] | None = None,
+    sample_rates: list[int] | tuple[int, ...] | None = None,
+    record_seconds: float = 1.0,
+    tone_seconds: float = 0.35,
+    frequency_hz: float = 880.0,
+    output_gain: float = 0.35,
+    min_capture_peak: int = 300,
+    include_all_pairs: bool = False,
+    max_routes: int = 24,
+) -> dict[str, Any]:
+    """Scan input/output routes and rank them by captured signal evidence."""
+    if sd is None:
+        return {"status": "error", "error": "sounddevice is not installed", "routes": []}
+
+    devices_payload = query_audio_devices()
+    if devices_payload.get("status") != "ok":
+        return {
+            "status": "error",
+            "error": devices_payload.get("error", "audio device query failed"),
+            "routes": [],
+        }
+
+    devices = list(devices_payload.get("devices", []))
+    inputs = _normalise_device_list(input_devices)
+    outputs = _normalise_device_list(output_devices)
+    routes = _candidate_routes(
+        devices,
+        input_devices=inputs or None,
+        output_devices=outputs or None,
+        include_all_pairs=include_all_pairs,
+        max_routes=max(1, int(max_routes)),
+    )
+    rates = list(sample_rates or [48000, 44100])
+    results: list[dict[str, Any]] = []
+    for input_device, output_device in routes:
+        for rate in rates:
+            result = run_audio_loopback(
+                input_device=input_device,
+                output_device=output_device,
+                sample_rate=int(rate),
+                record_seconds=record_seconds,
+                tone_seconds=tone_seconds,
+                frequency_hz=frequency_hz,
+                output_gain=output_gain,
+                min_capture_peak=min_capture_peak,
+                wav_out=None,
+                play_recording=False,
+            )
+            results.append(result)
+
+    results.sort(
+        key=lambda row: (
+            row.get("status") == "ok",
+            bool(row.get("tone_detected")),
+            int(row.get("peak") or 0),
+            float(row.get("tone_correlation") or 0.0),
+        ),
+        reverse=True,
+    )
+    best = results[0] if results else {}
+    any_ok = any(row.get("status") == "ok" for row in results)
+    verified_config_hint: dict[str, Any] = {}
+    if any_ok and best:
+        verified_config_hint = {
+            "voice.input_device": best.get("input_device"),
+            "voice.input_transport": "sounddevice",
+            "voice.mic_channels": best.get("input_channels"),
+            "voice.mic_channel_select": best.get("selected_input_channel"),
+            "voice.tts.output_device": best.get("output_device"),
+            "voice.tts.output_transport": "sounddevice",
+        }
+    diagnostic_hint = ""
+    if not any_ok:
+        failure_reasons = {
+            str(row.get("failure_reason"))
+            for row in results
+            if row.get("failure_reason")
+        }
+        if "microphone_captured_silence" in failure_reasons:
+            diagnostic_hint = (
+                "audio_playback_works_but_microphone_captures_silence:"
+                "check_windows_input_permission_device_mute_and_selected_array_channel"
+            )
+        elif "input_output_hostapi_mismatch" in failure_reasons:
+            diagnostic_hint = "try_same_hostapi_wasapi_or_mme_input_output_pair"
+        elif failure_reasons:
+            diagnostic_hint = ",".join(sorted(failure_reasons))
+    return {
+        "status": "ok" if any_ok else "degraded",
+        "failure_reason": "" if any_ok else "no_audio_route_captured_test_signal",
+        "diagnostic_hint": diagnostic_hint,
+        "platform": devices_payload.get("platform"),
+        "recommendation": devices_payload.get("recommendation", {}),
+        "verified_config_hint": verified_config_hint,
+        "route_count": len(results),
+        "best_route": best,
+        "routes": results,
+        "min_capture_peak": min_capture_peak,
     }
 
 
@@ -322,6 +576,8 @@ def print_audio_loopback_summary(payload: dict[str, Any]) -> None:
     print(f"  playback-ok: {payload.get('playback_ok')}")  # noqa: T201
     if payload.get("playback_error"):
         print(f"  playback-error: {payload['playback_error']}")  # noqa: T201
+    if payload.get("failure_reason"):
+        print(f"  failure-reason: {payload['failure_reason']}")  # noqa: T201
     print(  # noqa: T201
         "  capture: "
         f"peak={payload.get('peak')} rms={payload.get('rms')} "
@@ -330,3 +586,33 @@ def print_audio_loopback_summary(payload: dict[str, Any]) -> None:
     )
     if payload.get("wav_out"):
         print(f"  wav: {payload['wav_out']}")  # noqa: T201
+
+
+def print_audio_route_scan_summary(payload: dict[str, Any]) -> None:
+    print(f"Audio route scan: {payload.get('status', 'unknown')}")  # noqa: T201
+    if payload.get("failure_reason"):
+        print(f"  failure-reason: {payload['failure_reason']}")  # noqa: T201
+    if payload.get("diagnostic_hint"):
+        print(f"  diagnostic-hint: {payload['diagnostic_hint']}")  # noqa: T201
+    best = payload.get("best_route") or {}
+    if best:
+        print(  # noqa: T201
+            "  best: "
+            f"in={best.get('input_device')} out={best.get('output_device')} "
+            f"sr={best.get('sample_rate')} ch={best.get('selected_input_channel')} "
+            f"peak={best.get('peak')} corr={best.get('tone_correlation')} "
+            f"status={best.get('status')}"
+        )
+    if payload.get("verified_config_hint"):
+        print(  # noqa: T201
+            "  verified-config: "
+            f"{json.dumps(payload['verified_config_hint'], ensure_ascii=False)}"
+        )
+    for row in payload.get("routes", [])[:8]:
+        print(  # noqa: T201
+            "  route: "
+            f"in={row.get('input_device')} out={row.get('output_device')} "
+            f"sr={row.get('sample_rate')} ch={row.get('selected_input_channel')} "
+            f"peak={row.get('peak')} corr={row.get('tone_correlation')} "
+            f"reason={row.get('failure_reason')}"
+        )

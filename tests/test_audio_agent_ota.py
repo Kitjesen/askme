@@ -40,6 +40,13 @@ class _DummyTTS:
             self.tts_text_queue.get_nowait()
         self._is_playing = False
 
+    def status_snapshot(self) -> dict:
+        return {
+            "backend": self.backend,
+            "is_playing": self._is_playing,
+            "queue_size": self.tts_text_queue.qsize(),
+        }
+
     def shutdown(self) -> None:
         self._is_playing = False
 
@@ -118,6 +125,30 @@ def test_audio_agent_status_snapshot_includes_input_diagnostics(monkeypatch) -> 
     assert input_status["vad_state"] == "silent"
     assert input_status["gate_state"] == "noise"
     assert input_status["gate_recommendation"] == "observed_peak_below_noise_gate:123<500"
+
+
+def test_audio_agent_status_snapshot_reports_silent_microphone(monkeypatch) -> None:
+    monkeypatch.setattr("askme.voice.audio_agent.TTSEngine", _DummyTTS)
+
+    agent = AudioAgent(
+        {"voice": {"tts": {"backend": "edge"}, "noise_gate_peak": 500}},
+        voice_mode=False,
+        metrics=OTABridgeMetrics(),
+    )
+
+    agent._record_input_observation(
+        peak=0,
+        rms=0.0,
+        vad_state="silent",
+        gate_state="noise",
+    )
+
+    input_status = agent.status_snapshot()["input"]
+
+    assert input_status["peak_max_10s"] == 0
+    assert input_status["gate_recommendation"] == (
+        "microphone_captured_silence:check_input_device_permission_or_physical_mute"
+    )
 
 
 def test_audio_agent_marks_voice_error_for_ota_metrics(monkeypatch) -> None:

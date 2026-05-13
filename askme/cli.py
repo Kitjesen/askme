@@ -156,6 +156,37 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Replay the captured microphone audio after the loopback test",
     )
+    runtime_audio_route_scan = runtime_subparsers.add_parser(
+        "audio-route-scan",
+        help="Scan microphone/speaker routes and rank real capture evidence",
+    )
+    runtime_audio_route_scan.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_audio_route_scan.add_argument(
+        "--input-devices",
+        default="",
+        help="Comma-separated input device indexes. Empty scans same-hostapi routes.",
+    )
+    runtime_audio_route_scan.add_argument(
+        "--output-devices",
+        default="",
+        help="Comma-separated output device indexes. Empty scans same-hostapi routes.",
+    )
+    runtime_audio_route_scan.add_argument(
+        "--sample-rates",
+        default="48000,44100",
+        help="Comma-separated sample rates to try",
+    )
+    runtime_audio_route_scan.add_argument("--record-seconds", type=float, default=1.0)
+    runtime_audio_route_scan.add_argument("--tone-seconds", type=float, default=0.35)
+    runtime_audio_route_scan.add_argument("--frequency-hz", type=float, default=880.0)
+    runtime_audio_route_scan.add_argument("--output-gain", type=float, default=0.35)
+    runtime_audio_route_scan.add_argument("--min-capture-peak", type=int, default=300)
+    runtime_audio_route_scan.add_argument("--max-routes", type=int, default=24)
+    runtime_audio_route_scan.add_argument(
+        "--all-pairs",
+        action="store_true",
+        help="Also try cross-hostapi pairs, which may report illegal combinations",
+    )
     runtime_voice_online_smoke = runtime_subparsers.add_parser(
         "voice-online-smoke",
         help="Run real MiniMax LLM/TTS and DashScope ASR connectivity checks",
@@ -1138,6 +1169,32 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
             _emit_payload(payload, json_output=True)
         else:
             print_audio_loopback_summary(payload)
+        if payload.get("status") != "ok":
+            raise SystemExit(1)
+        return
+
+    if args.runtime_command == "audio-route-scan":
+        from askme.voice.audio_devices import (
+            print_audio_route_scan_summary,
+            run_audio_route_scan,
+        )
+
+        payload = run_audio_route_scan(
+            input_devices=_parse_csv_ints(args.input_devices),
+            output_devices=_parse_csv_ints(args.output_devices),
+            sample_rates=_parse_csv_ints(args.sample_rates) or [48000, 44100],
+            record_seconds=args.record_seconds,
+            tone_seconds=args.tone_seconds,
+            frequency_hz=args.frequency_hz,
+            output_gain=args.output_gain,
+            min_capture_peak=args.min_capture_peak,
+            include_all_pairs=args.all_pairs,
+            max_routes=args.max_routes,
+        )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            print_audio_route_scan_summary(payload)
         if payload.get("status") != "ok":
             raise SystemExit(1)
         return
@@ -4055,6 +4112,21 @@ def _get_json(url: str) -> dict[str, Any]:
 
 def _normalise_server_url(server: str) -> str:
     return server.rstrip("/")
+
+
+def _parse_csv_ints(value: str | None) -> list[int]:
+    result: list[int] = []
+    for part in str(value or "").split(","):
+        token = part.strip()
+        if not token:
+            continue
+        try:
+            parsed = int(token)
+        except ValueError:
+            continue
+        if parsed not in result:
+            result.append(parsed)
+    return result
 
 
 def _server_auth_headers() -> dict[str, str] | None:
