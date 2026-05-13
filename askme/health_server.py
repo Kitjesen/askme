@@ -23,8 +23,8 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from askme.api.routes.governance import register_governance_routes
 from askme.api.routes.cognition import register_cognition_routes
+from askme.api.routes.governance import register_governance_routes
 from askme.api.routes.memory import register_memory_routes
 from askme.api.routes.runtime import register_runtime_routes
 from askme.api.routes.space import register_space_routes
@@ -117,6 +117,50 @@ def _resolve_field_evidence_path(raw_path: str) -> Path | None:
     if not resolved.is_file():
         return None
     return resolved
+
+
+def _skill_growth_candidate_prompt(candidate: dict[str, Any]) -> str:
+    examples = candidate.get("examples") if isinstance(candidate.get("examples"), list) else []
+    reasons = candidate.get("reasons") if isinstance(candidate.get("reasons"), list) else []
+    example_text = "\n".join(f"- {item}" for item in examples[:5]) or "- 无"
+    reason_text = ", ".join(str(item) for item in reasons[:5]) or "unknown"
+    return (
+        "你是园区机器狗的受控技能草稿。这个技能来自在线增长候选池，"
+        "必须保持低风险、可审计、可拒绝。\n\n"
+        "处理目标：根据用户输入判断是否能完成该候选需求；如果缺少地图、知识、"
+        "传感器或权限，就明确说明需要人工配置或转交管理员，不要编造结果。\n\n"
+        f"候选摘要：{candidate.get('summary') or ''}\n"
+        f"候选原因：{reason_text}\n"
+        f"证据数量：{candidate.get('evidence_count') or 0}\n"
+        f"历史表达：\n{example_text}\n\n"
+        "用户输入：{{user_input}}\n\n"
+        "请用一句到三句话回复，先说明能否处理，再说明下一步。"
+    )
+
+
+def _agent_profile_known_tools() -> set[str]:
+    """Return tool names that a project Agent Profile is allowed to reference."""
+
+    names = {"spawn_agent", "dispatch_skill", "create_skill", "create_agent_profile"}
+    try:
+        from askme.tools.builtin_tools import SpeakProgressTool, register_builtin_tools
+        from askme.tools.move_tool import register_move_tools
+        from askme.tools.robot_api_tool import RobotApiTool
+        from askme.tools.scan_tool import register_scan_tools
+        from askme.tools.temporal_query_tool import register_temporal_tools
+        from askme.tools.tool_registry import ToolRegistry
+
+        registry = ToolRegistry(config={"default_timeout": 1.0})
+        register_builtin_tools(registry, production_mode=True)
+        registry.register(SpeakProgressTool())
+        registry.register(RobotApiTool())
+        register_move_tools(registry)
+        register_scan_tools(registry)
+        register_temporal_tools(registry)
+        names.update(registry.get_agent_allowed_names())
+    except Exception as exc:
+        logger.warning("Failed to build Agent Profile tool allowlist: %s", exc)
+    return {name for name in names if name}
 
 
 def _field_runtime_plan_from_event(
@@ -723,22 +767,25 @@ def create_health_app(
         return payload
 
     def _operator_id_from_request(request: Request, body: dict[str, Any]) -> str:
-        return str(
-            body.get("operator_id")
-            or request.headers.get("x-askme-operator-id")
-            or request.headers.get("x-operator-id")
-            or "dashboard.operator"
-        ).strip()
+        identity = _operator_directory.resolve_context(headers=request.headers, body=body)
+        return str(identity.operator_id or "dashboard.operator").strip()
 
     def _require_permission(
         request: Request,
         body: dict[str, Any],
         permission: str,
     ) -> JSONResponse | None:
-        operator_id = _operator_id_from_request(request, body)
-        decision = _operator_directory.authorize(operator_id, permission)
+        decision = _operator_directory.authorize(
+            None,
+            permission,
+            headers=request.headers,
+            body=body,
+        )
         if decision.get("allowed"):
-            body.setdefault("operator_id", operator_id)
+            body["operator_id"] = (
+                decision.get("operator", {}).get("operator_id")
+                or _operator_id_from_request(request, body)
+            )
             body.setdefault("operator_auth", decision)
             return None
         return _mission_json(
@@ -752,41 +799,17 @@ def create_health_app(
 
     def _operator_directory_payload() -> dict[str, Any]:
         return _operator_directory.payload()
-        try:
-            cfg = get_config()
-        except Exception as exc:
-            logger.warning("Operator directory config unavailable: %s", exc)
-            cfg = {}
-        field_cfg = cfg.get("field_operations") if isinstance(cfg.get("field_operations"), dict) else {}
-        directory_cfg = (
-            field_cfg.get("operator_directory")
-            if isinstance(field_cfg.get("operator_directory"), dict)
-            else {}
-        )
-        operators_cfg = field_cfg.get("operators") if isinstance(field_cfg.get("operators"), dict) else {}
-        operators = []
-        for operator_id, operator in sorted(operators_cfg.items()):
-            operator_payload = operator if isinstance(operator, dict) else {}
-            roles = operator_payload.get("roles") if isinstance(operator_payload.get("roles"), list) else []
-            operators.append({
-                "operator_id": str(operator_id),
-                "display_name": str(operator_payload.get("display_name") or operator_id),
-                "roles": [str(role) for role in roles],
-                "source": "config.yaml",
-            })
-        return {
-            "mode": str(directory_cfg.get("mode") or "demo_config"),
-            "identity_provider": str(directory_cfg.get("identity_provider") or "local_config"),
-            "production_binding_required": bool(
-                directory_cfg.get("production_binding_required", True)
-            ),
-            "session_operator_header": "x-askme-operator-id",
-            "operators": operators,
-            "limitations": [
-                "当前是 demo operator directory，不等于企业账号体系。",
-                "生产环境应接入企业 SSO/IAM，并把审批、关闭、运行控制写入统一审计。",
-            ],
-        }
+
+    def _current_operator_payload(operator_id: str | None, headers: Any = None) -> dict[str, Any]:
+        return _operator_directory.current_operator_payload(operator_id, headers=headers)
+
+    def _operator_authorization_payload(
+        operator_id: str | None,
+        permission: str,
+        headers: Any = None,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return _operator_directory.authorize(operator_id, permission, headers=headers, body=body)
 
     def _looks_like_device_ingest_without_scenario(body: dict[str, Any]) -> bool:
         if body.get("scenario_id"):
@@ -1154,6 +1177,8 @@ def create_health_app(
     register_governance_routes(
         app,
         governance_payload=_operator_directory_payload,
+        current_operator_payload=_current_operator_payload,
+        authorization_payload=_operator_authorization_payload,
         mission_json=_mission_json,
         cors_options_response=_cors_options_response,
     )
@@ -1315,6 +1340,17 @@ def create_health_app(
             return _mission_json(result)
         except Exception as exc:
             logger.error("Field events endpoint failed: %s", exc)
+            return _mission_json({"error": str(exc)}, status_code=500)
+
+    @app.get("/api/field/events/{event_id}", tags=["Field Operations"])
+    async def field_event_detail(event_id: str) -> JSONResponse:
+        """Return one field operation event with workflow and evidence detail."""
+        try:
+            result = await _dispatch_field_operations("detail_payload", event_id)
+            status_code = 200 if result.get("found") else 404
+            return _mission_json(result, status_code=status_code)
+        except Exception as exc:
+            logger.error("Field event detail endpoint failed: %s", exc)
             return _mission_json({"error": str(exc)}, status_code=500)
 
     @app.get("/api/field/evidence", tags=["Field Operations"], response_model=None)
@@ -1546,6 +1582,11 @@ def create_health_app(
     async def field_events_cors() -> Response:
         return _cors_options_response("GET, POST, OPTIONS")
 
+    @app.options("/api/field/events/{event_id}", include_in_schema=False)
+    async def field_event_detail_cors(event_id: str) -> Response:
+        _ = event_id
+        return _cors_options_response("GET, OPTIONS")
+
     @app.options("/api/field/evidence", include_in_schema=False)
     async def field_evidence_cors() -> Response:
         return _cors_options_response("GET, OPTIONS")
@@ -1745,6 +1786,707 @@ def create_health_app(
             )
         except Exception as exc:
             logger.error("Capabilities endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/capability-center", tags=["System"])
+    async def capability_center() -> JSONResponse:
+        """Return customer-facing grouped robot capabilities."""
+        if capabilities_provider is None:
+            return JSONResponse(
+                {"error": "capabilities not available"},
+                status_code=503,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+        try:
+            payload = capabilities_provider()
+            center = (
+                payload.get("skills", {}).get("capability_center")
+                if isinstance(payload, dict) else None
+            )
+            if not center and isinstance(payload, dict):
+                center = (
+                    payload.get("components", {})
+                    .get("skill", {})
+                    .get("capabilities", {})
+                    .get("capability_center")
+                )
+            return JSONResponse(
+                center or {},
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Capability center endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/skill-audit", tags=["System"])
+    async def skill_audit(limit: int = 50) -> JSONResponse:
+        """Return recent skill execution audit records."""
+        try:
+            from askme.skills.audit import SkillAuditLog
+
+            safe_limit = max(1, min(int(limit), 200))
+            records = SkillAuditLog().recent(limit=safe_limit)
+            return JSONResponse(
+                {"records": records, "count": len(records), "limit": safe_limit},
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Skill audit endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/audit/events", tags=["Governance"])
+    async def audit_events(
+        request: Request,
+        limit: int = 100,
+        source: str = "",
+        actor_id: str = "",
+        operator_id: str = "",
+        action: str = "",
+        outcome: str = "",
+        q: str = "",
+    ) -> JSONResponse:
+        """Return a unified product audit timeline across field/runtime/skill records."""
+        try:
+            from askme.audit import AuditQueryService
+
+            auth_body = {"operator_id": actor_id}
+            denied = _require_permission(request, auth_body, "audit:read")
+            if denied is not None:
+                return denied
+            payload = AuditQueryService(get_config()).query(
+                limit=limit,
+                source=source,
+                operator_id=operator_id,
+                action=action,
+                outcome=outcome,
+                q=q,
+            )
+            return JSONResponse(
+                payload,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Unified audit endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/audit/export/retry", tags=["Governance"])
+    async def audit_export_retry_status(
+        request: Request,
+        actor_id: str = "",
+        limit: int = 50,
+    ) -> JSONResponse:
+        """Return pending unified audit export delivery retries."""
+        try:
+            from askme.audit import AuditExportService
+
+            denied = _require_permission(request, {"operator_id": actor_id}, "audit:export")
+            if denied is not None:
+                return denied
+            payload = AuditExportService(get_config()).retry_status(limit=limit)
+            return JSONResponse(
+                payload,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Unified audit export retry status failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.post("/api/audit/export/retry", tags=["Governance"])
+    async def audit_export_retry_delivery(request: Request) -> JSONResponse:
+        """Replay pending unified audit export deliveries."""
+        try:
+            from askme.audit import AuditExportService
+
+            body = await _optional_json_body(request)
+            denied = _require_permission(request, body, "audit:export")
+            if denied is not None:
+                return denied
+            payload = AuditExportService(get_config()).retry_queued_deliveries(
+                limit=int(body.get("limit") or 50),
+            )
+            return JSONResponse(
+                payload,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Unified audit export retry delivery failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.post("/api/audit/export", tags=["Governance"])
+    async def audit_export(request: Request) -> JSONResponse:
+        """Create a signed unified audit export package and optionally deliver it."""
+        try:
+            from askme.audit import AuditExportService
+
+            body = await _optional_json_body(request)
+            denied = _require_permission(request, body, "audit:export")
+            if denied is not None:
+                return denied
+            actor_id = _operator_id_from_request(request, body)
+            payload = AuditExportService(get_config()).create_export(
+                actor_id=actor_id,
+                limit=int(body.get("limit") or 500),
+                source=str(body.get("source") or ""),
+                operator_id=str(body.get("filter_operator_id") or body.get("operator_filter") or ""),
+                action=str(body.get("action") or ""),
+                outcome=str(body.get("outcome") or ""),
+                q=str(body.get("q") or ""),
+                deliver=bool(body.get("deliver", False)),
+                webhook_url=str(body.get("webhook_url") or ""),
+            )
+            return JSONResponse(
+                payload,
+                status_code=200 if payload.get("ok") else 400,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Unified audit export endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/skill-growth/backlog", tags=["System"])
+    async def skill_growth_backlog(min_occurrences: int = 2, limit: int = 20) -> JSONResponse:
+        """Return reviewable online-growth candidates from skill audit evidence."""
+        try:
+            from askme.skills.growth_backlog import SkillGrowthBacklog
+
+            backlog = SkillGrowthBacklog()
+            return JSONResponse(
+                backlog.payload(min_occurrences=min_occurrences, limit=limit),
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Skill growth backlog endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.post("/api/skill-growth/backlog/{candidate_id}", tags=["System"])
+    async def mark_skill_growth_candidate(candidate_id: str, request: Request) -> JSONResponse:
+        """Mark a skill-growth candidate as promoted, dismissed, or reopened."""
+        try:
+            from askme.skills.growth_backlog import SkillGrowthBacklog
+
+            body = await _optional_json_body(request)
+            denied = _require_permission(request, body, "skill:review")
+            if denied is not None:
+                return denied
+            backlog = SkillGrowthBacklog()
+            result = backlog.mark(
+                candidate_id,
+                action=str(body.get("action") or "observe"),
+                operator_id=_operator_id_from_request(request, body),
+                note=str(body.get("note") or ""),
+            )
+            return JSONResponse(
+                result,
+                status_code=200 if result.get("ok") else 400,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Skill growth backlog update endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.post("/api/skill-growth/backlog/{candidate_id}/draft", tags=["System"])
+    async def draft_skill_from_growth_candidate(candidate_id: str, request: Request) -> JSONResponse:
+        """Create a generated SKILL.md draft from a reviewed growth candidate."""
+        try:
+            from askme.skills.growth_backlog import SkillGrowthBacklog
+            from askme.skills.skill_manager import SkillManager
+
+            body = await _optional_json_body(request)
+            denied = _require_permission(request, body, "skill:review")
+            if denied is not None:
+                return denied
+            operator_id = _operator_id_from_request(request, body)
+            backlog = SkillGrowthBacklog()
+            candidate = backlog.get_candidate(
+                candidate_id,
+                min_occurrences=int(body.get("min_occurrences") or 1),
+            )
+            if candidate is None:
+                return JSONResponse(
+                    {"ok": False, "error": "skill growth candidate not found", "candidate_id": candidate_id},
+                    status_code=404,
+                    headers={"Access-Control-Allow-Origin": "*"},
+                )
+            candidate_payload = candidate.to_dict()
+            prompt = str(body.get("prompt") or _skill_growth_candidate_prompt(candidate_payload))
+            manager = SkillManager()
+            draft = manager.create_generated_skill_draft(
+                name=str(body.get("skill_name") or candidate.suggested_skill_name),
+                description=str(
+                    body.get("description")
+                    or f"Handle repeated site request: {candidate.summary}"
+                ),
+                prompt=prompt,
+                voice_trigger=str(body.get("voice_trigger") or candidate.suggested_voice_trigger),
+                tools_section=str(body.get("tools_section") or ""),
+                tags=body.get("tags") or ["generated", "growth", "candidate"],
+                safety_level=str(body.get("safety_level") or candidate.risk_level),
+                confirm_before_execute=bool(
+                    body.get("confirm_before_execute", candidate.risk_level != "normal")
+                ),
+                operator_id=operator_id,
+                source="skill_growth_backlog",
+                overwrite=bool(body.get("overwrite", False)),
+            )
+            if not draft.get("ok"):
+                return JSONResponse(
+                    {"ok": False, "candidate": candidate_payload, "draft": draft, "error": draft.get("error")},
+                    status_code=400,
+                    headers={"Access-Control-Allow-Origin": "*"},
+                )
+            marked = backlog.mark(
+                candidate_id,
+                action="promote",
+                operator_id=operator_id,
+                note=f"drafted generated skill {draft.get('skill_name')}",
+            )
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "candidate": candidate_payload,
+                    "draft": draft,
+                    "backlog": marked.get("backlog", {}),
+                },
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Skill growth draft endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/skills/generated", tags=["System"])
+    async def generated_skills() -> JSONResponse:
+        """Return generated-skill review queue."""
+        try:
+            from askme.skills.skill_manager import SkillManager
+
+            manager = SkillManager()
+            manager.load()
+            return JSONResponse(
+                manager.get_generated_skill_governance(),
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Generated skills endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/skill-packages", tags=["System"])
+    async def skill_packages() -> JSONResponse:
+        """Return customer/site ability packages for approved generated skills."""
+        try:
+            from askme.skills.skill_manager import SkillManager
+
+            manager = SkillManager()
+            manager.load()
+            return JSONResponse(
+                manager.get_skill_packages(),
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Skill packages endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.post("/api/skill-packages", tags=["System"])
+    async def upsert_skill_package(request: Request) -> JSONResponse:
+        """Create or update a customer/site ability package."""
+        try:
+            from askme.skills.skill_manager import SkillManager
+
+            body = await _optional_json_body(request)
+            denied = _require_permission(request, body, "skill:review")
+            if denied is not None:
+                return denied
+            manager = SkillManager()
+            result = manager.upsert_skill_package(
+                package_id=str(body.get("package_id") or "default-demo"),
+                display_name=str(body.get("display_name") or ""),
+                site_id=str(body.get("site_id") or "demo"),
+                customer_name=str(body.get("customer_name") or ""),
+                description=str(body.get("description") or ""),
+                enabled=bool(body.get("enabled", True)),
+                release_channel=str(body.get("release_channel") or ""),
+                rollout_percent=(
+                    int(body["rollout_percent"])
+                    if body.get("rollout_percent") not in (None, "")
+                    else None
+                ),
+                operator_id=_operator_id_from_request(request, body),
+            )
+            return JSONResponse(
+                result,
+                status_code=200 if result.get("ok") else 400,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Skill package upsert endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.post("/api/skill-packages/{package_id}/skills/{skill_name}", tags=["System"])
+    async def update_skill_package(package_id: str, skill_name: str, request: Request) -> JSONResponse:
+        """Assign or remove a generated skill from a customer/site ability package."""
+        try:
+            from askme.skills.skill_manager import SkillManager
+
+            body = await _optional_json_body(request)
+            denied = _require_permission(request, body, "skill:review")
+            if denied is not None:
+                return denied
+            manager = SkillManager()
+            result = manager.update_skill_package(
+                skill_name=skill_name,
+                package_id=package_id,
+                action=str(body.get("action") or "assign"),
+                operator_id=_operator_id_from_request(request, body),
+            )
+            return JSONResponse(
+                result,
+                status_code=200 if result.get("ok") else 400,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Skill package update endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/skill-packages/{package_id}/history", tags=["System"])
+    async def skill_package_history(package_id: str, limit: int = 20) -> JSONResponse:
+        """Return version snapshots for one customer/site ability package."""
+        try:
+            from askme.skills.skill_manager import SkillManager
+
+            manager = SkillManager()
+            return JSONResponse(
+                manager.get_skill_package_history(
+                    package_id=package_id,
+                    limit=max(1, min(int(limit), 100)),
+                ),
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Skill package history endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.post("/api/skill-packages/{package_id}/release", tags=["System"])
+    async def release_skill_package(package_id: str, request: Request) -> JSONResponse:
+        """Publish or gray-release a customer/site ability package."""
+        try:
+            from askme.skills.skill_manager import SkillManager
+
+            body = await _optional_json_body(request)
+            denied = _require_permission(request, body, "skill:review")
+            if denied is not None:
+                return denied
+            manager = SkillManager()
+            result = manager.release_skill_package(
+                package_id=package_id,
+                release_channel=str(body.get("release_channel") or "pilot"),
+                rollout_percent=int(body.get("rollout_percent", 100)),
+                operator_id=_operator_id_from_request(request, body),
+                note=str(body.get("note") or ""),
+            )
+            return JSONResponse(
+                result,
+                status_code=200 if result.get("ok") else 400,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Skill package release endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.post("/api/skill-packages/{package_id}/rollback", tags=["System"])
+    async def rollback_skill_package(package_id: str, request: Request) -> JSONResponse:
+        """Rollback a customer/site ability package to a previous snapshot."""
+        try:
+            from askme.skills.skill_manager import SkillManager
+
+            body = await _optional_json_body(request)
+            denied = _require_permission(request, body, "skill:review")
+            if denied is not None:
+                return denied
+            raw_version = body.get("target_version")
+            manager = SkillManager()
+            result = manager.rollback_skill_package(
+                package_id=package_id,
+                target_version=(
+                    int(raw_version)
+                    if raw_version not in (None, "")
+                    else None
+                ),
+                operator_id=_operator_id_from_request(request, body),
+                note=str(body.get("note") or ""),
+            )
+            return JSONResponse(
+                result,
+                status_code=200 if result.get("ok") else 400,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Skill package rollback endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/skills/generated/{skill_name}/validation", tags=["System"])
+    async def generated_skill_validation(skill_name: str) -> JSONResponse:
+        """Return preflight validation for one generated skill."""
+        try:
+            from askme.skills.skill_manager import SkillManager
+            from askme.skills.validation import validate_generated_skill
+
+            manager = SkillManager()
+            manager.load()
+            skill = manager.get(skill_name)
+            if skill is None or skill.source != "generated":
+                return JSONResponse(
+                    {"ok": False, "error": "generated skill not found", "skill_name": skill_name},
+                    status_code=404,
+                    headers={"Access-Control-Allow-Origin": "*"},
+                )
+            result = validate_generated_skill(skill, all_skills=manager.get_all())
+            result["skill_name"] = skill_name
+            return JSONResponse(
+                result,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Generated skill validation endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/skills/generated/{skill_name}/preview", tags=["System"])
+    async def generated_skill_preview(skill_name: str) -> JSONResponse:
+        """Return the reviewable SKILL.md body and parsed policy for one generated skill."""
+        try:
+            from askme.skills.skill_manager import SkillManager
+            from askme.skills.validation import validate_generated_skill
+
+            manager = SkillManager()
+            manager.load()
+            skill = manager.get(skill_name)
+            if skill is None or skill.source != "generated":
+                return JSONResponse(
+                    {"ok": False, "error": "generated skill not found", "skill_name": skill_name},
+                    status_code=404,
+                    headers={"Access-Control-Allow-Origin": "*"},
+                )
+            raw_body = ""
+            try:
+                raw_body = Path(skill.path).read_text(encoding="utf-8")
+            except OSError:
+                raw_body = ""
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "skill_name": skill.name,
+                    "description": skill.description,
+                    "voice_trigger": skill.voice_trigger or "",
+                    "safety_level": skill.safety_level,
+                    "execution": skill.execution,
+                    "enabled": skill.enabled,
+                    "tags": list(skill.tags),
+                    "path": skill.path,
+                    "prompt": skill.prompt_template,
+                    "tools": skill.tools_section,
+                    "raw_body": raw_body,
+                    "validation": validate_generated_skill(skill, all_skills=manager.get_all()),
+                },
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Generated skill preview endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.post("/api/skills/generated/{skill_name}/review", tags=["System"])
+    async def review_generated_skill(skill_name: str, request: Request) -> JSONResponse:
+        """Approve, reject, disable, or return a generated skill to review."""
+        try:
+            from askme.skills.skill_manager import SkillManager
+
+            body = await _optional_json_body(request)
+            denied = _require_permission(request, body, "skill:review")
+            if denied is not None:
+                return denied
+            operator_id = _operator_id_from_request(request, body)
+            manager = SkillManager()
+            result = manager.review_generated_skill(
+                skill_name,
+                action=str(body.get("action") or "request_review"),
+                operator_id=str(operator_id),
+                note=str(body.get("note") or ""),
+            )
+            status_code = 200 if result.get("ok") else 400
+            return JSONResponse(
+                result,
+                status_code=status_code,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Generated skill review endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/agent-profiles", tags=["System"])
+    async def agent_profiles() -> JSONResponse:
+        """Return product-reviewable agent profile catalog."""
+        try:
+            from askme.agent_shell.agent_profile import AgentProfileRegistry
+
+            catalog = AgentProfileRegistry().catalog()
+            return JSONResponse(
+                catalog,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Agent profile endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.post("/api/agent-profiles", tags=["System"])
+    async def upsert_agent_profile(request: Request) -> JSONResponse:
+        """Create or update a project-level agent profile Markdown file."""
+        try:
+            from askme.agent_shell.agent_profile import AgentProfileRegistry
+
+            body = await _optional_json_body(request)
+            denied = _require_permission(request, body, "skill:review")
+            if denied is not None:
+                return denied
+            registry = AgentProfileRegistry()
+            known_tools = _agent_profile_known_tools()
+            result = registry.write_project_profile(
+                name=str(body.get("name") or ""),
+                display_name=str(body.get("display_name") or ""),
+                description=str(body.get("description") or ""),
+                instructions=str(body.get("instructions") or ""),
+                tools=body.get("tools"),
+                disallowed_tools=body.get("disallowed_tools", body.get("disallowedTools")),
+                spawnable_profiles=body.get("spawnable_profiles", body.get("spawnableProfiles")),
+                skills=body.get("skills"),
+                mcp_servers=body.get("mcp_servers", body.get("mcpServers")),
+                hooks=body.get("hooks") if isinstance(body.get("hooks"), dict) else None,
+                model=str(body.get("model") or "inherit"),
+                permission_mode=str(body.get("permission_mode") or body.get("permissionMode") or "default"),
+                risk_level=str(body.get("risk_level") or body.get("riskLevel") or "medium"),
+                customer_visible=bool(body.get("customer_visible", body.get("customerVisible", True))),
+                memory_scope=str(body.get("memory") or body.get("memory_scope") or ""),
+                max_iterations=(
+                    int(body.get("max_iterations", body.get("maxTurns")))
+                    if body.get("max_iterations", body.get("maxTurns")) not in (None, "")
+                    else None
+                ),
+                timeout_seconds=(
+                    float(body.get("timeout_seconds", body.get("timeoutSeconds")))
+                    if body.get("timeout_seconds", body.get("timeoutSeconds")) not in (None, "")
+                    else None
+                ),
+                operator_id=_operator_id_from_request(request, body),
+                known_tools=known_tools,
+                overwrite=bool(body.get("overwrite", True)),
+            )
+            return JSONResponse(
+                result,
+                status_code=200 if result.get("ok") else 400,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Agent profile upsert endpoint failed: %s", exc)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=500,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+    @app.get("/api/agent-profiles/{profile_name}/preview", tags=["System"])
+    async def agent_profile_preview(profile_name: str) -> JSONResponse:
+        """Return parsed profile policy plus raw Markdown when available."""
+        try:
+            from askme.agent_shell.agent_profile import AgentProfileRegistry
+
+            payload = AgentProfileRegistry().preview(profile_name)
+            return JSONResponse(
+                payload,
+                status_code=200 if payload.get("ok") else 404,
+                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+            )
+        except Exception as exc:
+            logger.error("Agent profile preview endpoint failed: %s", exc)
             return JSONResponse(
                 {"error": str(exc)},
                 status_code=500,
@@ -3025,6 +3767,7 @@ _DASHBOARD_PAGES = frozenset(
         "conversation",
         "field",
         "knowledge",
+        "capabilities",
         "voice",
         "delivery",
     }

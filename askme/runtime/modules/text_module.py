@@ -1,4 +1,4 @@
-"""TextModule — wraps TextLoop + CommandHandler as a declarative module.
+﻿"""TextModule 鈥?wraps TextLoop + CommandHandler as a declarative module.
 
 Canonical wiring::
 
@@ -40,7 +40,7 @@ class TextModule(Module):
     voice_in: In[AudioAgent]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        from askme.llm.intent_router import IntentRouter
+        from askme.interaction.intent_router import IntentRouter
         from askme.pipeline.commands import CommandHandler
         from askme.pipeline.text_loop import TextLoop
         from askme.robot.ota_bridge import OTABridgeMetrics

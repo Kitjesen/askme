@@ -759,6 +759,18 @@ class HealthModule(Module):
                     skill_manager.get_contract_catalog()
                     if skill_manager else []
                 ),
+                "capability_center": (
+                    skill_manager.get_capability_center()
+                    if skill_manager and hasattr(skill_manager, "get_capability_center") else {}
+                ),
+                "generated_skill_governance": (
+                    skill_manager.get_generated_skill_governance()
+                    if skill_manager and hasattr(skill_manager, "get_generated_skill_governance") else {}
+                ),
+                "skill_packages": (
+                    skill_manager.get_skill_packages()
+                    if skill_manager and hasattr(skill_manager, "get_skill_packages") else {}
+                ),
             },
             "openapi": {
                 "title": openapi_doc.get("info", {}).get("title", ""),

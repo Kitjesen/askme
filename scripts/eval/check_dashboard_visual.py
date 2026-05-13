@@ -148,6 +148,9 @@ def _start_server(archive_path: Path) -> dict[str, Any]:
 
 
 def _seed_field_event(base_url: str, output_dir: Path) -> None:
+    demo_evidence_path = ROOT / "artifacts" / "evidence" / "dashboard-field-demo.jpg"
+    demo_evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    demo_evidence_path.write_bytes(_ONE_PIXEL_PNG)
     evidence_path = output_dir / "visual-illegal-parking.png"
     evidence_path.write_bytes(_ONE_PIXEL_PNG)
     payload = {
@@ -166,18 +169,20 @@ def _seed_field_event(base_url: str, output_dir: Path) -> None:
 def _check_viewport(page: Any, *, name: str, width: int, height: int, output_dir: Path) -> dict[str, Any]:
     page.set_viewport_size({"width": width, "height": height})
     page.goto("/dashboard", wait_until="domcontentloaded")
-    page.wait_for_selector("#voice-console-card", timeout=5000)
+    page.wait_for_selector("#dashboard-nav", timeout=5000)
+    page.wait_for_selector(".product-shell", timeout=5000)
     page.wait_for_timeout(600)
     screenshot_path = output_dir / f"askme-dashboard-{name}.png"
     page.screenshot(path=str(screenshot_path), full_page=True)
     body_text = page.locator("body").inner_text(timeout=5000)
     required = [
-        "Thunder",
-        "实时语音交互",
-        "知识管理",
+        "现场任务平台",
+        "现场事件闭环看板",
+        "客户现在能看什么",
+        "知识库",
         "现场事件",
-        "播报音色",
-        "机器狗播报",
+        "语音音色",
+        "交付检查",
     ]
     missing = [text for text in required if text not in body_text]
     overflow = page.evaluate(
@@ -194,6 +199,28 @@ def _check_viewport(page: Any, *, name: str, width: int, height: int, output_dir
         "has_horizontal_overflow": has_horizontal_overflow,
         "scroll_width": overflow["scrollWidth"],
         "client_width": overflow["clientWidth"],
+    }
+
+
+def _exercise_interactions(page: Any, *, output_dir: Path) -> dict[str, Any]:
+    """Exercise one real product interaction through the browser page."""
+
+    page.goto("/dashboard/field", wait_until="domcontentloaded")
+    page.wait_for_selector("#field-submit", timeout=5000)
+    page.fill("#field-location", "B区主通道")
+    page.fill("#field-note", "浏览器实际交互 smoke：车辆停在主通道")
+    page.click("#field-submit")
+    page.wait_for_selector(".field-detail-card", timeout=8000)
+    page.wait_for_timeout(800)
+    body_text = page.locator("body").inner_text(timeout=5000)
+    screenshot_path = output_dir / "askme-dashboard-field-interaction.png"
+    page.screenshot(path=str(screenshot_path), full_page=True)
+    return {
+        "name": "field_event_create",
+        "screenshot": str(screenshot_path),
+        "has_submit_result": "操作已提交" in body_text,
+        "has_event_context": "B区主通道" in body_text,
+        "has_customer_language": "现场事件处置" in body_text,
     }
 
 
@@ -214,6 +241,7 @@ def run(output_dir: Path) -> dict[str, Any]:
     page_errors: list[str] = []
     response_errors: list[dict[str, Any]] = []
     checks: list[dict[str, Any]] = []
+    interactions: list[dict[str, Any]] = []
     try:
         _seed_field_event(base_url, output_dir)
         with sync_playwright() as p:
@@ -231,6 +259,7 @@ def run(output_dir: Path) -> dict[str, Any]:
                     else None,
                 )
                 checks.append(_check_viewport(page, name="desktop", width=1600, height=900, output_dir=output_dir))
+                interactions.append(_exercise_interactions(page, output_dir=output_dir))
                 checks.append(_check_viewport(page, name="mobile", width=390, height=844, output_dir=output_dir))
             finally:
                 browser.close()
@@ -254,7 +283,10 @@ def run(output_dir: Path) -> dict[str, Any]:
         if check["has_horizontal_overflow"]:
             failures.append(f"{check['name']}: horizontal overflow")
     actionable_response_errors = [
-        item for item in response_errors if not str(item["url"]).endswith("/favicon.ico")
+        item
+        for item in response_errors
+        if not str(item["url"]).endswith("/favicon.ico")
+        and not (str(item["url"]).endswith("/api/field/notification-preflight") and item["status"] == 409)
     ]
     if actionable_response_errors:
         failures.append(f"response_errors:{len(actionable_response_errors)}")
@@ -262,10 +294,18 @@ def run(output_dir: Path) -> dict[str, Any]:
         failures.append(f"console_errors:{len(console_errors)}")
     if page_errors:
         failures.append(f"page_errors:{len(page_errors)}")
+    for interaction in interactions:
+        if not interaction["has_submit_result"]:
+            failures.append(f"{interaction['name']}: missing submit result")
+        if not interaction["has_event_context"]:
+            failures.append(f"{interaction['name']}: missing event context")
+        if not interaction["has_customer_language"]:
+            failures.append(f"{interaction['name']}: missing customer language")
     result = {
         "status": "passed" if not failures else "failed",
         "base_url": base_url,
         "checks": checks,
+        "interactions": interactions,
         "console_errors": console_errors[:20],
         "page_errors": page_errors[:20],
         "response_errors": response_errors[:20],

@@ -1,4 +1,4 @@
-"""VoiceModule — wraps AudioAgent + IntentRouter + VoiceLoop + AddressDetector.
+﻿"""VoiceModule 鈥?wraps AudioAgent + IntentRouter + VoiceLoop + AddressDetector.
 
 Canonical wiring::
 
@@ -47,7 +47,7 @@ class VoiceModule(Module):
     audio_out: Out[AudioAgent]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        from askme.llm.intent_router import IntentRouter
+        from askme.interaction.intent_router import IntentRouter
         from askme.pipeline.voice_loop import VoiceLoop
         from askme.robot.ota_bridge import OTABridgeMetrics
         from askme.tools.builtin_tools import SpeakProgressTool

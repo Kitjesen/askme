@@ -1,5 +1,5 @@
 """
-Askme MCP Server — exposes robot control, voice I/O, and skills via MCP.
+Askme MCP Server; exposes robot control, voice I/O, and skills via MCP.
 
 Usage::
 
@@ -21,7 +21,7 @@ from mcp.server.fastmcp import FastMCP
 from askme.config import get_config, get_section, validate_config
 from askme.runtime.profiles import MCP_PROFILE
 
-# Logging MUST go to stderr — stdout is the JSON-RPC channel in stdio mode
+# Logging MUST go to stderr; stdout is the JSON-RPC channel in stdio mode
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -62,14 +62,14 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     ctx.config = get_config()
     ctx.runtime_profile = MCP_PROFILE.snapshot()
 
-    # ── Validate configuration ────────────────────────────────
+    # Validate configuration.
     for warning in validate_config(ctx.config):
         logger.warning("Config: %s", warning)
 
-    # ── Always init: skills, tools, brain ──────────────────────
+    # Always init: skills, tools, brain.
     from askme.llm.client import LLMClient
-    from askme.llm.conversation import ConversationManager
     from askme.memory.bridge import MemoryBridge
+    from askme.memory.conversation import ConversationManager
     from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.session import SessionMemory
     from askme.perception.scene_intelligence import SceneIntelligence
@@ -100,7 +100,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         default_model=ctx.config.get("brain", {}).get("model", "MiniMax-M2.7-highspeed"),
     )
 
-    # ── Robot (conditional) ────────────────────────────────────
+    # Robot (conditional).
     robot_cfg = get_section("robot")
     if robot_cfg.get("enabled", False):
         try:
@@ -114,7 +114,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         except Exception as exc:
             logger.warning("Robot init failed: %s", exc)
 
-    # ── Voice engines (conditional) ────────────────────────────
+    # Voice engines (conditional).
     voice_cfg = get_section("voice")
     if voice_cfg:
         try:
@@ -155,7 +155,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         logger.info("Shutdown complete.")
 
 
-# ── FastMCP instance ──────────────────────────────────────────
+# FastMCP instance.
 
 mcp = FastMCP(
     "askme",
@@ -172,6 +172,7 @@ if __name__ == "__main__":
 
 # Import tool/resource modules to trigger @mcp.tool()/@mcp.resource() registration.
 # These MUST be imported after `mcp` is defined.
+import askme.mcp.resources.contract_resources as _cr  # noqa: E402, F401
 import askme.mcp.resources.health_resources as _hr  # noqa: E402, F401
 import askme.mcp.resources.perception_resources as _pr  # noqa: E402, F401
 import askme.mcp.resources.robot_resources as _rr  # noqa: E402, F401

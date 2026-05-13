@@ -17,6 +17,19 @@ class TestLLMRegistry:
         cls = llm_registry._backends.get("minimax")
         assert cls is LLMClient
 
+    def test_product_llm_providers_registered(self):
+        expected = {
+            "openai_compatible",
+            "openai",
+            "minimax",
+            "doubao",
+            "dashscope",
+            "deepseek",
+            "zhipu",
+            "fake",
+        }
+        assert expected <= set(llm_registry._backends)
+
 
 class TestASRRegistry:
     def test_sherpa_registered(self):

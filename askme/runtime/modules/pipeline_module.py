@@ -1,4 +1,4 @@
-"""PipelineModule — wraps BrainPipeline as a declarative module.
+"""PipelineModule 鈥?wraps BrainPipeline as a declarative module.
 
 Canonical wiring::
 
@@ -20,6 +20,7 @@ from typing import Any
 from askme.llm.client import LLMClient
 from askme.perception.vision_bridge import VisionBridge
 from askme.pipeline.brain_pipeline import BrainPipeline
+from askme.pipeline.persona import persona_from_brain_config
 from askme.robot.control_client import DogControlClient
 from askme.robot.safety_client import DogSafetyClient
 from askme.runtime.module import In, Module, ModuleRegistry, Out
@@ -52,7 +53,7 @@ def _load_soul_seed(cfg: dict[str, Any]) -> list[dict[str, str]]:
         return []
     return [
         {"role": "user", "content": f"请读取这份角色定义，并在整个会话中保持一致。\n{brief}"},
-        {"role": "assistant", "content": "已加载 Thunder 角色定义，将按该设定持续响应。"},
+        {"role": "assistant", "content": "已加载当前项目的角色定义，将按该设定持续响应。"},
     ]
 
 
@@ -65,7 +66,7 @@ class PipelineModule(Module):
 
     pipeline: Out[BrainPipeline]
 
-    # In ports — auto-wired by runtime before build() is called
+    # In ports 鈥?auto-wired by runtime before build() is called
     llm_in: In[LLMClient]
     tool_registry_in: In[ToolRegistry]
     memory_context: In[MemoryContext]
@@ -100,7 +101,14 @@ class PipelineModule(Module):
         dog_control = _from(control_mod, "client")
 
         brain_cfg = cfg.get("brain", {})
-        prompt_seed = _load_soul_seed(cfg) or brain_cfg.get("prompt_seed", [])
+        persona = persona_from_brain_config(brain_cfg)
+        system_prompt = brain_cfg.get("system_prompt") or persona.build_system_prompt()
+        prompt_seed = (
+            _load_soul_seed(cfg)
+            or brain_cfg.get("prompt_seed", [])
+            or persona.build_prompt_seed()
+        )
+        user_prefix = brain_cfg.get("user_prefix") or persona.build_user_prefix()
 
         self._pipeline = BrainPipeline(
             llm=llm,
@@ -117,9 +125,9 @@ class PipelineModule(Module):
             vision=vision,
             session_memory=session_memory,
             episodic_memory=episodic,
-            system_prompt=brain_cfg.get("system_prompt", ""),
+            system_prompt=system_prompt,
             prompt_seed=prompt_seed,
-            user_prefix=brain_cfg.get("user_prefix", ""),
+            user_prefix=user_prefix,
             voice_model=brain_cfg.get("voice_model"),
             general_tool_max_safety_level=cfg.get("tools", {}).get(
                 "general_chat_max_safety_level", "normal"

@@ -1,7 +1,14 @@
-"""LLM module -- client, conversation history, and intent routing."""
+"""Product LLM package.
 
-from askme.llm.client import LLMClient
-from askme.llm.conversation import ConversationManager
-from askme.llm.intent_router import IntentRouter
+Root imports stay backward compatible.  Real implementation lives under
+``core/``, provider adapters under ``providers/``, and runtime policy under
+``policy/``.
+"""
 
-__all__ = ["LLMClient", "ConversationManager", "IntentRouter"]
+from askme.interaction.intent_router import IntentRouter
+from askme.llm.core.client import LLMClient
+from askme.llm.core.config import LLMConfig
+from askme.llm.core.gateway import LLMGateway
+from askme.memory.conversation import ConversationManager
+
+__all__ = ["LLMClient", "LLMConfig", "LLMGateway", "ConversationManager", "IntentRouter"]

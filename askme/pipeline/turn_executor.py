@@ -1,4 +1,4 @@
-"""Turn executor — orchestrates one full conversation turn: memory → LLM → tools → TTS → save."""
+"""Turn executor; orchestrates one full conversation turn: memory, LLM, tools, TTS, save."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from askme.pipeline.utils import classify_llm_error, set_log_context
 
 if TYPE_CHECKING:
     from askme.llm.client import LLMClient
-    from askme.llm.conversation import ConversationManager
     from askme.memory.bridge import MemoryBridge
+    from askme.memory.conversation import ConversationManager
     from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.system import MemorySystem
     from askme.perception.vision_bridge import VisionBridge
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class TurnExecutor:
-    """Orchestrates one full conversation turn: memory → LLM → tools → TTS → save."""
+    """Orchestrates one full conversation turn: memory, LLM, tools, TTS, save."""
 
     _SILENT_MARKER = "[SILENT]"
     _REFLECT_DELAY_S = 5.0       # seconds to wait before post-turn reflection
@@ -42,7 +42,7 @@ class TurnExecutor:
         called before all _track_task() calls inside process(), background tasks
         automatically inherit the turn's trace_id and session_id (item 19).
         """
-        # create_task() propagates the current context — no manual copy needed.
+        # create_task() propagates the current context; no manual copy needed.
         t = asyncio.create_task(coro, name=name)
         self._pending_tasks.add(t)
 
@@ -96,7 +96,7 @@ class TurnExecutor:
         # before the first turn completes don't each create their own semaphore.
         self._llm_semaphore: asyncio.Semaphore = asyncio.Semaphore(1)
 
-    # ── Public API ────────────────────────────────────────────
+    # Public API.
 
     @property
     def last_spoken_text(self) -> str:
@@ -107,7 +107,7 @@ class TurnExecutor:
         """Late-bind AudioAgent (set by VoiceModule/TextModule after build)."""
         self._audio = audio
 
-    # ── Core turn orchestration ───────────────────────────────
+    # Core turn orchestration.
 
     def _log_episode(self, kind: str, text: str) -> None:
         if self._mem is not None:
@@ -130,7 +130,7 @@ class TurnExecutor:
             if not _should:
                 return
             if self._llm_semaphore.locked():
-                logger.info("[Dream] Skipping reflection — LLM busy with user turn")
+                logger.info("[Dream] Skipping reflection; LLM busy with user turn")
                 return
             logger.info("[Dream] Idle-time reflection triggered")
             try:
@@ -166,10 +166,10 @@ class TurnExecutor:
         is_voice = source == "voice"
 
         if self._cancel_token is not None and self._cancel_token.is_set():
-            logger.warning("[TurnExecutor] cancel_token set — skipping turn")
+            logger.warning("[TurnExecutor] cancel_token set; skipping turn")
             return ""
 
-        # ── pre_turn hook (Claude Code: UserPromptSubmit) ──────────────────
+        # pre_turn hook (Claude Code: UserPromptSubmit).
         # Build a lightweight TurnContext snapshot for hooks; the token is
         # shared with sub-components so hooks can also trigger E-STOP.
         _token = self._cancel_token if self._cancel_token is not None else asyncio.Event()
@@ -276,7 +276,7 @@ class TurnExecutor:
             if full_response.lstrip().startswith(self._SILENT_MARKER):
                 logger.info("[SILENT] Not addressed to robot, suppressing output")
                 self._audio.drain_buffers()
-                # Remove exactly the user message we added — match by content to
+                # Remove exactly the user message we added; match by content to
                 # avoid popping the wrong message if compress ran concurrently.
                 for i in range(len(self._conversation.history) - 1, -1, -1):
                     m = self._conversation.history[i]
@@ -288,7 +288,7 @@ class TurnExecutor:
             self._conversation.add_assistant_message(full_response)
             self._last_spoken_text = full_response
 
-            # ── post_turn hook (Claude Code: Stop hook / notification) ─────
+            # post_turn hook (Claude Code: Stop hook / notification).
             if self._hooks:
                 await self._hooks.fire_post_turn(_ctx, full_response)
 
@@ -371,7 +371,7 @@ class TurnExecutor:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._pending_tasks.clear()
 
-    # ── Internal helpers ──────────────────────────────────────
+    # Internal helpers.鈹€
 
     def _start_vision_capture(self) -> asyncio.Task[str] | None:
         if not self._vision or not self._vision.available:

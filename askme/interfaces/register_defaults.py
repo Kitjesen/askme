@@ -19,9 +19,16 @@ logger = logging.getLogger(__name__)
 # LLM
 # ---------------------------------------------------------------------------
 from askme.interfaces.llm import llm_registry  # noqa: E402
-from askme.llm.client import LLMClient  # noqa: E402
+from askme.llm.core.client import LLMClient  # noqa: E402
 
+llm_registry.register("openai_compatible")(LLMClient)
+llm_registry.register("openai")(LLMClient)
 llm_registry.register("minimax")(LLMClient)
+llm_registry.register("doubao")(LLMClient)
+llm_registry.register("dashscope")(LLMClient)
+llm_registry.register("deepseek")(LLMClient)
+llm_registry.register("zhipu")(LLMClient)
+llm_registry.register("fake")(LLMClient)
 
 # ---------------------------------------------------------------------------
 # ASR

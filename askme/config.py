@@ -76,6 +76,10 @@ _FEATURE_FLAGS = {
 
 _TRUTHY = {"1", "true", "yes"}
 _FALSY = {"0", "false", "no"}
+_ALSA_DEVICE_PATTERN = re.compile(
+    r"^(?:plug)?hw:|^sysdefault:|^dmix:|^dsnoop:|^front:|^surround",
+    flags=re.IGNORECASE,
+)
 
 
 def _apply_feature_flags(config: dict) -> None:
@@ -95,6 +99,56 @@ def _apply_feature_flags(config: dict) -> None:
                 config.setdefault(section, {})[key] = True
             elif val in _FALSY:
                 config.setdefault(section, {})[key] = False
+
+
+def _looks_like_alsa_device(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    return bool(_ALSA_DEVICE_PATTERN.match(value.strip()))
+
+
+def _apply_platform_audio_overrides(config: dict) -> None:
+    """Normalize hardware-specific audio settings for the current OS.
+
+    The field robot profile uses ALSA/MCP01 values such as ``plughw:1,0`` and
+    ``usb_direct``.  Those are valid on the Linux robot, but on Windows they
+    make PortAudio try an impossible device and break real microphone/speaker
+    tests.  Keep the config file deployable to the robot while resolving the
+    runtime config to native Windows sounddevice endpoints during local demos.
+    """
+    if os.environ.get("ASKME_DISABLE_PLATFORM_AUDIO_OVERRIDES", "").strip().lower() in _TRUTHY:
+        return
+    if os.name != "nt":
+        return
+
+    voice_cfg = config.get("voice")
+    if not isinstance(voice_cfg, dict):
+        return
+
+    overrides: list[str] = []
+
+    if _looks_like_alsa_device(voice_cfg.get("input_device")):
+        voice_cfg["input_device"] = None
+        overrides.append("voice.input_device: ALSA name -> Windows default input")
+
+    input_transport = str(voice_cfg.get("input_transport", "auto")).strip().lower()
+    if input_transport == "usb_direct":
+        voice_cfg["input_transport"] = "sounddevice"
+        overrides.append("voice.input_transport: usb_direct -> sounddevice")
+
+    tts_cfg = voice_cfg.get("tts")
+    if isinstance(tts_cfg, dict):
+        if _looks_like_alsa_device(tts_cfg.get("output_device")):
+            tts_cfg["output_device"] = None
+            overrides.append("voice.tts.output_device: ALSA name -> Windows default output")
+
+        output_transport = str(tts_cfg.get("output_transport", "auto")).strip().lower()
+        if output_transport in {"usb_direct", "aplay"}:
+            tts_cfg["output_transport"] = "sounddevice"
+            overrides.append(f"voice.tts.output_transport: {output_transport} -> sounddevice")
+
+    if overrides:
+        config["_platform_audio_overrides"] = overrides
 
 
 def _load_config_from_disk() -> dict:
@@ -122,7 +176,10 @@ def _load_config_from_disk() -> dict:
     # 5. Apply feature flag overrides
     _apply_feature_flags(resolved)
 
-    # 6. Inject convenience helpers
+    # 6. Apply platform-specific safe defaults
+    _apply_platform_audio_overrides(resolved)
+
+    # 7. Inject convenience helpers
     resolved["_project_root"] = str(_PROJECT_ROOT)
 
     return resolved

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from askme.agent_shell.agent_hooks import AgentHookRunner
 from askme.agent_shell.thunder_agent_shell import (
     _MAX_DEPTH,
     _MAX_ITERATIONS,
@@ -186,6 +187,61 @@ async def test_tool_execution_timeout_returns_error(shell, monkeypatch) -> None:
 
     assert "[Error]" in result
     assert "超时" in result
+
+
+@pytest.mark.asyncio
+async def test_pre_tool_hook_blocks_execution(shell, mock_tools) -> None:
+    """Profile PreToolUse hook can block a tool before registry execution."""
+    shell._allowed_tools = {"bash"}
+    shell._hook_runner = AgentHookRunner(
+        {
+            "PreToolUse": [
+                {
+                    "matcher": "bash",
+                    "contains": "rm -rf",
+                    "decision": "deny",
+                    "reason": "destructive command",
+                }
+            ]
+        }
+    )
+
+    result = await shell._execute_tool({
+        "id": "c1",
+        "name": "bash",
+        "arguments": '{"command":"rm -rf data"}',
+    })
+
+    assert "Agent hook blocked bash" in result
+    assert mock_tools.execute.called is False
+
+
+@pytest.mark.asyncio
+async def test_post_tool_hook_blocks_result(shell, mock_tools) -> None:
+    """Profile PostToolUse hook can hide a tool result after execution."""
+    shell._allowed_tools = {"read_file"}
+    shell._hook_runner = AgentHookRunner(
+        {
+            "PostToolUse": [
+                {
+                    "matcher": "read_file",
+                    "contains": "secret=",
+                    "decision": "block",
+                    "reason": "secret content",
+                }
+            ]
+        }
+    )
+    mock_tools.execute.return_value = "secret=123"
+
+    result = await shell._execute_tool({
+        "id": "c1",
+        "name": "read_file",
+        "arguments": '{"path":"secret.txt"}',
+    })
+
+    assert "Agent hook blocked read_file" in result
+    assert mock_tools.execute.called is True
 
 
 @pytest.mark.asyncio

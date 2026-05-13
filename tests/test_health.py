@@ -1,6 +1,7 @@
 """Tests for the MCP and HTTP health surfaces."""
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -694,10 +695,49 @@ class TestHealthServer:
         assert payload["session_operator_header"] == "x-askme-operator-id"
         assert payload["permissions"]["operator"]
         assert payload["sso"]["configured"] is False
+        assert payload["sso"]["trusted_identity_headers_enabled"] is False
         assert any(
             operator["operator_id"] == "dashboard.operator"
             for operator in payload["operators"]
         )
+        assert payload["readiness"]["status"] == "demo_or_trial_only"
+        assert payload["readiness"]["production_ready"] is False
+        assert any(item["role"] == "supervisor" for item in payload["roles"])
+        assert any(row["scope"] == "knowledge:approve" for row in payload["authorization_matrix"])
+
+    def test_governance_current_operator_resolves_permissions(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        response = client.get(
+            "/api/governance/current-operator",
+            params={"operator_id": "supervisor-1"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["operator"]["operator_id"] == "supervisor-1"
+        assert payload["operator"]["known"] is True
+        assert "knowledge:approve" in payload["permissions"]
+        assert payload["readiness"]["production_ready"] is False
+
+    def test_governance_unknown_operator_is_limited(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        current = client.get(
+            "/api/governance/current-operator",
+            params={"operator_id": "ghost.operator"},
+        )
+        authorization = client.post(
+            "/api/governance/authorize",
+            json={"operator_id": "ghost.operator", "permission": "field:event:create"},
+        )
+
+        assert current.status_code == 200
+        payload = current.json()
+        assert payload["operator"]["known"] is False
+        assert payload["permissions"] == []
+        assert authorization.status_code == 403
+        assert authorization.json()["reason"] == "operator_missing_permission"
 
     def test_dashboard_contains_cognition_planning_controls(self):
         client = TestClient(create_health_app(lambda: _runtime_snapshot()))
@@ -711,6 +751,7 @@ class TestHealthServer:
             "/dashboard/conversation",
             "/dashboard/field",
             "/dashboard/knowledge",
+            "/dashboard/capabilities",
             "/dashboard/voice",
             "/dashboard/delivery",
         ):
@@ -723,15 +764,18 @@ class TestHealthServer:
 
         assert js_response.status_code == 200
         assert css_response.status_code == 200
+        assert "/api/governance/current-operator" in js_response.text
         assert "/dashboard/conversation" in js_response.text
         assert "/dashboard/field" in js_response.text
         assert "/dashboard/knowledge" in js_response.text
+        assert "/dashboard/capabilities" in js_response.text
         assert "/dashboard/voice" in js_response.text
         assert "/dashboard/delivery" in js_response.text
         assert "renderOverview" in js_response.text
         assert "renderConversation" in js_response.text
         assert "renderField" in js_response.text
         assert "renderKnowledge" in js_response.text
+        assert "renderCapabilities" in js_response.text
         assert "renderVoice" in js_response.text
         assert "renderDelivery" in js_response.text
         assert "/api/chat" in js_response.text
@@ -739,6 +783,28 @@ class TestHealthServer:
         assert "/api/knowledge/import" in js_response.text
         assert "/api/knowledge/list" in js_response.text
         assert "/api/memory/search" in js_response.text
+        assert "/api/capability-center" in js_response.text
+        assert "/api/skill-audit" in js_response.text
+        assert "/api/audit/events" in js_response.text
+        assert "/api/audit/export" in js_response.text
+        assert "/api/agent-profiles" in js_response.text
+        assert "/api/skills/generated" in js_response.text
+        assert "/api/skill-packages" in js_response.text
+        assert "/api/skill-growth/backlog" in js_response.text
+        assert 'id="agent-profile-name"' in js_response.text
+        assert "data-agent-preview" in js_response.text
+        assert "保存 Agent Profile" in js_response.text
+        assert "renderAgentProfilePreview" in js_response.text
+        assert "scenario_blueprints" in js_response.text
+        assert "场景能力蓝图" in js_response.text
+        assert "renderScenarioBlueprint" in js_response.text
+        assert "/draft" in js_response.text
+        assert 'id="skill-package-id"' in js_response.text
+        assert "data-skill-package" in js_response.text
+        assert "data-growth-action" in js_response.text
+        assert "生成草稿" in js_response.text
+        assert "/preview" in js_response.text
+        assert "预检" in js_response.text
         assert "知识管理" in js_response.text
         assert "导入并发布" in js_response.text
         assert "重建索引" in js_response.text
@@ -747,6 +813,12 @@ class TestHealthServer:
         assert "knowledge-operations" in js_response.text
         assert "/api/field/scenarios" in js_response.text
         assert "/api/field/events" in js_response.text
+        assert "renderFieldEventDetail" in js_response.text
+        assert "incident_workflow" in js_response.text
+        assert "action_audit" in js_response.text
+        assert "runtime_delivery" in js_response.text
+        assert "resend-notification" in js_response.text
+        assert "request-close" in js_response.text
         assert "/api/field/readiness" in js_response.text
         assert "/api/field/devices" in js_response.text
         assert "暂无现场事件" in js_response.text
@@ -784,6 +856,337 @@ class TestHealthServer:
         assert data["profile"]["name"] == "voice"
         assert data["components"]["skills"]["capabilities"]["openapi_generated"] is True
         assert data["skills"]["contract_count"] == 3
+
+    def test_capability_center_endpoint_returns_customer_catalog(self):
+        client = TestClient(
+            create_health_app(
+                lambda: _runtime_snapshot(),
+                capabilities_provider=lambda: {
+                    "skills": {
+                        "capability_center": {
+                            "title": "园区巡检机器人能力中心",
+                            "summary": {"group_count": 1},
+                            "groups": [{"display_name": "巡检任务", "skills": []}],
+                        }
+                    }
+                },
+            )
+        )
+
+        response = client.get("/api/capability-center")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["title"] == "园区巡检机器人能力中心"
+        assert data["groups"][0]["display_name"] == "巡检任务"
+
+    def test_skill_audit_endpoint_returns_records_shape(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        response = client.get("/api/skill-audit?limit=3")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["limit"] == 3
+        assert isinstance(data["records"], list)
+
+    def test_skill_growth_backlog_endpoint_returns_candidates_shape(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        response = client.get("/api/skill-growth/backlog?min_occurrences=1&limit=3")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "candidates" in data
+        assert data["policy"]["human_product_owner_required"] is True
+        assert data["policy"]["auto_create_or_enable_skills"] is False
+
+    def test_skill_growth_backlog_update_requires_rbac_permission(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        denied = client.post(
+            "/api/skill-growth/backlog/grow_missing",
+            json={"action": "promote"},
+        )
+        assert denied.status_code == 403
+
+    def test_skill_growth_backlog_draft_creates_pending_generated_skill(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import askme.skills.growth_backlog as growth_backlog_module
+        import askme.skills.skill_manager as skill_manager_module
+        from askme.skills.audit import SkillAuditLog
+        from askme.skills.skill_manager import SkillManager
+
+        audit = SkillAuditLog(tmp_path / "skill-audit.jsonl")
+        audit.append(skill_name="unknown", status="failed", user_text="检查喷泉灯", reason="no_skill")
+        audit.append(skill_name="unknown", status="blocked", user_text="检查喷泉灯", reason="not_found")
+        monkeypatch.setattr(growth_backlog_module, "SkillAuditLog", lambda: audit)
+        monkeypatch.setattr(
+            growth_backlog_module,
+            "default_skill_growth_state_path",
+            lambda: tmp_path / "growth.json",
+        )
+        monkeypatch.setattr(skill_manager_module, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(
+            skill_manager_module,
+            "_SETTINGS_FILE",
+            tmp_path / "skills_settings.json",
+        )
+        monkeypatch.setattr(
+            skill_manager_module,
+            "SkillAuditLog",
+            lambda: SkillAuditLog(tmp_path / "skill-audit.jsonl"),
+        )
+
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+        candidate_id = client.get(
+            "/api/skill-growth/backlog?min_occurrences=1&limit=3"
+        ).json()["candidates"][0]["candidate_id"]
+
+        denied = client.post(f"/api/skill-growth/backlog/{candidate_id}/draft", json={})
+        assert denied.status_code == 403
+
+        authorized = client.post(
+            f"/api/skill-growth/backlog/{candidate_id}/draft",
+            json={"operator_id": "admin-1"},
+            headers={"X-Askme-Operator-Id": "admin-1"},
+        )
+
+        assert authorized.status_code == 200
+        payload = authorized.json()
+        assert payload["ok"] is True
+        assert payload["draft"]["enabled"] is False
+        assert payload["draft"]["status"] == "pending_approval"
+        skill_name = payload["draft"]["skill_name"]
+        assert (tmp_path / "skills" / skill_name / "SKILL.md").exists()
+
+        manager = SkillManager(project_dir=tmp_path)
+        manager.load()
+        skill = manager.get(skill_name)
+        assert skill is not None
+        assert skill.source == "generated"
+        assert skill.enabled is False
+
+    def test_agent_profiles_endpoint_returns_product_roles(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        response = client.get("/api/agent-profiles")
+
+        assert response.status_code == 200
+        data = response.json()
+        names = {profile["name"] for profile in data["profiles"]}
+        assert "field_operator" in names
+        assert "skill_growth_manager" in names
+
+    def test_agent_profile_upsert_and_preview_endpoint(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        denied = client.post("/api/agent-profiles", json={})
+        assert denied.status_code == 403
+
+        response = client.post(
+            "/api/agent-profiles",
+            json={
+                "operator_id": "admin-1",
+                "name": "Parking PM",
+                "display_name": "Parking PM",
+                "description": "Plans customer-facing illegal parking detection delivery.",
+                "instructions": "Only produce parking detection delivery plans with acceptance criteria.",
+                "tools": ["read_file", "robot_api", "temporal_query"],
+                "spawnable_profiles": ["safety_reviewer"],
+                "skills": ["detect_illegal_parking"],
+            },
+            headers={"X-Askme-Operator-Id": "admin-1"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["profile"]["name"] == "parking_pm"
+        assert (tmp_path / ".askme" / "agents" / "parking_pm.md").exists()
+
+        preview = client.get("/api/agent-profiles/parking_pm/preview")
+        assert preview.status_code == 200
+        assert preview.json()["profile"]["preloaded_skills"] == ["detect_illegal_parking"]
+
+    def test_agent_profile_upsert_rejects_unknown_tool_without_client_allowlist(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        monkeypatch.chdir(tmp_path)
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        response = client.post(
+            "/api/agent-profiles",
+            json={
+                "operator_id": "admin-1",
+                "name": "Unsafe Agent",
+                "description": "This profile tries to expand its own tool allowlist.",
+                "instructions": "Use a fake tool to bypass governance.",
+                "tools": ["not_a_real_tool"],
+                "known_tools": ["not_a_real_tool"],
+            },
+            headers={"X-Askme-Operator-Id": "admin-1"},
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert data["ok"] is False
+        assert data["error"] == "unknown tools requested"
+        assert data["unknown_tools"] == ["not_a_real_tool"]
+        assert not (tmp_path / ".askme" / "agents" / "unsafe_agent.md").exists()
+
+    def test_generated_skills_endpoint_returns_review_queue(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        response = client.get("/api/skills/generated")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "records" in data
+        assert data["policy"]["approval_required"] is True
+        assert data["policy"]["auto_enable_generated_skills"] is False
+
+    def test_skill_packages_endpoint_returns_package_policy(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        response = client.get("/api/skill-packages")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "packages" in data
+        assert data["policy"]["customer_scoped_enablement"] is True
+
+    def test_skill_package_upsert_requires_rbac_permission(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        denied = client.post(
+            "/api/skill-packages",
+            json={"package_id": "fanmu-phase-1", "display_name": "Fanmu"},
+        )
+        assert denied.status_code == 403
+
+        authorized = client.post(
+            "/api/skill-packages",
+            json={"package_id": "fanmu-phase-1", "display_name": "Fanmu"},
+            headers={"X-Askme-Operator-Id": "admin-1"},
+        )
+        assert authorized.status_code == 200
+        assert authorized.json()["package"]["package_id"] == "fanmu-phase-1"
+
+    def test_generated_skill_validation_endpoint_for_missing_skill(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        response = client.get("/api/skills/generated/missing-skill/validation")
+
+        assert response.status_code == 404
+        assert response.json()["ok"] is False
+
+    def test_generated_skill_preview_endpoint_for_missing_skill(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        response = client.get("/api/skills/generated/missing-skill/preview")
+
+        assert response.status_code == 404
+        assert response.json()["ok"] is False
+
+    def test_generated_skill_review_requires_rbac_permission(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        denied = client.post(
+            "/api/skills/generated/missing-skill/review",
+            json={"action": "approve"},
+        )
+        assert denied.status_code == 403
+        assert denied.json()["reason"] == "operator_missing_permission"
+
+        authorized = client.post(
+            "/api/skills/generated/missing-skill/review",
+            json={"action": "approve"},
+            headers={"X-Askme-Operator-Id": "admin-1"},
+        )
+        assert authorized.status_code == 400
+        assert authorized.json()["error"] == "generated skill not found"
+
+    def test_skill_package_update_requires_rbac_permission(self):
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        denied = client.post(
+            "/api/skill-packages/default-demo/skills/missing-skill",
+            json={"action": "assign"},
+        )
+        assert denied.status_code == 403
+
+        authorized = client.post(
+            "/api/skill-packages/default-demo/skills/missing-skill",
+            json={"action": "assign"},
+            headers={"X-Askme-Operator-Id": "admin-1"},
+        )
+        assert authorized.status_code == 400
+        assert authorized.json()["error"] == "generated skill not found"
+
+    def test_skill_package_release_history_and_rollback_endpoints(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import askme.skills.skill_manager as skill_manager_module
+        from askme.skills.audit import SkillAuditLog
+
+        monkeypatch.setattr(skill_manager_module, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(
+            skill_manager_module,
+            "_SETTINGS_FILE",
+            tmp_path / "skills_settings.json",
+        )
+        monkeypatch.setattr(
+            skill_manager_module,
+            "SkillAuditLog",
+            lambda: SkillAuditLog(tmp_path / "skill-audit.jsonl"),
+        )
+        client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+        denied = client.post(
+            "/api/skill-packages/default-demo/release",
+            json={"release_channel": "pilot", "rollout_percent": 25},
+        )
+        assert denied.status_code == 403
+
+        first = client.post(
+            "/api/skill-packages/default-demo/release",
+            json={"release_channel": "pilot", "rollout_percent": 25},
+            headers={"X-Askme-Operator-Id": "admin-1"},
+        )
+        second = client.post(
+            "/api/skill-packages/default-demo/release",
+            json={"release_channel": "prod", "rollout_percent": 100},
+            headers={"X-Askme-Operator-Id": "admin-1"},
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert second.json()["package"]["release_version"] == 2
+
+        history = client.get("/api/skill-packages/default-demo/history")
+        assert history.status_code == 200
+        assert history.json()["count"] == 2
+
+        rollback = client.post(
+            "/api/skill-packages/default-demo/rollback",
+            json={"target_version": 1, "note": "rollback test"},
+            headers={"X-Askme-Operator-Id": "admin-1"},
+        )
+
+        assert rollback.status_code == 200
+        package = rollback.json()["package"]
+        assert package["release_version"] == 3
+        assert package["rollback_of_version"] == 1
+        assert package["release_channel"] == "pilot"
+        assert package["rollout_percent"] == 25
 
     def test_control_api_key_protects_non_probe_routes(self):
         client = TestClient(
@@ -1031,7 +1434,7 @@ class TestHealthServer:
         response = client.post(
             "/api/runtime/runs/run-7/pause",
             json={
-                "operator_id": "operator.alice",
+                "operator_id": "guard-1",
                 "reason": "visitor entered path",
                 "risk_acknowledgement": True,
             },
@@ -1040,7 +1443,7 @@ class TestHealthServer:
         assert response.status_code == 200
         assert runtime.seen == {
             "run_id": "run-7",
-            "operator_id": "operator.alice",
+            "operator_id": "guard-1",
             "reason": "visitor entered path",
             "risk_acknowledgement": True,
         }

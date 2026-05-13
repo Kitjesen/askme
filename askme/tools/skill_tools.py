@@ -1,16 +1,17 @@
-"""
-Skill management tools for askme.
+"""Skill management tools for askme.
 
-Enables the LLM to create new skills dynamically and hot-reload them at runtime
-without restarting the assistant.  The LLM should use create_skill when a user
-request cannot be satisfied by existing skills.
+The online-growth path lets the agent draft new SKILL.md capabilities at
+runtime.  Generated skills are deliberately not auto-enabled: they enter the
+generated-skill governance queue and need review before voice triggers become
+active.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from typing import TYPE_CHECKING, Any
+
+from askme.agent_shell.agent_profile import AgentProfileRegistry
 
 from .tool_registry import BaseTool, ToolRegistry
 
@@ -20,96 +21,66 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SKILL_TEMPLATE = """\
----
-name: {name}
-description: {description}
-version: 1.0.0
-trigger: voice
-model: ""
-timeout: 30
-tags: [{tags}]
-depends: []
-conflicts: []
-safety_level: {safety_level}
-voice_trigger: {voice_trigger}
----
-
-## Tools
-
-{tools_section}
-
-## Prompt
-
-{prompt}
-"""
+_AGENT_PROFILE_CORE_TOOLS = frozenset({
+    "spawn_agent",
+    "dispatch_skill",
+    "create_skill",
+    "create_agent_profile",
+    "read_file",
+    "list_directory",
+    "web_search",
+    "web_fetch",
+    "http_request",
+    "robot_api",
+    "temporal_query",
+    "speak_progress",
+    "space_lookup_place",
+    "space_recommend_route",
+})
 
 
 class CreateSkillTool(BaseTool):
-    """Dynamically create a new skill and hot-reload it immediately.
-
-    The LLM should call this when the user requests something that no existing
-    skill can handle.  The new skill is written to data/skills/ and becomes
-    active within the same session — no restart required.
-    """
+    """Create a generated skill draft and refresh the in-memory catalog."""
 
     name = "create_skill"
     description = (
-        "动态创建新技能并立即热加载生效——当用户需求超出现有技能范围时使用。"
-        "新技能写入 data/skills/ 并实时激活，无需重启。"
-        "\n\n可在 tools_section 中列出以下工具（每行一个）："
-        "\n- bash：执行 shell 命令（工作区内）"
-        "\n- write_file：创建/写入文件（工作区内）"
-        "\n- web_search：搜索互联网"
-        "\n- web_fetch：抓取网页内容"
-        "\n- http_request：调用 REST API（机器人 runtime 写请求会被阻断）"
-        "\n- robot_api：调用 Thunder runtime 服务"
-        "\n- get_current_time：获取当前时间"
-        "\n- read_file：读取 data/ 目录下的文件"
-        "\n示例：要让技能每次查询天气，tools_section 填 'web_search'，"
-        "prompt 里写明搜索什么关键词、如何解读结果、说什么给用户。"
+        "Create a new generated skill draft under data/skills. "
+        "The skill is hot-loaded for review but remains disabled until an "
+        "operator approves it from the generated-skill governance queue."
     )
     parameters: dict[str, Any] = {
         "type": "object",
         "properties": {
             "name": {
                 "type": "string",
-                "description": "技能唯一标识符（英文小写+下划线，如 check_battery）",
+                "description": "Unique lowercase skill id, e.g. check_battery.",
             },
             "description": {
                 "type": "string",
-                "description": "技能功能简述，一句话说清楚它做什么",
+                "description": "One sentence explaining what the skill does.",
             },
             "voice_trigger": {
                 "type": "string",
-                "description": "语音触发词，逗号分隔（如 查电量,电池多少,剩余电量）",
+                "description": "Comma-separated voice trigger phrases.",
             },
             "prompt": {
                 "type": "string",
-                "description": (
-                    "技能执行时给LLM的提示词，支持 {{user_input}} 占位符。"
-                    "如果需要调用服务，在提示词里明确写出：用哪个工具、调用什么 URL、"
-                    "传什么参数、如何解读响应、最终说什么给用户。"
-                ),
+                "description": "Prompt template. Supports {{user_input}}.",
             },
             "tools_section": {
                 "type": "string",
-                "description": (
-                    "允许使用的工具名称，每行一个（如 'http_request\\nnav_status'）。"
-                    "留空表示纯对话技能，不调用任何工具。"
-                    "需要调用真实服务时必须填写。"
-                ),
+                "description": "Allowed tool names, one per line. Empty means prompt-only.",
             },
             "tags": {
                 "type": "string",
-                "description": "标签，逗号分隔（可选，如 robot,sensor）",
+                "description": "Comma-separated tags, e.g. robot,sensor.",
             },
         },
         "required": ["name", "description", "prompt"],
     }
     safety_level = "normal"
     agent_allowed = True
-    voice_label = "创建新技能"  # visible to LLM in general chat; skill content is prompt-only
+    voice_label = "创建新技能草稿"
 
     def __init__(self) -> None:
         self._mgr: SkillManager | None = None
@@ -132,44 +103,131 @@ class CreateSkillTool(BaseTool):
         **kwargs: Any,
     ) -> str:
         if self._mgr is None:
-            return "[Error] SkillManager 未初始化"
+            return "[Error] SkillManager is not initialized"
 
-        # Sanitize skill name
-        name = re.sub(r"[^a-z0-9_-]", "_", name.lower().strip())
-        if not name:
-            return "[Error] 技能名称无效（仅允许英文小写、数字、下划线）"
+        result = self._mgr.create_generated_skill_draft(
+            name=name,
+            description=description,
+            prompt=prompt,
+            voice_trigger=voice_trigger,
+            tools_section=tools_section,
+            tags=tags or "generated",
+            safety_level="normal",
+            confirm_before_execute=False,
+            source="agent_create_skill_tool",
+            router=self._router,
+        )
+        if not result.get("ok"):
+            return f"[Error] {result.get('error', 'Failed to create skill draft')}"
 
-        skill_dir = self._mgr.generated_skills_dir / name
-        skill_file = skill_dir / "SKILL.md"
-
-        try:
-            skill_dir.mkdir(parents=True, exist_ok=True)
-            content = _SKILL_TEMPLATE.format(
-                name=name,
-                description=description.replace("\n", " "),
-                tags=tags or "generated",
-                safety_level="normal",
-                voice_trigger=voice_trigger or "",
-                tools_section=tools_section or "",
-                prompt=prompt,
-            )
-            skill_file.write_text(content, encoding="utf-8")
-            logger.info("Created skill '%s' at %s", name, skill_file)
-        except OSError as exc:
-            return f"[Error] 写入技能文件失败: {exc}"
-
-        # Hot-reload and update router
-        n = self._mgr.hot_reload(self._router)
-        new_triggers = [
-            phrase for phrase, skill in self._mgr.get_voice_triggers().items()
-            if skill == name
-        ]
-
-        result = f"技能 '{name}' 已创建并热加载（共 {n} 个技能）。"
-        if new_triggers:
-            result += f" 语音触发词：{', '.join(new_triggers)}。"
-        result += f" 文件路径：{skill_file}"
+        skill_name = str(result.get("skill_name") or name)
+        skill_file = str(result.get("path") or "")
+        loaded_count = int(result.get("loaded_count") or 0)
+        logger.info("Created generated skill draft '%s' at %s", skill_name, skill_file)
+        result = (
+            f"技能 '{skill_name}' 已创建并进入待审批（共 {loaded_count} 个技能）。"
+            "审批通过后语音触发词才会生效。"
+            f"文件路径：{skill_file}"
+        )
         return result
+
+
+class CreateAgentProfileTool(BaseTool):
+    """Create a project-level agent profile draft with scoped tool access."""
+
+    name = "create_agent_profile"
+    description = (
+        "Create or update a project-level agent profile under .askme/agents. "
+        "Profiles define an agent role, instructions, allowed tools, spawnable "
+        "profiles, preloaded skills, MCP servers, and risk level."
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Agent profile id, e.g. parking_detector_pm.",
+            },
+            "display_name": {
+                "type": "string",
+                "description": "Customer-visible agent name.",
+            },
+            "description": {
+                "type": "string",
+                "description": "When this agent profile should be used.",
+            },
+            "instructions": {
+                "type": "string",
+                "description": "Detailed system instructions for the agent lane.",
+            },
+            "tools": {
+                "type": "string",
+                "description": "Comma-separated allowed tool names. Empty inherits all non-denied tools.",
+            },
+            "disallowed_tools": {
+                "type": "string",
+                "description": "Comma-separated denied tool names.",
+            },
+            "spawnable_profiles": {
+                "type": "string",
+                "description": "Comma-separated profiles this agent may spawn.",
+            },
+            "skills": {
+                "type": "string",
+                "description": "Comma-separated skill names preloaded into this profile.",
+            },
+            "risk_level": {
+                "type": "string",
+                "description": "low, medium, high, or critical.",
+            },
+        },
+        "required": ["name", "description", "instructions"],
+    }
+    safety_level = "normal"
+    agent_allowed = True
+    voice_label = "创建代理配置"
+
+    def __init__(self, *, known_tools: set[str] | None = None) -> None:
+        self._known_tools = set(known_tools or _AGENT_PROFILE_CORE_TOOLS)
+
+    def execute(
+        self,
+        *,
+        name: str = "",
+        description: str = "",
+        instructions: str = "",
+        display_name: str = "",
+        tools: str = "",
+        disallowed_tools: str = "",
+        spawnable_profiles: str = "",
+        skills: str = "",
+        risk_level: str = "medium",
+        operator_id: str = "",
+        **kwargs: Any,
+    ) -> str:
+        registry = AgentProfileRegistry()
+        result = registry.write_project_profile(
+            name=name,
+            display_name=display_name,
+            description=description,
+            instructions=instructions,
+            tools=tools,
+            disallowed_tools=disallowed_tools,
+            spawnable_profiles=spawnable_profiles,
+            skills=skills,
+            risk_level=risk_level,
+            operator_id=operator_id or "agent",
+            known_tools=self._known_tools,
+            overwrite=True,
+        )
+        if not result.get("ok"):
+            return f"[Error] {result.get('error', 'Failed to create agent profile')}"
+        profile = result.get("profile") if isinstance(result.get("profile"), dict) else {}
+        return (
+            f"Agent profile '{profile.get('name') or name}' 已写入项目配置，"
+            "它会按工具边界、派生边界和审计策略进入 Agent 体系。"
+            f"文件路径：{result.get('path') or ''}"
+        )
 
 
 def register_skill_tools(
@@ -178,6 +236,16 @@ def register_skill_tools(
     router: IntentRouter,
 ) -> None:
     """Instantiate and register skill management tools."""
+    known_tools = set(_AGENT_PROFILE_CORE_TOOLS)
+    get_allowed = getattr(registry, "get_agent_allowed_names", None)
+    if callable(get_allowed):
+        try:
+            known_tools.update(str(name) for name in get_allowed() if name)
+        except Exception as exc:
+            logger.warning("Could not derive agent-profile tool allowlist: %s", exc)
     tool = CreateSkillTool()
     tool.set_context(skill_manager, router)
     registry.register(tool)
+    known_tools.add(CreateSkillTool.name)
+    known_tools.add(CreateAgentProfileTool.name)
+    registry.register(CreateAgentProfileTool(known_tools=known_tools))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from askme.schemas.events import ChangeEvent, ChangeEventType
+from askme.schemas.field import FieldEventAction, FieldEventDetail, FieldEventListResponse
 from askme.schemas.observation import Detection, Observation
 
 # ── ChangeEventType ───────────────────────────────────────────────────────────
@@ -298,3 +299,82 @@ class TestObservation:
         }
         obs = Observation.from_daemon_json(data)
         assert obs.detections[0].bbox == (0, 0, 0, 0)
+
+
+class TestFieldEventSchemas:
+    def test_field_event_detail_preserves_workflow_and_identity_fields(self):
+        payload = {
+            "event_id": "evt-1",
+            "scenario_id": "illegal_parking",
+            "status": "pending_close_approval",
+            "location": "B区主通道",
+            "incident_state": "pending_operator_approval",
+            "incident_stage": "operator",
+            "incident_workflow": {
+                "state": "pending_operator_approval",
+                "stage": "operator",
+                "stages": [{"stage": "operator", "status": "pending", "owner": "field-ops"}],
+            },
+            "sla": {"state": "due_soon", "remaining_s": 120, "target_s": 600},
+            "close_approval_required": True,
+        }
+
+        detail = FieldEventDetail.from_dict(payload)
+        restored = detail.to_dict()
+
+        assert restored["event_id"] == "evt-1"
+        assert restored["incident_workflow"]["stage"] == "operator"
+        assert restored["sla"]["state"] == "due_soon"
+        assert restored["close_approval_required"] is True
+
+    def test_field_event_action_preserves_operator_outcome_reason_and_note(self):
+        action = FieldEventAction.from_dict(
+            {
+                "action": "close",
+                "outcome": "denied",
+                "operator_id": "security-1",
+                "reason": "close_requires_supervisor_approval",
+                "note": "ready",
+                "supervisor_id": "supervisor-1",
+                "record_hash": "abc",
+            }
+        )
+
+        restored = action.to_dict()
+
+        assert restored["action"] == "close"
+        assert restored["outcome"] == "denied"
+        assert restored["operator_id"] == "security-1"
+        assert restored["reason"] == "close_requires_supervisor_approval"
+        assert restored["note"] == "ready"
+        assert restored["supervisor_id"] == "supervisor-1"
+        assert restored["record_hash"] == "abc"
+
+    def test_field_event_list_preserves_delivery_evidence_and_runtime_receipts(self):
+        payload = {
+            "events": [
+                {
+                    "event_id": "evt-1",
+                    "evidence_media": [{"media_type": "image", "path": "car.jpg"}],
+                    "delivery_report": [{"channel": "dingtalk", "status": "sent"}],
+                    "voice_delivery": {"status": "spoken"},
+                    "runtime_delivery": {"status": "accepted"},
+                    "runtime_delivery_receipts": [{"runtime_callback_id": "cb-1"}],
+                    "memory_delivery": {"status": "written"},
+                }
+            ],
+            "total": 1,
+            "filtered_total": 1,
+            "summary": {"open": 1},
+        }
+
+        response = FieldEventListResponse.from_dict(payload)
+        restored = response.to_dict()
+        event = restored["events"][0]
+
+        assert event["evidence_media"][0]["path"] == "car.jpg"
+        assert event["delivery_report"][0]["channel"] == "dingtalk"
+        assert event["voice_delivery"]["status"] == "spoken"
+        assert event["runtime_delivery"]["status"] == "accepted"
+        assert event["runtime_delivery_receipts"][0]["runtime_callback_id"] == "cb-1"
+        assert event["memory_delivery"]["status"] == "written"

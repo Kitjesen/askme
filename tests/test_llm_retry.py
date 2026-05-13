@@ -11,7 +11,7 @@ from openai import APIStatusError, APITimeoutError
 def _make_client(monkeypatch, **overrides):
     """Create an LLMClient with test defaults."""
     monkeypatch.setattr(
-        "askme.llm.client.get_config",
+        "askme.llm.core.client.get_config",
         lambda: {"brain": {
             "api_key": "test-key",
             "base_url": "https://test.example.com/v1",

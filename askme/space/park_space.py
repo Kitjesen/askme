@@ -57,7 +57,7 @@ class ParkPoint:
     enabled: bool = True
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "ParkPoint":
+    def from_dict(cls, raw: dict[str, Any]) -> ParkPoint:
         return cls(
             point_id=str(raw.get("point_id") or raw.get("id") or "").strip(),
             park_id=str(raw.get("park_id") or "default").strip(),
@@ -116,7 +116,7 @@ class ServicePoint:
     remark: str = ""
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "ServicePoint":
+    def from_dict(cls, raw: dict[str, Any]) -> ServicePoint:
         polygon = raw.get("trigger_region_polygon")
         if not isinstance(polygon, list):
             polygon = []
@@ -165,7 +165,7 @@ class GuideRoute:
     enabled: bool = True
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "GuideRoute":
+    def from_dict(cls, raw: dict[str, Any]) -> GuideRoute:
         return cls(
             route_id=str(raw.get("route_id") or raw.get("id") or "").strip(),
             from_point_id=str(raw.get("from_point_id") or "").strip(),
@@ -209,7 +209,7 @@ class ParkSpaceService:
         self._routes = [route for route in (routes or []) if route.route_id]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "ParkSpaceService":
+    def from_config(cls, config: dict[str, Any]) -> ParkSpaceService:
         raw = config.get("space_cognition") if isinstance(config.get("space_cognition"), dict) else {}
         park_id = str(raw.get("park_id") or "default")
         points = [ParkPoint.from_dict(item) for item in _dict_list(raw.get("points"))]

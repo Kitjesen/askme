@@ -1,4 +1,4 @@
-"""SkillModule — wraps SkillManager + SkillDispatcher + PlannerAgent.
+"""SkillModule 鈥?wraps SkillManager + SkillDispatcher + PlannerAgent.
 
 Canonical wiring::
 
@@ -36,7 +36,7 @@ class SkillModule(Module):
     dispatcher: Out[SkillDispatcher]
     skill_manager_out: Out[SkillManager]
 
-    # In ports — auto-wired by runtime before build() is called
+    # In ports 鈥?auto-wired by runtime before build() is called
     llm_in: In[LLMClient]
     tool_registry_in: In[ToolRegistry]
     pipeline_in: In[BrainPipeline]
@@ -72,7 +72,7 @@ class SkillModule(Module):
         # Cross-link: pipeline needs skill refs for tool-calling and skill dispatch.
         # SkillModule owns skill_manager/skill_executor, so it is responsible for
         # injecting them into the pipeline that was built earlier (pipeline cannot
-        # depend on skill — that would create a cycle).
+        # depend on skill 鈥?that would create a cycle).
         if pipeline is not None:
             pipeline.set_skill_manager(self._skill_manager)
             pipeline.set_skill_executor(self._skill_executor)
@@ -94,7 +94,7 @@ class SkillModule(Module):
 
         # Wire dispatch_skill tool
         if tools is not None:
-            from askme.llm.intent_router import IntentRouter
+            from askme.interaction.intent_router import IntentRouter
             from askme.tools.builtin_tools import DispatchSkillTool
             from askme.tools.skill_tools import register_skill_tools
 
@@ -144,4 +144,13 @@ class SkillModule(Module):
             "status": "ok",
             "skill_count": len(self._skill_manager.get_all()),
             "enabled_count": len(enabled),
+        }
+    def capabilities(self) -> dict[str, Any]:
+        center = self._skill_manager.get_capability_center()
+        return {
+            "openapi_generated": True,
+            "capability_center": center,
+            "online_growth": center.get("online_growth", {}),
+            "generated_skill_governance": self._skill_manager.get_generated_skill_governance(),
+            "skill_packages": self._skill_manager.get_skill_packages(),
         }

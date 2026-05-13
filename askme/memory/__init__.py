@@ -2,6 +2,7 @@
 
 from askme.memory.association import AssociationGraph
 from askme.memory.bridge import MemoryBridge
+from askme.memory.conversation import ConversationManager
 from askme.memory.episode import Episode
 from askme.memory.episodic_memory import EpisodicMemory
 from askme.memory.mempalace_backend import MemPalaceBackend
@@ -15,6 +16,7 @@ from askme.memory.vector_store import VectorStore
 __all__ = [
     "EpisodicMemory",
     "MemoryBridge",
+    "ConversationManager",
     "MemPalaceBackend",
     "RobotMemBackend",
     "MemorySystem",

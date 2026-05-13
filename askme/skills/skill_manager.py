@@ -21,8 +21,12 @@ from typing import Any
 import yaml
 
 from . import contracts_builtin as _contracts_builtin  # noqa: F401
+from .audit import SkillAuditLog
 from .contracts import SkillContract, build_skills_openapi, registered_skill_contracts
+from .governance import APPROVED, DISABLED, PENDING, REJECTED, SkillGovernanceStore
+from .packages import DEFAULT_PACKAGE_ID, SkillPackageStore
 from .skill_model import SkillDefinition
+from .validation import validate_generated_skill
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,30 @@ _PACKAGE_DIR = Path(__file__).resolve().parent            # askme/skills/
 _PROJECT_ROOT = _PACKAGE_DIR.parent.parent                # askme repo root
 _DATA_DIR = _PROJECT_ROOT / "data"
 _SETTINGS_FILE = _DATA_DIR / "skills_settings.json"
+_GENERATED_SKILL_TEMPLATE = """\
+---
+name: {name}
+description: {description}
+version: 1.0.0
+trigger: voice
+model: ""
+timeout: 30
+tags: [{tags}]
+depends: []
+conflicts: []
+safety_level: {safety_level}
+voice_trigger: {voice_trigger}
+confirm_before_execute: {confirm_before_execute}
+---
+
+## Tools
+
+{tools_section}
+
+## Prompt
+
+{prompt}
+"""
 
 
 class SkillManager:
@@ -62,6 +90,7 @@ class SkillManager:
         for name in self._disabled:
             if name in self._skills:
                 self._skills[name].enabled = False
+        self._apply_generated_skill_governance()
 
         logger.info("Loaded %d skills", len(self._skills))
 
@@ -145,6 +174,474 @@ class SkillManager:
             })
             entries.append(base)
         return entries
+
+    def get_capability_center(self) -> dict[str, Any]:
+        """Return customer-facing grouped capabilities for product UI."""
+        from askme.skills.capability_center import build_capability_center
+
+        return build_capability_center(
+            self.get_all(),
+            voice_triggers=self.get_voice_triggers(),
+        )
+
+    def get_generated_skill_governance(self) -> dict[str, Any]:
+        """Return review state for generated skills."""
+        store = self._governance_store()
+        records = {record.skill_name: record for record in store.list_records()}
+        items: list[dict[str, Any]] = []
+        for skill in sorted(
+            (item for item in self.get_all() if item.source == "generated"),
+            key=lambda item: item.name,
+        ):
+            record = records.get(skill.name) or store.ensure_pending(skill)
+            payload = record.to_dict()
+            payload.update(
+                {
+                    "enabled": skill.enabled,
+                    "tags": list(skill.tags),
+                    "installed": True,
+                    "package_ids": self._package_store().enabled_package_ids_for_skill(skill.name),
+                    "validation": validate_generated_skill(
+                        skill,
+                        all_skills=self.get_all(),
+                    ),
+                }
+            )
+            items.append(payload)
+        known_names = {item["skill_name"] for item in items}
+        for record in records.values():
+            if record.skill_name not in known_names:
+                payload = record.to_dict()
+                payload.update({"enabled": False, "installed": False, "tags": [], "validation": {}})
+                items.append(payload)
+        return {
+            "records": items,
+            "summary": {
+                "total": len(items),
+                "pending_approval": sum(1 for item in items if item["status"] == PENDING),
+                "approved": sum(1 for item in items if item["status"] == APPROVED),
+                "rejected": sum(1 for item in items if item["status"] == REJECTED),
+                "disabled": sum(1 for item in items if item["status"] == DISABLED),
+            },
+            "policy": {
+                "generated_skills_default_state": PENDING,
+                "auto_enable_generated_skills": False,
+                "approval_required": True,
+                "approved_generated_skills_require_package": True,
+            },
+        }
+
+    def get_skill_packages(self) -> dict[str, Any]:
+        """Return customer/site ability packages for generated skills."""
+        payload = self._package_store().payload()
+        known_skills = {skill.name for skill in self.get_all()}
+        for package in payload.get("packages", []):
+            if not isinstance(package, dict):
+                continue
+            skill_names = [
+                name for name in package.get("skill_names", [])
+                if isinstance(name, str)
+            ]
+            package["missing_skill_names"] = [
+                name for name in skill_names if name not in known_skills
+            ]
+            package["active_skill_names"] = [
+                name for name in skill_names
+                if self._skills.get(name) is not None and self._skills[name].enabled
+            ]
+        return payload
+
+    def review_generated_skill(
+        self,
+        name: str,
+        *,
+        action: str,
+        operator_id: str,
+        note: str = "",
+        router: Any | None = None,
+    ) -> dict[str, Any]:
+        """Approve, reject, disable, or return a generated skill to review."""
+        self.load()
+        skill = self._skills.get(name)
+        if skill is None or skill.source != "generated":
+            return {"ok": False, "error": "generated skill not found", "skill_name": name}
+
+        action_to_status = {
+            "approve": APPROVED,
+            "enable": APPROVED,
+            "reject": REJECTED,
+            "disable": DISABLED,
+            "request_review": PENDING,
+            "pending": PENDING,
+        }
+        status = action_to_status.get(action)
+        if status is None:
+            return {"ok": False, "error": f"unsupported action: {action}", "skill_name": name}
+        validation = validate_generated_skill(skill, all_skills=self.get_all())
+        if status == APPROVED and not validation.get("ok"):
+            SkillAuditLog().append(
+                skill_name=name,
+                status="validation_failed",
+                event_type="governance",
+                source="skill_governance",
+                safety_level=skill.safety_level,
+                execution=skill.execution,
+                operator_id=operator_id,
+                action=action,
+                reason="generated skill validation failed",
+                metadata={
+                    "validation_ok": validation.get("ok"),
+                    "issue_count": len(validation.get("issues", []))
+                    if isinstance(validation.get("issues"), list) else 0,
+                },
+            )
+            return {
+                "ok": False,
+                "error": "generated skill validation failed",
+                "skill_name": name,
+                "validation": validation,
+            }
+
+        record = self._governance_store().set_status(
+            skill,
+            status=status,
+            reviewed_by=operator_id,
+            review_note=note,
+        )
+        if status == APPROVED:
+            self._package_store().assign_skill(
+                skill.name,
+                package_id=DEFAULT_PACKAGE_ID,
+                operator_id=operator_id,
+            )
+        SkillAuditLog().append(
+            skill_name=skill.name,
+            status=status,
+            event_type="governance",
+            source="skill_governance",
+            safety_level=skill.safety_level,
+            execution=skill.execution,
+            operator_id=operator_id,
+            action=action,
+            reason=note,
+            result_preview=f"generated skill {status}",
+            metadata={
+                "enabled_after_review": self._generated_skill_enabled_by_governance(skill),
+                "package_ids": ",".join(
+                    self._package_store().enabled_package_ids_for_skill(skill.name)
+                ),
+                "validation_ok": validation.get("ok"),
+            },
+        )
+        self.set_enabled(skill.name, self._generated_skill_enabled_by_governance(skill))
+        self.hot_reload(router)
+        reviewed = self._skills.get(skill.name)
+        payload = record.to_dict()
+        payload.update(
+            {
+                "ok": True,
+                "enabled": bool(reviewed.enabled) if reviewed is not None else False,
+                "validation": validation,
+                "voice_triggers": [
+                    phrase for phrase, target in self.get_voice_triggers().items()
+                    if target == skill.name
+                ],
+            }
+        )
+        return payload
+
+    def update_skill_package(
+        self,
+        *,
+        skill_name: str,
+        package_id: str = DEFAULT_PACKAGE_ID,
+        action: str = "assign",
+        operator_id: str = "",
+    ) -> dict[str, Any]:
+        """Assign or remove a generated skill from a customer/site package."""
+        self.load()
+        skill = self._skills.get(skill_name)
+        if skill is None or skill.source != "generated":
+            return {"ok": False, "error": "generated skill not found", "skill_name": skill_name}
+        record = self._governance_store().get(skill.name)
+        if record is None or record.status != APPROVED:
+            return {
+                "ok": False,
+                "error": "generated skill must be approved before package enablement",
+                "skill_name": skill.name,
+            }
+        if action == "assign":
+            package = self._package_store().assign_skill(
+                skill.name,
+                package_id=package_id,
+                operator_id=operator_id,
+            )
+        elif action == "unassign":
+            package = self._package_store().unassign_skill(
+                skill.name,
+                package_id=package_id,
+                operator_id=operator_id,
+            )
+        else:
+            return {"ok": False, "error": f"unsupported package action: {action}"}
+        enabled = self._generated_skill_enabled_by_governance(skill)
+        self.set_enabled(skill.name, enabled)
+        self.hot_reload()
+        SkillAuditLog().append(
+            skill_name=skill.name,
+            status="package_assigned" if action == "assign" else "package_unassigned",
+            event_type="governance",
+            source="skill_package",
+            safety_level=skill.safety_level,
+            execution=skill.execution,
+            operator_id=operator_id,
+            action=action,
+            result_preview=f"{action} {skill.name} in {package.package_id}",
+            metadata={"package_id": package.package_id, "enabled_after_package_update": enabled},
+        )
+        return {
+            "ok": True,
+            "skill_name": skill.name,
+            "enabled": enabled,
+            "package": package.to_dict(),
+            "packages": self.get_skill_packages(),
+        }
+
+    def upsert_skill_package(
+        self,
+        *,
+        package_id: str = DEFAULT_PACKAGE_ID,
+        display_name: str = "",
+        site_id: str = "demo",
+        customer_name: str = "",
+        description: str = "",
+        enabled: bool = True,
+        release_channel: str = "",
+        rollout_percent: int | None = None,
+        operator_id: str = "",
+    ) -> dict[str, Any]:
+        """Create or update a customer/site ability package."""
+        package = self._package_store().upsert_package(
+            package_id=package_id,
+            display_name=display_name,
+            site_id=site_id,
+            customer_name=customer_name,
+            description=description,
+            enabled=enabled,
+            release_channel=release_channel,
+            rollout_percent=rollout_percent,
+            operator_id=operator_id,
+        )
+        self.load()
+        SkillAuditLog().append(
+            skill_name="skill_package",
+            status="package_updated",
+            event_type="governance",
+            source="skill_package",
+            operator_id=operator_id,
+            action="upsert_package",
+            result_preview=f"updated package {package.package_id}",
+            metadata={
+                "package_id": package.package_id,
+                "enabled": package.enabled,
+                "release_version": package.release_version,
+                "release_channel": package.release_channel,
+                "rollout_percent": package.rollout_percent,
+            },
+        )
+        return {
+            "ok": True,
+            "package": package.to_dict(),
+            "packages": self.get_skill_packages(),
+        }
+
+    def release_skill_package(
+        self,
+        *,
+        package_id: str = DEFAULT_PACKAGE_ID,
+        release_channel: str = "pilot",
+        rollout_percent: int = 100,
+        operator_id: str = "",
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Publish or gray-release a customer/site ability package."""
+        package = self._package_store().update_release(
+            package_id=package_id,
+            release_channel=release_channel,
+            rollout_percent=rollout_percent,
+            operator_id=operator_id,
+            note=note,
+        )
+        self.load()
+        SkillAuditLog().append(
+            skill_name="skill_package",
+            status="package_released",
+            event_type="governance",
+            source="skill_package",
+            operator_id=operator_id,
+            action="release_package",
+            reason=note,
+            result_preview=f"released package {package.package_id} v{package.release_version}",
+            metadata={
+                "package_id": package.package_id,
+                "release_version": package.release_version,
+                "release_channel": package.release_channel,
+                "rollout_percent": package.rollout_percent,
+            },
+        )
+        return {
+            "ok": True,
+            "package": package.to_dict(),
+            "packages": self.get_skill_packages(),
+        }
+
+    def rollback_skill_package(
+        self,
+        *,
+        package_id: str = DEFAULT_PACKAGE_ID,
+        target_version: int | None = None,
+        operator_id: str = "",
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Rollback a customer/site ability package to a previous snapshot."""
+        try:
+            package = self._package_store().rollback_package(
+                package_id=package_id,
+                target_version=target_version,
+                operator_id=operator_id,
+                note=note,
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc), "package_id": package_id}
+        self.load()
+        SkillAuditLog().append(
+            skill_name="skill_package",
+            status="package_rolled_back",
+            event_type="governance",
+            source="skill_package",
+            operator_id=operator_id,
+            action="rollback_package",
+            reason=note,
+            result_preview=f"rolled back package {package.package_id} to v{package.rollback_of_version}",
+            metadata={
+                "package_id": package.package_id,
+                "release_version": package.release_version,
+                "rollback_of_version": package.rollback_of_version,
+            },
+        )
+        return {
+            "ok": True,
+            "package": package.to_dict(),
+            "history": self._package_store().history(package.package_id),
+            "packages": self.get_skill_packages(),
+        }
+
+    def get_skill_package_history(
+        self,
+        *,
+        package_id: str = DEFAULT_PACKAGE_ID,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Return version snapshots for one customer/site ability package."""
+        return self._package_store().history(package_id, limit=limit)
+
+    def create_generated_skill_draft(
+        self,
+        *,
+        name: str,
+        description: str,
+        prompt: str,
+        voice_trigger: str = "",
+        tools_section: str = "",
+        tags: str | list[str] = "generated",
+        safety_level: str = "normal",
+        confirm_before_execute: bool = False,
+        operator_id: str = "",
+        source: str = "skill_growth",
+        router: Any | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Create a generated SKILL.md draft that still needs review."""
+        skill_name = _sanitize_skill_name(name)
+        if not skill_name:
+            return {"ok": False, "error": "invalid skill name"}
+        if not description.strip():
+            return {"ok": False, "error": "description is required", "skill_name": skill_name}
+        if len(prompt.strip()) < 10:
+            return {"ok": False, "error": "prompt is too short", "skill_name": skill_name}
+
+        self.load()
+        existing = self._skills.get(skill_name)
+        if existing is not None and existing.source != "generated":
+            return {
+                "ok": False,
+                "error": "skill name conflicts with existing non-generated skill",
+                "skill_name": skill_name,
+                "existing_source": existing.source,
+            }
+
+        skill_dir = self.generated_skills_dir / skill_name
+        skill_file = skill_dir / "SKILL.md"
+        if skill_file.exists() and not overwrite:
+            return {
+                "ok": False,
+                "error": "generated skill already exists",
+                "skill_name": skill_name,
+                "path": str(skill_file),
+            }
+
+        try:
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            skill_file.write_text(
+                _GENERATED_SKILL_TEMPLATE.format(
+                    name=skill_name,
+                    description=description.replace("\n", " "),
+                    tags=_format_tags(tags),
+                    safety_level=safety_level or "normal",
+                    voice_trigger=voice_trigger or "",
+                    confirm_before_execute="true" if confirm_before_execute else "false",
+                    tools_section=tools_section or "",
+                    prompt=prompt.strip(),
+                ),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            return {"ok": False, "error": f"failed to write skill file: {exc}", "skill_name": skill_name}
+
+        loaded_count = self.hot_reload(router)
+        skill = self._skills.get(skill_name)
+        record = None
+        validation: dict[str, Any] = {}
+        if skill is not None:
+            record = self._governance_store().ensure_pending(skill)
+            self.set_enabled(skill.name, False)
+            validation = validate_generated_skill(skill, all_skills=self.get_all())
+
+        SkillAuditLog().append(
+            skill_name=skill_name,
+            status="draft_created",
+            event_type="governance",
+            source=source,
+            safety_level=safety_level,
+            execution=skill.execution if skill is not None else "",
+            operator_id=operator_id,
+            action="create_generated_skill_draft",
+            result_preview=f"generated skill draft created: {skill_name}",
+            metadata={
+                "path": str(skill_file),
+                "validation_ok": validation.get("ok", False),
+                "loaded_count": loaded_count,
+            },
+        )
+        return {
+            "ok": True,
+            "skill_name": skill_name,
+            "path": str(skill_file),
+            "loaded_count": loaded_count,
+            "status": record.status if record is not None else PENDING,
+            "enabled": False,
+            "validation": validation,
+        }
 
     def openapi_document(self) -> dict[str, Any]:
         """Generate an OpenAPI document from the loaded contracts."""
@@ -261,11 +758,19 @@ class SkillManager:
         meta = self._parse_yaml(fm_match.group(1))
 
         # --- ## Prompt section ---
-        prompt_match = re.search(r"## Prompt\s*\r?\n(.*?)(?=\r?\n## |\Z)", content, re.DOTALL)
+        prompt_match = re.search(
+            r"^## Prompt[^\S\r\n]*\r?\n(.*?)(?=^## |\Z)",
+            content,
+            re.DOTALL | re.MULTILINE,
+        )
         prompt = prompt_match.group(1).strip() if prompt_match else ""
 
         # --- ## Tools section ---
-        tools_match = re.search(r"## Tools\s*\r?\n(.*?)(?=\r?\n## |\Z)", content, re.DOTALL)
+        tools_match = re.search(
+            r"^## Tools[^\S\r\n]*\r?\n(.*?)(?=^## |\Z)",
+            content,
+            re.DOTALL | re.MULTILINE,
+        )
         tools_section = tools_match.group(1).strip() if tools_match else ""
 
         # Determine name: explicit in meta, or directory name
@@ -331,6 +836,43 @@ class SkillManager:
             return [s.strip() for s in value.split(",") if s.strip()]
         return []
 
+    def _governance_store(self) -> SkillGovernanceStore:
+        return SkillGovernanceStore.for_generated_dir(self.generated_skills_dir)
+
+    def _package_store(self) -> SkillPackageStore:
+        return SkillPackageStore.for_generated_dir(self.generated_skills_dir)
+
+    def _apply_generated_skill_governance(self) -> None:
+        store = self._governance_store()
+        changed = False
+        for skill in self._skills.values():
+            if skill.source != "generated":
+                continue
+            record = store.ensure_pending(skill)
+            should_enable = (
+                SkillGovernanceStore.is_enabled_status(record.status)
+                and self._package_store().is_skill_enabled(skill.name)
+            )
+            if not should_enable:
+                skill.enabled = False
+                if skill.name not in self._disabled:
+                    self._disabled.add(skill.name)
+                    changed = True
+            elif skill.name in self._disabled:
+                skill.enabled = True
+                self._disabled.discard(skill.name)
+                changed = True
+        if changed:
+            self._save_settings()
+
+    def _generated_skill_enabled_by_governance(self, skill: SkillDefinition) -> bool:
+        record = self._governance_store().get(skill.name)
+        return (
+            record is not None
+            and SkillGovernanceStore.is_enabled_status(record.status)
+            and self._package_store().is_skill_enabled(skill.name)
+        )
+
     # ── Settings Persistence ────────────────────────────────────
 
     def _load_settings(self) -> None:
@@ -353,3 +895,19 @@ class SkillManager:
             )
         except OSError as exc:
             logger.warning("Failed to save skill settings: %s", exc)
+
+
+def _sanitize_skill_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9_-]", "_", str(value or "").lower().strip())
+
+
+def _format_tags(value: str | list[str]) -> str:
+    raw = value if isinstance(value, list) else str(value or "").split(",")
+    tags = [
+        re.sub(r"[^a-zA-Z0-9_-]", "_", str(item).strip())
+        for item in raw
+        if str(item).strip()
+    ]
+    if "generated" not in tags:
+        tags.insert(0, "generated")
+    return ",".join(tags)

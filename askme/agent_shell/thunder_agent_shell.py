@@ -21,6 +21,9 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from askme.agent_shell.agent_hooks import AgentHookRunner
+from askme.agent_shell.agent_profile import AgentProfile, AgentProfileRegistry
+
 if TYPE_CHECKING:
     from askme.llm.client import LLMClient
     from askme.tools.tool_registry import ToolRegistry
@@ -52,6 +55,10 @@ _SPAWN_AGENT_SCHEMA: dict[str, Any] = {
         "parameters": {
             "type": "object",
             "properties": {
+                "agent_type": {
+                    "type": "string",
+                    "description": "子 Agent 类型，例如 knowledge_curator、wayfinding_guide、safety_reviewer、skill_growth_manager",
+                },
                 "task": {
                     "type": "string",
                     "description": "子 Agent 要完成的具体任务，要写清楚目标和约束",
@@ -67,8 +74,22 @@ _SPAWN_AGENT_SCHEMA: dict[str, Any] = {
 }
 
 
-def _build_agent_system_prompt(workspace: Path) -> str:
+def _build_agent_system_prompt(workspace: Path, profile: AgentProfile | None = None) -> str:
+    profile_block = ""
+    if profile is not None:
+        profile_block = (
+            f"当前 Agent Profile: {profile.display_name} ({profile.name})\n"
+            f"职责: {profile.description}\n"
+            f"专属指令: {profile.instructions}\n\n"
+            f"Agent model policy: {profile.model}; permission mode: {profile.permission_mode}\n"
+            f"Max turns: {profile.max_iterations or _MAX_ITERATIONS}; timeout: {profile.timeout_seconds or _DEFAULT_TIMEOUT}s\n"
+            f"Preloaded skills: {', '.join(profile.preloaded_skills) or 'none'}\n"
+            f"MCP servers: {', '.join(profile.mcp_servers) or 'none'}; hooks: {', '.join(profile.hooks.keys()) or 'none'}\n"
+            f"Effort: {profile.effort or 'inherit'}; isolation: {profile.isolation or 'none'}\n"
+            f"Memory scope: {profile.memory_scope or 'none'}\n\n"
+        )
     return (
+        profile_block +
         "你是 Thunder 机器人上运行的自主 Agent，拥有真实的执行能力。\n"
         "你可以运行 shell 命令、读写文件、搜索网络、调用机器人 API、发送 HTTP 请求。\n\n"
         f"工作区：{workspace}（所有文件操作默认在此目录内）\n\n"
@@ -119,17 +140,28 @@ class ThunderAgentShell:
         *,
         model: str | None = None,
         workspace: Path | None = None,
+        agent_profile: str = "field_operator",
         _depth: int = 0,
     ) -> None:
         self._llm = llm_client
         self._tools = tool_registry
         self._audio = audio
-        self._model = model or os.environ.get("AGENT_MODEL", _DEFAULT_AGENT_MODEL)
         self._workspace = workspace or (
             Path(__file__).parent.parent.parent / "data" / "agent_workspace"
         )
         self._depth = _depth
-        self._default_timeout: float = float(os.environ.get("AGENT_TIMEOUT", 120.0))
+        self._profile_registry = AgentProfileRegistry(project_dir=Path.cwd())
+        self._profile = self._profile_registry.get(agent_profile)
+        self._hook_runner = AgentHookRunner(self._profile.hooks)
+        profile_model = "" if self._profile.model in {"", "inherit"} else self._profile.model
+        self._model = os.environ.get("AGENT_MODEL") or model or profile_model or _DEFAULT_AGENT_MODEL
+        self._iteration_limit = self._profile.max_iterations or _MAX_ITERATIONS
+        self._default_timeout = float(
+            os.environ.get(
+                "AGENT_TIMEOUT",
+                self._profile.timeout_seconds or _DEFAULT_TIMEOUT,
+            )
+        )
         # Current action string — updated during tool execution so the heartbeat
         # can report what the agent is doing instead of a generic message.
         self._current_action = ""
@@ -143,7 +175,7 @@ class ThunderAgentShell:
         task: str,
         *,
         context: dict[str, str] | None = None,
-        timeout: float = _DEFAULT_TIMEOUT,
+        timeout: float | None = None,
     ) -> str:
         """Run an agentic task loop until completion or timeout.
 
@@ -153,8 +185,8 @@ class ThunderAgentShell:
         self._workspace.mkdir(parents=True, exist_ok=True)
 
         # Read allowed tools + voice labels from registry (not hardcoded)
-        self._allowed_tools = self._tools.get_agent_allowed_names()
-        self._allowed_tools.add("spawn_agent")  # spawn_agent is inline, not in registry
+        inherited_tools = self._tools.get_agent_allowed_names()
+        self._allowed_tools = self._profile.resolve_tools(inherited_tools)
         self._voice_labels = self._tools.get_voice_labels()
 
         self._did_stream_tts = False
@@ -194,7 +226,7 @@ class ThunderAgentShell:
         if self._audio is not None:
             heartbeat_task = asyncio.create_task(_heartbeat())
 
-        system_prompt = _build_agent_system_prompt(self._workspace)
+        system_prompt = _build_agent_system_prompt(self._workspace, self._profile)
 
         # Build context string
         ctx_parts = [f"任务：{task}"]
@@ -214,7 +246,7 @@ class ThunderAgentShell:
             max_safety_level="dangerous",
         )
         # Inject spawn_agent inline schema (not in registry) when nesting allows it
-        if self._depth < _MAX_DEPTH:
+        if self._depth < _MAX_DEPTH and "spawn_agent" in self._allowed_tools:
             tool_definitions = list(tool_definitions) + [_SPAWN_AGENT_SCHEMA]
         logger.info(
             "[AgentShell] Tools available (%d): %s",
@@ -222,15 +254,16 @@ class ThunderAgentShell:
             [td.get("function", {}).get("name") for td in tool_definitions],
         )
 
+        effective_timeout = float(timeout or self._default_timeout)
         final_response = ""
         try:
             final_response = await asyncio.wait_for(
                 self._run_agent_loop(messages, tool_definitions, system_prompt),
-                timeout=timeout,
+                timeout=effective_timeout,
             )
         except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
-            logger.warning("[AgentShell] Task timed out after %.0fs", timeout)
-            final_response = f"任务执行超时（{int(timeout)}秒），已停止。"
+            logger.warning("[AgentShell] Task timed out after %.0fs", effective_timeout)
+            final_response = f"任务执行超时（{int(effective_timeout)}秒），已停止。"
         except Exception as exc:
             logger.error("[AgentShell] Task failed: %s", exc)
             final_response = f"任务执行出错：{exc}"
@@ -254,9 +287,9 @@ class ThunderAgentShell:
         final_response = ""
         iterations = 0
 
-        while iterations < _MAX_ITERATIONS:
+        while iterations < self._iteration_limit:
             iterations += 1
-            logger.info("[AgentShell] Iteration %d/%d", iterations, _MAX_ITERATIONS)
+            logger.info("[AgentShell] Iteration %d/%d", iterations, self._iteration_limit)
 
             response_text, tool_calls = await self._call_llm(
                 messages, tool_definitions, system_prompt
@@ -348,9 +381,9 @@ class ThunderAgentShell:
                 )
 
         else:
-            logger.warning("[AgentShell] Reached max iterations (%d)", _MAX_ITERATIONS)
+            logger.warning("[AgentShell] Reached max iterations (%d)", self._iteration_limit)
             if not final_response:
-                final_response = f"任务执行中，已完成 {_MAX_ITERATIONS} 步操作。"
+                final_response = f"任务执行中，已完成 {self._iteration_limit} 步操作。"
 
         return final_response
 
@@ -457,9 +490,24 @@ class ThunderAgentShell:
         args_json = tc.get("arguments", "{}")
         logger.info("[AgentShell] Executing tool: %s(%s)", name, args_json[:80])
 
+        preflight = self._hook_runner.before_tool(tool_name=name, arguments=args_json)
+        if preflight.blocked:
+            logger.warning(
+                "[AgentShell] PreToolUse hook blocked %s: %s",
+                name,
+                preflight.reason,
+            )
+            return preflight.error_text()
+
         # spawn_agent is handled inline (not registered in ToolRegistry)
         if name == "spawn_agent":
-            return await self._spawn_child_agent(args_json)
+            result = await self._spawn_child_agent(args_json)
+            postflight = self._hook_runner.after_tool(
+                tool_name=name,
+                arguments=args_json,
+                result=result,
+            )
+            return postflight.error_text() if postflight.blocked else result
 
         try:
             result = await asyncio.wait_for(
@@ -472,7 +520,20 @@ class ThunderAgentShell:
                 ),
                 timeout=35.0,  # slightly above SandboxedBashTool's 30s limit
             )
-            return str(result)
+            result_text = str(result)
+            postflight = self._hook_runner.after_tool(
+                tool_name=name,
+                arguments=args_json,
+                result=result_text,
+            )
+            if postflight.blocked:
+                logger.warning(
+                    "[AgentShell] PostToolUse hook blocked %s result: %s",
+                    name,
+                    postflight.reason,
+                )
+                return postflight.error_text()
+            return result_text
         except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
             return f"[Error] 工具 {name} 执行超时（35s）"
         except Exception as exc:
@@ -484,6 +545,11 @@ class ThunderAgentShell:
 
         if self._depth >= _MAX_DEPTH:
             return f"[Error] 已达最大子 Agent 嵌套深度（{_MAX_DEPTH}层），无法再 spawn。"
+        if not hasattr(self, "_allowed_tools"):
+            inherited_tools = self._tools.get_agent_allowed_names()
+            self._allowed_tools = self._profile.resolve_tools(set(inherited_tools or ()))
+        if "spawn_agent" not in getattr(self, "_allowed_tools", set()):
+            return "[Error] 当前 Agent Profile 不允许启动子 Agent。"
 
         try:
             args = json.loads(args_json)
@@ -493,21 +559,35 @@ class ThunderAgentShell:
         task = args.get("task", "").strip()
         if not task:
             return "[Error] spawn_agent: task 不能为空"
+        default_child_type = (
+            self._profile.spawnable_profiles[0]
+            if self._profile.spawnable_profiles else "field_operator"
+        )
+        agent_type = str(args.get("agent_type") or default_child_type).strip()
+        if self._profile.spawnable_profiles and agent_type not in self._profile.spawnable_profiles:
+            allowed = ", ".join(self._profile.spawnable_profiles)
+            return f"[Error] 当前 Agent Profile 只允许启动这些子 Agent：{allowed}"
 
         context_str = args.get("context", "").strip()
         ctx = {"上下文": context_str} if context_str else None
 
-        logger.info("[AgentShell] Spawning child agent (depth=%d): %s", self._depth + 1, task[:60])
+        logger.info(
+            "[AgentShell] Spawning child agent type=%s (depth=%d): %s",
+            agent_type,
+            self._depth + 1,
+            task[:60],
+        )
         child = ThunderAgentShell(
             llm_client=self._llm,
             tool_registry=self._tools,
             audio=None,  # child agents are silent
             model=self._model,
             workspace=self._workspace,
+            agent_profile=agent_type,
             _depth=self._depth + 1,
         )
         try:
-            result = await child.run_task(task, context=ctx, timeout=30.0)
+            result = await child.run_task(task, context=ctx)
             return f"[子任务完成]\n{result}"
         except Exception as exc:
             return f"[子任务失败] {exc}"

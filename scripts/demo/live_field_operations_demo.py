@@ -292,7 +292,8 @@ def _demo_scenarios() -> list[dict[str, Any]]:
             "payload": {
                 "scenario_id": "wayfinding_help_point",
                 "trigger_source": "visitor_help_point",
-                "operator_id": "guide-point-01",
+                "operator_id": "dashboard.operator",
+                "service_point_id": "guide-point-01",
                 "location": "North Gate Help Point",
                 "requested_destination": "Service Center",
                 "question": "Where is the service center?",

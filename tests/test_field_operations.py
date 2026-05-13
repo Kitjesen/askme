@@ -1514,6 +1514,26 @@ def test_field_operations_http_endpoints(tmp_path: Path):
     assert requested.status_code == 200
     assert requested.json()["event"]["status"] == "pending_close_approval"
 
+    detail = client.get(f"/api/field/events/{event_id}")
+    assert detail.status_code == 200
+    detail_event = detail.json()["event"]
+    assert detail.json()["found"] is True
+    assert detail_event["event_id"] == event_id
+    assert detail_event["incident_workflow"]["stages"]
+    assert detail_event["incident_stage"] == "operator"
+    assert detail_event["sla"]["state"] in {"active", "due_soon", "overdue", "closed"}
+    assert detail_event["close_approval_required"] is True
+    assert detail_event["evidence_media"][0]["path"] == "artifacts/evidence/car.jpg"
+    assert [item["action"] for item in detail_event["action_audit"]][-3:] == [
+        "acknowledge",
+        "resend_notification",
+        "request_close",
+    ]
+
+    missing_detail = client.get("/api/field/events/not-a-real-event")
+    assert missing_detail.status_code == 404
+    assert missing_detail.json()["reason"] == "event_not_found"
+
     unauthorized_close = client.post(
         f"/api/field/events/{event_id}/close",
         json={

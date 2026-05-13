@@ -15,11 +15,24 @@ app:
 # Brain: LLM / Reasoning
 # ----------------------------------------------------------
 brain:
+  # Provider names: minimax, doubao, dashscope, deepseek, zhipu,
+  # openai_compatible, openai, fake.  Endpoint/key remain config-owned.
+  provider: minimax
   api_key: ${MINIMAX_API_KEY}
   base_url: https://api.minimax.chat/v1
   model: MiniMax-M2.7-highspeed
   # Lightweight model for real-time voice turns (lower TTFT)
   voice_model: MiniMax-M2.7-highspeed
+  persona:
+    robot_name: Thunder
+    product_name: 现场任务平台
+    customer_name: 梵木创艺园
+    operator_audience: 园区运营人员、安保和交付工程师
+    role: 园区巡检与服务机器狗
+    # Keep blank unless the customer explicitly wants a displayed ownership label.
+    ownership_label: ""
+    speaking_style: 中文口语，简洁汇报，像现场值班员
+    max_reply_chars: 80
   # Max tokens for a single completion (0 = model default)
   max_tokens: 0
   temperature: 0.7
@@ -32,21 +45,17 @@ brain:
   minimax_api_key: ${MINIMAX_API_KEY}
   minimax_base_url: https://api.minimax.chat/v1
   minimax_model: MiniMax-M2.5-highspeed
-  # Character definition file (overrides prompt_seed when present)
-  soul_file: prompts/SOUL.md
-  # System prompt template (relay may override, prompts/SOUL.md compensates via seed)
-  system_prompt: "工业巡检机器人Thunder。中文口语，简洁汇报，80字以内。重要规则：如果判断这句话不是在跟你说话（旁人闲聊、背景对话、跟别人说的话），只回复[SILENT]，不说任何其他内容。只有明确跟你对话、下指令、问问题时才正常回答。没有真实传感器数据时绝不编造巡检结果，如实告知。"
-  # Prompt seed: fallback when prompts/SOUL.md is absent
-  prompt_seed:
-    - role: user
-      content: "你是Thunder，穹沛科技的工业巡检机器人，用中文简洁回答。如果听到的话不是在跟你说话（旁人闲聊），只回复[SILENT]。没有真实数据时不编造。"
-    - role: assistant
-      content: "收到。我是Thunder，穹沛的巡检机器人。不是跟我说话我就保持沉默，没有数据不编造。等待指令。"
-  # Format tag prepended to each user message for TTS output control
-  user_prefix: "[工业巡检模式：中文口语，80字以内，简洁汇报式，不用markdown，不说英文]"
+  # Optional character file. Leave blank to generate prompt seed from persona.
+  soul_file: ""
+  # Optional full override. Leave blank to generate system prompt from persona.
+  system_prompt: ""
+  # Optional seed override. Leave empty to generate seed from persona.
+  prompt_seed: []
+  # Optional user prefix override. Leave blank to generate from persona.
+  user_prefix: ""
   # Product-facing reply templates when RAG/memory cannot safely support an answer.
   rag_policy_templates:
-    no_evidence: "我这里没有可靠依据，不能直接回答。请补充位置或让管理员上传知识。"
+    no_evidence: "我这里没有可靠依据，不能直接回答。请补充位置，或让管理员上传知识。"
     filtered: "我找到了相关资料，但还不能作为可靠依据。请管理员先复核知识。"
     stale: "这条知识已经过期，我不能按旧信息回答。请先刷新问答可用性。"
     conflict: "我查到的信息互相冲突，不能给出确定结论。请管理员确认保留哪一条。"
@@ -67,9 +76,9 @@ memory:
   # Gracefully degrades to no-op when sentence-transformers is not installed.
   enabled: true
   # Backend: "mem0" (default), "robotmem", "mempalace", or "vector"
-  #   mem0     — Mem0 + Qdrant (pip install mem0ai)
-  #   robotmem — robotmem SDK, SQLite + hybrid search (pip install robotmem jieba)
-  #   vector   — local VectorStore with sentence-transformers (no server)
+  #   mem0     鈥?Mem0 + Qdrant (pip install mem0ai)
+  #   robotmem 鈥?robotmem SDK, SQLite + hybrid search (pip install robotmem jieba)
+  #   vector   鈥?local VectorStore with sentence-transformers (no server)
   backend: robotmem
   robotmem_fallback_backend: vector
   mempalace_fallback_backend: vector
@@ -123,7 +132,7 @@ voice:
   # Input transport: auto uses sounddevice when ALSA is healthy and falls back to
   # MCP01 direct USB capture on Sunrise when the custom kernel exposes no ALSA card.
   input_transport: auto
-  # HK-MIC native rate is 48kHz 2ch — MicInput resamples to 16kHz mono
+  # HK-MIC native rate is 48kHz 2ch 鈥?MicInput resamples to 16kHz mono
   # On Windows Realtek: typically 44100Hz. Set to match your mic's native rate.
   mic_native_rate: 48000
   mic_channels: 2
@@ -139,7 +148,7 @@ voice:
     num_threads: 2
     # Endpoint detection silence thresholds (seconds)
     # rule1: long silence after short utterance, rule2: normal speech
-    # Lowered from 1.6 to 0.6 — industrial commands are short, 1.6s delay is unacceptable
+    # Lowered from 1.6 to 0.6 鈥?industrial commands are short, 1.6s delay is unacceptable
     rule1_min_trailing_silence: 0.6
     rule2_min_trailing_silence: 0.4
     # Timeout (seconds) for ASR after wake word detection
@@ -192,8 +201,8 @@ voice:
     feed_silence: false
 
   # Address detection: filter out bystander chat (not talking to robot).
-  # When enabled, casual speech like "走走走吃饭去" is silently ignored.
-  # Safe default: uncertain → respond (never miss a real command).
+  # When enabled, casual speech like "璧拌蛋璧板悆楗幓" is silently ignored.
+  # Safe default: uncertain 鈫?respond (never miss a real command).
   address_detection:
     enabled: true
 
@@ -240,29 +249,29 @@ voice:
 
   tts:
     # Backend: "local" | "edge" | "minimax"
-    # "local"   = sherpa-onnx, 低延迟，离线，声音固定
-    # "edge"    = Microsoft Edge TTS, 需要网络，声音丰富
-    # "minimax" = MiniMax SSE流式, 低延迟, 支持语音克隆/情绪调节
+    # "local"   = sherpa-onnx, 浣庡欢杩燂紝绂荤嚎锛屽０闊冲浐瀹?
+    # "edge"    = Microsoft Edge TTS, 闇€瑕佺綉缁滐紝澹伴煶涓板瘜
+    # "minimax" = MiniMax SSE娴佸紡, 浣庡欢杩? 鏀寔璇煶鍏嬮殕/鎯呯华璋冭妭
     backend: minimax
     # Local backend settings (MeloTTS: 44100Hz, natural Chinese)
     model_dir: models/tts/vits-melo-tts-zh_en
     num_threads: 4
     speed: 1.0
     sid: 0   # speaker ID (this model has 1 speaker only)
-    # Edge backend settings — 切换 backend: edge 后生效
-    # 中文男声: zh-CN-YunxiNeural (活泼), zh-CN-YunjianNeural (沉稳)
-    # 中文女声: zh-CN-XiaoxiaoNeural (温柔), zh-CN-XiaoyiNeural (活力)
-    # 英文男声: en-US-GuyNeural, en-US-AndrewNeural
-    # 完整列表: edge-tts --list-voices
+    # Edge backend settings 鈥?鍒囨崲 backend: edge 鍚庣敓鏁?
+    # 涓枃鐢峰０: zh-CN-YunxiNeural (娲绘臣), zh-CN-YunjianNeural (娌夌ǔ)
+    # 涓枃濂冲０: zh-CN-XiaoxiaoNeural (娓╂煍), zh-CN-XiaoyiNeural (娲诲姏)
+    # 鑻辨枃鐢峰０: en-US-GuyNeural, en-US-AndrewNeural
+    # 瀹屾暣鍒楄〃: edge-tts --list-voices
     voice: zh-CN-YunjianNeural
     rate: "+0%"
-    # MiniMax backend settings — 切换 backend: minimax 后生效
+    # MiniMax backend settings 鈥?鍒囨崲 backend: minimax 鍚庣敓鏁?
     # MiniMax streaming transport: "sse" | "websocket".
     # WebSocket uses the Speech 2.8 T2A task_start/task_continue/task_finish flow.
     minimax_api_key: ${MINIMAX_API_KEY}
     minimax_tts_url: https://api.minimax.chat/v1
     minimax_tts_transport: websocket
-    # 中国账号/key 使用 minimaxi.com；Global 账号可改为 api.minimax.io。
+    # 涓浗璐﹀彿/key 浣跨敤 minimaxi.com锛汫lobal 璐﹀彿鍙敼涓?api.minimax.io銆?
     minimax_tts_ws_url: wss://api.minimaxi.com/ws/v1/t2a_v2
     minimax_tts_model: speech-2.8-turbo
     minimax_voice_id: male-qn-qingse
@@ -282,41 +291,41 @@ voice:
     voice_profile_state_path: data/voice/active_voice_profile.json
     voice_profiles:
       patrol_default:
-        label: 巡检播报
+        label: 宸℃鎾姤
         voice_id: male-qn-qingse
         speed: 1.0
         volume: 1.0
         pitch: 0
         emotion: ""
       visitor_friendly:
-        label: 游客服务
+        label: 娓稿鏈嶅姟
         voice_id: male-qn-qingse
         speed: 0.96
         volume: 0.95
         pitch: 1
         emotion: happy
       security_clear:
-        label: 安防提醒
+        label: 瀹夐槻鎻愰啋
         voice_id: male-qn-qingse
         speed: 1.0
         volume: 1.0
         pitch: -1
         emotion: calm
       emergency_short:
-        label: 紧急告警
+        label: 绱ф€ュ憡璀?
         voice_id: male-qn-qingse
         speed: 1.08
         volume: 1.0
         pitch: 0
         emotion: fearful
       night_quiet:
-        label: 夜间低扰
+        label: 澶滈棿浣庢壈
         voice_id: male-qn-qingse
         speed: 0.9
         volume: 0.72
         pitch: -2
         emotion: calm
-    # Preserve enough leading context that short first tokens ("1"/"一") are not
+    # Preserve enough leading context that short first tokens ("1"/"涓€") are not
     # thinned out before the USB speaker wake-up protection runs.
     minimax_leading_silence_preserve_seconds: 0.16
     minimax_onset_threshold: 0.0005
@@ -400,7 +409,7 @@ robot:
   action_dim: 16
   serial_port: COM3
   serial_baudrate: 115200
-  # simulate: true → no real hardware, for testing
+  # simulate: true 鈫?no real hardware, for testing
   simulate: true
 
 # ----------------------------------------------------------
@@ -432,15 +441,15 @@ tools:
   confirmation_bypass_tools:
     - robot_emergency_stop
   confirmation_phrases:
-    - "确认执行"
-    - "继续执行"
-    - "批准执行"
+    - "纭鎵ц"
+    - "缁х画鎵ц"
+    - "鎵瑰噯鎵ц"
     - "approve"
     - "confirm"
   rejection_phrases:
-    - "取消"
-    - "取消执行"
-    - "放弃"
+    - "鍙栨秷"
+    - "鍙栨秷鎵ц"
+    - "鏀惧純"
     - "cancel"
     - "deny"
 
@@ -472,9 +481,9 @@ proactive:
       info: ["voice", "log"]
       warning: ["voice", "webhook", "log"]
       error: ["voice", "dingtalk", "webhook", "log"]
-  #   - name: "环境播报"
+  #   - name: "鐜鎾姤"
   #     interval: 300
-  #     prompt: "用一句话描述当前环境状况"
+  #     prompt: "鐢ㄤ竴鍙ヨ瘽鎻忚堪褰撳墠鐜鐘跺喌"
 
 # ----------------------------------------------------------
 # Platforms: Multi-platform support (future)
@@ -487,11 +496,11 @@ platforms:
   web:
     enabled: false
   telegram:
-    enabled: false              # 设为 true 并填写 TELEGRAM_BOT_TOKEN 后启用
+    enabled: false              # 璁句负 true 骞跺～鍐?TELEGRAM_BOT_TOKEN 鍚庡惎鐢?
     token_env: TELEGRAM_BOT_TOKEN
-    allowed_users: []           # 空列表=不限制；填 Telegram user_id 整数开白名单
-    voice_transcribe: true      # 是否转写语音消息（需要 ffmpeg + sherpa-onnx）
-    lingtu_url: ""              # 留空则读 NAV_GATEWAY_URL 环境变量
+    allowed_users: []           # 绌哄垪琛?涓嶉檺鍒讹紱濉?Telegram user_id 鏁存暟寮€鐧藉悕鍗?
+    voice_transcribe: true      # 鏄惁杞啓璇煶娑堟伅锛堥渶瑕?ffmpeg + sherpa-onnx锛?
+    lingtu_url: ""              # 鐣欑┖鍒欒 NAV_GATEWAY_URL 鐜鍙橀噺
 
 # ----------------------------------------------------------
 # Scheduler: Timed tasks (future)
@@ -592,8 +601,20 @@ field_operations:
       jwks_uri: ${ASKME_IAM_OIDC_JWKS_URI}
       claim_operator_id: sub
       claim_roles: roles
+    # In production, put askme behind an IAM/OIDC gateway that verifies tokens
+    # and injects these headers. askme consumes only these trusted claims; it
+    # does not trust browser-supplied operator ids in enterprise identity mode.
+    trusted_identity_headers:
+      enabled: false
+      operator_id: x-askme-iam-operator-id
+      roles: x-askme-iam-roles
+      display_name: x-askme-iam-display-name
+      source: x-askme-iam-source
+      roles_required: true
+      fallback_to_local_roles: false
     permissions:
       operator:
+        - audit:read
         - field:event:create
         - field:event:acknowledge
         - field:event:request_close
@@ -603,8 +624,11 @@ field_operations:
         - runtime:read
         - runtime:pause
         - runtime:resume
+        - skill:read
         - voice:profile:read
       supervisor:
+        - audit:read
+        - audit:export
         - field:event:create
         - field:event:acknowledge
         - field:event:close
@@ -621,6 +645,8 @@ field_operations:
         - runtime:resume
         - runtime:cancel
         - runtime:advance
+        - skill:read
+        - skill:review
         - voice:profile:read
         - voice:profile:update
       admin:
@@ -643,18 +669,18 @@ field_operations:
   site_map:
     zones:
       main-road-1:
-        name: B区主通道
-        location: B区主通道
+        name: B鍖轰富閫氶亾
+        location: B鍖轰富閫氶亾
         type: main_channel
         parking_allowed: false
       guide-01:
-        name: 游客中心路引点
-        location: 游客中心门口
+        name: 娓稿涓績璺紩鐐?
+        location: 娓稿涓績闂ㄥ彛
         type: help_point
         help_point_id: guide-01
       north-window-01:
-        name: 北侧一层窗户
-        location: 北侧一层窗户
+        name: 鍖椾晶涓€灞傜獥鎴?
+        location: 鍖椾晶涓€灞傜獥鎴?
         type: window
 
 # ----------------------------------------------------------
@@ -752,7 +778,6 @@ space_cognition:
       robot_passable: false
       risk_notes: [室内区域首期只语音指路]
       enabled: true
-
 # ----------------------------------------------------------
 # Perception provider contracts: external algorithms -> InteractionGate
 # ----------------------------------------------------------
@@ -802,6 +827,18 @@ cognition:
   # Keep the planning scratchpad in-memory unless a privacy policy explicitly
   # enables durable storage in a separate memory service.
   working_memory_persist_enabled: false
+
+# ----------------------------------------------------------
+# Unified product audit export
+# ----------------------------------------------------------
+audit:
+  export:
+    output_dir: artifacts/audit_exports
+    webhook_url: ${ASKME_AUDIT_EXPORT_WEBHOOK_URL}
+    hmac_secret: ${ASKME_AUDIT_EXPORT_HMAC_SECRET}
+    signature_key_id: local-unified-audit-export
+    retry_queue_path: artifacts/audit_exports/export-delivery-retry.jsonl
+    timeout_s: 5.0
 
 # ----------------------------------------------------------
 # Runtime handoff: confirmed-plan -> fake arbiter TaskRun

@@ -1,6 +1,6 @@
 # askme Product Brief
 
-更新时间：2026-05-10
+更新时间：2026-05-13
 
 askme 是面向机器人现场任务的自然语言入口。它不是普通聊天框，也不是机器人底层控制器；它负责把人的语音或文字目标变成可解释、可确认、可审计、可评测的任务意图，再交给安全和 runtime 层处理。
 
@@ -60,6 +60,24 @@ askme 是面向机器人现场任务的自然语言入口。它不是普通聊�
 - Voice E2E 离线评测：游客问路、未知地点拒答、巡检 SOP、设备位置、过期路线拒答、旁观噪声、多人澄清、急停。
 - Health snapshot 与 Dashboard 运营诊断显示 Knowledge Trust 和 Voice E2E 结果。
 
+### 能力中心与在线技能增长
+
+- Dashboard `能力中心` 展示客户可读的能力分组、场景能力蓝图、缺口、Agent Profile、生成技能审批队列、技能包和调用审计。
+- `在线增长候选` 从真实调用审计里聚合失败、阻断、未命中请求，帮助产品经理判断哪些重复需求值得沉淀成技能。
+- 产品经理可从增长候选一键生成 `SKILL.md` 草稿；草稿仍然是 `pending_approval`，不会自动启用。
+- LLM 生成的新 `SKILL.md` 默认进入草稿/待审批，不会自动变成生产可用能力。
+- 生成技能必须通过结构校验、触发词冲突检查、工具边界检查和人工审批。
+- 审批通过后还必须分配到客户/园区 `Skill Package`，同一套产品可针对不同项目启用不同能力。
+- `Skill Package` 已升级为客户项目发布单元，支持版本快照、pilot/prod 发布通道、灰度比例和回滚。
+- 灰度比例为 `0%` 时，该能力包内技能不会进入可触发状态；回滚会生成新的版本记录，保留谁在何时回滚到哪个版本。
+- 支持项目级、用户级和 managed Agent Profile Markdown 配置，字段包含工具 allow/deny、可派生子 agent、预加载 skills、MCP server、hooks、模型、最大轮次、超时、隔离方式、记忆范围和风险等级。
+- Agent Profile 的 hooks 已支持产品级声明式拦截：`PreToolUse` 可在工具调用前拒绝，`PostToolUse` 可在结果返回前阻断敏感输出；系统不会执行任意 shell hook。
+- `create_skill` 工具统一走 `SkillManager.create_generated_skill_draft`，所以语音/文本 Agent、Dashboard 候选生成和后端 API 都进入同一套待审批、禁用、校验、审计流程。
+- 首批园区场景技能已从 planned 落成 built-in：`report_fall_unrecoverable`、`report_stuck`、`report_motor_fault`、`detect_night_intruder`、`detect_illegal_parking`、`detect_fire_smoke`、`inspect_trash_bin`、`offer_wayfinding_help`、`escort_visitor`。这些技能通过 `field_event_trigger` 进入 FieldOperationsService，生成事件、按策略通知、归档和审计，而不是只返回聊天文案。
+- 操作员治理已从前端兜底推进到服务端目录：Dashboard 会读取 `/api/governance/current-operator`，未知操作员显示为未登记并且无权限；目录页面返回角色矩阵、SSO/IAM readiness 和生产阻塞原因。
+- 企业账号接入采用网关验签模式：客户的 OIDC/IAM 网关验证登录 token 后注入受信身份头，askme 只根据已验证的 operator/roles 做权限和审计，不相信请求 body 里的 operator_id。
+- 统一审计查询和导出已具备产品入口：`/api/audit/events` 汇总技能、现场事件和 runtime 审计；`/api/audit/export` 生成带 SHA-256/可选 HMAC 的 JSONL 证据包，并可投递到 SIEM/WORM webhook；`/api/audit/export/retry` 可查询和重放失败投递，Dashboard 交付页能看到待投递数量。
+
 ## 产品边界
 
 askme 可以：
@@ -97,9 +115,20 @@ askme 不可以：
 2. 把 Knowledge Trust 与 Voice E2E 合并为统一 Readiness Evidence 页面。
 3. Knowledge Console 增加审批、版本、冲突处理和异步重建索引 job。
 4. TaskRunStore 持久化运行状态、runtime events、operator actions、reports。
-5. Operator RBAC：viewer/operator/supervisor/admin。
-6. 接入真实感知 provider：pose/gaze、gesture、DOA、声画关联、接近/停留、多人仲裁。
-7. external/lab runtime 只开放低风险 shadow/lab skill：status_report、capture_image、read_status_panel、generate_report、return_home。
+5. Operator RBAC 下一步补企业登录页/会话 UI、审批流通知、审计导出重试任务和外部 SIEM/WORM 生产联调；当前已具备 OIDC/IAM 网关受信身份头适配、统一审计查询和签名导出。
+6. Skill Package 增加客户项目验收状态、发布日历和字段级变更对比。
+7. 接入真实感知 provider：pose/gaze、gesture、DOA、声画关联、接近/停留、多人仲裁。
+8. external/lab runtime 只开放低风险 shadow/lab skill：status_report、capture_image、read_status_panel、generate_report、return_home。
+
+本次新增的产品化增长能力：
+
+- Agent Profile 可以通过 `POST /api/agent-profiles` 写入项目级配置，和 Claude Code 的项目 subagent 文件类似，但会进入 askme 审计链。
+- 受控 agent 可调用 `create_agent_profile` 生成新的项目级 agent lane，用于沉淀“知识运营、问路、停车检测、垃圾桶巡检”等专职代理；工具权限由服务端 allowlist 校验，不能由前端或 LLM 自行扩权。
+- Dashboard 能力中心已提供 Agent Profile 创建表单和预览按钮，产品经理可以在界面上填写角色边界、工具范围、可派生 agent 和预加载技能。
+- 能力中心新增 `scenario_blueprints`：把机器人异常、夜间陌生人、违停、烟火、垃圾桶、突发巡检、人群聚集、问路和带路映射到 required skills、传感器/数据依赖、通知归档和验收标准。
+- 园区问路已具备可调用技能入口：`lookup_place` 调用空间语义地图解析目的地，`recommend_route` 调用路线推荐服务生成语音指路或带路前 handoff 建议，`answer_wayfinding` 封装成游客可直接触发的语音指路能力；未知地点必须拒答或要求人工更新点位库。
+- 人群聚集已具备可调用技能入口：`detect_crowd_gathering` 会在人数、停留时长或复巡证据满足策略时进入安保事件闭环，短暂停留不能被夸大成告警。
+- 新 profile 只定义角色、工具边界、可派生 agent、预加载技能和风险等级；真实机器人动作仍必须经过 SkillGate、SafetyPreflight 和 runtime arbiter。
 
 暂不做：
 

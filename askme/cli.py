@@ -128,6 +128,50 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Mark the check as live preflight without opening audio devices",
     )
+    runtime_audio_devices = runtime_subparsers.add_parser(
+        "audio-devices",
+        help="List local microphone/speaker devices and recommended config",
+    )
+    runtime_audio_devices.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_audio_loopback = runtime_subparsers.add_parser(
+        "audio-loopback",
+        help="Play a short tone while recording the microphone",
+    )
+    runtime_audio_loopback.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_audio_loopback.add_argument("--input-device", default=None)
+    runtime_audio_loopback.add_argument("--output-device", default=None)
+    runtime_audio_loopback.add_argument("--sample-rate", type=int, default=None)
+    runtime_audio_loopback.add_argument("--record-seconds", type=float, default=2.0)
+    runtime_audio_loopback.add_argument("--tone-seconds", type=float, default=0.8)
+    runtime_audio_loopback.add_argument("--frequency-hz", type=float, default=880.0)
+    runtime_audio_loopback.add_argument("--output-gain", type=float, default=0.25)
+    runtime_audio_loopback.add_argument("--min-capture-peak", type=int, default=300)
+    runtime_audio_loopback.add_argument(
+        "--wav-out",
+        default="artifacts/audio/windows-audio-loopback.wav",
+        help="Write captured microphone audio to this WAV file",
+    )
+    runtime_audio_loopback.add_argument(
+        "--play-recording",
+        action="store_true",
+        help="Replay the captured microphone audio after the loopback test",
+    )
+    runtime_voice_online_smoke = runtime_subparsers.add_parser(
+        "voice-online-smoke",
+        help="Run real MiniMax LLM/TTS and DashScope ASR connectivity checks",
+    )
+    runtime_voice_online_smoke.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_voice_online_smoke.add_argument(
+        "--text",
+        default="你好，请问需要指路吗？服务中心在前方右转。",
+        help="Text used for the MiniMax TTS online synthesis probe",
+    )
+    runtime_voice_online_smoke.add_argument(
+        "--silence-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds of silence sent to DashScope after session start",
+    )
     runtime_mic_calibration = runtime_subparsers.add_parser(
         "mic-calibration",
         help="Poll a running runtime and summarize microphone gate levels",
@@ -1053,6 +1097,65 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
             _emit_payload(payload, json_output=True)
         else:
             _emit_voice_health_payload(payload)
+        if payload.get("status") != "ok":
+            raise SystemExit(1)
+        return
+
+    if args.runtime_command == "audio-devices":
+        from askme.voice.audio_devices import (
+            print_audio_devices_summary,
+            query_audio_devices,
+        )
+
+        payload = query_audio_devices()
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            print_audio_devices_summary(payload)
+        if payload.get("status") != "ok":
+            raise SystemExit(1)
+        return
+
+    if args.runtime_command == "audio-loopback":
+        from askme.voice.audio_devices import (
+            print_audio_loopback_summary,
+            run_audio_loopback,
+        )
+
+        payload = run_audio_loopback(
+            input_device=args.input_device,
+            output_device=args.output_device,
+            sample_rate=args.sample_rate,
+            record_seconds=args.record_seconds,
+            tone_seconds=args.tone_seconds,
+            frequency_hz=args.frequency_hz,
+            output_gain=args.output_gain,
+            min_capture_peak=args.min_capture_peak,
+            wav_out=args.wav_out,
+            play_recording=args.play_recording,
+        )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            print_audio_loopback_summary(payload)
+        if payload.get("status") != "ok":
+            raise SystemExit(1)
+        return
+
+    if args.runtime_command == "voice-online-smoke":
+        from askme.voice.online_smoke import (
+            print_voice_online_smoke_summary,
+            run_voice_online_smoke_sync,
+        )
+
+        payload = run_voice_online_smoke_sync(
+            text=args.text,
+            silence_seconds=args.silence_seconds,
+        )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            print_voice_online_smoke_summary(payload)
         if payload.get("status") != "ok":
             raise SystemExit(1)
         return

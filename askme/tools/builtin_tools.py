@@ -21,6 +21,8 @@ from typing import Any
 
 from askme.config import get_section, project_root
 
+from .field_event_tool import FieldEventTriggerTool
+from .space_tool import SpaceLookupPlaceTool, SpaceRecommendRouteTool
 from .tool_registry import BaseTool, ToolRegistry
 
 # Directories the LLM is allowed to read. Data produced by askme itself
@@ -1266,6 +1268,9 @@ _BUILTIN_TOOLS: list[type[BaseTool]] = [
     HttpRequestTool,
     NavStatusTool,
     NavDispatchTool,
+    FieldEventTriggerTool,
+    SpaceLookupPlaceTool,
+    SpaceRecommendRouteTool,
     DogControlDispatchTool,
     SandboxedBashTool,
     WriteFileTool,

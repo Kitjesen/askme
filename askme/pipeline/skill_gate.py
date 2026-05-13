@@ -1,4 +1,4 @@
-"""Skill execution gate — safety checks, context assembly, AgentShell routing."""
+﻿"""Skill execution gate 鈥?safety checks, context assembly, AgentShell routing."""
 
 from __future__ import annotations
 
@@ -13,10 +13,11 @@ from typing import TYPE_CHECKING
 from askme.pipeline.hooks import PipelineHooks, ToolCallRecord
 from askme.pipeline.trace import get_tracer
 from askme.pipeline.utils import classify_skill_error, strip_think_blocks
+from askme.skills.audit import SkillAuditLog
 
 if TYPE_CHECKING:
     from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
-    from askme.llm.conversation import ConversationManager
+    from askme.memory.conversation import ConversationManager
     from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.system import MemorySystem
     from askme.robot.arm_controller import ArmController
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 class SkillGate:
-    """Skill execution gate — safety checks, context assembly, AgentShell routing."""
+    """Skill execution gate 鈥?safety checks, context assembly, AgentShell routing."""
 
     def __init__(
         self,
@@ -65,8 +66,9 @@ class SkillGate:
         self._last_spoken_text = ""
         self._cancel_token = cancel_token
         self._hooks = hooks
+        self._audit = SkillAuditLog()
 
-    # ── Helpers ───────────────────────────────────────────────
+    # 鈹€鈹€ Helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     def _log_episode(self, kind: str, text: str) -> None:
         if self._mem is not None:
@@ -81,7 +83,7 @@ class SkillGate:
             return result, result
 
         boundary = 0
-        for ch in "。！？!?":
+        for ch in "。！？?":
             idx = result.rfind(ch, 0, _AGENT_TTS_LIMIT)
             if idx > boundary:
                 boundary = idx + 1
@@ -107,19 +109,28 @@ class SkillGate:
 
     def extract_semantic_target(self, user_text: str) -> str:
         """Extract navigation target from natural language commands."""
-        patterns = [
-            r"导航到(.{1,20}?)(?:吧|啊|嗯|[。！？]|$)",
-            r"带我去(.{1,20}?)(?:吧|啊|嗯|[。！？]|$)",
-            r"前往(.{1,20}?)(?:吧|啊|嗯|[。！？]|$)",
-            r"走到(.{1,20}?)(?:吧|啊|嗯|[。！？]|$)",
-            r"去(.{1,20}?)(?:吧|啊|嗯|[。！？]|$)",
-        ]
-        for pattern in patterns:
-            m = re.search(pattern, user_text)
-            if m:
-                target = m.group(1).strip()
-                if target:
-                    return target
+        text = str(user_text or "").strip()
+        if not text:
+            return text
+
+        prefixes = ("导航到", "带我去", "前往", "走到", "去")
+        filler_suffixes = ("好的", "可以", "那里", "这边", "一下", "嗯", "好", "吧", "啊")
+
+        for prefix in prefixes:
+            if not text.startswith(prefix):
+                continue
+            target = text[len(prefix):].strip()
+            target = re.split(r"[。！？?!，,；;]", target, maxsplit=1)[0].strip()
+            changed = True
+            while changed:
+                changed = False
+                for suffix in filler_suffixes:
+                    if target.endswith(suffix) and len(target) > len(suffix):
+                        target = target[: -len(suffix)].strip()
+                        changed = True
+                        break
+            if target:
+                return target
         return user_text
 
     def _classify_skill_error_message(self, exc: Exception, skill_name: str) -> str:
@@ -132,22 +143,46 @@ class SkillGate:
             self._audio.play_thinking()
         return asyncio.create_task(_thinking_indicator()), None
 
-    # ── Core ──────────────────────────────────────────────────
+    # 鈹€鈹€ Core 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     async def execute_skill(
         self, skill_name: str, user_text: str, extra_context: str = "",
         source: str = "voice",
     ) -> str:
         """Execute a named skill and speak the result."""
+        audit_start = _time.perf_counter()
         if self._cancel_token is not None and self._cancel_token.is_set():
-            logger.warning("[SkillGate] cancel_token set — skipping skill '%s'", skill_name)
+            logger.warning("[SkillGate] cancel_token set; skipping skill '%s'", skill_name)
+            self._audit.append(
+                skill_name=skill_name,
+                status="blocked",
+                user_text=user_text,
+                source=source,
+                reason="cancel_token",
+            )
             return ""
 
         skill = self._skill_manager.get(skill_name)
         if not skill:
+            self._audit.append(
+                skill_name=skill_name,
+                status="blocked",
+                user_text=user_text,
+                source=source,
+                reason="not_found",
+            )
             return f"[Skill] Not found: {skill_name}"
         if getattr(skill, "enabled", True) is False:
             logger.warning("[SkillGate] disabled skill blocked: %s", skill_name)
+            self._audit.append(
+                skill_name=skill_name,
+                status="blocked",
+                user_text=user_text,
+                source=source,
+                safety_level=skill.safety_level,
+                execution=skill.execution,
+                reason="disabled",
+            )
             return f"[Skill] Disabled: {skill_name}"
 
         if self._dog_safety and self._dog_safety.is_configured():
@@ -155,6 +190,15 @@ class SkillGate:
             if estop_state is not None and estop_state.get("enabled"):
                 msg = f"[安全锁定] 急停已激活，无法执行 {skill_name}。请先解除急停。"
                 logger.warning("Safety gate blocked skill '%s': estop is active", skill_name)
+                self._audit.append(
+                    skill_name=skill_name,
+                    status="blocked",
+                    user_text=user_text,
+                    source=source,
+                    safety_level=skill.safety_level,
+                    execution=skill.execution,
+                    reason="estop_active",
+                )
                 return msg
 
         if skill.depends:
@@ -194,10 +238,30 @@ class SkillGate:
                 self._log_episode("outcome", f"{skill_name}完成: {result[:100]}")
                 if source == "voice":
                     await asyncio.to_thread(self._audio.wait_speaking_done)
+                self._audit.append(
+                    skill_name=skill_name,
+                    status="succeeded",
+                    user_text=user_text,
+                    source=source,
+                    safety_level=skill.safety_level,
+                    execution=skill.execution,
+                    elapsed_ms=(_time.perf_counter() - audit_start) * 1000,
+                    result_preview=result,
+                )
                 return result
             except Exception as exc:
                 logger.error("[AgentShell] %s failed: %s", skill_name, exc)
                 self._audio.speak(f"任务执行出错：{exc}")
+                self._audit.append(
+                    skill_name=skill_name,
+                    status="failed",
+                    user_text=user_text,
+                    source=source,
+                    safety_level=skill.safety_level,
+                    execution=skill.execution,
+                    elapsed_ms=(_time.perf_counter() - audit_start) * 1000,
+                    reason=str(exc),
+                )
                 return f"[AgentShell Error] {exc}"
             finally:
                 self._audio.stop_playback()
@@ -215,7 +279,7 @@ class SkillGate:
         if extra_context:
             context["mission_context"] = extra_context
         if self._arm:
-            # arm.get_state() may call hardware registers — run in thread pool
+            # arm.get_state() may call hardware registers; run in thread pool.
             context["robot_state"] = json.dumps(
                 await asyncio.to_thread(self._arm.get_state), ensure_ascii=False
             )
@@ -274,7 +338,7 @@ class SkillGate:
                         loop = asyncio.get_running_loop()
                         loop.create_task(_hooks.fire_pre_tool(probe))
                     except RuntimeError:
-                        pass  # No running loop — hooks can't fire here
+                        pass  # No running loop; hooks can't fire here.
 
             t0 = _time.perf_counter()
             with get_tracer().span(f"skill.{skill_name}", skill=skill_name):
@@ -290,7 +354,7 @@ class SkillGate:
             result = strip_think_blocks(raw_result)
             logger.info("Skill result [%.0fms]: %s", elapsed_ms, result[:100])
 
-            # post_tool hook — may transform the skill result
+            # post_tool hook may transform the skill result.
             if self._hooks and self._hooks.post_tool:
                 record = ToolCallRecord(
                     call_id="", tool_name=skill_name,
@@ -303,21 +367,41 @@ class SkillGate:
             self._last_spoken_text = result
             self._conversation.add_user_message(user_text)
             self._conversation.add_assistant_message(result)
-            self._log_episode("outcome", f"直接回复: {result[:100]}")
+            self._log_episode("outcome", f"鐩存帴鍥炲: {result[:100]}")
             if source == "voice":
                 await asyncio.to_thread(self._audio.wait_speaking_done)
+            self._audit.append(
+                skill_name=skill_name,
+                status="succeeded",
+                user_text=user_text,
+                source=source,
+                safety_level=skill.safety_level,
+                execution=skill.execution,
+                elapsed_ms=(_time.perf_counter() - audit_start) * 1000,
+                result_preview=result,
+            )
             return result
         except Exception as exc:
             logger.error("Skill error (%s): %s", skill_name, exc)
-            self._log_episode("error", f"技能错误 {skill_name}: {exc}")
+            self._log_episode("error", f"鎶€鑳介敊璇?{skill_name}: {exc}")
             self._audio.speak(self._classify_skill_error_message(exc, skill_name))
+            self._audit.append(
+                skill_name=skill_name,
+                status="failed",
+                user_text=user_text,
+                source=source,
+                safety_level=skill.safety_level,
+                execution=skill.execution,
+                elapsed_ms=(_time.perf_counter() - audit_start) * 1000,
+                reason=str(exc),
+            )
             return f"[Skill Error] {exc}"
         finally:
             if thinking_task is not None:
                 thinking_task.cancel()
             self._audio.stop_playback()
 
-    # ── Late-binding setters ──────────────────────────────────
+    # 鈹€鈹€ Late-binding setters 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     def set_audio(self, audio: AudioAgent) -> None:
         self._audio = audio
@@ -331,7 +415,7 @@ class SkillGate:
     def set_agent_shell(self, shell: ThunderAgentShell) -> None:
         self._agent_shell = shell
 
-    # ── Properties ────────────────────────────────────────────
+    # 鈹€鈹€ Properties 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     @property
     def last_spoken_text(self) -> str:

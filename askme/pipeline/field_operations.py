@@ -25,6 +25,7 @@ from askme.pipeline.field_ingest_adapters import normalize_field_ingest_payload
 from askme.pipeline.field_scenarios import FIELD_SCENARIOS, FieldScenario
 from askme.pipeline.field_site_profile import build_site_profile_report
 from askme.pipeline.incident_alerts import format_incident_alert, format_incident_playbook
+from askme.schemas.field import FieldEventDetail
 from askme.voice.voice_profiles import resolve_voice_profile_id
 
 _SCENARIO_TO_INCIDENT_TOPIC = {
@@ -427,6 +428,18 @@ class FieldOperationsService:
             },
             "archive_path": str(self._archive_path),
         }
+
+    def detail_payload(self, event_id: str) -> dict[str, Any]:
+        event_key = str(event_id or "").strip()
+        for event in self._read_events():
+            if str(event.get("event_id") or "") == event_key:
+                event_view = FieldEventDetail.from_dict(_field_event_view(event)).to_dict()
+                return {
+                    "found": True,
+                    "event_id": event_key,
+                    "event": event_view,
+                }
+        return {"found": False, "reason": "event_not_found", "event_id": event_key}
 
     def ingest_help_payload(self) -> dict[str, Any]:
         return self._product_ingest_help_payload()

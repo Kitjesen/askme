@@ -1,11 +1,11 @@
-"""Brain pipeline — facade over StreamProcessor + SkillGate + TurnExecutor.
+﻿"""Brain pipeline 鈥?facade over StreamProcessor + SkillGate + TurnExecutor.
 
 Decomposed from the original 1093-line monolith (GAP-CORE-1).
 Public API is unchanged: process(), execute_skill(), shutdown().
 
 Decoupling improvements:
   - Constructor accepts StreamProcessorProtocol / SkillGateProtocol /
-    TurnExecutorProtocol — tests pass mocks directly, no private-attr access.
+    TurnExecutorProtocol 鈥?tests pass mocks directly, no private-attr access.
   - cancel_token (asyncio.Event) is injected externally; handle_estop() calls
     cancel_token.set() and each sub-component stops autonomously.
 """
@@ -27,13 +27,13 @@ from askme.pipeline.skill_gate import SkillGate
 from askme.pipeline.stream_processor import StreamProcessor
 from askme.pipeline.tool_executor import ToolExecutor
 from askme.pipeline.turn_executor import TurnExecutor
-from askme.pipeline.utils import strip_think_blocks  # noqa: F401 — re-exported for compat
+from askme.pipeline.utils import strip_think_blocks  # noqa: F401 鈥?re-exported for compat
 
 if TYPE_CHECKING:
     from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
     from askme.llm.client import LLMClient
-    from askme.llm.conversation import ConversationManager
     from askme.memory.bridge import MemoryBridge
+    from askme.memory.conversation import ConversationManager
     from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.session import SessionMemory
     from askme.memory.system import MemorySystem
@@ -60,18 +60,17 @@ class BrainPipeline:
     """
 
     _DEFAULT_MAX_RESPONSE_CHARS = 500
-    # Default system prompt used when none is provided via config.yaml.
-    # Override by setting ``brain.system_prompt`` in config.yaml or passing
-    # ``system_prompt=`` to the constructor. The prompt is intentionally kept
-    # in the source as a self-documenting default, not buried in a data file.
+    # Brand-neutral fallback used only when config did not provide persona or
+    # system_prompt. Customer deployments should configure ``brain.persona``.
     _DEFAULT_SYSTEM_PROMPT = (
-        "你是穹沛科技的机器人语音助手，搭载在巡检机器人上。"
-        "操作员是工程师和现场人员。"
+        "你是现场任务机器人语音助手，搭载在巡检机器人上。"
+        "当前项目、客户名称和归属口径由部署配置决定，不要主动声明厂商归属。"
+        "服务对象是现场运营人员、安保和交付工程师。"
         "说话简洁口语化，像对讲机里的值班员。"
         "短句为主，不超过80字。"
-        "不用markdown、emoji、英文。"
-        "不确定时说'不确定，需要确认'，不编造信息。"
-        "绝不说自己是AI助手或语言模型。"
+        "不用 markdown、emoji、英文。"
+        "不确定时说不确定，需要确认，不编造信息。"
+        "不要说自己是 AI 助手或语言模型。"
     )
 
     def __init__(
@@ -102,14 +101,14 @@ class BrainPipeline:
         memory_system: MemorySystem | None = None,
         qp_memory: Any = None,
         rag_policy_templates: dict[str, str] | None = None,
-        # ── Decoupled sub-component injection (Protocol types) ────────────
+        # 鈹€鈹€ Decoupled sub-component injection (Protocol types) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         # Pass pre-built instances for testing or custom implementations.
         # When None (default) the components are constructed from the raw args above.
         cancel_token: asyncio.Event | None = None,
         stream_processor: StreamProcessorProtocol | None = None,
         skill_gate: SkillGateProtocol | None = None,
         turn_executor: TurnExecutorProtocol | None = None,
-        # ── Lifecycle hooks (Claude Code-style) ───────────────────────────
+        # 鈹€鈹€ Lifecycle hooks (Claude Code-style) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         # PipelineHooks provides pre/post callbacks for turns and tool calls.
         # If None, no hooks are fired. Build a PipelineHooks and register
         # callbacks via decorator syntax or direct list append.
@@ -131,13 +130,13 @@ class BrainPipeline:
         self._arm = arm_controller
         self._dog_safety = dog_safety_client
 
-        # cancel_token — shared across all sub-components.
+        # cancel_token 鈥?shared across all sub-components.
         # handle_estop() calls cancel_token.set(); each component stops autonomously.
         self._cancel_token: asyncio.Event = cancel_token if cancel_token is not None else asyncio.Event()
         self._hooks = hooks
 
         if stream_processor is not None and skill_gate is not None and turn_executor is not None:
-            # ── Injection path (tests / custom implementations) ───────────
+            # 鈹€鈹€ Injection path (tests / custom implementations) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             # All three protocol objects provided; skip internal construction.
             self._stream_processor: StreamProcessorProtocol = stream_processor
             self._skill_gate: SkillGateProtocol = skill_gate
@@ -146,7 +145,7 @@ class BrainPipeline:
             self._prompt_builder = None
             self._tool_executor = None
         else:
-            # ── Default construction path ─────────────────────────────────
+            # 鈹€鈹€ Default construction path 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             # PromptBuilder (already extracted)
             self._prompt_builder = PromptBuilder(
                 base_prompt=system_prompt,
@@ -242,7 +241,7 @@ class BrainPipeline:
         self._skill_executor = skill_executor
         self._agent_shell = agent_shell
 
-    # ── Public API ───────────────────────────────────────────
+    # 鈹€鈹€ Public API 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     @property
     def last_spoken_text(self) -> str:
@@ -279,11 +278,11 @@ class BrainPipeline:
         """Trigger an emergency stop.
 
         Sets cancel_token so all sub-components (StreamProcessor, TurnExecutor,
-        SkillGate) stop autonomously via their own cancel checks — no manual
+        SkillGate) stop autonomously via their own cancel checks 鈥?no manual
         per-component coordination required.  Hardware stop and hooks follow.
         """
         logger.warning("E-STOP triggered!")
-        # Signal all sub-components to stop — each checks cancel_token independently.
+        # Signal all sub-components to stop 鈥?each checks cancel_token independently.
         self._cancel_token.set()
         if self._arm:
             self._arm.emergency_stop()
@@ -304,13 +303,13 @@ class BrainPipeline:
 
         Uses asyncio.Event.clear() so all sub-components that hold the *same*
         event reference (TurnExecutor, SkillGate, StreamProcessor) see the
-        cleared state immediately — no reference-swap needed.
+        cleared state immediately 鈥?no reference-swap needed.
         """
         if not self._cancel_token.is_set():
-            logger.info("reset_estop: cancel_token was not set — no-op")
+            logger.info("reset_estop: cancel_token was not set 鈥?no-op")
             return
         self._cancel_token.clear()
-        logger.warning("E-STOP cleared — new turns will be accepted.")
+        logger.warning("E-STOP cleared 鈥?new turns will be accepted.")
 
     def has_pending_tool_approval(self) -> bool:
         return self._tools.has_pending_approval()
@@ -327,7 +326,7 @@ class BrainPipeline:
             user_text, assistant_text, audio=self._audio_ref, source=source,
         )
 
-    # ── Late-binding setters ─────────────────────────────────
+    # 鈹€鈹€ Late-binding setters 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     def set_audio(self, audio: Any) -> None:
         self._audio_ref = audio
@@ -350,7 +349,7 @@ class BrainPipeline:
         self._agent_shell = shell
         self._skill_gate.set_agent_shell(shell)
 
-    # ── Utilities (kept on facade for backward compat) ───────
+    # 鈹€鈹€ Utilities (kept on facade for backward compat) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     def extract_semantic_target(self, user_text: str) -> str:
         return self._skill_gate.extract_semantic_target(user_text)
@@ -364,7 +363,7 @@ class BrainPipeline:
     def _prepare_agent_result(self, result: str) -> tuple[str, str]:
         return self._skill_gate._prepare_agent_result(result)
 
-    # ── Backward compat properties (delegate private attr access to sub-components) ───
+    # 鈹€鈹€ Backward compat properties (delegate private attr access to sub-components) 鈹€鈹€鈹€
 
     @property
     def _episodic(self):

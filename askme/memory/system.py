@@ -1,4 +1,4 @@
-"""Unified facade over L1-L4 memory layers.
+﻿"""Unified facade over L1-L4 memory layers.
 
 Single injection point for BrainPipeline. Eliminates scattered guard blocks
 like ``if self._episodic: self._episodic.log(...)`` throughout the pipeline.
@@ -32,8 +32,8 @@ from askme.memory.trend_analyzer import TrendAnalyzer
 
 if TYPE_CHECKING:
     from askme.llm.client import LLMClient
-    from askme.llm.conversation import ConversationManager
     from askme.memory.bridge import MemoryBridge
+    from askme.memory.conversation import ConversationManager
     from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.procedural import ProceduralMemory
     from askme.memory.session import SessionMemory
@@ -68,7 +68,7 @@ class MemorySystem:
         self._site = site_knowledge
         self._procedural = procedural
 
-        # Resolve config once — injectable for tests, fall back to global get_config()
+        # Resolve config once. It is injectable for tests, with a global fallback.
         if config is None:
             try:
                 from askme.config import get_config
@@ -137,7 +137,7 @@ class MemorySystem:
         if self._policies:
             policy_ctx = self._policies.get_policy_prompt()
             if policy_ctx:
-                parts.append(f"行为规则:\n{policy_ctx}")
+                parts.append(f"琛屼负瑙勫垯:\n{policy_ctx}")
         return "\n".join(parts)
 
     def start_prefetch(self, user_text: str) -> asyncio.Task[str] | None:

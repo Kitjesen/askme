@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from askme.pipeline.hooks import _PROCEED, PipelineHooks, ToolCallRecord
 
 if TYPE_CHECKING:
-    from askme.llm.conversation import ConversationManager
+    from askme.memory.conversation import ConversationManager
     from askme.memory.episodic_memory import EpisodicMemory
     from askme.pipeline.prompt_builder import PromptBuilder
     from askme.tools.tool_registry import ToolRegistry
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class _StreamAndSpeakFn(Protocol):
-    """stream_and_speak callback — keyword args must be passed by keyword."""
+    """stream_and_speak callback; keyword args must be passed by keyword."""
 
     async def __call__(
         self,
@@ -70,11 +70,11 @@ class ToolExecutor:
         """Execute accumulated tool calls and get follow-up LLM response.
 
         For each tool call:
-          1. Fire ``pre_tool`` hooks — any hook can short-circuit by returning a
+          1. Fire ``pre_tool`` hooks; any hook can short-circuit by returning a
              string result, skipping the actual tool execution (like Claude Code's
              PreToolUse hook blocking a dangerous command).
           2. Execute the tool (with timeout).
-          3. Fire ``post_tool`` hooks — hooks may transform the result before it
+          3. Fire ``post_tool`` hooks; hooks may transform the result before it
              enters the conversation (like Claude Code's PostToolUse hook).
           4. Produce an immutable ``ToolCallRecord`` for hook context.
         """
@@ -95,7 +95,7 @@ class ToolExecutor:
 
             timed_out = False
 
-            # ── pre_tool hook (Claude Code: PreToolUse) ────────────────────
+            # pre_tool hook (Claude Code: PreToolUse).
             hook_override: str | None = None
             if self._hooks and self._hooks.pre_tool:
                 probe = ToolCallRecord(
@@ -140,7 +140,7 @@ class ToolExecutor:
             if self._episodic:
                 self._episodic.log("outcome", f"工具结果 {tool_name}: {str(result)[:100]}")
 
-            # ── post_tool hook (Claude Code: PostToolUse) ──────────────────
+            # post_tool hook (Claude Code: PostToolUse).
             if self._hooks and self._hooks.post_tool:
                 record = ToolCallRecord(
                     call_id=call_id, tool_name=tool_name,
@@ -160,7 +160,7 @@ class ToolExecutor:
                 break
 
         if approval_response is not None:
-            # Do NOT record to history when approval is pending —
+            # Do NOT record to history when approval is pending;
             # the tool will be re-executed after operator confirmation.
             return approval_response
 

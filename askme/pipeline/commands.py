@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from askme.llm.conversation import ConversationManager
+    from askme.memory.conversation import ConversationManager
     from askme.skills.skill_manager import SkillManager
 
 logger = logging.getLogger(__name__)

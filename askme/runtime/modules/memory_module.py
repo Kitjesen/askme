@@ -1,4 +1,4 @@
-"""MemoryModule — wraps the four-layer memory stack as a declarative module.
+﻿"""MemoryModule 鈥?wraps the four-layer memory stack as a declarative module.
 
 Canonical wiring::
 
@@ -22,9 +22,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from askme.llm.client import LLMClient
-from askme.llm.conversation import ConversationManager
 from askme.memory.bridge import MemoryBridge
 from askme.memory.catalog import KnowledgeCatalog
+from askme.memory.conversation import ConversationManager
 from askme.memory.episodic_memory import EpisodicMemory
 from askme.memory.index_jobs import KnowledgeIndexJobStore
 from askme.memory.session import SessionMemory

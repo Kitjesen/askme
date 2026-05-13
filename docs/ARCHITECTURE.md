@@ -1,6 +1,6 @@
 # askme Architecture
 
-更新时间：2026-05-10
+更新时间：2026-05-13
 
 本文是 askme 当前唯一的架构入口。
 
@@ -35,6 +35,54 @@ askme 使用 declarative runtime module 组合。主要模块：
 | `RuntimeHandoffModule` | TaskHandoff、TaskRun、runtime profile、pause/resume/cancel/advance |
 | `HealthModule` | Dashboard、HTTP API、health snapshot、readiness evidence |
 | `SkillModule` | 工具/技能注册、SkillGate、安全边界 |
+
+## Agent 与 Skill 增长机制
+
+askme 借鉴 Claude Code 的可配置 agent 思路，但面向机器人现场产品做了更强的安全边界：
+
+- Agent Profile 是可审计的角色配置，不是自由人格。内置角色包括现场任务总控、知识运营、园区问路、安全复核和在线技能增长。
+- Profile 可从 `~/.askme/agents/*.md`、项目 `.askme/agents/*.md`、项目 `agents/*.md`、managed `.askme/managed/agents/*.md` 加载；项目覆盖用户，managed 覆盖项目。
+- Profile frontmatter 支持 `tools`、`disallowedTools`、`spawnableProfiles`、`skills`、`mcpServers`、`hooks`、`memory`、`model`、`permissionMode`、`maxTurns`、`timeoutSeconds`、`effort`、`isolation`、`color`、`disabled`、`risk_level`。
+- `skills` 表示启动时预加载的领域能力说明；工具 allow/deny 决定 agent 真实可用工具。
+- `maxTurns`、`timeoutSeconds`、`model` 已进入 AgentShell 运行策略；子 agent 只能由父 profile 显式 allowlist 派生。
+- `hooks` 当前支持声明式 `PreToolUse` / `PostToolUse` 规则，可按工具名和参数/结果内容阻断调用；不会执行 profile 中的任意 shell/HTTP hook。
+- `mcpServers` 当前进入 profile catalog 和系统提示，用于产品审计与下一步 MCP scope 接入；真实安全边界仍由服务端 RBAC、SkillGate、SafetyPreflight 兜底。
+- LLM 生成的新能力写入 `data/skills/<skill>/SKILL.md`，先进入 governance store。
+- Skill Growth Backlog 从 `SkillAuditLog` 派生增长候选，聚合失败、阻断、未命中请求；候选只进入产品判断，不会自动创建或启用技能。
+- `/api/skill-growth/backlog/{candidate_id}/draft` 可把候选转换为 generated skill 草稿，接口受 `skill:review` 保护，生成后仍保持待审批和禁用状态。
+- 生成技能通过 validation 后，由具备 `skill:review` 权限的 operator 审批。
+- 审批后还要进入客户/园区 `Skill Package`；未分配到启用包的技能不会注册语音触发。
+- `Skill Package` 是客户项目的能力发布单元，包含 `release_version`、`release_channel`、`rollout_percent` 和历史快照。
+- 能力包每次保存、分配技能、移除技能、灰度发布或回滚都会产生版本记录；`rollout_percent=0` 会暂停该包内技能生效。
+- `/api/skill-packages/{package_id}/release` 用于 pilot/prod 发布或灰度比例调整，`/api/skill-packages/{package_id}/rollback` 会从历史快照恢复并生成新的版本。
+- 所有生成、审批、包分配、调用结果写入 SkillAuditLog，供 Dashboard 和交付复盘查看。
+- `field_event_trigger` 是技能层进入现场事件系统的受控工具。摔倒、卡住、电机故障、夜间陌生人、违停、烟火、垃圾桶、问路准入和访客带路等 built-in 技能通过它调用 `FieldOperationsService.trigger_payload()`，由现场事件系统统一完成证据校验、通知、归档、runtime handoff 和审计；技能本身不直接绕过 safety 控制硬件。
+- `CapabilityCenter` 现在输出 `scenario_blueprints`，把 `FIELD_SCENARIOS` 的客户场景映射到 required skills、现场依赖、证据、通知、归档、审批和验收标准。Dashboard 可以直接显示“这个场景为什么 ready/partial/blocked”，而不是只展示散乱技能。
+- `space_lookup_place` 和 `space_recommend_route` 把 `ParkSpaceService` 接入技能执行层；`lookup_place` / `recommend_route` skills 只能返回点位确认、语音路线或 escort handoff payload，不直接控制底盘。
+
+## 身份与权限治理
+
+现场产品不能依赖浏览器本地变量来决定谁能审批、启停能力或控制任务。当前实现把 demo operator directory 收敛到服务端 `OperatorDirectory`：
+
+- `/api/governance/operator-directory` 返回操作员目录、角色说明、权限矩阵、SSO/IAM 配置状态和生产 readiness findings。
+- `/api/governance/current-operator` 按请求头或 query 解析当前操作员，返回已知身份、认证来源和可用权限。
+- `/api/governance/authorize` 用同一套 RBAC 判断单个权限，未知操作员不会继承默认 operator 权限。
+- Dashboard 只把服务端目录中的人员显示为可操作账号；未知本地 operator 会进入“未登记/无权限”状态。
+- 当前 `local_config` 只适合演示和试点。生产部署必须把同一接口背后的身份来源替换为企业 OIDC/IAM，并保持高风险动作的审计链路。
+- 企业模式采用“网关验签 + 受信身份头”模式：OIDC/IAM 网关负责校验 token，askme 只消费 `x-askme-iam-operator-id`、`x-askme-iam-roles`、`x-askme-iam-display-name` 等已验证 claims。
+- 当 `identity_provider` 是 `oidc/iam/sso` 时，HTTP body 里的 `operator_id` 不能覆盖受信身份头，避免前端或脚本冒充审批人。
+
+## 统一审计
+
+产品验收需要能回答“谁在什么时候做了什么、结果是什么、证据来自哪里”。当前新增 `AuditQueryService`，把分散的审计源标准化为统一 timeline：
+
+- Skill 审计：读取 `SkillAuditLog`，覆盖技能调用、生成、审批、能力包发布和回滚。
+- Field 审计：优先读取 `field-action-audit.jsonl` 的 append-only 记录；没有独立审计文件时回退到 field event archive 的 `action_audit`。
+- Runtime 审计：读取 runtime handoff audit JSONL，覆盖 operator action、runtime event 和 terminal snapshot。
+- `/api/audit/events` 支持按 source、operator、action、outcome 和关键词过滤，接口受 `audit:read` 权限保护。
+- `/api/audit/export` 生成统一审计证据包：JSONL records + manifest，manifest 包含 SHA-256 和可选 HMAC 签名；接口受 `audit:export` 权限保护。
+- `/api/audit/export/retry` 提供外部审计投递队列的状态查询和重试投递；审计包可选投递到企业 SIEM/WORM webhook，投递失败会写入 retry queue，避免导出证据丢失。
+- Dashboard 交付检查页展示最近统一审计记录，作为客户验收和事后追溯入口。
 
 ## 语音链路
 
@@ -183,3 +231,11 @@ WorldState 是 planner 和 safety 的事实来源。感知快照要带 `observed
 | `askme/runtime/arbiter_client.py` | external/lab contract-only client |
 | `askme/runtime/modules/health_module.py` | HTTP/Dashboard wiring 与 evidence report |
 | `askme/static/dashboard.html` | Voice Mission Center |
+
+## Agent Profile 管理入口
+
+- `POST /api/agent-profiles` 可写入项目级 `.askme/agents/<profile>.md`，用于新增或更新一个可审计的 Agent Profile。
+- `GET /api/agent-profiles/{profile_name}/preview` 返回解析后的权限策略和原始 Markdown，方便产品、交付和安全人员复核。
+- Agent Profile 的工具清单由服务端从真实 `ToolRegistry` 构建，前端提交的 `known_tools` 不会扩权；未知工具会被拒绝且不会写入 profile 文件。
+- `create_agent_profile` 工具允许受控增长代理提出新的 agent lane，但同样使用工具 allowlist 校验，只写项目配置和审计，不会自动授予硬件执行权限。
+- 该机制借鉴 Claude Code 的项目级 subagent 文件、工具白名单和独立角色配置；askme 额外保留 RBAC、SkillGate、SafetyPreflight、runtime arbiter 作为机器人安全边界。

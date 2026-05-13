@@ -1,4 +1,4 @@
-"""Text-mode main loop — terminal input → intent routing → brain pipeline."""
+﻿"""Text-mode main loop 鈥?terminal input 鈫?intent routing 鈫?brain pipeline."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from askme.pipeline.external_turns import record_external_turn
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from askme.llm.conversation import ConversationManager
-    from askme.llm.intent_router import IntentRouter
+    from askme.interaction.intent_router import IntentRouter
+    from askme.memory.conversation import ConversationManager
     from askme.pipeline.brain_pipeline import BrainPipeline
     from askme.pipeline.commands import CommandHandler
     from askme.pipeline.skill_dispatcher import SkillDispatcher
@@ -105,7 +105,7 @@ class TextLoop:
 
     async def run(self) -> None:
         """Block until the user types /quit or presses Ctrl+C."""
-        from askme.llm.intent_router import IntentType
+        from askme.interaction.intent_router import IntentType
 
         logger.info("Text mode. Commands: /clear /history /skills /quit")
         logger.info("Loaded %d previous messages.", len(self._conversation.history))
@@ -166,18 +166,18 @@ class TextLoop:
                     continue
 
                 if intent.type == IntentType.VOICE_TRIGGER:
-                    # Cancel memory prefetch — skill path never uses the result
+                    # Cancel memory prefetch 鈥?skill path never uses the result
                     if memory_task and not memory_task.done():
                         memory_task.cancel()
                     memory_task = None
-                    # Try runtime bridge first — edge service may route to arbiter
+                    # Try runtime bridge first 鈥?edge service may route to arbiter
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
                         if idle_task and not idle_task.done():
                             idle_task.cancel()
                         idle_task = self._pipeline.start_idle_reflection()
                         continue
-                    # Bridge not configured / failed — local skill dispatch
+                    # Bridge not configured / failed 鈥?local skill dispatch
                     if self._dispatcher:
                         _result = await self._proactive.run(
                             intent.skill_name or "", user_text, self._text_audio,
@@ -225,7 +225,7 @@ class TextLoop:
                 if intent.type == IntentType.GENERAL:
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
-                        # Cancel the memory prefetch we started earlier — the bridge
+                        # Cancel the memory prefetch we started earlier 鈥?the bridge
                         # handled the turn so the prefetched context is no longer needed.
                         if memory_task and not memory_task.done():
                             memory_task.cancel()
@@ -235,7 +235,7 @@ class TextLoop:
                         idle_task = self._pipeline.start_idle_reflection()
                         continue
 
-                # General → LLM (pass pre-fetched memory)
+                # General 鈫?LLM (pass pre-fetched memory)
                 if self._dispatcher:
                     reply = await self._dispatcher.handle_general(
                         user_text, source="text", memory_task=memory_task,
@@ -264,7 +264,7 @@ class TextLoop:
                         "Text loop degraded: %d consecutive errors, pausing 3s",
                         consecutive_errors,
                     )
-                    print("⚠️ 多次错误，系统暂时异常，请稍候...")  # noqa: T201
+                    print("鈿狅笍 澶氭閿欒锛岀郴缁熸殏鏃跺紓甯革紝璇风◢鍊?..")  # noqa: T201
                     await asyncio.sleep(3)
                     consecutive_errors = 0
             finally:
@@ -275,7 +275,7 @@ class TextLoop:
                     except (asyncio.CancelledError, Exception):
                         pass
 
-        # Session-end summarization — save L2 summary if enough conversation happened
+        # Session-end summarization 鈥?save L2 summary if enough conversation happened
         _sm = getattr(self._pipeline, "_session_memory", None)
         if _sm and len(self._conversation.history) > 4:
             try:
@@ -289,10 +289,10 @@ class TextLoop:
         """Execute a single turn through full intent routing + skill dispatch.
 
         Used by /api/chat so the HTTP endpoint gets the same routing as the
-        terminal text loop (IntentRouter → ProactiveOrchestrator → SkillDispatcher).
+        terminal text loop (IntentRouter 鈫?ProactiveOrchestrator 鈫?SkillDispatcher).
         Returns the response string (empty string for commands/estop).
         """
-        from askme.llm.intent_router import IntentType
+        from askme.interaction.intent_router import IntentType
 
         self._text_audio.spoken.clear()
         self.last_cognition_result = None

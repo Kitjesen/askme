@@ -1,4 +1,4 @@
-"""Voice-mode main loop — microphone → intent routing → brain pipeline."""
+"""Voice-mode main loop 鈥?microphone 鈫?intent routing 鈫?brain pipeline."""
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from askme.contracts.adapters import (
+    interaction_decision_to_action_decision,
+    perception_snapshot_to_input,
+)
 from askme.pipeline.external_turns import record_external_turn
 from askme.pipeline.trace import get_tracer
 from askme.voice.address_detector import AddressDetector
@@ -15,7 +19,7 @@ from askme.voice.interaction_gate import InteractionAction, InteractionDecision,
 from askme.voice.perception_context import InteractionPerceptionSnapshot
 
 if TYPE_CHECKING:
-    from askme.llm.intent_router import IntentRouter
+    from askme.interaction.intent_router import IntentRouter
     from askme.pipeline.brain_pipeline import BrainPipeline
     from askme.pipeline.skill_dispatcher import SkillDispatcher
     from askme.skills.skill_model import SkillDefinition
@@ -68,6 +72,8 @@ class VoiceLoop:
         self._interaction_perception_provider: Callable[[], Any] | None = None
         self._last_interaction_decision: dict[str, Any] | None = None
         self._last_interaction_perception: dict[str, Any] | None = None
+        self._last_input_contract: dict[str, Any] | None = None
+        self._last_action_contract: dict[str, Any] | None = None
 
     def set_address_detector(self, detector: AddressDetector) -> None:
         """Wire the address detector after construction."""
@@ -83,7 +89,7 @@ class VoiceLoop:
 
     async def run(self) -> None:
         """Block until Ctrl+C or too many consecutive errors."""
-        from askme.llm.intent_router import IntentType
+        from askme.interaction.intent_router import IntentType
 
         logger.info("Voice mode active. Say something! (Ctrl+C to quit)")
 
@@ -95,9 +101,9 @@ class VoiceLoop:
             _trace = None
             try:
                 # Tell the noise filter whether we're waiting for a
-                # confirmation so that words like "好的"/"不" pass through.
-                # Also detect when the last assistant message was a question
-                # (ended with ？or ?) — the user's short reply is likely an answer.
+                # confirmation so short replies can pass through.
+                # If the last assistant message was a question, the user's
+                # short reply is likely an answer.
                 _last = self._pipeline.last_spoken_text or ""
                 _ends_with_question = _last.rstrip().endswith(("？", "?"))
                 self._audio.awaiting_confirmation = (
@@ -115,7 +121,7 @@ class VoiceLoop:
                 _trace = _tracer.start_trace("voice_turn")
                 _trace.metadata["user_text"] = user_text[:60]
 
-                # ── Muted state gate ──────────────────────────────────────
+                # 鈹€鈹€ Muted state gate 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
                 # When muted, only the unmute_mic voice trigger and COMMAND
                 # (quit/exit) pass through. Everything else is silently discarded.
                 if self._audio.is_muted:
@@ -126,7 +132,7 @@ class VoiceLoop:
                     ):
                         self._audio.unmute()
                         self._audio.acknowledge()
-                        await self._audio.speak_and_wait("好的，重新开启。")
+                        await self._audio.speak_and_wait("好的，已重新开启。")
                     elif _muted_intent.type == IntentType.COMMAND:
                         pass  # fall through to COMMAND handler below
                     else:
@@ -145,12 +151,29 @@ class VoiceLoop:
                     addressed=addressed,
                 )
                 self._last_interaction_perception = _snapshot_to_dict(perception_snapshot)
+                input_contract = perception_snapshot_to_input(
+                    perception_snapshot,
+                    transcript=user_text,
+                    addressed=addressed,
+                )
+                action_contract = interaction_decision_to_action_decision(
+                    gate_decision,
+                    user_text=user_text,
+                    addressed=addressed,
+                    perception=perception_snapshot,
+                )
+                self._last_input_contract = input_contract.to_dict()
+                self._last_action_contract = action_contract.to_dict()
                 _trace.metadata["interaction_gate"] = {
                     "action": gate_decision.action.value,
                     "reason": gate_decision.reason,
                     "confidence": gate_decision.confidence,
                     "addressed": addressed,
                     "perception": self._last_interaction_perception,
+                }
+                _trace.metadata["product_contract"] = {
+                    "perception_input": self._last_input_contract,
+                    "action_decision": self._last_action_contract,
                 }
                 if gate_decision.action in (
                     InteractionAction.IGNORE,
@@ -168,7 +191,7 @@ class VoiceLoop:
                         await self._audio.speak_and_wait(gate_decision.reply)
                     continue
 
-                # Immediate audio feedback — user knows we heard them
+                # Immediate audio feedback 鈥?user knows we heard them
                 # Fires before LLM call to fill the latency gap
                 self._audio.acknowledge()
 
@@ -198,7 +221,7 @@ class VoiceLoop:
                     await self._audio.speak_and_wait("已紧急停止。")
                     continue
 
-                # ── Quick reply — zero LLM, instant response ─────────────────
+                # 鈹€鈹€ Quick reply 鈥?zero LLM, instant response 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
                 if intent.type == IntentType.QUICK_REPLY:
                     if memory_task and not memory_task.done():
                         memory_task.cancel()
@@ -212,7 +235,7 @@ class VoiceLoop:
                     idle_task = self._pipeline.start_idle_reflection()
                     continue
 
-                # ── Stop speaking — also cancels any active agent task ────────
+                # 鈹€鈹€ Stop speaking 鈥?also cancels any active agent task 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
                 if (
                     intent.type == IntentType.VOICE_TRIGGER
                     and intent.skill_name == "stop_speaking"
@@ -225,10 +248,10 @@ class VoiceLoop:
                         await self._audio.speak_and_wait("已取消任务。")
                     else:
                         self._audio.drain_buffers()
-                    # acknowledge already fired — no extra chime needed
+                    # acknowledge already fired 鈥?no extra chime needed
                     continue
 
-                # ── Repeat last response — zero LLM, replay TTS ──────────
+                # 鈹€鈹€ Repeat last response 鈥?zero LLM, replay TTS 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
                 if (
                     intent.type == IntentType.VOICE_TRIGGER
                     and intent.skill_name == "repeat_last"
@@ -244,7 +267,7 @@ class VoiceLoop:
                         await self._audio.speak_and_wait("暂时没有内容可以重复。")
                     continue
 
-                # ── Mute mic — zero latency, no LLM ──────────────────────
+                # 鈹€鈹€ Mute mic 鈥?zero latency, no LLM 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
                 if (
                     intent.type == IntentType.VOICE_TRIGGER
                     and intent.skill_name == "mute_mic"
@@ -257,7 +280,7 @@ class VoiceLoop:
                     await self._audio.speak_and_wait('好的，已关闭麦克风。说"开麦"来重新打开。')
                     continue
 
-                # ── Volume / speed — zero latency, no LLM ────────────────
+                # 鈹€鈹€ Volume / speed 鈥?zero latency, no LLM 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
                 _vol_speed_skill = intent.skill_name if intent.type == IntentType.VOICE_TRIGGER else None
                 if _vol_speed_skill in (
                     "volume_up", "volume_down", "volume_reset",
@@ -269,26 +292,26 @@ class VoiceLoop:
                     self._audio.drain_buffers()
                     if _vol_speed_skill == "volume_up":
                         v = self._audio.adjust_volume(+0.2)
-                        msg = f"好的，音量已调大，当前{int(v * 100)}%。"
+                        msg = f"好的，音量已调大，当前 {int(v * 100)}%。"
                     elif _vol_speed_skill == "volume_down":
                         v = self._audio.adjust_volume(-0.2)
-                        msg = f"好的，音量已调小，当前{int(v * 100)}%。"
+                        msg = f"好的，音量已调小，当前 {int(v * 100)}%。"
                     elif _vol_speed_skill == "volume_reset":
                         self._audio.set_volume(1.0)
                         msg = "好的，已恢复默认音量。"
                     elif _vol_speed_skill == "speed_up":
                         s = self._audio.adjust_speed(+0.3)
-                        msg = f"好的，语速已加快，当前{s:.1f}倍。"
+                        msg = f"好的，语速已加快，当前 {s:.1f} 倍。"
                     elif _vol_speed_skill == "speed_down":
                         s = self._audio.adjust_speed(-0.3)
-                        msg = f"好的，语速已降低，当前{s:.1f}倍。"
+                        msg = f"好的，语速已降低，当前 {s:.1f} 倍。"
                     else:  # speed_reset
                         self._audio.set_speed(1.0)
                         msg = "好的，已恢复默认语速。"
                     await self._audio.speak_and_wait(msg)
                     continue
 
-                # ── Agent-busy gate ───────────────────────────────────────────
+                # 鈹€鈹€ Agent-busy gate 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
                 # While a background agent_task is running, block new skill
                 # dispatches and LLM turns to prevent audio conflicts.
                 # ESTOP and stop_speaking are handled above and always pass through.
@@ -312,18 +335,18 @@ class VoiceLoop:
                         continue
 
                 if intent.type == IntentType.VOICE_TRIGGER:
-                    # Cancel memory prefetch — skill path never uses the result
+                    # Cancel memory prefetch 鈥?skill path never uses the result
                     if memory_task and not memory_task.done():
                         memory_task.cancel()
                     memory_task = None
-                    # Try runtime bridge first — edge service may route to arbiter
+                    # Try runtime bridge first 鈥?edge service may route to arbiter
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
                         if idle_task and not idle_task.done():
                             idle_task.cancel()
                         idle_task = self._pipeline.start_idle_reflection()
                         continue
-                    # Bridge not configured / failed — local skill dispatch
+                    # Bridge not configured / failed 鈥?local skill dispatch
                     if self._dispatcher:
                         result = await self._proactive.run(
                             intent.skill_name or "", user_text, self._audio,
@@ -336,7 +359,7 @@ class VoiceLoop:
                             )
                         elif result.interrupt_payload:
                             # User bailed out and issued a new intent in the same breath
-                            # e.g. "算了，去仓库B" → reroute immediately without re-listening
+                            # e.g. "绠椾簡锛屽幓浠撳簱B" 鈫?reroute immediately without re-listening
                             logger.info(
                                 "VoiceLoop: rerouting interrupt_payload: %r",
                                 result.interrupt_payload,
@@ -359,7 +382,7 @@ class VoiceLoop:
                                         source="voice",
                                     )
                             else:
-                                # Rerouted to a general intent — start fresh memory
+                                # Rerouted to a general intent 鈥?start fresh memory
                                 # prefetch for the new payload so LLM gets context.
                                 memory_task = self._pipeline.start_memory_prefetch(
                                     result.interrupt_payload
@@ -389,7 +412,7 @@ class VoiceLoop:
                 if intent.type == IntentType.GENERAL:
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
-                        # Cancel the memory prefetch we started earlier — the bridge
+                        # Cancel the memory prefetch we started earlier 鈥?the bridge
                         # handled the turn so the prefetched context is no longer needed.
                         if memory_task and not memory_task.done():
                             memory_task.cancel()
@@ -399,7 +422,7 @@ class VoiceLoop:
                         idle_task = self._pipeline.start_idle_reflection()
                         continue
 
-                # General → LLM (pass pre-fetched memory)
+                # General 鈫?LLM (pass pre-fetched memory)
                 with _tracer.span("llm_pipeline"):
                     if self._dispatcher:
                         await self._dispatcher.handle_general(
@@ -409,7 +432,7 @@ class VoiceLoop:
                         await self._pipeline.process(user_text, memory_task=memory_task)
                 memory_task = None  # pipeline took ownership
 
-                # Don't block on wait_speaking_done — echo gate in listen_loop
+                # Don't block on wait_speaking_done 鈥?echo gate in listen_loop
                 # suppresses speaker echo while allowing user barge-in.
 
                 # Restart idle reflection timer
@@ -422,8 +445,8 @@ class VoiceLoop:
             except Exception as exc:
                 kind = AudioRouter.classify_error(exc)
 
-                # ── XRUN: silent retry, no user notification ──────────────
-                # Buffer overrun after aplay finishes — expected on half-duplex
+                # 鈹€鈹€ XRUN: silent retry, no user notification 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+                # Buffer overrun after aplay finishes 鈥?expected on half-duplex
                 # ALSA hardware.  The AudioRouter ownership model prevents most
                 # XRUNs; the ones that slip through are recoverable silently.
                 if kind == AudioErrorKind.XRUN:
@@ -431,19 +454,19 @@ class VoiceLoop:
                     await asyncio.sleep(0.1)
                     continue
 
-                # ── DEVICE_BUSY: short backoff, silent retry ───────────────
+                # 鈹€鈹€ DEVICE_BUSY: short backoff, silent retry 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
                 if kind == AudioErrorKind.DEVICE_BUSY:
-                    logger.warning("Voice loop: audio device busy — retrying in 2s: %s", exc)
+                    logger.warning("Voice loop: audio device busy 鈥?retrying in 2s: %s", exc)
                     await asyncio.sleep(2.0)
                     continue
 
-                # ── TTS_FAIL: mic unaffected, retry quickly ───────────────
+                # 鈹€鈹€ TTS_FAIL: mic unaffected, retry quickly 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
                 if kind == AudioErrorKind.TTS_FAIL:
                     logger.error("Voice loop: TTS backend error: %s", exc)
                     await asyncio.sleep(0.5)
                     continue
 
-                # ── DEVICE_LOST: notify user once, long backoff ───────────
+                # 鈹€鈹€ DEVICE_LOST: notify user once, long backoff 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
                 if kind == AudioErrorKind.DEVICE_LOST:
                     logger.error("Voice loop: audio device lost: %s", exc)
                     consecutive_errors += 1
@@ -455,7 +478,7 @@ class VoiceLoop:
                     await asyncio.sleep(5.0)
                     continue
 
-                # ── UNKNOWN: standard consecutive-error escalation ────────
+                # 鈹€鈹€ UNKNOWN: standard consecutive-error escalation 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
                 consecutive_errors += 1
                 logger.error("Voice loop error [%s]: %s", kind.value, exc)
                 if consecutive_errors >= self.MAX_CONSECUTIVE_ERRORS:
@@ -484,7 +507,7 @@ class VoiceLoop:
                     except (asyncio.CancelledError, Exception):
                         pass
 
-        # Session-end summarization — save L2 summary if enough conversation happened
+        # Session-end summarization 鈥?save L2 summary if enough conversation happened
         _sm = getattr(self._pipeline, "_session_memory", None)
         _conv = getattr(self._pipeline, "_conversation", None)
         if _sm and _conv and len(_conv.history) > 4:
@@ -496,7 +519,7 @@ class VoiceLoop:
         logger.info("Bye!")
 
     def _slot_present(self, skill: SkillDefinition, user_text: str) -> bool:
-        """Proxy to slot_utils.slot_present — kept for backward compatibility with tests."""
+        """Proxy to slot_utils.slot_present 鈥?kept for backward compatibility with tests."""
         from askme.pipeline.proactive.slot_utils import slot_present
         return slot_present(skill, user_text, self._pipeline)
 
@@ -541,6 +564,8 @@ class VoiceLoop:
         return {
             "last_decision": dict(self._last_interaction_decision or {}),
             "last_perception": dict(self._last_interaction_perception or {}),
+            "last_input_contract": dict(self._last_input_contract or {}),
+            "last_action_contract": dict(self._last_action_contract or {}),
         }
 
     async def _maybe_handle_runtime_bridge(self, user_text: str) -> bool:
