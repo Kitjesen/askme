@@ -69,4 +69,15 @@ class ExecutorModule(Module):
         return self.shell
 
     def health(self) -> dict[str, Any]:
-        return {"status": "ok"}
+        shell = getattr(self, "shell", None)
+        profile = getattr(shell, "_profile", None)
+        return {
+            "status": "ok",
+            "agent_shell_enabled": shell is not None,
+            "agent_model": getattr(shell, "_model", ""),
+            "agent_profile": getattr(profile, "name", ""),
+            "agent_profile_display": getattr(profile, "display_name", ""),
+            "max_iterations": getattr(shell, "_iteration_limit", None),
+            "timeout_seconds": getattr(shell, "_default_timeout", None),
+            "workspace": str(getattr(shell, "_workspace", "")),
+        }

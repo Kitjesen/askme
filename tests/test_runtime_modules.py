@@ -623,6 +623,102 @@ class TestHealthModule:
         assert snapshot["voice_pipeline_status"]["input"]["last_peak"] == 123
         assert snapshot["voice_pipeline_status"]["input"]["gate_state"] == "noise"
 
+    def test_runtime_health_provider_exposes_model_routing_and_skill_callability(self):
+        from askme.runtime.modules.health_module import HealthModule
+
+        class SkillModule:
+            name = "skill"
+
+            def __init__(self):
+                self.skill_manager = MagicMock()
+                self.skill_manager.get_enabled.return_value = [
+                    MagicMock(name="skill_obj", name_attr=""),
+                ]
+                self.skill_manager.get_enabled.return_value[0].name = "get_time"
+                self.skill_manager.get_agent_shell_skills.return_value = {"agent_task"}
+
+            def health(self):
+                return {"status": "ok"}
+
+        class PipelineModule:
+            name = "pipeline"
+
+            def health(self):
+                return {"status": "ok"}
+
+        class ExecutorModule:
+            name = "executor"
+
+            def __init__(self):
+                self.shell = MagicMock()
+                self.shell._model = "MiniMax-M2.7-highspeed"
+                self.shell._default_timeout = 120.0
+                self.shell._iteration_limit = 5
+                self.shell._profile.name = "field_operator"
+
+            def health(self):
+                return {"status": "ok"}
+
+        class VoiceModule:
+            name = "voice"
+
+            def __init__(self):
+                self.audio = MagicMock()
+                self.audio.status_snapshot.return_value = {
+                    "mode": "voice",
+                    "enabled": True,
+                    "output_ready": True,
+                    "pipeline_ok": True,
+                    "tts_backend": "minimax",
+                    "asr": {
+                        "provider": "cloud+local",
+                        "cloud": {"model": "paraformer-realtime-v2"},
+                    },
+                    "tts": {
+                        "minimax": {
+                            "model": "speech-2.8-turbo",
+                            "active_profile": "visitor_friendly",
+                        },
+                    },
+                }
+
+            def health(self):
+                return {"status": "ok"}
+
+        registry = _make_registry()
+        registry.register(SkillModule())
+        registry.register(PipelineModule())
+        registry.register(ExecutorModule())
+        registry.register(VoiceModule())
+
+        cfg = {
+            "brain": {
+                "provider": "minimax",
+                "model": "MiniMax-M2.7-highspeed",
+                "voice_model": "MiniMax-M2.7-highspeed",
+            },
+            "voice": {
+                "cloud_asr": {"model": "paraformer-realtime-v2"},
+                "tts": {"backend": "minimax", "minimax_tts_model": "speech-2.8-turbo"},
+            },
+        }
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server) as server_cls:
+            HealthModule().build(cfg, registry)
+
+        provider = server_cls.call_args.kwargs["snapshot_provider"]
+        snapshot = provider()
+
+        assert snapshot["model_routing"]["dialogue"]["llm_model"] == "MiniMax-M2.7-highspeed"
+        assert snapshot["model_routing"]["dialogue"]["asr_model"] == "paraformer-realtime-v2"
+        assert snapshot["model_routing"]["dialogue"]["tts_model"] == "speech-2.8-turbo"
+        assert snapshot["model_routing"]["agent_shell"]["model"] == "MiniMax-M2.7-highspeed"
+        assert snapshot["skill_callability"]["callable"] is True
+        assert snapshot["skill_callability"]["agent_shell_callable"] is True
+        assert snapshot["skill_callability"]["agent_shell_skills"] == ["agent_task"]
+
     def test_runtime_health_provider_exposes_rag_trust_report(self, tmp_path):
         from askme.runtime.modules.health_module import HealthModule
 

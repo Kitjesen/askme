@@ -10,6 +10,7 @@ Usage::
 from askme.runtime.module import Runtime
 from askme.runtime.modules import (
     CognitionModule,
+    ExecutorModule,
     HealthModule,
     LLMModule,
     MemoryModule,
@@ -31,6 +32,7 @@ voice = (
     + Runtime.use(RuntimeHandoffModule)
     + Runtime.use(PipelineModule)
     + Runtime.use(SkillModule)
+    + Runtime.use(ExecutorModule)
     + Runtime.use(VoiceModule)
     + Runtime.use(TextModule)
     + Runtime.use(HealthModule)

@@ -67,6 +67,8 @@ class HealthModule(Module):
                 ota_status=self._ota_status(registry),
                 voice_bridge=self._voice_bridge_status(registry),
             )
+            snapshot["model_routing"] = self._model_routing(cfg, registry, snapshot)
+            snapshot["skill_callability"] = self._skill_callability(registry)
             snapshot["components"] = components
             snapshot.update(components)
             snapshot["rag_trust"] = self._rag_trust_report(cfg)
@@ -688,6 +690,90 @@ class HealthModule(Module):
         if model:
             return str(model)
         return str(cfg.get("brain", {}).get("model", "unknown"))
+
+    def _model_routing(
+        self,
+        cfg: dict[str, Any],
+        registry: ModuleRegistry,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return product-readable model routing for voice, reasoning, and AgentShell."""
+
+        brain_cfg = cfg.get("brain", {}) if isinstance(cfg.get("brain"), dict) else {}
+        voice_cfg = cfg.get("voice", {}) if isinstance(cfg.get("voice"), dict) else {}
+        tts_cfg = voice_cfg.get("tts", {}) if isinstance(voice_cfg.get("tts"), dict) else {}
+        cloud_asr_cfg = (
+            voice_cfg.get("cloud_asr", {})
+            if isinstance(voice_cfg.get("cloud_asr"), dict)
+            else {}
+        )
+
+        voice_status = snapshot.get("voice_pipeline_status", {})
+        asr_status = voice_status.get("asr", {}) if isinstance(voice_status, dict) else {}
+        cloud_asr_status = asr_status.get("cloud", {}) if isinstance(asr_status, dict) else {}
+        tts_status = voice_status.get("tts", {}) if isinstance(voice_status, dict) else {}
+        minimax_status = tts_status.get("minimax", {}) if isinstance(tts_status, dict) else {}
+
+        executor = registry.get("executor")
+        shell = getattr(executor, "shell", None) if executor else None
+        agent_profile = getattr(getattr(shell, "_profile", None), "name", "field_operator")
+
+        return {
+            "dialogue": {
+                "llm_provider": str(brain_cfg.get("provider") or "unknown"),
+                "llm_model": str(
+                    brain_cfg.get("voice_model")
+                    or brain_cfg.get("model")
+                    or snapshot.get("model_name")
+                    or "unknown"
+                ),
+                "asr_provider": str(asr_status.get("provider") or "unknown"),
+                "asr_model": str(
+                    cloud_asr_status.get("model")
+                    or cloud_asr_cfg.get("model")
+                    or "unknown"
+                ),
+                "tts_backend": str(voice_status.get("tts_backend") or tts_cfg.get("backend") or "unknown"),
+                "tts_model": str(
+                    minimax_status.get("model")
+                    or tts_cfg.get("minimax_tts_model")
+                    or "unknown"
+                ),
+                "voice_profile": str(minimax_status.get("active_profile") or tts_cfg.get("voice_profile") or ""),
+            },
+            "reasoning": {
+                "provider": str(brain_cfg.get("provider") or "unknown"),
+                "model": str(snapshot.get("model_name") or brain_cfg.get("model") or "unknown"),
+            },
+            "agent_shell": {
+                "enabled": shell is not None,
+                "model": str(getattr(shell, "_model", "") or brain_cfg.get("agent_model") or "unknown"),
+                "profile": str(agent_profile or ""),
+                "timeout_seconds": getattr(shell, "_default_timeout", brain_cfg.get("agent_timeout")),
+                "max_iterations": getattr(shell, "_iteration_limit", None),
+            },
+        }
+
+    def _skill_callability(self, registry: ModuleRegistry) -> dict[str, Any]:
+        skill_mod = registry.get("skill")
+        skill_manager = getattr(skill_mod, "skill_manager", None) if skill_mod else None
+        enabled = self._active_skill_names(registry)
+        get_agent_shell_skills = getattr(skill_manager, "get_agent_shell_skills", None)
+        agent_shell_skills: list[str] = []
+        if callable(get_agent_shell_skills):
+            try:
+                agent_shell_skills = sorted(str(name) for name in get_agent_shell_skills())
+            except Exception as exc:
+                logger.debug("HealthModule: agent shell skill snapshot failed: %s", exc)
+        pipeline_ready = registry.get("pipeline") is not None
+        executor_ready = registry.get("executor") is not None
+        return {
+            "callable": bool(enabled and pipeline_ready),
+            "active_skill_count": len(enabled),
+            "agent_shell_callable": bool(agent_shell_skills and executor_ready),
+            "agent_shell_skill_count": len(agent_shell_skills),
+            "agent_shell_skills": agent_shell_skills,
+        }
 
     def _mission_handler(self, registry: ModuleRegistry) -> Any | None:
         mission_mod = registry.get("mission")

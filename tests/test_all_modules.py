@@ -520,7 +520,9 @@ class TestCompositions:
         names = [mc.name for mc in voice._module_classes]
         assert "cognition" in names
         assert "runtime_handoff" in names
-        assert len(voice._module_classes) == 11
+        assert "executor" in names
+        assert names.index("executor") < names.index("voice")
+        assert len(voice._module_classes) == 12
 
     def test_voice_perception_extends_voice(self):
         """voice_perception = voice + 4 perception modules."""
@@ -528,7 +530,8 @@ class TestCompositions:
         names = [mc.name for mc in voice_perception._module_classes]
         assert "cognition" in names
         assert "runtime_handoff" in names
-        assert len(voice_perception._module_classes) == 15
+        assert "executor" in names
+        assert len(voice_perception._module_classes) == 16
 
     def test_text_runtime_has_no_voice(self):
         """text blueprint has no VoiceModule."""
@@ -540,7 +543,9 @@ class TestCompositions:
         assert "cognition" in names
         assert "runtime_handoff" in names
         assert "health" in names
-        assert len(text._module_classes) == 10
+        assert "executor" in names
+        assert names.index("executor") < names.index("text")
+        assert len(text._module_classes) == 11
 
     def test_edge_robot_adds_plugins(self):
         """edge_robot = voice_perception + 6 external plugins."""
@@ -579,7 +584,7 @@ class TestCompositions:
         names = [mc.name for mc in smaller._module_classes]
         assert "text" not in names
         assert "cognition" in names
-        assert len(smaller._module_classes) == 10
+        assert len(smaller._module_classes) == 11
 
 
 # ══════════════════════════════════════════════════════════════════════
