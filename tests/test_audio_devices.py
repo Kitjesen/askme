@@ -197,3 +197,28 @@ def test_audio_route_scan_reports_silent_microphone_diagnosis(monkeypatch):
     )
     assert payload["verified_config_hint"] == {}
     assert payload["best_route"]["failure_reason"] == "microphone_captured_silence"
+
+
+class _InvalidFloatSoundDevice(_FakeSoundDevice):
+    @classmethod
+    def playrec(cls, out, **kwargs):
+        cls.last_playrec = kwargs
+        channels = int(kwargs.get("channels") or 1)
+        captured = np.zeros((len(out), channels), dtype=np.float32)
+        captured[:, 0] = np.inf
+        return captured
+
+
+def test_audio_route_scan_handles_invalid_float_samples(monkeypatch):
+    monkeypatch.setattr(audio_devices, "sd", _InvalidFloatSoundDevice)
+
+    payload = audio_devices.run_audio_route_scan(
+        input_devices=[0],
+        output_devices=[1],
+        sample_rates=[48000],
+        record_seconds=0.4,
+        tone_seconds=0.2,
+    )
+
+    assert payload["status"] == "degraded"
+    assert payload["best_route"]["failure_reason"] == "microphone_captured_silence"

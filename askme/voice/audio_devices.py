@@ -170,6 +170,12 @@ def _device_max_input_channels(device: int | str | None, *, fallback: int = 1) -
         return fallback
 
 
+def _safe_float_audio(samples: np.ndarray) -> np.ndarray:
+    values = np.asarray(samples, dtype=np.float32)
+    values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+    return np.clip(values, -1.0, 1.0).astype(np.float32, copy=False)
+
+
 def _channel_metrics(
     captured: np.ndarray,
     *,
@@ -188,7 +194,7 @@ def _channel_metrics(
         channels = captured
     rows: list[dict[str, Any]] = []
     for channel_index in range(channels.shape[1]):
-        samples = channels[:, channel_index].astype(np.float32, copy=False)
+        samples = _safe_float_audio(channels[:, channel_index])
         peak = int(float(np.max(np.abs(samples))) * 32768) if len(samples) else 0
         rms = int(float(np.sqrt(np.mean(samples * samples))) * 32768) if len(samples) else 0
         segment = samples[start_frame:end_frame] if len(samples) >= end_frame else samples
@@ -325,9 +331,9 @@ def run_audio_loopback(
     )
     channel_index = _best_channel(channels)
     if captured.ndim == 2 and captured.shape[1] > channel_index:
-        mono = captured[:, channel_index].astype(np.float32, copy=False)
+        mono = _safe_float_audio(captured[:, channel_index])
     else:
-        mono = captured.reshape(-1).astype(np.float32, copy=False)
+        mono = _safe_float_audio(captured.reshape(-1))
     peak = int(float(np.max(np.abs(mono))) * 32768) if len(mono) else 0
     rms = int(float(np.sqrt(np.mean(mono * mono))) * 32768) if len(mono) else 0
 
