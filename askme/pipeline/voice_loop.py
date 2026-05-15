@@ -11,6 +11,7 @@ from askme.contracts.adapters import (
     interaction_decision_to_action_decision,
     perception_snapshot_to_input,
 )
+from askme.interaction import attach_intent_route_trace
 from askme.pipeline.external_turns import record_external_turn
 from askme.pipeline.trace import get_tracer
 from askme.voice.address_detector import AddressDetector
@@ -126,6 +127,12 @@ class VoiceLoop:
                 # (quit/exit) pass through. Everything else is silently discarded.
                 if self._audio.is_muted:
                     _muted_intent = self._router.route(user_text)
+                    attach_intent_route_trace(
+                        _trace,
+                        _muted_intent,
+                        source="voice",
+                        stage="muted_gate_route",
+                    )
                     if (
                         _muted_intent.type == IntentType.VOICE_TRIGGER
                         and _muted_intent.skill_name == "unmute_mic"
@@ -209,8 +216,11 @@ class VoiceLoop:
                 # Start memory prefetch ASAP (overlaps with routing)
                 memory_task = self._pipeline.start_memory_prefetch(user_text)
 
-                with _tracer.span("intent_route"):
+                with _tracer.span("intent_route") as _route_span:
                     intent = self._router.route(user_text)
+                    _route_span.metadata.update(
+                        attach_intent_route_trace(_trace, intent, source="voice")
+                    )
 
                 if intent.type == IntentType.ESTOP:
                     # Cancel any background agent task before hard stop
@@ -226,7 +236,7 @@ class VoiceLoop:
                     if memory_task and not memory_task.done():
                         memory_task.cancel()
                         memory_task = None
-                    _quick_text = intent.skill_name or "好的。"
+                    _quick_text = intent.reply_text or intent.skill_name or "好的。"
                     self._audio.drain_buffers()
                     await self._audio.speak_and_wait(_quick_text)
                     self._pipeline._turn_executor._last_spoken_text = _quick_text
@@ -365,6 +375,12 @@ class VoiceLoop:
                                 result.interrupt_payload,
                             )
                             _reroute_intent = self._router.route(result.interrupt_payload)
+                            attach_intent_route_trace(
+                                _trace,
+                                _reroute_intent,
+                                source="voice",
+                                stage="interrupt_reroute",
+                            )
                             if (
                                 _reroute_intent.type == IntentType.VOICE_TRIGGER
                                 and _reroute_intent.skill_name

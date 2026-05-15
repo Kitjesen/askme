@@ -1,0 +1,120 @@
+template:
+  template_id: park-visitor-service
+  version: 0.1.0
+  publish_status: pilot
+  release_channel: pilot
+  owner: askme-product
+  upgrade_policy: manual_review
+  min_runtime_version: 4.0.0
+  display_name: Park visitor service starter
+  industry: creative_park
+  customer_claim: Starter profile for visitor wayfinding, illegal parking, trash, and perimeter inspection.
+
+customer:
+  customer_id: template-customer
+  customer_name: Template Customer
+  industry: creative_park
+  project_id: park-visitor-service-project
+  project_name: Park Visitor Service Project
+  delivery_model: solution_project
+
+site:
+  site_id: template-park-site
+  name: Template Park Site
+  map_version: template-v1
+
+responder_groups:
+  security:
+    name: Security Team
+    webhook_env: ASKME_DINGTALK_SECURITY_WEBHOOK
+    secret_env: ASKME_DINGTALK_SECURITY_SECRET
+  cleaning:
+    name: Cleaning Team
+    webhook_env: ASKME_DINGTALK_CLEANING_WEBHOOK
+    secret_env: ASKME_DINGTALK_CLEANING_SECRET
+  operations:
+    name: Operations Team
+    webhook_env: ASKME_DINGTALK_OPERATIONS_WEBHOOK
+    secret_env: ASKME_DINGTALK_OPERATIONS_SECRET
+
+zones:
+  main-road:
+    name: Main road
+    location: Main road
+    type: main_channel
+    parking_allowed: false
+  visitor-parking:
+    name: Visitor parking
+    location: Visitor parking
+    type: parking_area
+    parking_allowed: true
+  guide-point:
+    name: Visitor guide point
+    location: Main entrance
+    type: help_point
+    help_point_id: guide-point
+  trash-station:
+    name: Trash station
+    location: Service corridor
+    type: trash_bin_station
+
+devices:
+  camera-main-road:
+    name: Main road camera
+    source: camera
+    camera_id: cam-main-road
+    zone_id: main-road
+    secret_env: ASKME_FIELD_CAMERA_MAIN_ROAD_SECRET
+  smoke-service:
+    name: Service sensor
+    source: sensor
+    sensor_type: smoke_temperature
+    zone_id: trash-station
+    secret_env: ASKME_FIELD_SMOKE_WAREHOUSE_SECRET
+  robot-park:
+    name: Park robot
+    source: robot
+    robot_id: thunder-park
+    zone_id: main-road
+    secret_env: ASKME_FIELD_ROBOT_THUNDER_SECRET
+
+thresholds:
+  parking_duration_s: 120
+  night_stranger_dwell_s: 10
+  fire_temperature_c: 60
+  smoke_level: 0.7
+  trash_fill_ratio: 0.8
+  crowd_person_count: 5
+  crowd_duration_min: 30
+
+managed_objects:
+  visitors:
+    display_name: Visitors and guide points
+    category: visitor_service
+    object_labels: [visitor, destination, help_point]
+    scenario_ids: [wayfinding_help_point, visitor_escort]
+    zone_types: [help_point]
+    device_sources: [camera, robot]
+    responder_group: operations
+    evidence_required: [service_point, intent, route_result]
+    bindings:
+      vision_models: [person-dwell-detection]
+      sensor_protocols: [voice-turn-json, robot-route-status-json]
+      skill_packages: [capability.answer_wayfinding, capability.escort_visitor]
+      acceptance_tests: [tests/test_space_cognition.py::visitor_escort]
+    customer_visible: true
+  vehicles:
+    display_name: Illegal parking objects
+    category: traffic
+    object_labels: [vehicle, car]
+    scenario_ids: [illegal_parking]
+    zone_types: [main_channel, parking_area]
+    device_sources: [camera]
+    responder_group: security
+    evidence_required: [photo, zone, dwell_duration]
+    bindings:
+      vision_models: [vehicle-detection]
+      sensor_protocols: [camera-detection-json]
+      skill_packages: [capability.detect_illegal_parking]
+      acceptance_tests: [tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking]
+    customer_visible: true

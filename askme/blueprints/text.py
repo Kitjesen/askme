@@ -1,9 +1,9 @@
-"""Text — 纯文本交互.
+"""Text Operations Console blueprint.
 
-核心能力，无语音硬件。SSH/开发用。5 个模块。
+Use this for development, knowledge management, and task dry runs where no
+microphone, speaker, or robot-side IO is required.
 
-Usage::
-
+Run:
     python -m askme.blueprints.text
 """
 
@@ -41,4 +41,4 @@ __all__ = ["text"]
 if __name__ == "__main__":
     from askme.blueprints._runner import run_blueprint
 
-    run_blueprint(text, "Text")
+    run_blueprint(text, "Text Operations Console")

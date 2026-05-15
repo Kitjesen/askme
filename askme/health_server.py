@@ -8,7 +8,6 @@ import ipaddress
 import json
 import logging
 import math
-import mimetypes
 import os
 import re
 import secrets
@@ -21,18 +20,25 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 
+from askme.api.routes.audit import register_audit_routes
+from askme.api.routes.capabilities import register_capability_routes
 from askme.api.routes.cognition import register_cognition_routes
+from askme.api.routes.conversation import register_conversation_routes
+from askme.api.routes.dashboard import register_dashboard_routes
+from askme.api.routes.field import register_field_routes
 from askme.api.routes.governance import register_governance_routes
 from askme.api.routes.memory import register_memory_routes
+from askme.api.routes.monitor import register_monitor_routes
 from askme.api.routes.runtime import register_runtime_routes
 from askme.api.routes.space import register_space_routes
 from askme.api.routes.system import register_system_routes
 from askme.api.routes.voice import register_voice_routes
-from askme.config import get_config
+from askme.api.services.conversation_service import ConversationService
+from askme.api.services.monitor_service import MonitorService
+from askme.config import get_config, project_root
 from askme.governance import OperatorDirectory
-from askme.pipeline.rag_policy import forced_rag_reply
 from askme.robot.runtime_health import RuntimeHealthSnapshot, merge_voice_pipeline_status
 from askme.runtime.field_callbacks import (
     derive_field_runtime_callback_id,
@@ -614,6 +620,30 @@ def create_health_app(
         or os.getenv("ASKME_FIELD_RUNTIME_CALLBACK_HMAC_SECRET")
     )
     resolved_runtime_callback_max_age_s = max(1.0, float(field_runtime_callback_max_age_s))
+    app_config = get_config()
+    conversation_cfg = app_config.get("conversation", {}) if isinstance(app_config, dict) else {}
+    if not isinstance(conversation_cfg, dict):
+        conversation_cfg = {}
+    chat_timeout_s = _optional_positive_float_config(
+        conversation_cfg.get("chat_timeout_s", 30.0),
+        default=30.0,
+    )
+    chat_max_concurrency = _positive_int_config(
+        conversation_cfg.get("chat_max_concurrency", 8),
+        default=8,
+    )
+    chat_slow_threshold_ms = _optional_positive_float_config(
+        conversation_cfg.get("chat_slow_threshold_ms", 2000.0),
+        default=2000.0,
+    )
+    chat_diagnostics_history_limit = _positive_int_config(
+        conversation_cfg.get("chat_diagnostics_history_limit", 20),
+        default=20,
+    )
+    runtime_voice_turn_timeout_s = _optional_positive_float_config(
+        conversation_cfg.get("runtime_voice_turn_timeout_s", 30.0),
+        default=30.0,
+    )
     if field_operations_handler is None:
         from askme.pipeline.field_operations import FieldOperationsService
 
@@ -621,7 +651,7 @@ def create_health_app(
     if space_handler is None:
         from askme.space import ParkSpaceService
 
-        space_handler = ParkSpaceService.from_config(get_config())
+        space_handler = ParkSpaceService.from_config(app_config)
 
     app = FastAPI(
         title="askme-health",
@@ -635,7 +665,7 @@ def create_health_app(
         "Content-Type, Authorization, X-Askme-Api-Key, "
         "X-Askme-Operator-Id, X-Operator-Id"
     )
-    _operator_directory = OperatorDirectory(get_config())
+    _operator_directory = OperatorDirectory(app_config)
 
     def _json_error(message: str, *, status_code: int) -> JSONResponse:
         return JSONResponse({"error": message}, status_code=status_code, headers=_CORS_HEADERS)
@@ -652,6 +682,11 @@ def create_health_app(
                 "Access-Control-Allow-Headers": _CORS_ALLOW_HEADERS,
             },
         )
+
+    def _blueprint_catalog_payload() -> dict[str, Any]:
+        from askme.blueprints import catalog_payload
+
+        return catalog_payload(config=app_config)
 
     def _request_has_control_auth(request: Request) -> bool:
         if not resolved_control_api_key:
@@ -743,7 +778,16 @@ def create_health_app(
         raw = await request.body()
         if not raw:
             return {}
-        body = await request.json()
+        body: Any = None
+        last_error: Exception | None = None
+        for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "gb18030"):
+            try:
+                body = json.loads(raw.decode(encoding))
+                break
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                last_error = exc
+        else:
+            raise ValueError(f"JSON object body could not be decoded: {last_error}")
         if not isinstance(body, dict):
             raise ValueError("JSON object body required")
         return body
@@ -799,6 +843,9 @@ def create_health_app(
 
     def _operator_directory_payload() -> dict[str, Any]:
         return _operator_directory.payload()
+
+    def _identity_readiness_payload() -> dict[str, Any]:
+        return _operator_directory.identity_gateway_readiness()
 
     def _current_operator_payload(operator_id: str | None, headers: Any = None) -> dict[str, Any]:
         return _operator_directory.current_operator_payload(operator_id, headers=headers)
@@ -1054,121 +1101,34 @@ def create_health_app(
         result["runtime_delivery"] = delivery
         return await _record_field_runtime_delivery(result, delivery)
 
-    def _handler_accepts_speak(handler: ChatHandler) -> bool:
-        try:
-            params = signature(handler).parameters
-        except (TypeError, ValueError):
-            return True
-        return (
-            "speak" in params
-            or any(param.kind == Parameter.VAR_KEYWORD for param in params.values())
-        )
+    conversation_service = ConversationService(
+        chat_handler=chat_handler,
+        memory_handler=memory_handler,
+        logger=logger,
+        chat_timeout_s=chat_timeout_s,
+        chat_max_concurrency=chat_max_concurrency,
+        chat_slow_threshold_ms=chat_slow_threshold_ms,
+        chat_diagnostics_history_limit=chat_diagnostics_history_limit,
+    )
+    monitor_service = MonitorService(
+        config_provider=get_config,
+        project_root=project_root(),
+        conversation_provider=conversation_provider,
+        logger=logger,
+    )
 
-    async def _dispatch_chat_handler(text: str, *, speak: bool) -> Any:
-        if chat_handler is None:
-            raise RuntimeError("chat not available")
-        if _handler_accepts_speak(chat_handler):
-            return await _maybe_await(chat_handler(text, speak=speak))
-        return await _maybe_await(chat_handler(text))
-
-    def _voice_turn_payload_from_body(
-        body: dict[str, Any],
-        *,
-        text: str,
-        channel: str = "voice",
-    ) -> dict[str, Any] | None:
-        is_voice = bool(
-            body.get("voice")
-            or body.get("transcript_id")
-            or body.get("asr_confidence") is not None
-        )
-        if not is_voice:
-            return None
-        payload: dict[str, Any] = {
-            "transcript_id": str(body.get("transcript_id") or f"voice-turn-{secrets.token_hex(6)}"),
-            "recognized_text": text,
-            "is_final": bool(body.get("is_final", True)),
-            "channel": str(body.get("channel") or channel or "voice"),
-            "safety_bypass_allowed": False,
-            "created_at": time.time(),
-        }
-        confidence = body.get("asr_confidence", body.get("confidence"))
-        if confidence is not None:
-            try:
-                payload["confidence"] = min(max(float(confidence), 0.0), 1.0)
-            except (TypeError, ValueError):
-                payload["confidence"] = 0.0
-        return payload
-
-    def _chat_response_payload(
-        result: Any,
-        *,
-        text: str,
-        speak: bool,
-        voice_turn: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        if isinstance(result, dict):
-            payload = dict(result)
-            payload.setdefault("text", text)
-            payload.setdefault("reply", "")
-        else:
-            payload = {"reply": result, "text": text}
-        payload.setdefault("evidence", [])
-        if speak:
-            payload.setdefault("spoken", False)
-        if voice_turn is not None:
-            payload.setdefault("voice_turn", voice_turn)
-        return payload
-
-    async def _attach_memory_chat_context(payload: dict[str, Any]) -> dict[str, Any]:
-        """Attach latest RAG evidence/policy when chat handler returned plain text."""
-        if memory_handler is None:
-            return payload
-        health_method = getattr(memory_handler, "health", None)
-        if not callable(health_method):
-            return payload
-        try:
-            health = await _maybe_await(health_method())
-        except Exception as exc:
-            logger.debug("memory health unavailable for chat evidence: %s", exc)
-            return payload
-        if not isinstance(health, dict):
-            return payload
-
-        evidence = health.get("last_evidence")
-        dropped = health.get("last_dropped_evidence")
-        answer_policy = health.get("last_answer_policy")
-
-        if not payload.get("evidence") and isinstance(evidence, list):
-            payload["evidence"] = evidence
-
-        rag_payload = payload.get("rag")
-        if not isinstance(rag_payload, dict):
-            rag_payload = {}
-            payload["rag"] = rag_payload
-        rag_payload.setdefault("enabled", health.get("enabled", False))
-        rag_payload.setdefault("backend", health.get("backend", ""))
-        rag_payload.setdefault("available", health.get("available", False))
-        rag_payload.setdefault("last_backend", health.get("last_backend", ""))
-        rag_payload.setdefault("last_retrieve_ms", health.get("last_retrieve_ms"))
-        rag_payload.setdefault("last_retrieved_items", health.get("last_retrieved_items", 0))
-        if isinstance(dropped, list):
-            rag_payload.setdefault("dropped_evidence", dropped)
-        if isinstance(answer_policy, dict):
-            rag_payload.setdefault("answer_policy", answer_policy)
-            forced_reply = forced_rag_reply(answer_policy)
-            if forced_reply and not payload.get("evidence"):
-                payload["reply"] = forced_reply
-                payload["rag_blocked"] = True
-                rag_payload["answer_blocked"] = True
-                rag_payload["forced_reply"] = True
-                rag_payload["block_reason"] = answer_policy.get("reason", "")
+    def _metrics_provider_with_conversation() -> dict[str, Any]:
+        snapshot = resolved_metrics_provider()
+        if not isinstance(snapshot, dict):
+            return snapshot
+        payload = dict(snapshot)
+        payload["conversation_runtime"] = conversation_service.metrics_snapshot()["chat"]
         return payload
 
     register_system_routes(
         app,
         health_provider=resolved_health_provider,
-        metrics_provider=resolved_metrics_provider,
+        metrics_provider=_metrics_provider_with_conversation,
         render_prometheus_metrics=render_prometheus_metrics,
         json_snapshot_response=_json_snapshot_response,
         snapshot_payload=_snapshot_payload,
@@ -1177,6 +1137,7 @@ def create_health_app(
     register_governance_routes(
         app,
         governance_payload=_operator_directory_payload,
+        identity_readiness_payload=_identity_readiness_payload,
         current_operator_payload=_current_operator_payload,
         authorization_payload=_operator_authorization_payload,
         mission_json=_mission_json,
@@ -1224,752 +1185,63 @@ def create_health_app(
         logger=logger,
         authorize=_require_permission,
     )
+    register_field_routes(
+        app,
+        dispatch_field_operations=_dispatch_field_operations,
+        mission_json=_mission_json,
+        optional_json_body=_optional_json_body,
+        cors_options_response=_cors_options_response,
+        logger=logger,
+        authorize=_require_permission,
+        field_manual_trigger_body=_field_manual_trigger_body,
+        looks_like_device_ingest_without_scenario=_looks_like_device_ingest_without_scenario,
+        dispatch_field_voice_directive=_dispatch_field_voice_directive,
+        dispatch_field_runtime_policy=_dispatch_field_runtime_policy,
+        runtime_callback_trust=_field_runtime_callback_trust,
+        runtime_callback_delivery_body=_field_runtime_callback_delivery_body,
+        runtime_callback_secret=resolved_runtime_callback_secret,
+        runtime_callback_max_age_s=resolved_runtime_callback_max_age_s,
+        cors_headers=_CORS_HEADERS,
+        identity_readiness_payload=_identity_readiness_payload,
+        site_profile_root=Path("deploy/site-profiles"),
+        config_provider=get_config,
+    )
+    register_dashboard_routes(
+        app,
+        dashboard_html=_DASHBOARD_HTML,
+        dashboard_asset_dir=_DASHBOARD_ASSET_DIR,
+        dashboard_pages=_DASHBOARD_PAGES,
+        json_error=_json_error,
+    )
+    register_capability_routes(
+        app,
+        capabilities_provider=capabilities_provider,
+        blueprints_provider=_blueprint_catalog_payload,
+        logger=logger,
+    )
+    register_audit_routes(
+        app,
+        config_provider=get_config,
+        optional_json_body=_optional_json_body,
+        authorize=_require_permission,
+        operator_id_from_request=_operator_id_from_request,
+        logger=logger,
+    )
+    register_conversation_routes(
+        app,
+        conversation_service=conversation_service,
+        runtime_available=runtime_handler is not None,
+        dispatch_runtime=_dispatch_runtime,
+        cors_options_response=_cors_options_response,
+        logger=logger,
+        runtime_voice_turn_timeout_s=runtime_voice_turn_timeout_s,
+    )
+    register_monitor_routes(
+        app,
+        monitor_service=monitor_service,
+        logger=logger,
+    )
 
-    @app.post("/api/chat", tags=["Monitor"])
-    async def chat(request: Request) -> JSONResponse:
-        """Send text to the brain pipeline and return the response."""
-        if chat_handler is None:
-            return JSONResponse(
-                {"error": "chat not available"},
-                status_code=503,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-        try:
-            body = await request.json()
-            raw_text = body.get("text") or body.get("message") or body.get("prompt") or ""
-            text = str(raw_text).strip()
-            if not text:
-                return JSONResponse(
-                    {"error": "empty text"},
-                    status_code=400,
-                    headers={"Access-Control-Allow-Origin": "*"},
-                )
-            speak = bool(
-                body.get("speak")
-                or body.get("voice")
-                or body.get("play_audio")
-            )
-            voice_turn = _voice_turn_payload_from_body(body, text=text)
-            result = await _dispatch_chat_handler(text, speak=speak)
-            payload = _chat_response_payload(
-                result, text=text, speak=speak, voice_turn=voice_turn
-            )
-            payload = await _attach_memory_chat_context(payload)
-            return JSONResponse(
-                payload,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Chat endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/runtime/voice-turn", tags=["Runtime"])
-    async def runtime_voice_turn(request: Request) -> JSONResponse:
-        """Route a final voice transcript to runtime controls only."""
-        if runtime_handler is None:
-            return JSONResponse(
-                {"error": "runtime handler not configured"},
-                status_code=503,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-        try:
-            body = await request.json()
-            raw_text = body.get("text") or body.get("message") or body.get("transcript") or ""
-            text = str(raw_text).strip()
-            if not text:
-                return JSONResponse(
-                    {
-                        "handled": False,
-                        "reason": "empty_transcript",
-                        "voice_turn": _voice_turn_payload_from_body(body, text=text),
-                    },
-                    status_code=400,
-                    headers={"Access-Control-Allow-Origin": "*"},
-                )
-            payload = await _dispatch_runtime(
-                "voice_turn_payload",
-                text,
-                speak=bool(body.get("speak") or body.get("play_audio")),
-                transcript_id=str(body.get("transcript_id") or ""),
-                confidence=body.get("asr_confidence", body.get("confidence")),
-                is_final=bool(body.get("is_final", True)),
-                channel=str(body.get("channel") or "voice"),
-            )
-            return JSONResponse(
-                payload,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Runtime voice-turn endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/field/scenarios", tags=["Field Operations"])
-    async def field_scenarios() -> JSONResponse:
-        """Return customer-visible field operation scenarios."""
-        try:
-            result = await _dispatch_field_operations("scenarios_payload")
-            return _mission_json(result)
-        except Exception as exc:
-            logger.error("Field scenarios endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.get("/api/field/events", tags=["Field Operations"])
-    async def field_events(
-        limit: int = 50,
-        status: str = "",
-        notification_group: str = "",
-        needs_attention: bool = False,
-    ) -> JSONResponse:
-        """Return recent field operation events."""
-        try:
-            result = await _dispatch_field_operations(
-                "list_payload",
-                limit=limit,
-                status=status or None,
-                notification_group=notification_group or None,
-                needs_attention=needs_attention,
-            )
-            return _mission_json(result)
-        except Exception as exc:
-            logger.error("Field events endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.get("/api/field/events/{event_id}", tags=["Field Operations"])
-    async def field_event_detail(event_id: str) -> JSONResponse:
-        """Return one field operation event with workflow and evidence detail."""
-        try:
-            result = await _dispatch_field_operations("detail_payload", event_id)
-            status_code = 200 if result.get("found") else 404
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field event detail endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.get("/api/field/evidence", tags=["Field Operations"], response_model=None)
-    async def field_evidence(path: str) -> Response:
-        """Serve a local field evidence artifact from approved evidence roots."""
-        resolved = _resolve_field_evidence_path(path)
-        if resolved is None:
-            return _mission_json({"error": "field evidence not found"}, status_code=404)
-        media_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
-        return FileResponse(
-            resolved,
-            media_type=media_type,
-            filename=resolved.name,
-            headers={
-                "Cache-Control": "private, max-age=60",
-                **_CORS_HEADERS,
-            },
-        )
-
-    @app.post("/api/field/events", tags=["Field Operations"])
-    async def field_event_trigger(request: Request) -> JSONResponse:
-        """Evaluate a field event and dispatch alerts when rules pass."""
-        try:
-            body = await _optional_json_body(request)
-            if _looks_like_device_ingest_without_scenario(body):
-                return _mission_json(
-                    {
-                        "accepted": False,
-                        "status": "rejected",
-                        "reason": "device_payload_must_use_field_ingest",
-                        "message": "Device camera, sensor, and robot payloads must be submitted to /api/field/ingest.",
-                    },
-                    status_code=422,
-                )
-            failure = _require_permission(request, body, "field:event:create")
-            if failure is not None:
-                return failure
-            body = _field_manual_trigger_body(request, body)
-            result = await _dispatch_field_operations("trigger_payload", body)
-            result = await _dispatch_field_voice_directive(result)
-            result = await _dispatch_field_runtime_policy(
-                result,
-                operator_id=str(body.get("operator_id") or "dashboard.operator"),
-            )
-            result.setdefault(
-                "trigger_contract",
-                {
-                    "admission_path": "field_events_manual",
-                    "trigger_source": body.get("trigger_source"),
-                    "operator_id": body.get("operator_id"),
-                    "device_payload_endpoint": "/api/field/ingest",
-                },
-            )
-            status_code = 200 if result.get("accepted", True) else 422
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field event trigger endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.post("/api/field/events/{event_id}/close", tags=["Field Operations"])
-    async def field_event_close(event_id: str, request: Request) -> JSONResponse:
-        """Close a field operation event with an operator note."""
-        try:
-            body = await _optional_json_body(request)
-            failure = _require_permission(request, body, "field:event:close")
-            if failure is not None:
-                return failure
-            result = await _dispatch_field_operations("close_payload", event_id, body)
-            status_code = 200 if result.get("closed") else 404
-            if result.get("reason") in {
-                "close_requires_supervisor_approval",
-                "event_already_closed",
-                "event_not_closable",
-            }:
-                status_code = 409
-            if result.get("reason") in {"operator_not_authorized", "supervisor_not_authorized"}:
-                status_code = 403
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field event close endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.post("/api/field/events/{event_id}/request-close", tags=["Field Operations"])
-    async def field_event_request_close(event_id: str, request: Request) -> JSONResponse:
-        """Request supervisor approval before closing a high-risk field event."""
-        try:
-            body = await _optional_json_body(request)
-            failure = _require_permission(request, body, "field:event:request_close")
-            if failure is not None:
-                return failure
-            result = await _dispatch_field_operations("request_close_payload", event_id, body)
-            status_code = 200 if result.get("requested") else 404
-            if result.get("reason") in {"event_already_closed", "event_not_closable"}:
-                status_code = 409
-            if result.get("reason") == "operator_not_authorized":
-                status_code = 403
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field event close request endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.post("/api/field/events/{event_id}/acknowledge", tags=["Field Operations"])
-    async def field_event_acknowledge(event_id: str, request: Request) -> JSONResponse:
-        """Acknowledge a field operation event without closing it."""
-        try:
-            body = await _optional_json_body(request)
-            failure = _require_permission(request, body, "field:event:acknowledge")
-            if failure is not None:
-                return failure
-            result = await _dispatch_field_operations("acknowledge_payload", event_id, body)
-            status_code = 200 if result.get("acknowledged") else 409
-            if result.get("reason") == "event_not_found":
-                status_code = 404
-            if result.get("reason") == "operator_not_authorized":
-                status_code = 403
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field event acknowledge endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.post("/api/field/events/{event_id}/resend-notification", tags=["Field Operations"])
-    async def field_event_resend_notification(event_id: str, request: Request) -> JSONResponse:
-        """Retry notification delivery for an open field operation event."""
-        try:
-            body = await _optional_json_body(request)
-            failure = _require_permission(request, body, "field:event:acknowledge")
-            if failure is not None:
-                return failure
-            result = await _dispatch_field_operations(
-                "resend_notification_payload",
-                event_id,
-                body,
-            )
-            status_code = 200 if result.get("resent") else 409
-            if result.get("reason") == "event_not_found":
-                status_code = 404
-            if result.get("reason") == "operator_not_authorized":
-                status_code = 403
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field event notification resend endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.get("/api/field/events/{event_id}/report", tags=["Field Operations"])
-    async def field_event_report(event_id: str) -> JSONResponse:
-        """Return an auditable customer-facing field event report."""
-        try:
-            result = await _dispatch_field_operations("event_report_payload", event_id)
-            status_code = 200 if result.get("found") else 404
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field event report endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.post("/api/field/events/{event_id}/runtime-delivery", tags=["Field Operations"])
-    async def field_event_runtime_delivery(event_id: str, request: Request) -> JSONResponse:
-        """Record a runtime-arbiter or robot callback for a field event."""
-        try:
-            body = await _optional_json_body(request)
-            trust = _field_runtime_callback_trust(
-                body,
-                secret=resolved_runtime_callback_secret,
-                max_age_s=resolved_runtime_callback_max_age_s,
-            )
-            if not trust.get("trusted"):
-                return _mission_json(
-                    {
-                        "recorded": False,
-                        "reason": trust.get("reason") or "runtime_callback_not_trusted",
-                        "runtime_callback_trust": trust,
-                    },
-                    status_code=403,
-                )
-            delivery = _field_runtime_callback_delivery_body(body, trust=trust)
-            result = await _dispatch_field_operations(
-                "record_runtime_delivery_payload",
-                event_id,
-                delivery,
-            )
-            status_code = 200 if result.get("recorded") else 422
-            if result.get("reason") == "event_not_found":
-                status_code = 404
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field runtime-delivery endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.post("/api/field/notification-test", tags=["Field Operations"])
-    async def field_notification_test(request: Request) -> JSONResponse:
-        """Send a low-risk notification smoke test to a responder group."""
-        try:
-            body = await _optional_json_body(request)
-            failure = _require_permission(request, body, "field:notification:test")
-            if failure is not None:
-                return failure
-            result = await _dispatch_field_operations("test_notification_payload", body)
-            status_code = 200 if result.get("status") != "invalid_group" else 422
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field notification test endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.get("/api/field/notification-preflight", tags=["Field Operations"])
-    async def field_notification_preflight() -> JSONResponse:
-        """Check whether real DingTalk responder notification credentials are configured."""
-        try:
-            result = await _dispatch_field_operations("notification_preflight_payload")
-            status_code = 200 if result.get("ready") else 409
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field notification preflight endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.get("/api/field/devices", tags=["Field Operations"])
-    async def field_devices() -> JSONResponse:
-        """Return registered and observed field-device trust/online status."""
-        try:
-            result = await _dispatch_field_operations("device_status_payload")
-            return _mission_json(result)
-        except Exception as exc:
-            logger.error("Field devices endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.options("/api/field/scenarios", include_in_schema=False)
-    async def field_scenarios_cors() -> Response:
-        return _cors_options_response("GET, OPTIONS")
-
-    @app.options("/api/field/events", include_in_schema=False)
-    async def field_events_cors() -> Response:
-        return _cors_options_response("GET, POST, OPTIONS")
-
-    @app.options("/api/field/events/{event_id}", include_in_schema=False)
-    async def field_event_detail_cors(event_id: str) -> Response:
-        _ = event_id
-        return _cors_options_response("GET, OPTIONS")
-
-    @app.options("/api/field/evidence", include_in_schema=False)
-    async def field_evidence_cors() -> Response:
-        return _cors_options_response("GET, OPTIONS")
-
-    @app.options("/api/field/events/{event_id}/acknowledge", include_in_schema=False)
-    async def field_event_acknowledge_cors(event_id: str) -> Response:
-        _ = event_id
-        return _cors_options_response("POST, OPTIONS")
-
-    @app.options("/api/field/events/{event_id}/close", include_in_schema=False)
-    async def field_event_close_cors(event_id: str) -> Response:
-        _ = event_id
-        return _cors_options_response("POST, OPTIONS")
-
-    @app.options("/api/field/events/{event_id}/request-close", include_in_schema=False)
-    async def field_event_request_close_cors(event_id: str) -> Response:
-        _ = event_id
-        return _cors_options_response("POST, OPTIONS")
-
-    @app.options("/api/field/events/{event_id}/resend-notification", include_in_schema=False)
-    async def field_event_resend_notification_cors(event_id: str) -> Response:
-        _ = event_id
-        return _cors_options_response("POST, OPTIONS")
-
-    @app.options("/api/field/events/{event_id}/report", include_in_schema=False)
-    async def field_event_report_cors(event_id: str) -> Response:
-        _ = event_id
-        return _cors_options_response("GET, OPTIONS")
-
-    @app.options("/api/field/events/{event_id}/runtime-delivery", include_in_schema=False)
-    async def field_event_runtime_delivery_cors(event_id: str) -> Response:
-        _ = event_id
-        return _cors_options_response("POST, OPTIONS")
-
-    @app.options("/api/field/notification-test", include_in_schema=False)
-    async def field_notification_test_cors() -> Response:
-        return _cors_options_response("POST, OPTIONS")
-
-    @app.options("/api/field/notification-preflight", include_in_schema=False)
-    async def field_notification_preflight_cors() -> Response:
-        return _cors_options_response("GET, OPTIONS")
-
-    @app.options("/api/field/devices", include_in_schema=False)
-    async def field_devices_cors() -> Response:
-        return _cors_options_response("GET, OPTIONS")
-
-    @app.options("/api/field/ingest", include_in_schema=False)
-    async def field_ingest_cors() -> Response:
-        return _cors_options_response("GET, POST, OPTIONS")
-
-    @app.options("/api/field/audit/integrity", include_in_schema=False)
-    async def field_action_audit_integrity_cors() -> Response:
-        return _cors_options_response("GET, OPTIONS")
-
-    @app.get("/api/field/ingest", tags=["Field Operations"])
-    async def field_ingest_help() -> JSONResponse:
-        """Return examples for raw camera/sensor/robot event ingestion."""
-        try:
-            result = await _dispatch_field_operations("ingest_help_payload")
-            return _mission_json(result)
-        except Exception as exc:
-            logger.error("Field ingest help endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.get("/api/field/readiness", tags=["Field Operations"])
-    async def field_readiness() -> JSONResponse:
-        """Return deployment readiness gates for field operations."""
-        try:
-            result = await _dispatch_field_operations("readiness_payload")
-            return _mission_json(result)
-        except Exception as exc:
-            logger.error("Field readiness endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.get("/api/field/audit/integrity", tags=["Field Operations"])
-    async def field_action_audit_integrity() -> JSONResponse:
-        """Verify the append-only field action audit hash chain."""
-        try:
-            result = await _dispatch_field_operations("action_audit_integrity_payload")
-            status_code = 200
-            if result.get("enabled") is not False and not result.get("valid"):
-                status_code = 409
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field action audit integrity endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.post("/api/field/ingest", tags=["Field Operations"])
-    async def field_ingest(request: Request) -> JSONResponse:
-        """Normalize raw camera/sensor/robot/map payloads into field events."""
-        try:
-            body = await _optional_json_body(request)
-            result = await _dispatch_field_operations("ingest_payload", body)
-            result = await _dispatch_field_voice_directive(result)
-            result = await _dispatch_field_runtime_policy(
-                result,
-                operator_id=str(body.get("operator_id") or "askme.operator"),
-            )
-            status_code = 200 if result.get("accepted", True) else 422
-            return _mission_json(result, status_code=status_code)
-        except Exception as exc:
-            logger.error("Field ingest endpoint failed: %s", exc)
-            return _mission_json({"error": str(exc)}, status_code=500)
-
-    @app.get("/api/status", tags=["Monitor"])
-    async def system_status() -> JSONResponse:
-        """Unified system status — all key metrics in one endpoint."""
-        import time as _time
-
-        status: dict[str, Any] = {"timestamp": _time.time()}
-
-        # Perception
-        perception: dict[str, Any] = {}
-        try:
-            with open("/tmp/askme_frame_daemon.heartbeat") as f:
-                hb = float(f.read().strip())
-            perception["frame_daemon"] = {
-                "alive": _time.time() - hb < 3.0,
-                "age_s": round(_time.time() - hb, 1),
-            }
-        except (FileNotFoundError, ValueError):
-            perception["frame_daemon"] = {"alive": False}
-
-        try:
-            with open("/tmp/askme_frame_detections.json") as f:
-                det = json.load(f)
-            perception["detections"] = {
-                "count": len(det.get("detections", [])),
-                "infer_ms": det.get("infer_ms", 0),
-                "objects": [d["class_id"] for d in det.get("detections", [])],
-            }
-        except (FileNotFoundError, json.JSONDecodeError):
-            perception["detections"] = {"count": 0}
-
-        try:
-            import os
-            event_path = "/tmp/askme_events.jsonl"
-            if os.path.exists(event_path):
-                with open(event_path) as f:
-                    lines = f.readlines()
-                perception["change_events"] = {"total": len(lines)}
-                if lines:
-                    last = json.loads(lines[-1].strip())
-                    perception["change_events"]["last"] = last
-            else:
-                perception["change_events"] = {"total": 0}
-        except Exception:
-            perception["change_events"] = {"total": 0}
-
-        status["perception"] = perception
-
-        # Services
-        try:
-            import subprocess
-            orbbec = subprocess.run(
-                ["systemctl", "is-active", "orbbec-camera"],
-                capture_output=True, timeout=3,
-            )
-            status["orbbec_camera"] = orbbec.stdout.decode().strip() == "active"
-        except Exception:
-            status["orbbec_camera"] = False
-
-        # Memory
-        try:
-            import os
-            knowledge_dir = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)),
-                "data", "qp_memory", "knowledge",
-            )
-            if os.path.isdir(knowledge_dir):
-                files = [f for f in os.listdir(knowledge_dir) if f.endswith(".md")]
-                status["memory"] = {"knowledge_files": len(files)}
-            else:
-                status["memory"] = {"knowledge_files": 0}
-        except Exception:
-            status["memory"] = {"knowledge_files": 0}
-
-        return JSONResponse(
-            status,
-            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-        )
-
-    @app.get("/api/capabilities", tags=["System"])
-    async def capabilities() -> JSONResponse:
-        """Return the runtime profile, components, and generated contracts."""
-        if capabilities_provider is None:
-            return JSONResponse(
-                {"error": "capabilities not available"},
-                status_code=503,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-        try:
-            payload = capabilities_provider()
-            return JSONResponse(
-                payload,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Capabilities endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/capability-center", tags=["System"])
-    async def capability_center() -> JSONResponse:
-        """Return customer-facing grouped robot capabilities."""
-        if capabilities_provider is None:
-            return JSONResponse(
-                {"error": "capabilities not available"},
-                status_code=503,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-        try:
-            payload = capabilities_provider()
-            center = (
-                payload.get("skills", {}).get("capability_center")
-                if isinstance(payload, dict) else None
-            )
-            if not center and isinstance(payload, dict):
-                center = (
-                    payload.get("components", {})
-                    .get("skill", {})
-                    .get("capabilities", {})
-                    .get("capability_center")
-                )
-            return JSONResponse(
-                center or {},
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Capability center endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/skill-audit", tags=["System"])
-    async def skill_audit(limit: int = 50) -> JSONResponse:
-        """Return recent skill execution audit records."""
-        try:
-            from askme.skills.audit import SkillAuditLog
-
-            safe_limit = max(1, min(int(limit), 200))
-            records = SkillAuditLog().recent(limit=safe_limit)
-            return JSONResponse(
-                {"records": records, "count": len(records), "limit": safe_limit},
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Skill audit endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/audit/events", tags=["Governance"])
-    async def audit_events(
-        request: Request,
-        limit: int = 100,
-        source: str = "",
-        actor_id: str = "",
-        operator_id: str = "",
-        action: str = "",
-        outcome: str = "",
-        q: str = "",
-    ) -> JSONResponse:
-        """Return a unified product audit timeline across field/runtime/skill records."""
-        try:
-            from askme.audit import AuditQueryService
-
-            auth_body = {"operator_id": actor_id}
-            denied = _require_permission(request, auth_body, "audit:read")
-            if denied is not None:
-                return denied
-            payload = AuditQueryService(get_config()).query(
-                limit=limit,
-                source=source,
-                operator_id=operator_id,
-                action=action,
-                outcome=outcome,
-                q=q,
-            )
-            return JSONResponse(
-                payload,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Unified audit endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/audit/export/retry", tags=["Governance"])
-    async def audit_export_retry_status(
-        request: Request,
-        actor_id: str = "",
-        limit: int = 50,
-    ) -> JSONResponse:
-        """Return pending unified audit export delivery retries."""
-        try:
-            from askme.audit import AuditExportService
-
-            denied = _require_permission(request, {"operator_id": actor_id}, "audit:export")
-            if denied is not None:
-                return denied
-            payload = AuditExportService(get_config()).retry_status(limit=limit)
-            return JSONResponse(
-                payload,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Unified audit export retry status failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/audit/export/retry", tags=["Governance"])
-    async def audit_export_retry_delivery(request: Request) -> JSONResponse:
-        """Replay pending unified audit export deliveries."""
-        try:
-            from askme.audit import AuditExportService
-
-            body = await _optional_json_body(request)
-            denied = _require_permission(request, body, "audit:export")
-            if denied is not None:
-                return denied
-            payload = AuditExportService(get_config()).retry_queued_deliveries(
-                limit=int(body.get("limit") or 50),
-            )
-            return JSONResponse(
-                payload,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Unified audit export retry delivery failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/audit/export", tags=["Governance"])
-    async def audit_export(request: Request) -> JSONResponse:
-        """Create a signed unified audit export package and optionally deliver it."""
-        try:
-            from askme.audit import AuditExportService
-
-            body = await _optional_json_body(request)
-            denied = _require_permission(request, body, "audit:export")
-            if denied is not None:
-                return denied
-            actor_id = _operator_id_from_request(request, body)
-            payload = AuditExportService(get_config()).create_export(
-                actor_id=actor_id,
-                limit=int(body.get("limit") or 500),
-                source=str(body.get("source") or ""),
-                operator_id=str(body.get("filter_operator_id") or body.get("operator_filter") or ""),
-                action=str(body.get("action") or ""),
-                outcome=str(body.get("outcome") or ""),
-                q=str(body.get("q") or ""),
-                deliver=bool(body.get("deliver", False)),
-                webhook_url=str(body.get("webhook_url") or ""),
-            )
-            return JSONResponse(
-                payload,
-                status_code=200 if payload.get("ok") else 400,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Unified audit export endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
 
     @app.get("/api/skill-growth/backlog", tags=["System"])
     async def skill_growth_backlog(min_occurrences: int = 2, limit: int = 20) -> JSONResponse:
@@ -2578,89 +1850,6 @@ def create_health_app(
     @app.options("/api/missions/{mission_id}/report", include_in_schema=False)
     async def mission_item_cors(mission_id: str) -> Response:
         return _cors_options_response("GET, OPTIONS")
-
-    @app.get("/dashboard", tags=["Monitor"])
-    async def dashboard() -> Response:
-        """Serve the product dashboard shell."""
-        return Response(content=_DASHBOARD_HTML, media_type="text/html")
-
-    @app.get("/dashboard/{asset_path:path}", tags=["Monitor"])
-    async def dashboard_asset(asset_path: str) -> Response:
-        """Serve dashboard pages and assets without mixing them into one HTML file."""
-        clean_path = asset_path.strip("/")
-        if not clean_path or clean_path in _DASHBOARD_PAGES:
-            return Response(content=_DASHBOARD_HTML, media_type="text/html")
-        resolved = (_DASHBOARD_ASSET_DIR / clean_path).resolve()
-        try:
-            resolved.relative_to(_DASHBOARD_ASSET_DIR.resolve())
-        except ValueError:
-            return _json_error("dashboard asset path is outside static directory", status_code=404)
-        if not resolved.is_file():
-            return _json_error("dashboard asset not found", status_code=404)
-        return FileResponse(
-            resolved,
-            media_type=mimetypes.guess_type(str(resolved))[0] or "application/octet-stream",
-            headers={"Cache-Control": "private, max-age=30"},
-        )
-
-    @app.options("/api/chat", include_in_schema=False)
-    async def chat_cors() -> Response:
-        return Response(
-            status_code=204,
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": _CORS_ALLOW_HEADERS,
-            },
-        )
-
-    @app.get("/api/live", tags=["Monitor"])
-    async def live() -> JSONResponse:
-        """Return in-memory conversation history (voice + web chat combined)."""
-        if conversation_provider is None:
-            return JSONResponse(
-                {"messages": [], "count": 0},
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        try:
-            messages = conversation_provider()
-            return JSONResponse(
-                {"messages": messages, "count": len(messages)},
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            return JSONResponse(
-                {"messages": [], "count": 0, "error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/conversations", tags=["Monitor"])
-    async def conversations() -> JSONResponse:
-        """Return conversation history for the monitor UI."""
-        try:
-            from askme.config import get_config, project_root
-            cfg = get_config().get("conversation", {})
-            raw_path = cfg.get("history_file", "data/conversation_history.json")
-            history_file = Path(raw_path)
-            if not history_file.is_absolute():
-                history_file = project_root() / history_file
-            if history_file.exists():
-                with open(history_file, encoding="utf-8") as fh:
-                    history = json.load(fh)
-            else:
-                history = []
-            return JSONResponse(
-                {"messages": history, "count": len(history)},
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Conversations endpoint failed: %s", exc)
-            return JSONResponse(
-                {"messages": [], "count": 0, "error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
 
     # ---- Vision endpoints ----
 
@@ -3478,6 +2667,64 @@ def render_prometheus_metrics(snapshot: dict[str, Any]) -> str:
         "gauge",
         llm_snap.get("p99_latency_ms"),
     )
+    conversation_runtime = snapshot.get("conversation_runtime", {})
+    if isinstance(conversation_runtime, dict):
+        _append_metric(
+            lines,
+            "askme_chat_in_flight",
+            "Current in-flight HTTP chat requests",
+            "gauge",
+            conversation_runtime.get("in_flight"),
+        )
+        _append_metric(
+            lines,
+            "askme_chat_turns_total",
+            "Total HTTP chat turns handled by this process",
+            "counter",
+            conversation_runtime.get("total_turns"),
+        )
+        _append_metric(
+            lines,
+            "askme_chat_failures_total",
+            "Total HTTP chat turns that ended in an error or timeout",
+            "counter",
+            conversation_runtime.get("failures"),
+        )
+        _append_metric(
+            lines,
+            "askme_chat_timeouts_total",
+            "Total HTTP chat turns that exceeded the configured timeout",
+            "counter",
+            conversation_runtime.get("timeouts"),
+        )
+        _append_metric(
+            lines,
+            "askme_chat_overloads_total",
+            "Total HTTP chat turns rejected by the concurrency limiter",
+            "counter",
+            conversation_runtime.get("overloads"),
+        )
+        _append_metric(
+            lines,
+            "askme_chat_slow_turns_total",
+            "Total HTTP chat turns above the configured slow threshold",
+            "counter",
+            conversation_runtime.get("slow_turns_total"),
+        )
+        _append_metric(
+            lines,
+            "askme_chat_last_turn_latency_ms",
+            "Total latency of the most recent HTTP chat turn in milliseconds",
+            "gauge",
+            conversation_runtime.get("last_turn_latency_ms"),
+        )
+        _append_metric(
+            lines,
+            "askme_chat_last_handler_ms",
+            "Handler latency of the most recent HTTP chat turn in milliseconds",
+            "gauge",
+            conversation_runtime.get("last_handler_ms"),
+        )
     _append_metric(
         lines,
         "askme_active_skills",
@@ -3685,6 +2932,26 @@ def _clean_secret(value: Any) -> str | None:
     return text or None
 
 
+def _optional_positive_float_config(value: Any, *, default: float) -> float | None:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _positive_int_config(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, parsed)
+
+
 def _is_remote_bind_host(host: str) -> bool:
     cleaned = host.strip().lower()
     if cleaned in _REMOTE_BIND_HOSTS:
@@ -3765,11 +3032,14 @@ _DASHBOARD_ASSET_DIR = _DASHBOARD_STATIC_DIR / "dashboard"
 _DASHBOARD_PAGES = frozenset(
     {
         "conversation",
+        "projects",
         "field",
+        "space",
         "knowledge",
         "capabilities",
         "voice",
         "delivery",
+        "audit",
     }
 )
 _DASHBOARD_HTML = (_DASHBOARD_STATIC_DIR / "dashboard.html").read_text(encoding="utf-8")

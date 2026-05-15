@@ -140,7 +140,7 @@ class VoiceModule(Module):
 
     async def start(self) -> None:
         """Open mic persistently, then start the VoiceLoop."""
-        self._audio._mic.start()  # mic stays open across listen/speak cycles
+        self._audio.start_input()  # mic stays open across listen/speak cycles
         self._task = asyncio.create_task(self._voice_loop.run(), name="voice-loop")
         logger.info("VoiceModule: voice loop started (mic persistent)")
 
@@ -152,7 +152,7 @@ class VoiceModule(Module):
                 await self._task
             except asyncio.CancelledError:
                 pass
-        self._audio._mic.stop()
+        self._audio.stop_input()
         self._audio.shutdown()
         logger.info("VoiceModule: stopped")
 

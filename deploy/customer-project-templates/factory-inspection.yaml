@@ -1,0 +1,124 @@
+template:
+  template_id: factory-inspection
+  version: 0.1.0
+  publish_status: pilot
+  release_channel: pilot
+  owner: askme-product
+  upgrade_policy: manual_review
+  min_runtime_version: 4.0.0
+  display_name: Factory inspection starter
+  industry: manufacturing
+  customer_claim: Starter profile for production line, equipment, fire, and passage inspection.
+
+customer:
+  customer_id: template-customer
+  customer_name: Template Customer
+  industry: manufacturing
+  project_id: factory-inspection-project
+  project_name: Factory Inspection Project
+  delivery_model: solution_project
+
+site:
+  site_id: template-factory-site
+  name: Template Factory Site
+  map_version: template-v1
+
+responder_groups:
+  security:
+    name: Security Team
+    webhook_env: ASKME_DINGTALK_SECURITY_WEBHOOK
+    secret_env: ASKME_DINGTALK_SECURITY_SECRET
+  cleaning:
+    name: Facility Team
+    webhook_env: ASKME_DINGTALK_CLEANING_WEBHOOK
+    secret_env: ASKME_DINGTALK_CLEANING_SECRET
+  operations:
+    name: Operations Team
+    webhook_env: ASKME_DINGTALK_OPERATIONS_WEBHOOK
+    secret_env: ASKME_DINGTALK_OPERATIONS_SECRET
+
+zones:
+  production-main-aisle:
+    name: Production main aisle
+    location: Production main aisle
+    type: main_channel
+    parking_allowed: false
+  loading-bay:
+    name: Loading bay
+    location: Loading bay
+    type: parking_area
+    parking_allowed: true
+  operator-help-point:
+    name: Operator help point
+    location: Line 1 entrance
+    type: help_point
+    help_point_id: operator-help-point
+  motor-room:
+    name: Motor room
+    location: Motor room
+    type: equipment_area
+  fire-risk-zone:
+    name: Fire risk zone
+    location: Paint storage entrance
+    type: smoke_risk_area
+
+devices:
+  camera-main-aisle:
+    name: Main aisle camera
+    source: camera
+    camera_id: cam-main-aisle
+    zone_id: production-main-aisle
+    secret_env: ASKME_FIELD_CAMERA_MAIN_ROAD_SECRET
+  smoke-fire-risk-zone:
+    name: Fire risk sensor
+    source: sensor
+    sensor_type: smoke_temperature
+    zone_id: fire-risk-zone
+    secret_env: ASKME_FIELD_SMOKE_WAREHOUSE_SECRET
+  robot-factory:
+    name: Factory robot
+    source: robot
+    robot_id: thunder-factory
+    zone_id: production-main-aisle
+    secret_env: ASKME_FIELD_ROBOT_THUNDER_SECRET
+
+thresholds:
+  parking_duration_s: 120
+  night_stranger_dwell_s: 10
+  fire_temperature_c: 60
+  smoke_level: 0.7
+  trash_fill_ratio: 0.8
+  crowd_person_count: 5
+  crowd_duration_min: 30
+
+managed_objects:
+  production_equipment:
+    display_name: Production equipment
+    category: equipment
+    object_labels: [motor, cabinet, panel]
+    scenario_ids: [equipment_inspection]
+    zone_types: [equipment_area]
+    device_sources: [camera, robot]
+    responder_group: operations
+    evidence_required: [photo, status_panel, location]
+    bindings:
+      vision_models: [equipment-panel-detection]
+      sensor_protocols: [robot-status-json]
+      skill_packages: [capability.inspect_equipment]
+      acceptance_tests: [tests/scenario_tests/test_field_operations_evaluation.py::equipment_inspection]
+    customer_visible: true
+  fire_and_smoke:
+    display_name: Fire and smoke risk
+    category: safety
+    object_labels: [smoke, fire, high_temperature]
+    scenario_ids: [fire_or_smoke]
+    zone_types: [smoke_risk_area]
+    device_sources: [sensor, camera]
+    responder_group: security
+    evidence_required: [sensor_reading, photo, location]
+    bindings:
+      vision_models: [smoke-fire-detection]
+      sensor_protocols: [smoke-temperature-json]
+      skill_packages: [capability.detect_fire_smoke]
+      acceptance_tests: [tests/scenario_tests/test_field_operations_evaluation.py::fire_or_smoke]
+    customer_visible: true

@@ -4,6 +4,8 @@ import asyncio
 import json
 from pathlib import Path
 
+from askme.audit import AuditReviewService
+from askme.pipeline.field_deployment_readiness import build_field_deployment_readiness
 from askme.pipeline.field_operations import FieldOperationsService
 
 
@@ -72,6 +74,178 @@ def test_field_deployment_readiness_blocks_without_reports(tmp_path: Path) -> No
     assert "field runtime roundtrip smoke has not passed" in payload["blockers"]
     assert "field event archive has no events" in payload["blockers"]
     assert payload["next_actions"]
+
+
+def test_field_deployment_readiness_blocks_unresolved_unified_audit_review(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "events.jsonl"
+    archive.write_text(
+        json.dumps({"event_id": "field-1", "scenario_id": "fire_or_smoke"}) + "\n",
+        encoding="utf-8",
+    )
+
+    payload = build_field_deployment_readiness(
+        config={
+            "scenario_report_path": str(tmp_path / "missing-scenario.json"),
+            "smoke_report_path": str(tmp_path / "missing-smoke.json"),
+            "voice_smoke_report_path": str(tmp_path / "missing-voice-smoke.json"),
+            "notification_smoke_report_path": str(tmp_path / "missing-notification-smoke.json"),
+            "runtime_roundtrip_report_path": str(tmp_path / "missing-runtime-roundtrip.json"),
+        },
+        archive_path=archive,
+        webhooks={},
+        webhook_secrets={},
+        unified_audit={
+            "product_summary": {
+                "status": "needs_review",
+                "record_count": 3,
+                "requires_review_count": 1,
+                "high_or_critical_count": 1,
+            },
+            "filtered_total": 3,
+            "review_queue": [
+                {
+                    "record_id": "field:1",
+                    "customer_label": "Field event action audit",
+                    "severity": "high",
+                    "action": "close",
+                    "outcome": "denied",
+                    "operator_id": "guard-1",
+                    "resource_type": "field_event",
+                    "resource_id": "field-1",
+                    "timestamp": "2026-05-14T10:00:00Z",
+                }
+            ],
+        },
+    )
+
+    assert payload["gates"]["unified_audit_review_clear"] is False
+    assert "unified audit review queue has unresolved high-risk records" in payload["blockers"]
+    assert payload["unified_audit"]["status"] == "needs_review"
+    assert payload["unified_audit"]["requires_review_count"] == 1
+    assert payload["unified_audit"]["review_queue"][0]["record_id"] == "field:1"
+    assert any("Unified Audit" in item for item in payload["next_actions"])
+
+
+def test_field_deployment_readiness_uses_audit_review_decisions(tmp_path: Path) -> None:
+    archive = tmp_path / "events.jsonl"
+    field_audit = tmp_path / "field-action-audit.jsonl"
+    review_path = tmp_path / "audit-reviews.jsonl"
+    archive.write_text(
+        json.dumps({"event_id": "field-1", "scenario_id": "fire_or_smoke"}) + "\n",
+        encoding="utf-8",
+    )
+    field_audit.write_text(
+        json.dumps({
+            "kind": "field_event_action",
+            "sequence": 1,
+            "event_id": "field-1",
+            "audit": {
+                "at": 10,
+                "action": "close",
+                "outcome": "denied",
+                "operator_id": "guard-1",
+                "reason": "supervisor_not_authorized",
+            },
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+    service = FieldOperationsService(
+        config={
+            "archive_path": str(archive),
+            "action_audit": {"path": str(field_audit), "enabled": False},
+            "audit_review_path": str(review_path),
+            "scenario_report_path": str(tmp_path / "missing-scenario.json"),
+            "smoke_report_path": str(tmp_path / "missing-smoke.json"),
+            "voice_smoke_report_path": str(tmp_path / "missing-voice-smoke.json"),
+            "notification_smoke_report_path": str(tmp_path / "missing-notification-smoke.json"),
+            "runtime_roundtrip_report_path": str(tmp_path / "missing-runtime-roundtrip.json"),
+        }
+    )
+    blocked = service.readiness_payload()
+
+    AuditReviewService(path=review_path).submit(
+        record_id="field:1",
+        reviewer_id="supervisor-1",
+        decision="accepted",
+        note="expected denial; close retried with supervisor approval",
+        created_at=20,
+    )
+    cleared = service.readiness_payload()
+
+    assert blocked["gates"]["unified_audit_review_clear"] is False
+    assert blocked["unified_audit"]["requires_review_count"] == 1
+    assert cleared["gates"]["unified_audit_review_clear"] is True
+    assert cleared["gates"]["unified_audit_review_integrity_verified"] is True
+    assert cleared["unified_audit"]["requires_review_count"] == 0
+
+    lines = review_path.read_text(encoding="utf-8").splitlines()
+    tampered = json.loads(lines[0])
+    tampered["note"] = "forged"
+    review_path.write_text(json.dumps(tampered) + "\n", encoding="utf-8")
+    tampered_payload = service.readiness_payload()
+
+    assert tampered_payload["gates"]["unified_audit_review_integrity_verified"] is False
+    assert "unified audit review log integrity has not passed" in tampered_payload["blockers"]
+
+
+def test_field_deployment_readiness_blocks_unhealthy_unified_audit_sources(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "events.jsonl"
+    archive.write_text(
+        json.dumps({"event_id": "field-1", "scenario_id": "fire_or_smoke"}) + "\n",
+        encoding="utf-8",
+    )
+
+    payload = build_field_deployment_readiness(
+        config={
+            "scenario_report_path": str(tmp_path / "missing-scenario.json"),
+            "smoke_report_path": str(tmp_path / "missing-smoke.json"),
+            "voice_smoke_report_path": str(tmp_path / "missing-voice-smoke.json"),
+            "notification_smoke_report_path": str(tmp_path / "missing-notification-smoke.json"),
+            "runtime_roundtrip_report_path": str(tmp_path / "missing-runtime-roundtrip.json"),
+        },
+        archive_path=archive,
+        webhooks={},
+        webhook_secrets={},
+        unified_audit={
+            "product_summary": {
+                "status": "auditable",
+                "record_count": 3,
+                "requires_review_count": 0,
+                "high_or_critical_count": 0,
+            },
+            "filtered_total": 3,
+            "review_integrity": {"valid": True, "exists": True, "checked_count": 1, "failures": []},
+            "source_health": {
+                "field_action_audit": {
+                    "exists": True,
+                    "readable": True,
+                    "valid_record_count": 1,
+                    "invalid_record_count": 2,
+                    "path": str(tmp_path / "field-action-audit.jsonl"),
+                },
+                "runtime_audit": {
+                    "exists": True,
+                    "readable": False,
+                    "valid_record_count": 0,
+                    "invalid_record_count": 0,
+                    "path": str(tmp_path / "runtime-audit.jsonl"),
+                    "error": "permission denied",
+                },
+            },
+        },
+    )
+
+    assert payload["gates"]["unified_audit_sources_healthy"] is False
+    assert "unified audit sources have unreadable or invalid records" in payload["blockers"]
+    assert payload["unified_audit"]["invalid_source_count"] == 1
+    assert payload["unified_audit"]["unreadable_source_count"] == 1
+    assert payload["unified_audit"]["unhealthy_sources"][0]["source"] == "field_action_audit"
+    assert any("Audit Source Health" in item for item in payload["next_actions"])
 
 
 def test_field_deployment_readiness_reports_lab_ready_with_sample_smoke(tmp_path: Path) -> None:

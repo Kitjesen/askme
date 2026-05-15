@@ -16,10 +16,15 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from askme.agent_shell.agent_hooks import AgentHookRunner
 from askme.agent_shell.agent_profile import AgentProfile, AgentProfileRegistry
@@ -41,6 +46,10 @@ _MAX_DEPTH = 1  # max sub-agent nesting depth (0=root, 1=child, children cannot 
 # Keep the original task message + last N to cap prompt size (prevents TTFT blowup
 # on later iterations and avoids memory pressure on Sunrise's constrained RAM).
 _MAX_MESSAGES = 20
+_MAX_RUN_HISTORY = 100
+_MAX_SUMMARY_TOOLS = 50
+_TOOL_TIMEOUT_SECONDS = 35.0
+_SENSITIVE_KEYS = ("authorization", "api_key", "apikey", "bearer", "password", "secret", "token")
 
 # Inline schema for spawn_agent — not registered in ToolRegistry to avoid shared-state mutation
 _SPAWN_AGENT_SCHEMA: dict[str, Any] = {
@@ -165,6 +174,8 @@ class ThunderAgentShell:
         # Current action string — updated during tool execution so the heartbeat
         # can report what the agent is doing instead of a generic message.
         self._current_action = ""
+        self._active_run_summary: dict[str, Any] | None = None
+        self._last_run_summary: dict[str, Any] = {}
 
     def set_audio(self, audio: Any) -> None:
         """Late-bind AudioAgent (set by VoiceModule after build)."""
@@ -255,7 +266,15 @@ class ThunderAgentShell:
         )
 
         effective_timeout = float(timeout or self._default_timeout)
+        run_summary = self._start_run_summary(
+            task=task,
+            timeout_seconds=effective_timeout,
+            allowed_tools=self._allowed_tools,
+            tool_definitions=tool_definitions,
+        )
+        self._active_run_summary = run_summary
         final_response = ""
+        status = "completed"
         try:
             final_response = await asyncio.wait_for(
                 self._run_agent_loop(messages, tool_definitions, system_prompt),
@@ -264,9 +283,12 @@ class ThunderAgentShell:
         except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
             logger.warning("[AgentShell] Task timed out after %.0fs", effective_timeout)
             final_response = f"任务执行超时（{int(effective_timeout)}秒），已停止。"
+            status = "timeout"
         except Exception as exc:
             logger.error("[AgentShell] Task failed: %s", exc)
             final_response = f"任务执行出错：{exc}"
+            status = "failed"
+            run_summary["error"] = str(exc)
         finally:
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
@@ -274,8 +296,14 @@ class ThunderAgentShell:
                     await heartbeat_task
                 except asyncio.CancelledError:
                     pass
+            self._finish_run_summary(run_summary, status=status, final_response=final_response)
+            self._active_run_summary = None
 
         return final_response or "任务已完成。"
+
+    def last_run_summary(self) -> dict[str, Any]:
+        """Return the latest product-readable run summary."""
+        return dict(self._last_run_summary)
 
     async def _run_agent_loop(
         self,
@@ -289,6 +317,8 @@ class ThunderAgentShell:
 
         while iterations < self._iteration_limit:
             iterations += 1
+            if self._active_run_summary is not None:
+                self._active_run_summary["iteration_count"] = iterations
             logger.info("[AgentShell] Iteration %d/%d", iterations, self._iteration_limit)
 
             response_text, tool_calls = await self._call_llm(
@@ -488,7 +518,8 @@ class ThunderAgentShell:
         """Execute a single tool call, return string result."""
         name = tc.get("name", "")
         args_json = tc.get("arguments", "{}")
-        logger.info("[AgentShell] Executing tool: %s(%s)", name, args_json[:80])
+        started = time.perf_counter()
+        logger.info("[AgentShell] Executing tool: %s(%s)", name, _redact_text(args_json)[:80])
 
         preflight = self._hook_runner.before_tool(tool_name=name, arguments=args_json)
         if preflight.blocked:
@@ -497,7 +528,15 @@ class ThunderAgentShell:
                 name,
                 preflight.reason,
             )
-            return preflight.error_text()
+            result = preflight.error_text()
+            self._record_tool_summary(
+                name=name,
+                arguments=args_json,
+                result=result,
+                status="blocked_pre_tool",
+                started=started,
+            )
+            return result
 
         # spawn_agent is handled inline (not registered in ToolRegistry)
         if name == "spawn_agent":
@@ -507,18 +546,27 @@ class ThunderAgentShell:
                 arguments=args_json,
                 result=result,
             )
-            return postflight.error_text() if postflight.blocked else result
+            if postflight.blocked:
+                result = postflight.error_text()
+                status = "blocked_post_tool"
+            else:
+                status = "ok"
+            self._record_tool_summary(
+                name=name,
+                arguments=args_json,
+                result=result,
+                status=status,
+                started=started,
+            )
+            return result
 
         try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._tools.execute,
-                    name,
-                    args_json,
-                    allowed_names=self._allowed_tools,
-                    max_safety_level="dangerous",
-                ),
-                timeout=35.0,  # slightly above SandboxedBashTool's 30s limit
+            result = await asyncio.to_thread(
+                self._tools.execute,
+                name,
+                args_json,
+                allowed_names=self._allowed_tools,
+                max_safety_level="dangerous",
             )
             result_text = str(result)
             postflight = self._hook_runner.after_tool(
@@ -532,17 +580,143 @@ class ThunderAgentShell:
                     name,
                     postflight.reason,
                 )
-                return postflight.error_text()
+                result_text = postflight.error_text()
+                self._record_tool_summary(
+                    name=name,
+                    arguments=args_json,
+                    result=result_text,
+                    status="blocked_post_tool",
+                    started=started,
+                )
+                return result_text
+            self._record_tool_summary(
+                name=name,
+                arguments=args_json,
+                result=result_text,
+                status="ok",
+                started=started,
+            )
             return result_text
         except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
-            return f"[Error] 工具 {name} 执行超时（35s）"
+            result = f"[Error] 工具 {name} 执行超时（{int(_TOOL_TIMEOUT_SECONDS)}s）"
+            self._record_tool_summary(
+                name=name,
+                arguments=args_json,
+                result=result,
+                status="timeout",
+                started=started,
+            )
+            return result
         except Exception as exc:
-            return f"[Error] {exc}"
+            result = f"[Error] {exc}"
+            self._record_tool_summary(
+                name=name,
+                arguments=args_json,
+                result=result,
+                status="error",
+                started=started,
+            )
+            return result
+
+    def _start_run_summary(
+        self,
+        *,
+        task: str,
+        timeout_seconds: float,
+        allowed_tools: set[str],
+        tool_definitions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        tool_names = [
+            str(definition.get("function", {}).get("name") or "")
+            for definition in tool_definitions
+            if definition.get("function", {}).get("name")
+        ]
+        return {
+            "run_id": f"agent-run-{uuid4().hex[:12]}",
+            "status": "running",
+            "started_at": _utc_now(),
+            "finished_at": "",
+            "duration_ms": 0.0,
+            "task_preview": _preview(task, limit=240),
+            "profile": self._profile.name,
+            "profile_display": self._profile.display_name,
+            "model": self._model,
+            "depth": self._depth,
+            "workspace": str(self._workspace),
+            "timeout_seconds": timeout_seconds,
+            "max_iterations": self._iteration_limit,
+            "iteration_count": 0,
+            "allowed_tool_count": len(allowed_tools),
+            "tool_definition_count": len(tool_names),
+            "tool_definitions": sorted(tool_names),
+            "tool_call_count": 0,
+            "tools_used": [],
+            "tools": [],
+            "_started_monotonic": time.perf_counter(),
+        }
+
+    def _finish_run_summary(
+        self,
+        summary: dict[str, Any],
+        *,
+        status: str,
+        final_response: str,
+    ) -> None:
+        started = float(summary.pop("_started_monotonic", time.perf_counter()) or time.perf_counter())
+        summary["status"] = status
+        summary["finished_at"] = _utc_now()
+        summary["duration_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+        summary["final_response_preview"] = _preview(_redact_text(final_response), limit=500)
+        self._last_run_summary = dict(summary)
+        self._persist_run_summary(summary)
+
+    def _record_tool_summary(
+        self,
+        *,
+        name: str,
+        arguments: str,
+        result: str,
+        status: str,
+        started: float,
+    ) -> None:
+        summary = self._active_run_summary
+        if summary is None:
+            return
+        event = {
+            "name": name or "unknown",
+            "status": status,
+            "duration_ms": round((time.perf_counter() - started) * 1000.0, 3),
+            "arguments_preview": _preview(_redact_text(arguments), limit=300),
+            "result_preview": _preview(_redact_text(result), limit=300),
+        }
+        tools = summary.setdefault("tools", [])
+        if isinstance(tools, list) and len(tools) < _MAX_SUMMARY_TOOLS:
+            tools.append(event)
+        used = set(summary.get("tools_used") or [])
+        used.add(event["name"])
+        summary["tools_used"] = sorted(used)
+        summary["tool_call_count"] = int(summary.get("tool_call_count") or 0) + 1
+
+    def _persist_run_summary(self, summary: dict[str, Any]) -> None:
+        try:
+            self._workspace.mkdir(parents=True, exist_ok=True)
+            last_path = self._workspace / "last_agent_run.json"
+            history_path = self._workspace / "agent_runs.jsonl"
+            serializable = dict(summary)
+            serializable["last_run_path"] = str(last_path)
+            last_path.write_text(
+                json.dumps(serializable, ensure_ascii=False, sort_keys=True, indent=2),
+                encoding="utf-8",
+                newline="\n",
+            )
+            history = _bounded_history(history_path, limit=_MAX_RUN_HISTORY - 1)
+            history.append(json.dumps(serializable, ensure_ascii=False, sort_keys=True))
+            history_path.write_text("\n".join(history) + "\n", encoding="utf-8", newline="\n")
+        except OSError as exc:
+            logger.warning("[AgentShell] Failed to persist run summary: %s", exc)
 
     async def _spawn_child_agent(self, args_json: str) -> str:
         """Spawn a child ThunderAgentShell to handle a focused sub-task."""
-        import json
-
         if self._depth >= _MAX_DEPTH:
             return f"[Error] 已达最大子 Agent 嵌套深度（{_MAX_DEPTH}层），无法再 spawn。"
         if not hasattr(self, "_allowed_tools"):
@@ -591,3 +765,60 @@ class ThunderAgentShell:
             return f"[子任务完成]\n{result}"
         except Exception as exc:
             return f"[子任务失败] {exc}"
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _preview(value: Any, *, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _redact_text(value: Any) -> str:
+    text = str(value or "")
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return _redact_raw_text(text)
+    return json.dumps(_redact_payload(payload), ensure_ascii=False, sort_keys=True)
+
+
+def _redact_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            text_key = str(key).lower()
+            if any(sensitive in text_key for sensitive in _SENSITIVE_KEYS):
+                redacted[key] = "***"
+            else:
+                redacted[key] = _redact_payload(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_payload(item) for item in value]
+    return value
+
+
+def _redact_raw_text(text: str) -> str:
+    redacted = text
+    for key in _SENSITIVE_KEYS:
+        redacted = _redact_assignment(redacted, key)
+    return redacted
+
+
+def _redact_assignment(text: str, key: str) -> str:
+    pattern = re.compile(rf"({re.escape(key)}\s*[=:]\s*)([^\s,&;]+)", re.IGNORECASE)
+    return pattern.sub(r"\1***", text)
+
+
+def _bounded_history(path: Path, *, limit: int) -> list[str]:
+    if limit <= 0 or not path.is_file():
+        return []
+    try:
+        lines = [line for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+    except OSError:
+        return []
+    return lines[-limit:]

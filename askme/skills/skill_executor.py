@@ -201,15 +201,12 @@ class SkillExecutor:
                     )
                     if on_tool_call:
                         on_tool_call(tool_name)
-                    result = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self._tools.execute,
-                            tool_name,
-                            tool_args,
-                            allowed_names=allowed_tool_names,
-                            max_safety_level=max_safety_level,
-                        ),
-                        timeout=35.0,  # matches ThunderAgentShell per-tool limit
+                    result = await asyncio.to_thread(
+                        self._tools.execute,
+                        tool_name,
+                        tool_args,
+                        allowed_names=allowed_tool_names,
+                        max_safety_level=max_safety_level,
                     )
                     messages.append({
                         "role": "tool",

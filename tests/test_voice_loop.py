@@ -2,8 +2,10 @@ import asyncio
 
 import pytest
 
+import askme.pipeline.voice_loop as voice_loop_module
 from askme.llm.intent_router import Intent, IntentType
 from askme.pipeline.proactive.base import ProactiveResult
+from askme.pipeline.trace import PipelineTracer
 from askme.pipeline.voice_loop import VoiceLoop
 from askme.voice.interaction_gate import InteractionGate
 
@@ -455,8 +457,48 @@ class _RouterWithTrigger:
                 type=IntentType.VOICE_TRIGGER,
                 skill_name=self._map[text],
                 raw_text=text,
+                trigger_phrase=text,
+                reason="voice_trigger",
             )
         return Intent(type=IntentType.GENERAL, raw_text=text)
+
+
+@pytest.mark.asyncio
+async def test_voice_loop_records_intent_route_trace(monkeypatch) -> None:
+    tracer = PipelineTracer()
+    monkeypatch.setattr(voice_loop_module, "get_tracer", lambda: tracer)
+    pipeline = _Pipeline()
+    audio = _Audio()
+    dispatcher = _Dispatcher()
+    texts = ["去仓库A", "exit"]
+    call_idx = 0
+
+    def _listen():
+        nonlocal call_idx
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(
+        router=_RouterWithTrigger({"去仓库A": "navigate"}),
+        pipeline=pipeline,
+        audio=audio,
+        dispatcher=dispatcher,
+    )
+    loop._proactive = _Proactive(ProactiveResult(enriched_text="导航到仓库A", proceed=True))
+
+    await loop.run()
+
+    traces = tracer.get_history(10)
+    target = next(item for item in traces if item["metadata"].get("user_text") == "去仓库A")
+    route = target["metadata"]["intent_route"]
+    route_span = next(span for span in target["spans"] if span["name"] == "intent_route")
+    assert route["type"] == "voice_trigger"
+    assert route["source"] == "voice"
+    assert route["skill_name"] == "navigate"
+    assert route["trigger_phrase"] == "去仓库A"
+    assert route_span["metadata"]["reason"] == "voice_trigger"
 
 
 @pytest.mark.asyncio

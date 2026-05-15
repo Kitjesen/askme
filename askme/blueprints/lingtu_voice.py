@@ -1,14 +1,10 @@
-"""LingTu Voice — 专为 LingTu 导航部署的 blueprint.
+"""LingTu Voice Navigation Adapter blueprint.
 
-在 S100P 上运行：本地语音 + Telegram Bot + LLM 大脑。
-不包含 Thunder cortex runtime 控制模块（control/safety/LED），
-避免与 LingTu 服务端口冲突。
+This is a site-specific voice runtime for LingTu navigation. It deliberately
+omits Thunder control, safety, and LED modules to avoid port and authority
+conflicts with the LingTu navigation service.
 
-导航通过 move_tool 的 _go_to_lingtu() 路由到 LingTu REST API：
-  NAV_GATEWAY_URL=http://localhost:8088
-
-Usage::
-
+Run:
     python -m askme.blueprints.lingtu_voice
 """
 
@@ -40,4 +36,4 @@ __all__ = ["lingtu_voice"]
 if __name__ == "__main__":
     from askme.blueprints._runner import run_blueprint
 
-    run_blueprint(lingtu_voice, "LingTu Voice")
+    run_blueprint(lingtu_voice, "LingTu Voice Navigation Adapter")

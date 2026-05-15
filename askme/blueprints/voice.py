@@ -1,9 +1,9 @@
-"""Voice — 纯语音 AI 助手.
+"""Voice Task Center blueprint.
 
-核心能力：听、理解、回答、说。6 个模块。
+Use this for microphone-driven operator dialogue, task planning, and customer
+voice demos that do not require direct robot-side IO.
 
-Usage::
-
+Run:
     python -m askme.blueprints.voice
 """
 
@@ -43,4 +43,4 @@ __all__ = ["voice"]
 if __name__ == "__main__":
     from askme.blueprints._runner import run_blueprint
 
-    run_blueprint(voice, "Voice")
+    run_blueprint(voice, "Voice Task Center")

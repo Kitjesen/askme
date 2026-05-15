@@ -178,7 +178,69 @@ def test_cognitive_planner_drafts_mission_without_dispatching() -> None:
     assert payload["planning_session_id"]
     assert payload["handoff_ready"] is False
     assert payload["missing_inputs"] == ["operator_confirmation"]
+    assert payload["readiness"]["status"] == "awaiting_operator_confirmation"
+    assert payload["readiness"]["can_submit_to_runtime"] is False
+    assert payload["readiness"]["blocked_by"] == ["operator_confirmation"]
+    assert "confirm_plan" in payload["readiness"]["allowed_next_actions"]
+    assert payload["handoff_contract"]["consumer"] == "runtime_handoff"
+    assert payload["handoff_contract"]["can_dispatch_hardware"] is False
+    assert payload["handoff_contract"]["dispatch_authority"] == "runtime_arbiter_only"
+    assert payload["handoff_contract"]["requires_safety_preflight"] is True
+    assert payload["world_state_snapshot_id"] == payload["handoff_contract"]["world_state_snapshot_id"]
     assert "确认" in payload["next_prompt"]
+
+
+def test_cognitive_planner_keeps_visitor_wayfinding_out_of_runtime_handoff() -> None:
+    planner = CognitivePlanner(
+        world_state=WorldStateService(),
+        working_memory=WorkingMemory(),
+        mission_service=MissionService(),
+    )
+
+    plan = planner.plan_from_text("梵木咖啡怎么走？", robot_id="dog-1")
+    payload = plan.to_dict()
+
+    assert payload["intent"] == "visitor_wayfinding"
+    assert payload["interaction_state"] == "answer_ready"
+    assert payload["handoff_ready"] is False
+    assert payload["mission"] is None
+    assert payload["readiness"]["status"] == "ready_to_answer"
+    assert payload["readiness"]["can_submit_to_runtime"] is False
+    assert payload["readiness"]["requires_operator_confirmation"] is False
+    assert payload["handoff_contract"]["can_dispatch_hardware"] is False
+    assert payload["handoff_contract"]["submit_conditions"] == [
+        "no_runtime_handoff_for_information_response",
+        "answer_must_use_grounded_park_knowledge",
+    ]
+    assert any(step["step"] == "answer_with_grounded_park_knowledge" for step in payload["steps"])
+    assert "不会启动机器狗移动" in payload["next_prompt"]
+
+
+def test_cognitive_planner_treats_explicit_visitor_escort_as_physical_task() -> None:
+    planner = CognitivePlanner(
+        world_state=WorldStateService(),
+        working_memory=WorkingMemory(),
+        mission_service=MissionService(),
+    )
+
+    draft = planner.plan_from_text("请带我去梵木咖啡", robot_id="dog-1")
+    confirmed = planner.plan_from_text(
+        "",
+        planning_session_id=draft.planning_session_id,
+        operator_confirmation="确认",
+        robot_id="dog-1",
+    )
+
+    assert draft.intent == "visitor_escort"
+    assert draft.interaction_state == "awaiting_confirmation"
+    assert draft.mission["mission"]["mission_type"] == "navigate_to"
+    assert any(step["target"] == "梵木咖啡" for step in draft.mission["mission"]["steps"])
+    assert draft.handoff_ready is False
+    assert draft.readiness["requires_operator_confirmation"] is True
+    assert draft.readiness["requires_safety_preflight"] is True
+    assert "确认" in draft.next_prompt
+    assert confirmed.interaction_state == "ready_for_arbiter"
+    assert confirmed.handoff_ready is True
 
 
 def test_cognitive_planner_clarifies_ambiguous_manipulation() -> None:
@@ -218,6 +280,18 @@ def test_cognitive_planner_confirms_existing_session_for_handoff() -> None:
     assert confirmed.interaction_state == "ready_for_arbiter"
     assert confirmed.handoff_ready is True
     assert confirmed.missing_inputs == []
+    payload = confirmed.to_dict()
+    assert payload["operator_id"] == ""
+    assert payload["robot_id"] == "dog-1"
+    assert payload["readiness"]["status"] == "ready_for_runtime_handoff"
+    assert payload["readiness"]["can_submit_to_runtime"] is True
+    assert payload["readiness"]["blocked_by"] == []
+    assert "submit_to_runtime_arbiter" in payload["readiness"]["allowed_next_actions"]
+    assert payload["handoff_contract"]["confirmed"] is True
+    assert payload["handoff_contract"]["handoff_ready"] is True
+    assert payload["handoff_contract"]["blocked_by"] == []
+    assert payload["handoff_contract"]["world_state_snapshot_id"].startswith("world-")
+    assert payload["world_state_snapshot_id"] == payload["handoff_contract"]["world_state_snapshot_id"]
     assert any(
         step["status"] == "ready"
         for step in confirmed.steps
@@ -243,6 +317,8 @@ def test_cognitive_planner_cancels_existing_session() -> None:
     assert cancelled.handoff_ready is False
     assert cancelled.mission is None
     assert cancelled.session["confirmation_status"] == "cancelled"
+    assert cancelled.readiness["status"] == "cancelled"
+    assert cancelled.handoff_contract["can_dispatch_hardware"] is False
 
 
 def test_perception_sync_reads_pulse_detections_and_robot_state() -> None:

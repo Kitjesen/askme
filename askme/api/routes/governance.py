@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 GovernancePayload = Callable[[], dict[str, Any]]
+IdentityReadinessPayload = Callable[[], dict[str, Any]]
 CurrentOperatorPayload = Callable[..., dict[str, Any]]
 AuthorizationPayload = Callable[..., dict[str, Any]]
 MissionJsonWithStatus = Callable[..., JSONResponse]
@@ -19,6 +20,7 @@ def register_governance_routes(
     app: FastAPI,
     *,
     governance_payload: GovernancePayload,
+    identity_readiness_payload: IdentityReadinessPayload,
     current_operator_payload: CurrentOperatorPayload,
     authorization_payload: AuthorizationPayload,
     mission_json: MissionJsonWithStatus,
@@ -32,6 +34,14 @@ def register_governance_routes(
 
     @app.options("/api/governance/operator-directory", include_in_schema=False)
     async def operator_directory_cors() -> Response:
+        return cors_options_response("GET, OPTIONS")
+
+    @app.get("/api/governance/identity-readiness", tags=["Governance"])
+    async def identity_readiness() -> JSONResponse:
+        return mission_json(identity_readiness_payload())
+
+    @app.options("/api/governance/identity-readiness", include_in_schema=False)
+    async def identity_readiness_cors() -> Response:
         return cors_options_response("GET, OPTIONS")
 
     @app.get("/api/governance/current-operator", tags=["Governance"])

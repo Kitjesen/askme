@@ -48,5 +48,21 @@ class ToolsModule(Module):
 
         logger.info("ToolsModule: built (%d tools)", len(self.registry))
 
+    async def stop(self) -> None:
+        registry = getattr(self, "registry", None)
+        shutdown = getattr(registry, "shutdown", None)
+        if callable(shutdown):
+            shutdown(wait=False, cancel_futures=True)
+
     def health(self) -> dict[str, Any]:
-        return {"status": "ok", "tool_count": len(self.registry)}
+        diagnostics = self.registry.diagnostics()
+        return {
+            "status": "ok",
+            "tool_count": diagnostics["tool_count"],
+            "executor": diagnostics["executor"],
+            "cooldown_count": diagnostics["cooldown_count"],
+            "pending_approval": diagnostics["pending_approval"],
+            "rate_limit": diagnostics.get("rate_limit", {}),
+            "circuit_breakers": diagnostics.get("circuit_breakers", {}),
+            "background_jobs": diagnostics.get("background_jobs", {}),
+        }

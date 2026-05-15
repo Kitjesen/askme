@@ -71,7 +71,15 @@ class AuditExportService:
         operator_id: str = "",
         action: str = "",
         outcome: str = "",
+        tenant_id: str = "",
+        delivery_namespace: str = "",
+        customer_id: str = "",
+        project_id: str = "",
+        site_id: str = "",
+        managed_object_id: str = "",
         q: str = "",
+        since: str = "",
+        until: str = "",
         deliver: bool = False,
         webhook_url: str = "",
     ) -> dict[str, Any]:
@@ -81,7 +89,15 @@ class AuditExportService:
             operator_id=operator_id,
             action=action,
             outcome=outcome,
+            tenant_id=tenant_id,
+            delivery_namespace=delivery_namespace,
+            customer_id=customer_id,
+            project_id=project_id,
+            site_id=site_id,
+            managed_object_id=managed_object_id,
             q=q,
+            since=since,
+            until=until,
         )
         export_id = self._export_id()
         records = payload.get("records") if isinstance(payload.get("records"), list) else []
@@ -89,11 +105,20 @@ class AuditExportService:
         if content:
             content += "\n"
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        evidence_summary = _evidence_summary(records)
         output_dir = self._export_config.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
         records_path = output_dir / f"{export_id}.jsonl"
         manifest_path = output_dir / f"{export_id}.manifest.json"
         records_path.write_text(content, encoding="utf-8", newline="\n")
+        customer_package = _customer_package_summary(
+            export_id=export_id,
+            payload=payload,
+            evidence_summary=evidence_summary,
+            records_path=records_path,
+            manifest_path=manifest_path,
+            deliver=deliver,
+        )
         manifest = {
             "export_id": export_id,
             "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -101,9 +126,23 @@ class AuditExportService:
             "record_count": len(records),
             "filtered_total": payload.get("filtered_total", len(records)),
             "total": payload.get("total", len(records)),
+            "limit": payload.get("limit", limit),
+            "truncated": bool(payload.get("truncated", False)),
+            "omitted_record_count": int(payload.get("omitted_record_count") or 0),
             "filters": payload.get("filters", {}),
+            "time_window": payload.get("time_window", {}),
             "summary": payload.get("summary", {}),
+            "product_summary": payload.get("product_summary", {}),
+            "customer_report": payload.get("customer_report", {}),
+            "delivery_dossier": payload.get("delivery_dossier", {}),
+            "audit_readiness": payload.get("audit_readiness", {}),
+            "customer_package": customer_package,
+            "review_queue_count": len(payload.get("review_queue") or []),
+            "review_integrity": payload.get("review_integrity", {}),
+            "review_decision_count": _review_decision_count(records),
+            "evidence_summary": evidence_summary,
             "sources": payload.get("sources", {}),
+            "source_health": payload.get("source_health", {}),
             "format": "jsonl",
             "records_path": str(records_path),
             "sha256": content_hash,
@@ -129,6 +168,40 @@ class AuditExportService:
             result["delivery"] = self.deliver_export(manifest, target)
         return result
 
+    def list_exports(self, *, limit: int = 20) -> dict[str, Any]:
+        """Return recent export manifests created on this node."""
+        safe_limit = max(1, min(int(limit or 20), 100))
+        output_dir = self._export_config.output_dir
+        if not output_dir.exists():
+            return {
+                "exports": [],
+                "count": 0,
+                "total": 0,
+                "invalid": 0,
+                "output_dir": str(output_dir),
+            }
+        manifests: list[dict[str, Any]] = []
+        invalid = 0
+        for path in output_dir.glob("*.manifest.json"):
+            try:
+                item = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                invalid += 1
+                continue
+            if not isinstance(item, dict):
+                invalid += 1
+                continue
+            manifests.append(_public_export_manifest(item, manifest_path=path))
+        manifests.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        visible = manifests[:safe_limit]
+        return {
+            "exports": visible,
+            "count": len(visible),
+            "total": len(manifests),
+            "invalid": invalid,
+            "output_dir": str(output_dir),
+        }
+
     def deliver_export(self, manifest: dict[str, Any], webhook_url: str) -> dict[str, Any]:
         if not webhook_url:
             return {"sent": False, "reason": "webhook_url_missing"}
@@ -145,7 +218,7 @@ class AuditExportService:
             headers["X-Askme-Audit-Signature-Alg"] = "hmac-sha256"
             headers["X-Askme-Audit-Signature-Key-Id"] = self._export_config.signature_key_id
         try:
-            return self._post_json(
+            delivery = self._post_json(
                 webhook_url,
                 body,
                 headers,
@@ -160,6 +233,15 @@ class AuditExportService:
             }
             self._queue_delivery_retry(webhook_url, body, headers, delivery)
             return delivery
+        if not delivery.get("sent"):
+            delivery = {
+                **delivery,
+                "sent": False,
+                "reason": delivery.get("reason") or "webhook_delivery_unsent",
+                "webhook_url": delivery.get("webhook_url") or webhook_url,
+            }
+            self._queue_delivery_retry(webhook_url, body, headers, delivery)
+        return delivery
 
     def retry_status(self, *, limit: int = 50) -> dict[str, Any]:
         """Return a customer-safe summary of pending export delivery retries."""
@@ -429,6 +511,182 @@ class AuditExportService:
 def _sign_payload(payload: dict[str, Any], *, secret: str) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hmac.new(secret.encode("utf-8"), encoded.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _review_decision_count(records: list[dict[str, Any]]) -> int:
+    return sum(1 for item in records if isinstance(item.get("review_decision"), dict))
+
+
+def _public_export_manifest(manifest: dict[str, Any], *, manifest_path: Path) -> dict[str, Any]:
+    return {
+        "export_id": str(manifest.get("export_id") or ""),
+        "created_at": str(manifest.get("created_at") or ""),
+        "actor_id": str(manifest.get("actor_id") or ""),
+        "record_count": int(manifest.get("record_count") or 0),
+        "review_queue_count": int(manifest.get("review_queue_count") or 0),
+        "review_decision_count": int(manifest.get("review_decision_count") or 0),
+        "evidence_summary": (
+            manifest.get("evidence_summary")
+            if isinstance(manifest.get("evidence_summary"), dict)
+            else {}
+        ),
+        "product_summary": (
+            manifest.get("product_summary")
+            if isinstance(manifest.get("product_summary"), dict)
+            else {}
+        ),
+        "customer_report": (
+            manifest.get("customer_report")
+            if isinstance(manifest.get("customer_report"), dict)
+            else {}
+        ),
+        "delivery_dossier": (
+            manifest.get("delivery_dossier")
+            if isinstance(manifest.get("delivery_dossier"), dict)
+            else {}
+        ),
+        "audit_readiness": (
+            manifest.get("audit_readiness")
+            if isinstance(manifest.get("audit_readiness"), dict)
+            else {}
+        ),
+        "customer_package": (
+            manifest.get("customer_package")
+            if isinstance(manifest.get("customer_package"), dict)
+            else {}
+        ),
+        "filters": manifest.get("filters") if isinstance(manifest.get("filters"), dict) else {},
+        "time_window": (
+            manifest.get("time_window")
+            if isinstance(manifest.get("time_window"), dict)
+            else {}
+        ),
+        "source_health": (
+            manifest.get("source_health")
+            if isinstance(manifest.get("source_health"), dict)
+            else {}
+        ),
+        "sha256": str(manifest.get("sha256") or ""),
+        "signature_alg": str(manifest.get("signature_alg") or ""),
+        "signature_key_id": str(manifest.get("signature_key_id") or ""),
+        "records_path": str(manifest.get("records_path") or ""),
+        "manifest_path": str(manifest_path),
+    }
+
+
+def _customer_package_summary(
+    *,
+    export_id: str,
+    payload: dict[str, Any],
+    evidence_summary: dict[str, Any],
+    records_path: Path,
+    manifest_path: Path,
+    deliver: bool,
+) -> dict[str, Any]:
+    report = payload.get("customer_report") if isinstance(payload.get("customer_report"), dict) else {}
+    readiness = payload.get("audit_readiness") if isinstance(payload.get("audit_readiness"), dict) else {}
+    product = payload.get("product_summary") if isinstance(payload.get("product_summary"), dict) else {}
+    dossier = payload.get("delivery_dossier") if isinstance(payload.get("delivery_dossier"), dict) else {}
+    ready = (
+        bool(report.get("customer_ready"))
+        and readiness.get("status") == "ready"
+        and evidence_summary.get("ready") is not False
+    )
+    return {
+        "package_name": "AskMe 客户验收审计包",
+        "export_id": export_id,
+        "acceptance_status": "ready" if ready else "needs_action",
+        "acceptance_label": "可提交客户验收" if ready else "需补齐后再提交",
+        "handoff_message": (
+            "本审计包可随项目验收、试点复盘或异常闭环材料交付。"
+            if ready
+            else "本审计包仍有复核、证据或审计源问题，暂不建议提交客户。"
+        ),
+        "customer_status": report.get("status_label") or product.get("customer_status_label") or "",
+        "record_count": int(payload.get("count") or 0),
+        "filtered_total": int(payload.get("filtered_total") or 0),
+        "review_queue_count": int(product.get("requires_review_count") or 0),
+        "evidence_ready": bool(evidence_summary.get("ready", True)),
+        "evidence_missing_count": int(evidence_summary.get("local_missing_count") or 0),
+        "acceptance_summary": report.get("acceptance_summary") or {},
+        "verification_checklist": report.get("acceptance_checklist") or [],
+        "delivery_contract": {
+            "customer_claim": dossier.get("customer_claim") or "",
+            "allowed_uses": dossier.get("allowed_uses") if isinstance(dossier.get("allowed_uses"), list) else [],
+            "blocked_uses": dossier.get("blocked_uses") if isinstance(dossier.get("blocked_uses"), list) else [],
+            "handoff_owner": dossier.get("handoff_owner") or "",
+            "next_step": dossier.get("next_step") or "",
+        },
+        "files": [
+            {
+                "label": "审计记录 JSONL",
+                "path": str(records_path),
+                "purpose": "逐条记录现场处置、运行控制和能力变更审计事件。",
+            },
+            {
+                "label": "审计包 Manifest",
+                "path": str(manifest_path),
+                "purpose": "记录筛选条件、哈希、签名、证据摘要和交付状态。",
+            },
+        ],
+        "delivery_mode": "webhook_and_local_archive" if deliver else "local_archive",
+    }
+
+
+def _evidence_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    refs = [
+        ref
+        for record in records
+        for ref in (record.get("evidence_refs") if isinstance(record.get("evidence_refs"), list) else [])
+        if isinstance(ref, dict) and str(ref.get("path") or "").strip()
+    ]
+    local_available = 0
+    local_missing = 0
+    remote = 0
+    api_refs = 0
+    labels: dict[str, int] = {}
+    for ref in refs:
+        label = str(ref.get("label") or ref.get("type") or "evidence").strip() or "evidence"
+        labels[label] = labels.get(label, 0) + 1
+        path = str(ref.get("path") or "").strip()
+        if path.startswith(("http://", "https://")):
+            remote += 1
+            continue
+        if path.startswith("/api/"):
+            api_refs += 1
+            continue
+        if _local_evidence_exists(path):
+            local_available += 1
+        else:
+            local_missing += 1
+    return {
+        "ref_count": len(refs),
+        "local_available_count": local_available,
+        "local_missing_count": local_missing,
+        "remote_count": remote,
+        "api_ref_count": api_refs,
+        "labels": dict(sorted(labels.items())),
+        "ready": local_missing == 0,
+    }
+
+
+def _local_evidence_exists(path: str) -> bool:
+    text = str(path or "").strip().replace("\\", "/")
+    if not text or "\x00" in text:
+        return False
+    candidate = Path(text)
+    cwd = Path.cwd().resolve()
+    allowed_roots = {(cwd / name).resolve() for name in ("artifacts", "output", "data")}
+    if candidate.is_absolute():
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return False
+    else:
+        if not candidate.parts or candidate.parts[0] not in {"artifacts", "output", "data"}:
+            return False
+        resolved = (cwd / candidate).resolve()
+    return any(resolved == root or root in resolved.parents for root in allowed_roots) and resolved.is_file()
 
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout_s: float) -> dict[str, Any]:

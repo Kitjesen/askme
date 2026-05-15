@@ -28,6 +28,18 @@ def test_draft_inspection_patrol_requires_confirmation() -> None:
     assert all("cmd_vel" not in step.capability for step in plan.steps)
 
 
+def test_draft_chinese_escort_becomes_navigation_mission() -> None:
+    service = MissionService()
+
+    plan = service.draft("请带我去梵木咖啡", robot_id="dog-1")
+
+    assert plan.mission_type == "navigate_to"
+    assert plan.risk_tier == "high"
+    assert plan.requires_confirmation is True
+    assert plan.steps[1].action == "plan_route"
+    assert any(step.target == "梵木咖啡" for step in plan.steps)
+
+
 def test_dry_run_submit_does_not_call_runtime(monkeypatch) -> None:
     service = MissionService({
         "runtime": {

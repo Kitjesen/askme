@@ -80,6 +80,27 @@ def register_runtime_routes(
     async def runtime_runs() -> JSONResponse:
         return await _runtime_get(dispatch_runtime, json_error, cors_headers, "runtime_list_payload")
 
+    @app.post("/api/runtime/handoff", tags=["Runtime"])
+    async def runtime_handoff_submit(request: Request) -> JSONResponse:
+        try:
+            body = await optional_json_body(request)
+            failure = authorize(request, body, "runtime:submit")
+            if failure is not None:
+                return failure
+            plan = _handoff_plan_from_body(body)
+            if plan is None:
+                return json_error(
+                    "runtime handoff request requires a plan or runtime_handoff_plan object",
+                    status_code=400,
+                )
+            payload = await dispatch_runtime("submit_plan_payload", plan)
+            status_code = 200 if payload.get("accepted", True) else 422
+            return JSONResponse(payload, status_code=status_code, headers={"Cache-Control": "no-store", **cors_headers})
+        except RuntimeError as exc:
+            return json_error(str(exc), status_code=503)
+        except Exception as exc:
+            return json_error(str(exc), status_code=500)
+
     @app.get("/api/runtime/runs/{run_id}", tags=["Runtime"])
     async def runtime_run_get(run_id: str) -> JSONResponse:
         return await _runtime_get(dispatch_runtime, json_error, cors_headers, "runtime_get_payload", run_id)
@@ -155,6 +176,10 @@ def register_runtime_routes(
     async def runtime_collection_cors() -> Response:
         return cors_options_response("GET, OPTIONS")
 
+    @app.options("/api/runtime/handoff", include_in_schema=False)
+    async def runtime_handoff_submit_cors() -> Response:
+        return cors_options_response("POST, OPTIONS")
+
     @app.options("/api/runtime/runs/{run_id}", include_in_schema=False)
     @app.options("/api/runtime/runs/{run_id}/report", include_in_schema=False)
     @app.options("/api/runtime/runs/{run_id}/pause", include_in_schema=False)
@@ -214,6 +239,16 @@ async def _runtime_action(
 
 def _sse_packet(event_name: str, payload: dict[str, Any]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+def _handoff_plan_from_body(body: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("plan", "runtime_handoff_plan", "source_plan"):
+        value = body.get(key)
+        if isinstance(value, dict):
+            return dict(value)
+    if "plan_id" in body and isinstance(body.get("mission"), dict):
+        return dict(body)
+    return None
 
 
 def _truthy_query(value: Any) -> bool:

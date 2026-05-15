@@ -593,6 +593,37 @@ async def test_wire_result_has_diagnostics():
 # ── Module.__init__ port pre-initialisation ─────────
 
 
+async def test_flow_stats_reports_wire_result_counts():
+    class MissingOptionalConsumer(Module):
+        name = "missing_optional_consumer"
+        pose: In[PoseData]
+
+        def build(self, cfg, registry):
+            pass
+
+    rt = (
+        Runtime.use(SensorBus)
+        + Runtime.use(DetectionConsumer)
+        + Runtime.use(RequiredConsumer)
+        + Runtime.use(MissingOptionalConsumer)
+    )
+    app = await rt.build()
+
+    stats = app.flow_stats()
+
+    assert stats["wired_ports"] == 2
+    assert stats["wired_by_consumer"] == {
+        "det_consumer": 1,
+        "req_consumer": 1,
+    }
+    assert stats["wired_by_provider"] == {"sensor_bus": 2}
+    assert stats["unwired_required_ports"] == 0
+    assert stats["unwired_optional_ports"] == 1
+    assert stats["orphan_providers"] == 1
+    assert stats["orphan_provider_ports"] == 1
+    assert stats["semantic_matches"] == 0
+
+
 def test_init_presets_in_ports_to_none():
     """Module() without Runtime.build() leaves In ports accessible as None.
 

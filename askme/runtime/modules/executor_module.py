@@ -71,6 +71,7 @@ class ExecutorModule(Module):
     def health(self) -> dict[str, Any]:
         shell = getattr(self, "shell", None)
         profile = getattr(shell, "_profile", None)
+        last_run_summary = shell.last_run_summary() if shell is not None else {}
         return {
             "status": "ok",
             "agent_shell_enabled": shell is not None,
@@ -80,4 +81,5 @@ class ExecutorModule(Module):
             "max_iterations": getattr(shell, "_iteration_limit", None),
             "timeout_seconds": getattr(shell, "_default_timeout", None),
             "workspace": str(getattr(shell, "_workspace", "")),
+            "last_run": last_run_summary,
         }

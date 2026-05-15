@@ -107,6 +107,48 @@ class TestValidateConfigNumericRules:
             cfg = {**_VALID_BASE, "conversation": {"max_history": val}}
             assert validate_config(cfg) == [], f"Expected no errors for max_history={val}"
 
+    def test_conversation_chat_timeout_non_numeric_is_error(self):
+        cfg = {**_VALID_BASE, "conversation": {"chat_timeout_s": "slow"}}
+        errors = validate_config(cfg)
+        assert any("conversation.chat_timeout_s" in e for e in errors)
+
+    def test_conversation_timeouts_allow_zero_as_disabled(self):
+        cfg = {
+            **_VALID_BASE,
+            "conversation": {
+                "chat_timeout_s": 0,
+                "runtime_voice_turn_timeout_s": 0,
+            },
+        }
+        assert validate_config(cfg) == []
+
+    def test_conversation_runtime_timeout_negative_is_error(self):
+        cfg = {**_VALID_BASE, "conversation": {"runtime_voice_turn_timeout_s": -1}}
+        errors = validate_config(cfg)
+        assert any("conversation.runtime_voice_turn_timeout_s" in e for e in errors)
+
+    def test_conversation_slow_threshold_negative_is_error(self):
+        cfg = {**_VALID_BASE, "conversation": {"chat_slow_threshold_ms": -1}}
+        errors = validate_config(cfg)
+        assert any("conversation.chat_slow_threshold_ms" in e for e in errors)
+
+    def test_conversation_diagnostics_history_limit_range(self):
+        assert validate_config({
+            **_VALID_BASE,
+            "conversation": {"chat_diagnostics_history_limit": 1},
+        }) == []
+        errors = validate_config({
+            **_VALID_BASE,
+            "conversation": {"chat_diagnostics_history_limit": 0},
+        })
+        assert any("conversation.chat_diagnostics_history_limit" in e for e in errors)
+
+    def test_conversation_chat_max_concurrency_range(self):
+        assert validate_config({**_VALID_BASE, "conversation": {"chat_max_concurrency": 1}}) == []
+        assert validate_config({**_VALID_BASE, "conversation": {"chat_max_concurrency": 256}}) == []
+        errors = validate_config({**_VALID_BASE, "conversation": {"chat_max_concurrency": 0}})
+        assert any("conversation.chat_max_concurrency" in e for e in errors)
+
     def test_health_port_below_1024_is_error(self):
         cfg = {**_VALID_BASE, "health_server": {"port": 999}}
         errors = validate_config(cfg)
@@ -135,6 +177,87 @@ class TestValidateConfigNumericRules:
         for level in ("normal", "dangerous", "critical"):
             cfg = {**_VALID_BASE, "tools": {"general_chat_max_safety_level": level}}
             assert validate_config(cfg) == [], f"Expected no errors for level={level}"
+
+    def test_tools_execution_control_ranges(self):
+        cfg = {
+            **_VALID_BASE,
+            "tools": {
+                "executor_max_workers": 1,
+                "queue_max_size": 256,
+                "job_history_limit": 100,
+                "rate_limit_per_minute": 0,
+                "circuit_failure_threshold": 3,
+                "circuit_cooldown_seconds": 30.0,
+                "priority_by_safety": {"critical": 0, "dangerous": 50, "normal": 100},
+            },
+        }
+        assert validate_config(cfg) == []
+
+    def test_tools_execution_control_invalid_values_are_errors(self):
+        cfg = {
+            **_VALID_BASE,
+            "tools": {
+                "executor_max_workers": 0,
+                "queue_max_size": "many",
+                "rate_limit_per_minute": -1,
+                "priority_by_safety": {"unknown": 1, "normal": "first"},
+            },
+        }
+        errors = validate_config(cfg)
+        assert any("tools.executor_max_workers" in e for e in errors)
+        assert any("tools.queue_max_size" in e for e in errors)
+        assert any("tools.rate_limit_per_minute" in e for e in errors)
+        assert any("tools.priority_by_safety" in e for e in errors)
+
+    def test_memory_backend_allows_auto_and_vector(self):
+        for backend in ("auto", "vector"):
+            cfg = {**_VALID_BASE, "memory": {"backend": backend}}
+            assert validate_config(cfg) == []
+
+    def test_memory_backend_invalid_is_error(self):
+        cfg = {**_VALID_BASE, "memory": {"backend": "unknown"}}
+        errors = validate_config(cfg)
+        assert any("memory.backend" in e for e in errors)
+
+    def test_memory_auto_backend_order_must_be_list(self):
+        cfg = {**_VALID_BASE, "memory": {"auto_backend_order": "robotmem"}}
+        errors = validate_config(cfg)
+        assert any("memory.auto_backend_order" in e for e in errors)
+
+    def test_memory_auto_backend_order_invalid_entry_is_error(self):
+        cfg = {
+            **_VALID_BASE,
+            "memory": {"auto_backend_order": ["robotmem", "unknown"]},
+        }
+        errors = validate_config(cfg)
+        assert any("memory.auto_backend_order" in e for e in errors)
+
+    def test_memory_section_must_be_mapping(self):
+        cfg = {**_VALID_BASE, "memory": "enabled"}
+        errors = validate_config(cfg)
+        assert any("memory must be a mapping" in e for e in errors)
+
+    def test_memory_retrieve_cache_ttl_range(self):
+        assert validate_config({
+            **_VALID_BASE,
+            "memory": {"retrieve_cache_ttl_s": 0},
+        }) == []
+        errors = validate_config({
+            **_VALID_BASE,
+            "memory": {"retrieve_cache_ttl_s": -0.1},
+        })
+        assert any("memory.retrieve_cache_ttl_s" in e for e in errors)
+
+    def test_memory_retrieve_cache_max_entries_range(self):
+        assert validate_config({
+            **_VALID_BASE,
+            "memory": {"retrieve_cache_max_entries": 128},
+        }) == []
+        errors = validate_config({
+            **_VALID_BASE,
+            "memory": {"retrieve_cache_max_entries": 0},
+        })
+        assert any("memory.retrieve_cache_max_entries" in e for e in errors)
 
     def test_empty_config_does_not_raise(self):
         errors = validate_config({})

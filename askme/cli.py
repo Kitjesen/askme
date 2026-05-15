@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     runtime_run = runtime_subparsers.add_parser("run", help="Run the interactive runtime")
     _add_runtime_selection_args(runtime_run)
+
+    runtime_blueprints = runtime_subparsers.add_parser(
+        "blueprints",
+        help="List local runtime blueprint product contracts",
+    )
+    runtime_blueprints.add_argument(
+        "--name",
+        default="",
+        help="Inspect one blueprint by name or alias",
+    )
+    runtime_blueprints.add_argument(
+        "--customer-visible",
+        action="store_true",
+        help="Show only customer-visible blueprints",
+    )
+    runtime_blueprints.add_argument(
+        "--delivery-package",
+        action="store_true",
+        help="Include product delivery package, handoff, and acceptance checklist details",
+    )
+    runtime_blueprints.add_argument(
+        "--output",
+        default="",
+        help="Write the blueprint catalog or delivery package JSON to this path",
+    )
+    runtime_blueprints.add_argument("--json", action="store_true", help="Print raw JSON")
 
     runtime_status = runtime_subparsers.add_parser("status", help="Query a running runtime health endpoint")
     runtime_status.add_argument(
@@ -396,6 +423,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Maximum number of events to process (0 means all)",
     )
+    runtime_field_ingest_file.add_argument(
+        "--device-secret",
+        action="append",
+        default=[],
+        metavar="DEVICE_ID=SECRET",
+        help="Sign normalized events for a registered device id, source, or * wildcard",
+    )
+    runtime_field_ingest_file.add_argument(
+        "--site-profile",
+        default="",
+        help="Load device HMAC secrets from this site profile's device secret_env entries",
+    )
     runtime_field_ingest_file.add_argument("--json", action="store_true", help="Print raw JSON")
     runtime_field_ingest_bridge = runtime_subparsers.add_parser(
         "field-ingest-bridge",
@@ -439,7 +478,44 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DEVICE_ID=SECRET",
         help="Sign bridged events for a registered device id, source, or * wildcard",
     )
+    runtime_field_ingest_bridge.add_argument(
+        "--site-profile",
+        default="",
+        help="Load device HMAC secrets from this site profile's device secret_env entries",
+    )
     runtime_field_ingest_bridge.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_field_sign_device_payload = runtime_subparsers.add_parser(
+        "field-sign-device-payload",
+        help="Sign camera, sensor, or robot ingest JSON/JSONL with a field-device HMAC",
+    )
+    runtime_field_sign_device_payload.add_argument("source", help="JSON object/array or JSONL/NDJSON file")
+    runtime_field_sign_device_payload.add_argument(
+        "--output",
+        default="",
+        help="Write signed JSON/JSONL to this path. Omit to print the signed payload.",
+    )
+    runtime_field_sign_device_payload.add_argument(
+        "--device-id",
+        default="",
+        help="Override or add device_id before signing",
+    )
+    runtime_field_sign_device_payload.add_argument(
+        "--secret",
+        default="",
+        help="HMAC secret value. Prefer --secret-env for shared scripts.",
+    )
+    runtime_field_sign_device_payload.add_argument(
+        "--secret-env",
+        default="",
+        help="Environment variable containing the HMAC secret",
+    )
+    runtime_field_sign_device_payload.add_argument(
+        "--timestamp",
+        type=float,
+        default=0.0,
+        help="Unix signature timestamp. Defaults to now.",
+    )
+    runtime_field_sign_device_payload.add_argument("--json", action="store_true", help="Print raw JSON")
     runtime_field_ingest_smoke = runtime_subparsers.add_parser(
         "field-ingest-smoke",
         help="Run an end-to-end smoke test for device JSONL -> bridge -> /api/field/ingest",
@@ -687,7 +763,79 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="HMAC secret for local field action audit verification",
     )
+    runtime_field_readiness.add_argument(
+        "--review-path",
+        default="",
+        help="Unified audit review JSONL path used to clear readiness review blockers",
+    )
     runtime_field_readiness.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_field_device_trust = runtime_subparsers.add_parser(
+        "field-device-trust",
+        help="Inspect registered field-device HMAC secret readiness from a site profile",
+    )
+    runtime_field_device_trust.add_argument(
+        "--site-profile",
+        default="deploy/site-profiles/park-demo.yaml",
+        help="Field site profile YAML containing devices and secret_env values",
+    )
+    runtime_field_device_trust.add_argument(
+        "--show-commands",
+        action="store_true",
+        help="Print signing commands for every registered device",
+    )
+    runtime_field_device_trust.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_field_site_env_template = runtime_subparsers.add_parser(
+        "field-site-env-template",
+        help="Generate a .env template from a field site profile",
+    )
+    runtime_field_site_env_template.add_argument(
+        "--site-profile",
+        default="deploy/site-profiles/park-demo.yaml",
+        help="Field site profile YAML containing responder and device *_env values",
+    )
+    runtime_field_site_env_template.add_argument(
+        "--output",
+        default="",
+        help="Write the generated .env template to this path. Prints it when omitted.",
+    )
+    runtime_field_site_env_template.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_audit_events = runtime_subparsers.add_parser(
+        "audit-events",
+        help="Inspect the unified product audit timeline and review queue",
+    )
+    runtime_audit_events.add_argument("--limit", type=int, default=100)
+    runtime_audit_events.add_argument("--source", default="")
+    runtime_audit_events.add_argument("--operator-id", default="")
+    runtime_audit_events.add_argument("--action", default="")
+    runtime_audit_events.add_argument("--outcome", default="")
+    runtime_audit_events.add_argument("--q", default="")
+    runtime_audit_events.add_argument("--since", default="")
+    runtime_audit_events.add_argument("--until", default="")
+    _add_unified_audit_path_args(runtime_audit_events)
+    runtime_audit_events.add_argument(
+        "--review-queue-only",
+        action="store_true",
+        help="Print only records requiring supervisor review in text mode",
+    )
+    runtime_audit_events.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_audit_review = runtime_subparsers.add_parser(
+        "audit-review",
+        help="Append a supervisor review decision for one unified audit record",
+    )
+    runtime_audit_review.add_argument("record_id", help="Unified audit record id, e.g. field:2")
+    runtime_audit_review.add_argument(
+        "decision",
+        choices=["accepted", "resolved", "waived", "false_positive", "escalated", "rejected"],
+        help="Supervisor decision to append to the audit review log",
+    )
+    runtime_audit_review.add_argument(
+        "--reviewer-id",
+        default="supervisor-1",
+        help="Reviewer/operator id written to the append-only review log",
+    )
+    runtime_audit_review.add_argument("--note", default="", help="Short review note")
+    _add_unified_audit_path_args(runtime_audit_review)
+    runtime_audit_review.add_argument("--json", action="store_true", help="Print raw JSON")
     runtime_field_live_demo = runtime_subparsers.add_parser(
         "field-live-demo",
         help="Run customer field-operation scenarios through the real HTTP API",
@@ -1006,6 +1154,14 @@ def _add_runtime_selection_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_unified_audit_path_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--skill-audit", default="", help="Override skill audit JSONL path")
+    parser.add_argument("--field-action-audit", default="", help="Override field action audit JSONL path")
+    parser.add_argument("--field-event-archive", default="", help="Override field event archive JSONL path")
+    parser.add_argument("--runtime-audit", default="", help="Override runtime handoff audit JSONL path")
+    parser.add_argument("--review-path", default="", help="Override unified audit review JSONL path")
+
+
 def _add_mission_context_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--operator-id",
@@ -1103,6 +1259,24 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
     if args.runtime_command == "run":
         voice_mode, robot_mode = _resolve_runtime_flags(args)
         _run_interactive_runtime(voice_mode=voice_mode, robot_mode=robot_mode)
+        return
+
+    if args.runtime_command == "blueprints":
+        payload = _runtime_blueprints_payload(
+            name=args.name,
+            customer_visible=True if args.customer_visible else None,
+            delivery_package=args.delivery_package,
+        )
+        if args.output:
+            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.output).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            _emit_runtime_blueprints_summary(payload)
         return
 
     if args.runtime_command == "status":
@@ -1325,6 +1499,10 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
             server=args.server,
             dry_run=args.dry_run,
             limit=args.limit,
+            device_secrets=_resolve_field_device_secrets(
+                args.device_secret,
+                site_profile=args.site_profile,
+            ),
         )
         if args.json:
             _emit_payload(payload, json_output=True)
@@ -1344,7 +1522,10 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
                 dry_run=args.dry_run,
                 limit=args.limit,
                 timeout_s=args.timeout,
-                device_secrets=_parse_device_secret_args(args.device_secret),
+                device_secrets=_resolve_field_device_secrets(
+                    args.device_secret,
+                    site_profile=args.site_profile,
+                ),
             )
             return
         payload = _run_field_ingest_bridge(
@@ -1354,7 +1535,10 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
             dry_run=args.dry_run,
             limit=args.limit,
             timeout_s=args.timeout,
-            device_secrets=_parse_device_secret_args(args.device_secret),
+            device_secrets=_resolve_field_device_secrets(
+                args.device_secret,
+                site_profile=args.site_profile,
+            ),
         )
         if args.json:
             _emit_payload(payload, json_output=True)
@@ -1362,6 +1546,23 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
             _emit_field_ingest_bridge_payload(payload)
         if payload.get("status") == "failed":
             raise SystemExit(1)
+        return
+
+    if args.runtime_command == "field-sign-device-payload":
+        payload = _run_field_sign_device_payload(
+            source=args.source,
+            output=args.output,
+            device_id=args.device_id,
+            secret=args.secret,
+            secret_env=args.secret_env,
+            timestamp=args.timestamp,
+        )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            _emit_field_sign_device_payload(payload)
+        if payload.get("status") != "signed":
+            raise SystemExit(2)
         return
 
     if args.runtime_command == "field-ingest-smoke":
@@ -1483,6 +1684,7 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
             site_profile=args.site_profile,
             check_site_env=args.check_site_env,
             audit_hmac_secret=args.audit_hmac_secret,
+            review_path=args.review_path,
         )
         if args.json:
             _emit_payload(payload, json_output=True)
@@ -1490,6 +1692,79 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
             _emit_field_readiness_payload(payload)
         if payload.get("status") == "blocked":
             raise SystemExit(1)
+        return
+
+    if args.runtime_command == "field-device-trust":
+        payload = _run_field_device_trust(
+            site_profile=args.site_profile,
+        )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            _emit_field_device_trust_payload(
+                payload,
+                show_commands=bool(args.show_commands),
+            )
+        if payload.get("status") == "invalid_profile":
+            raise SystemExit(2)
+        return
+
+    if args.runtime_command == "field-site-env-template":
+        payload = _run_field_site_env_template(
+            site_profile=args.site_profile,
+            output=args.output or "",
+        )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            _emit_field_site_env_template_payload(payload)
+        if payload.get("status") != "ok":
+            raise SystemExit(2)
+        return
+
+    if args.runtime_command == "audit-events":
+        payload = _run_unified_audit_events(
+            limit=args.limit,
+            source=args.source,
+            operator_id=args.operator_id,
+            action=args.action,
+            outcome=args.outcome,
+            q=args.q,
+            since=args.since,
+            until=args.until,
+            skill_audit=args.skill_audit,
+            field_action_audit=args.field_action_audit,
+            field_event_archive=args.field_event_archive,
+            runtime_audit=args.runtime_audit,
+            review_path=args.review_path,
+        )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            _emit_unified_audit_events_payload(
+                payload,
+                review_queue_only=bool(args.review_queue_only),
+            )
+        return
+
+    if args.runtime_command == "audit-review":
+        payload = _run_unified_audit_review(
+            record_id=args.record_id,
+            reviewer_id=args.reviewer_id,
+            decision=args.decision,
+            note=args.note,
+            skill_audit=args.skill_audit,
+            field_action_audit=args.field_action_audit,
+            field_event_archive=args.field_event_archive,
+            runtime_audit=args.runtime_audit,
+            review_path=args.review_path,
+        )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            _emit_unified_audit_review_payload(payload)
+        if payload.get("ok") is not True:
+            raise SystemExit(2)
         return
 
     if args.runtime_command == "field-live-demo":
@@ -1825,6 +2100,115 @@ def _load_local_capabilities(*, voice_mode: bool, robot_mode: bool) -> dict[str,
     )
 
 
+def _runtime_blueprints_payload(
+    *,
+    name: str = "",
+    customer_visible: bool | None = None,
+    delivery_package: bool = False,
+) -> dict[str, Any]:
+    from askme.blueprints import (
+        blueprint_delivery_package,
+        blueprint_readiness,
+        catalog_payload,
+        get_blueprint_spec,
+        inspect_blueprint,
+        list_blueprints,
+    )
+    from askme.config import get_config
+
+    config = get_config()
+
+    if name:
+        spec = get_blueprint_spec(name)
+        items = [
+            {
+                **spec.to_dict(),
+                "inspection": inspect_blueprint(spec.name),
+                "readiness": blueprint_readiness(spec.name, config=config),
+                **(
+                    {"delivery_package": blueprint_delivery_package(spec.name, config=config)}
+                    if delivery_package
+                    else {}
+                ),
+            }
+        ]
+    else:
+        specs = list_blueprints(customer_visible=customer_visible)
+        if customer_visible is None:
+            payload = catalog_payload(config=config)
+            if not delivery_package:
+                for item in payload.get("items", []):
+                    if isinstance(item, dict):
+                        item.pop("delivery_package", None)
+            return payload
+        items = [
+            {
+                **spec.to_dict(),
+                "inspection": inspect_blueprint(spec.name),
+                "readiness": blueprint_readiness(spec.name, config=config),
+                **(
+                    {"delivery_package": blueprint_delivery_package(spec.name, config=config)}
+                    if delivery_package
+                    else {}
+                ),
+            }
+            for spec in specs
+        ]
+    return {
+        "summary": {
+            "blueprint_count": len(items),
+            "customer_visible_count": sum(1 for item in items if item["customer_visible"]),
+            "valid_count": sum(1 for item in items if item["inspection"]["valid"]),
+            "ready_for_validation_count": sum(
+                1 for item in items if item["readiness"]["status"] == "ready_for_validation"
+            ),
+            "configuration_incomplete_count": sum(
+                1 for item in items if item["readiness"]["status"] == "configuration_incomplete"
+            ),
+            "pilot_blueprints": [
+                item["name"]
+                for item in items
+                if item["product_stage"] in {"pilot", "lab"}
+            ],
+        },
+        "items": items,
+    }
+
+
+def _emit_runtime_blueprints_summary(payload: dict[str, Any]) -> None:
+    summary = payload.get("summary", {})
+    print(  # noqa: T201
+        "blueprints={blueprint_count} customer_visible={customer_visible_count} valid={valid_count}".format(
+            **summary
+        )
+    )
+    for item in payload.get("items", []):
+        inspection = item.get("inspection", {})
+        print(  # noqa: T201
+            "{name}: {title} | stage={stage} | modules={modules} | valid={valid} | readiness={readiness} | run={run}".format(
+                name=item.get("name"),
+                title=item.get("title"),
+                stage=item.get("product_stage"),
+                modules=inspection.get("module_count"),
+                valid=inspection.get("valid"),
+                readiness=item.get("readiness", {}).get("status", "unknown"),
+                run=item.get("startup_command"),
+            )
+        )
+        package = item.get("delivery_package") if isinstance(item.get("delivery_package"), dict) else {}
+        if package:
+            print(  # noqa: T201
+                "  delivery-package: {package_id} status={status} claim={claim}".format(
+                    package_id=package.get("package_id"),
+                    status=package.get("status"),
+                    claim=package.get("customer_claim"),
+                )
+            )
+            stop_conditions = package.get("stop_conditions")
+            if isinstance(stop_conditions, list) and stop_conditions:
+                print(f"  stop: {stop_conditions[0]}")  # noqa: T201
+
+
 def _run_voice_health_check(*, live: bool) -> dict[str, Any]:
     from askme.voice.health_check import run_voice_health
 
@@ -2022,8 +2406,10 @@ def _run_field_ingest_file(
     server: str,
     dry_run: bool,
     limit: int,
+    device_secrets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     from askme.pipeline.field_ingest_adapters import normalize_field_ingest_payload
+    from askme.pipeline.field_ingest_bridge import sign_field_ingest_payload
 
     events = _load_field_ingest_events(Path(source))
     if limit > 0:
@@ -2031,12 +2417,17 @@ def _run_field_ingest_file(
     base_url = _normalise_server_url(server)
     results: list[dict[str, Any]] = []
     failures = 0
+    signed_count = 0
     for index, event in enumerate(events, start=1):
         normalized = normalize_field_ingest_payload(event)
+        normalized, signing = sign_field_ingest_payload(normalized, device_secrets or {})
+        if signing.get("signed"):
+            signed_count += 1
         item: dict[str, Any] = {
             "index": index,
             "normalized": normalized,
             "posted": False,
+            "device_signing": signing,
         }
         if dry_run:
             item["status"] = "dry_run"
@@ -2065,6 +2456,7 @@ def _run_field_ingest_file(
         "dry_run": dry_run,
         "count": len(events),
         "failed": failures,
+        "signed": signed_count,
         "results": results,
     }
 
@@ -2074,6 +2466,7 @@ def _emit_field_ingest_file_payload(payload: dict[str, Any]) -> None:
         "field-ingest-file: "
         f"{payload.get('status')} count={payload.get('count', 0)} "
         f"failed={payload.get('failed', 0)} "
+        f"signed={payload.get('signed', 0)} "
         f"dry_run={payload.get('dry_run')}"
     )
     for item in payload.get("results", [])[:20]:
@@ -2146,6 +2539,37 @@ def _parse_device_secret_args(values: list[str] | tuple[str, ...] | None) -> dic
     return secrets
 
 
+def _resolve_field_device_secrets(
+    values: list[str] | tuple[str, ...] | None,
+    *,
+    site_profile: str = "",
+) -> dict[str, str]:
+    secrets = _device_secrets_from_site_profile(site_profile)
+    secrets.update(_parse_device_secret_args(values))
+    return secrets
+
+
+def _device_secrets_from_site_profile(site_profile: str) -> dict[str, str]:
+    profile_path = str(site_profile or "").strip()
+    if not profile_path:
+        return {}
+    from askme.pipeline.field_site_profile import load_field_site_profile
+
+    profile = load_field_site_profile(Path(profile_path))
+    devices = profile.get("devices") if isinstance(profile.get("devices"), dict) else {}
+    secrets: dict[str, str] = {}
+    for device_id, device in devices.items():
+        if not isinstance(device, dict):
+            continue
+        secret_env = str(device.get("secret_env") or "").strip()
+        if not secret_env:
+            continue
+        secret = str(os.getenv(secret_env) or "").strip()
+        if secret:
+            secrets[str(device_id)] = secret
+    return secrets
+
+
 def _emit_field_ingest_bridge_payload(payload: dict[str, Any]) -> None:
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     print(
@@ -2178,6 +2602,114 @@ def _emit_field_ingest_bridge_payload(payload: dict[str, Any]) -> None:
             f"scenario={item.get('scenario_id') or item.get('normalized', {}).get('scenario_id') or '-'} "
             f"event={item.get('event_id') or '-'}"
         )
+
+
+def _run_field_sign_device_payload(
+    *,
+    source: str,
+    output: str,
+    device_id: str,
+    secret: str,
+    secret_env: str,
+    timestamp: float,
+) -> dict[str, Any]:
+    from askme.pipeline.field_operations import sign_field_device_payload
+
+    resolved_secret = _resolve_field_device_signing_secret(secret=secret, secret_env=secret_env)
+    if not resolved_secret:
+        return {
+            "status": "failed",
+            "reason": "device_secret_missing",
+            "source": source,
+            "output": output,
+            "count": 0,
+            "message": "Provide --secret or --secret-env with a configured HMAC secret.",
+        }
+
+    source_path = Path(source)
+    events = _load_field_ingest_events(source_path)
+    signature_timestamp = float(timestamp or time.time())
+    signed_events: list[dict[str, Any]] = []
+    for event in events:
+        signed = dict(event)
+        if device_id:
+            signed["device_id"] = device_id
+        signed.pop("device_signature", None)
+        signed.pop("signature", None)
+        signed.pop("x_signature", None)
+        signed["device_signature_alg"] = "hmac-sha256"
+        signed["device_signature_timestamp"] = signature_timestamp
+        signed["device_signature"] = sign_field_device_payload(signed, secret=resolved_secret)
+        signed_events.append(signed)
+
+    output_path = Path(output) if output else None
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            _field_signed_payload_text(signed_events, source_path=source_path, output_path=output_path),
+            encoding="utf-8",
+            newline="\n",
+        )
+    return {
+        "status": "signed",
+        "source": str(source_path),
+        "output": str(output_path or ""),
+        "count": len(signed_events),
+        "device_id": device_id or _single_device_id(signed_events),
+        "signature_alg": "hmac-sha256",
+        "signature_timestamp": signature_timestamp,
+        "secret_source": f"env:{secret_env}" if secret_env else "argument",
+        "signed_payload": signed_events[0] if len(signed_events) == 1 and output_path is None else None,
+        "signed_payloads": signed_events if len(signed_events) > 1 and output_path is None else None,
+    }
+
+
+def _resolve_field_device_signing_secret(*, secret: str, secret_env: str) -> str:
+    if secret:
+        return str(secret).strip()
+    if not secret_env:
+        return ""
+    return str(os.getenv(str(secret_env).strip()) or "").strip()
+
+
+def _field_signed_payload_text(
+    signed_events: list[dict[str, Any]],
+    *,
+    source_path: Path,
+    output_path: Path,
+) -> str:
+    if output_path.suffix.lower() in {".jsonl", ".ndjson"} or source_path.suffix.lower() in {".jsonl", ".ndjson"}:
+        return "\n".join(json.dumps(event, ensure_ascii=False, sort_keys=True) for event in signed_events) + "\n"
+    payload: dict[str, Any] | list[dict[str, Any]]
+    payload = signed_events[0] if len(signed_events) == 1 else signed_events
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+
+
+def _single_device_id(events: list[dict[str, Any]]) -> str:
+    ids = {str(event.get("device_id") or "").strip() for event in events if event.get("device_id")}
+    return next(iter(ids)) if len(ids) == 1 else ""
+
+
+def _emit_field_sign_device_payload(payload: dict[str, Any]) -> None:
+    print(
+        "field-sign-device-payload: "
+        f"{payload.get('status')} count={payload.get('count', 0)} "
+        f"device={payload.get('device_id') or '-'} "
+        f"alg={payload.get('signature_alg') or '-'} "
+        f"output={payload.get('output') or 'stdout'}"
+    )
+    if payload.get("status") != "signed":
+        print(f"reason: {payload.get('reason') or 'unknown'}")
+        if payload.get("message"):
+            print(f"message: {payload.get('message')}")
+        return
+    signed = payload.get("signed_payload")
+    signed_many = payload.get("signed_payloads")
+    if isinstance(signed, dict):
+        print(json.dumps(signed, ensure_ascii=False, sort_keys=True, indent=2))
+    elif isinstance(signed_many, list):
+        for item in signed_many:
+            print(json.dumps(item, ensure_ascii=False, sort_keys=True))
 
 
 def _resolve_field_action_audit_hmac_secret(hmac_secret: str = "") -> str:
@@ -2471,7 +3003,7 @@ def _run_field_notification_smoke(
                 f"{_normalise_server_url(base_url)}/api/field/notification-test",
                 {
                     "notification_group": group,
-                    "operator_id": "field-notification-smoke",
+                    "operator_id": "supervisor-1",
                     "message": f"Askme现场通知联调：{group}响应组。",
                 },
             )
@@ -2593,7 +3125,7 @@ def _run_field_disposition_smoke(
             closed = _post_json(
                 f"{_normalise_server_url(base_url)}/api/field/events/{event_id}/close",
                 {
-                    "operator_id": "security-1",
+                    "operator_id": "supervisor-1",
                     "note": "现场已复核并完成处置",
                     "supervisor_approved": True,
                     "supervisor_id": "supervisor-1",
@@ -3055,6 +3587,7 @@ def _run_field_readiness(
     site_profile: str = "",
     check_site_env: bool = False,
     audit_hmac_secret: str = "",
+    review_path: str = "",
 ) -> dict[str, Any]:
     if server:
         return _get_json(f"{_normalise_server_url(server)}/api/field/readiness")
@@ -3074,9 +3607,293 @@ def _run_field_readiness(
                 action_audit_path,
                 hmac_secret=audit_hmac_secret,
             ),
+            "audit_review_path": review_path,
         }
     )
     return service.readiness_payload()
+
+
+def _run_field_device_trust(*, site_profile: str) -> dict[str, Any]:
+    from askme.pipeline.field_site_profile import (
+        build_site_profile_report,
+        load_field_site_profile,
+    )
+
+    path = Path(site_profile)
+    try:
+        profile = load_field_site_profile(path)
+        report = build_site_profile_report(path, check_env=True)
+    except Exception as exc:
+        return {
+            "status": "invalid_profile",
+            "site_profile": str(path),
+            "reason": str(exc),
+            "devices": [],
+            "summary": {
+                "registered_device_count": 0,
+                "signature_ready_count": 0,
+                "missing_secret_count": 0,
+            },
+            "next_actions": ["修复站点配置文件后再检查设备信任状态。"],
+        }
+
+    devices = profile.get("devices") if isinstance(profile.get("devices"), dict) else {}
+    rows: list[dict[str, Any]] = []
+    for device_id, device in sorted(devices.items()):
+        if not isinstance(device, dict):
+            continue
+        secret_env = str(device.get("secret_env") or "").strip()
+        secret_configured = bool(secret_env and os.getenv(secret_env))
+        rows.append({
+            "device_id": str(device_id),
+            "name": str(device.get("name") or ""),
+            "source": str(device.get("source") or ""),
+            "zone_id": str(device.get("zone_id") or ""),
+            "secret_env": secret_env,
+            "secret_configured": secret_configured,
+            "require_signature": True,
+            "status": "ready" if secret_configured else "missing_secret",
+            "signing_command": _field_device_signing_command(str(device_id), secret_env),
+        })
+    missing = [row for row in rows if not row["secret_configured"]]
+    valid = report.get("status") == "passed"
+    if not valid:
+        status = "invalid_profile"
+    elif missing:
+        status = "needs_secret"
+    else:
+        status = "ready"
+    return {
+        "status": status,
+        "site_profile": str(path),
+        "profile_valid": valid,
+        "profile_errors": report.get("errors") or [],
+        "profile_warnings": report.get("warnings") or [],
+        "devices": rows,
+        "summary": {
+            "registered_device_count": len(rows),
+            "signature_ready_count": len(rows) - len(missing),
+            "missing_secret_count": len(missing),
+            "missing_secret_envs": sorted(
+                {
+                    str(row.get("secret_env") or "")
+                    for row in missing
+                    if row.get("secret_env")
+                }
+            ),
+        },
+        "next_actions": _field_device_trust_next_actions(status, missing),
+    }
+
+
+def _run_field_site_env_template(*, site_profile: str, output: str = "") -> dict[str, Any]:
+    from askme.pipeline.field_site_profile import (
+        load_field_site_profile,
+        render_site_profile_env_template,
+        site_profile_env_references,
+        validate_field_site_profile,
+    )
+
+    path = Path(site_profile)
+    try:
+        profile = load_field_site_profile(path)
+        validation = validate_field_site_profile(profile, check_env=False)
+        refs = site_profile_env_references(profile)
+        template = render_site_profile_env_template(profile)
+    except Exception as exc:
+        return {
+            "status": "invalid_profile",
+            "site_profile": str(path),
+            "reason": str(exc),
+            "env_count": 0,
+            "configured_count": 0,
+            "missing_count": 0,
+            "env_refs": [],
+            "template": "",
+            "output": "",
+            "next_actions": ["修复站点配置文件后再生成环境变量模板。"],
+        }
+
+    output_path = str(output or "").strip()
+    if output_path:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(template, encoding="utf-8", newline="\n")
+    configured_count = sum(1 for ref in refs if ref.get("configured"))
+    missing_count = len(refs) - configured_count
+    return {
+        "status": "ok" if validation.get("status") == "passed" else "invalid_profile",
+        "site_profile": str(path),
+        "profile_valid": validation.get("status") == "passed",
+        "profile_errors": validation.get("errors") or [],
+        "env_count": len(refs),
+        "configured_count": configured_count,
+        "missing_count": missing_count,
+        "env_refs": refs,
+        "template": "" if output_path else template,
+        "output": output_path,
+        "next_actions": _field_site_env_template_next_actions(
+            profile_valid=validation.get("status") == "passed",
+            missing_count=missing_count,
+            output=output_path,
+        ),
+    }
+
+
+def _field_site_env_template_next_actions(
+    *,
+    profile_valid: bool,
+    missing_count: int,
+    output: str,
+) -> list[str]:
+    if not profile_valid:
+        return ["先修复站点配置文件中的必填项，再生成部署环境模板。"]
+    actions = []
+    if output:
+        actions.append(f"将 {output} 交给现场交付人员填写真实密钥。")
+    else:
+        actions.append("将输出保存为部署环境的 .env 文件，并填写真实密钥。")
+    if missing_count:
+        actions.append("配置完成后运行 field-readiness --check-site-env 验证环境变量是否就绪。")
+    else:
+        actions.append("当前进程已读取到所有引用的环境变量，可继续做现场 readiness 检查。")
+    return actions
+
+
+def _field_device_signing_command(device_id: str, secret_env: str) -> str:
+    secret_arg = f"--secret-env {secret_env}" if secret_env else "--secret <DEVICE_SECRET>"
+    return (
+        "python -m askme runtime field-sign-device-payload device-event.json "
+        f"--device-id {device_id} {secret_arg} --output device-event.signed.json"
+    )
+
+
+def _field_device_trust_next_actions(status: str, missing: list[dict[str, Any]]) -> list[str]:
+    if status == "invalid_profile":
+        return ["修复站点配置文件中的设备、区域、响应组或阈值配置。"]
+    if missing:
+        envs = ", ".join(
+            sorted({str(row.get("secret_env") or "") for row in missing if row.get("secret_env")})
+        )
+        if envs:
+            return [f"在部署环境中配置设备 HMAC secret：{envs}。"]
+        return ["为每个现场设备补充 secret_env，并在部署环境中配置对应 HMAC secret。"]
+    return ["设备 HMAC secret 已就绪，可使用 field-sign-device-payload 生成可信事件。"]
+
+
+def _run_unified_audit_events(
+    *,
+    limit: int,
+    source: str,
+    operator_id: str,
+    action: str,
+    outcome: str,
+    q: str,
+    since: str,
+    until: str,
+    skill_audit: str = "",
+    field_action_audit: str = "",
+    field_event_archive: str = "",
+    runtime_audit: str = "",
+    review_path: str = "",
+) -> dict[str, Any]:
+    from askme.audit import AuditQueryService
+    from askme.config import get_config
+
+    config = get_config()
+    return AuditQueryService(
+        config,
+        paths=_unified_audit_paths_from_cli(
+            config,
+            skill_audit=skill_audit,
+            field_action_audit=field_action_audit,
+            field_event_archive=field_event_archive,
+            runtime_audit=runtime_audit,
+            review_path=review_path,
+        ),
+    ).query(
+        limit=limit,
+        source=source,
+        operator_id=operator_id,
+        action=action,
+        outcome=outcome,
+        q=q,
+        since=since,
+        until=until,
+    )
+
+
+def _run_unified_audit_review(
+    *,
+    record_id: str,
+    reviewer_id: str,
+    decision: str,
+    note: str,
+    skill_audit: str = "",
+    field_action_audit: str = "",
+    field_event_archive: str = "",
+    runtime_audit: str = "",
+    review_path: str = "",
+) -> dict[str, Any]:
+    from askme.audit import AuditQueryService, AuditReviewService
+    from askme.config import get_config
+
+    config = get_config()
+    paths = _unified_audit_paths_from_cli(
+        config,
+        skill_audit=skill_audit,
+        field_action_audit=field_action_audit,
+        field_event_archive=field_event_archive,
+        runtime_audit=runtime_audit,
+        review_path=review_path,
+    )
+    service = AuditQueryService(config, paths=paths)
+    if not service.record_exists(record_id):
+        return {
+            "ok": False,
+            "reason": "audit_record_not_found",
+            "record_id": str(record_id or ""),
+        }
+    payload = AuditReviewService(config, path=paths.audit_reviews).submit(
+        record_id=record_id,
+        reviewer_id=reviewer_id,
+        decision=decision,
+        note=note,
+    )
+    if payload.get("ok"):
+        refreshed = AuditQueryService(config, paths=paths).query(limit=25)
+        payload["post_review"] = {
+            "requires_review_count": refreshed.get("product_summary", {}).get("requires_review_count", 0),
+            "review_queue_count": len(refreshed.get("review_queue") or []),
+            "customer_status_label": refreshed.get("product_summary", {}).get("customer_status_label", ""),
+        }
+    return payload
+
+
+def _unified_audit_paths_from_cli(
+    config: dict[str, Any],
+    *,
+    skill_audit: str = "",
+    field_action_audit: str = "",
+    field_event_archive: str = "",
+    runtime_audit: str = "",
+    review_path: str = "",
+):
+    from askme.audit import AuditQueryService
+    from askme.audit.query import AuditPaths
+
+    default_paths = AuditQueryService(config)._paths
+    return AuditPaths(
+        skill_audit=Path(skill_audit) if skill_audit else default_paths.skill_audit,
+        field_action_audit=(
+            Path(field_action_audit) if field_action_audit else default_paths.field_action_audit
+        ),
+        field_event_archive=(
+            Path(field_event_archive) if field_event_archive else default_paths.field_event_archive
+        ),
+        runtime_audit=Path(runtime_audit) if runtime_audit else default_paths.runtime_audit,
+        audit_reviews=Path(review_path) if review_path else default_paths.audit_reviews,
+    )
 
 
 def _run_field_live_demo(
@@ -3416,6 +4233,132 @@ def _emit_field_readiness_payload(payload: dict[str, Any]) -> None:
         print("next actions:")
         for item in actions:
             print(f"- {item}")
+
+
+def _emit_field_device_trust_payload(payload: dict[str, Any], *, show_commands: bool) -> None:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    print(
+        "field-device-trust: "
+        f"{payload.get('status')} "
+        f"registered={summary.get('registered_device_count', 0)} "
+        f"ready={summary.get('signature_ready_count', 0)} "
+        f"missing={summary.get('missing_secret_count', 0)}"
+    )
+    if payload.get("reason"):
+        print(f"reason: {payload.get('reason')}")
+    warnings = payload.get("profile_warnings") if isinstance(payload.get("profile_warnings"), list) else []
+    for warning in warnings[:8]:
+        print(f"warning: {warning}")
+    devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
+    for item in devices:
+        if not isinstance(item, dict):
+            continue
+        print(
+            "  - "
+            f"{item.get('device_id') or '-'} "
+            f"source={item.get('source') or '-'} "
+            f"zone={item.get('zone_id') or '-'} "
+            f"secret_env={item.get('secret_env') or '-'} "
+            f"status={item.get('status') or '-'}"
+        )
+        if show_commands and item.get("signing_command"):
+            print(f"    sign: {item.get('signing_command')}")
+    actions = payload.get("next_actions") if isinstance(payload.get("next_actions"), list) else []
+    for action in actions:
+        print(f"next: {action}")
+
+
+def _emit_field_site_env_template_payload(payload: dict[str, Any]) -> None:
+    print(
+        "field-site-env-template: "
+        f"{payload.get('status')} "
+        f"envs={payload.get('env_count', 0)} "
+        f"configured={payload.get('configured_count', 0)} "
+        f"missing={payload.get('missing_count', 0)}"
+    )
+    if payload.get("reason"):
+        print(f"reason: {payload.get('reason')}")
+    if payload.get("output"):
+        print(f"output: {payload.get('output')}")
+    refs = payload.get("env_refs") if isinstance(payload.get("env_refs"), list) else []
+    for item in refs[:20]:
+        if not isinstance(item, dict):
+            continue
+        print(
+            "  - "
+            f"{item.get('env_name') or '-'} "
+            f"category={item.get('category') or '-'} "
+            f"configured={bool(item.get('configured'))} "
+            f"ref={item.get('reference') or '-'}"
+        )
+    if not payload.get("output") and payload.get("template"):
+        print("")
+        print(payload.get("template"), end="")
+    actions = payload.get("next_actions") if isinstance(payload.get("next_actions"), list) else []
+    for action in actions:
+        print(f"next: {action}")
+
+
+def _emit_unified_audit_events_payload(
+    payload: dict[str, Any],
+    *,
+    review_queue_only: bool,
+) -> None:
+    product = payload.get("product_summary") if isinstance(payload.get("product_summary"), dict) else {}
+    print(
+        "audit-events: "
+        f"records={payload.get('count', 0)} "
+        f"filtered={payload.get('filtered_total', 0)} "
+        f"status={product.get('status') or '-'} "
+        f"review_queue={product.get('requires_review_count', 0)}"
+    )
+    customer_report = (
+        payload.get("customer_report") if isinstance(payload.get("customer_report"), dict) else {}
+    )
+    if customer_report:
+        print(f"customer-status: {customer_report.get('status_label') or '-'}")
+        summary_sentence = customer_report.get("summary_sentence")
+        if summary_sentence:
+            print(f"summary: {summary_sentence}")
+    records_key = "review_queue" if review_queue_only else "records"
+    records = payload.get(records_key) if isinstance(payload.get(records_key), list) else []
+    if not records:
+        print("records: none")
+        return
+    print("records:")
+    for record in records[:20]:
+        print(
+            "  - "
+            f"{record.get('record_id') or '-'} "
+            f"{record.get('severity') or '-'} "
+            f"{record.get('source') or '-'} "
+            f"{record.get('action') or '-'} "
+            f"{record.get('outcome') or '-'} "
+            f"owner={record.get('customer_copy', {}).get('review_owner') if isinstance(record.get('customer_copy'), dict) else '-'}"
+        )
+
+
+def _emit_unified_audit_review_payload(payload: dict[str, Any]) -> None:
+    record = payload.get("record") if isinstance(payload.get("record"), dict) else {}
+    post_review = payload.get("post_review") if isinstance(payload.get("post_review"), dict) else {}
+    print(
+        "audit-review: "
+        f"ok={bool(payload.get('ok'))} "
+        f"record={payload.get('record_id') or record.get('record_id') or '-'} "
+        f"decision={record.get('decision') or '-'} "
+        f"clears_review={bool(record.get('clears_review'))}"
+    )
+    if payload.get("reason"):
+        print(f"reason: {payload.get('reason')}")
+    if post_review:
+        print(
+            "post-review: "
+            f"queue={post_review.get('review_queue_count', 0)} "
+            f"requires_review={post_review.get('requires_review_count', 0)} "
+            f"status={post_review.get('customer_status_label') or '-'}"
+        )
+    if payload.get("path"):
+        print(f"path: {payload.get('path')}")
 
 
 def _emit_field_live_demo_payload(payload: dict[str, Any]) -> None:

@@ -26,6 +26,7 @@ from askme.pipeline.field_scenarios import FIELD_SCENARIOS, FieldScenario
 from askme.pipeline.field_site_profile import build_site_profile_report
 from askme.pipeline.incident_alerts import format_incident_alert, format_incident_playbook
 from askme.schemas.field import FieldEventDetail
+from askme.skills.field_capability_contracts import field_capability_routes
 from askme.voice.voice_profiles import resolve_voice_profile_id
 
 _SCENARIO_TO_INCIDENT_TOPIC = {
@@ -78,6 +79,19 @@ _FIELD_ACTION_ROLES = ("operator", "supervisor", "admin")
 _SUPERVISOR_ROLES = ("supervisor", "admin")
 _FIELD_ACTION_AUDIT_GENESIS = "GENESIS"
 _FIELD_ACTION_AUDIT_HASH_ALG = "sha256"
+
+
+def _audit_review_path_from_field_config(config: dict[str, Any]) -> Path | None:
+    audit_cfg = config.get("audit") if isinstance(config.get("audit"), dict) else {}
+    review_cfg = audit_cfg.get("review") if isinstance(audit_cfg.get("review"), dict) else {}
+    raw = (
+        review_cfg.get("path")
+        or review_cfg.get("jsonl_path")
+        or audit_cfg.get("review_path")
+        or config.get("audit_review_path")
+    )
+    text = str(raw or "artifacts/audit/reviews.jsonl").strip()
+    return Path(text) if text else None
 _FIELD_ACTION_AUDIT_SIGNATURE_ALG = "hmac-sha256"
 _FIELD_DEVICE_SIGNATURE_ALG = "hmac-sha256"
 _FIELD_DEVICE_SIGNATURE_FIELDS = {
@@ -124,6 +138,17 @@ class FieldEventRecord:
     severity: str
     location: str
     created_at: float
+    customer_id: str = ""
+    project_id: str = ""
+    site_id: str = ""
+    site_name: str = ""
+    industry: str = ""
+    managed_object_id: str = ""
+    managed_object_display: str = ""
+    managed_object_category: str = ""
+    managed_object_bindings: dict[str, Any] = field(default_factory=dict)
+    resource_execution_context: dict[str, Any] = field(default_factory=dict)
+    project_scope: dict[str, Any] = field(default_factory=dict)
     payload: dict[str, Any] = field(default_factory=dict)
     incident_topic: str | None = None
     notification_group: str = "none"
@@ -216,6 +241,10 @@ class FieldOperationsService:
             or os.getenv("ASKME_FIELD_LLM_NARRATIVE") in {"1", "true", "yes"}
         )
         self._site_map = cfg.get("site_map") if isinstance(cfg.get("site_map"), dict) else {}
+        self._project_scope = _field_project_scope_from_config(cfg)
+        self._managed_objects = (
+            cfg.get("managed_objects") if isinstance(cfg.get("managed_objects"), dict) else {}
+        )
         self._thresholds = {
             "temperature_c": float(cfg.get("fire_temperature_c", 60.0)),
             "smoke_level": float(cfg.get("smoke_level", 0.7)),
@@ -407,6 +436,10 @@ class FieldOperationsService:
         status: str | None = None,
         notification_group: str | None = None,
         needs_attention: bool = False,
+        customer_id: str | None = None,
+        project_id: str | None = None,
+        site_id: str | None = None,
+        managed_object_id: str | None = None,
     ) -> dict[str, Any]:
         events = self._read_events()
         filtered_events = _filter_field_events(
@@ -414,18 +447,31 @@ class FieldOperationsService:
             status=status,
             notification_group=notification_group,
             needs_attention=needs_attention,
+            customer_id=customer_id,
+            project_id=project_id,
+            site_id=site_id,
+            managed_object_id=managed_object_id,
         )
         visible_events = [_field_event_view(event) for event in filtered_events]
+        filter_payload: dict[str, Any] = {
+            "status": status or "",
+            "notification_group": notification_group or "",
+            "needs_attention": bool(needs_attention),
+        }
+        for key, value in (
+            ("customer_id", customer_id),
+            ("project_id", project_id),
+            ("site_id", site_id),
+            ("managed_object_id", managed_object_id),
+        ):
+            if value:
+                filter_payload[key] = value
         return {
             "events": visible_events[-max(1, min(limit, 500)):][::-1],
             "total": len(events),
             "filtered_total": len(filtered_events),
             "summary": _field_event_summary(events),
-            "filter": {
-                "status": status or "",
-                "notification_group": notification_group or "",
-                "needs_attention": bool(needs_attention),
-            },
+            "filter": filter_payload,
             "archive_path": str(self._archive_path),
         }
 
@@ -515,6 +561,10 @@ class FieldOperationsService:
                 },
             },
             "bridge_contract": {
+                "sign_payload": (
+                    "python -m askme runtime field-sign-device-payload camera-event.json "
+                    "--secret-env ASKME_FIELD_CAMERA_MAIN_ROAD_SECRET --output camera-event.signed.json"
+                ),
                 "dry_run": (
                     "python -m askme runtime field-ingest-bridge camera-events.jsonl "
                     "--dry-run --json"
@@ -539,6 +589,7 @@ class FieldOperationsService:
                 "timestamp_field": "device_signature_timestamp",
                 "max_signature_age_s": self._device_signature_max_age_s,
                 "registered_device_count": len(self._device_registry),
+                "signing_cli": "python -m askme runtime field-sign-device-payload",
             },
         }
 
@@ -596,6 +647,10 @@ class FieldOperationsService:
                 },
             },
             "bridge_contract": {
+                "sign_payload": (
+                    "python -m askme runtime field-sign-device-payload camera-event.json "
+                    "--secret-env ASKME_FIELD_CAMERA_MAIN_ROAD_SECRET --output camera-event.signed.json"
+                ),
                 "dry_run": (
                     "python -m askme runtime field-ingest-bridge camera-events.jsonl "
                     "--dry-run --json"
@@ -620,6 +675,7 @@ class FieldOperationsService:
                 "timestamp_field": "device_signature_timestamp",
                 "max_signature_age_s": self._device_signature_max_age_s,
                 "registered_device_count": len(self._device_registry),
+                "signing_cli": "python -m askme runtime field-sign-device-payload",
             },
         }
 
@@ -632,7 +688,48 @@ class FieldOperationsService:
             webhooks=self._webhooks,
             webhook_secrets=self._webhook_secrets,
             action_audit_integrity=self.action_audit_integrity_payload(),
+            unified_audit=self._unified_audit_payload(),
         )
+
+    def _unified_audit_payload(self) -> dict[str, Any]:
+        try:
+            from askme.audit.query import AuditPaths, AuditQueryService
+
+            skill_audit_path = Path(
+                str(
+                    self._config.get("skill_audit_path")
+                    or self._archive_path.with_name("skill-audit-not-configured.jsonl")
+                )
+            )
+            return AuditQueryService(
+                paths=AuditPaths(
+                    skill_audit=skill_audit_path,
+                    field_action_audit=self._action_audit_path,
+                    field_event_archive=self._archive_path,
+                    audit_reviews=_audit_review_path_from_field_config(self._config),
+                )
+            ).query(limit=500)
+        except Exception as exc:
+            return {
+                "product_summary": {
+                    "status": "query_failed",
+                    "customer_status": "audit review status could not be verified",
+                    "record_count": 0,
+                    "requires_review_count": 1,
+                    "high_or_critical_count": 1,
+                },
+                "review_queue": [
+                    {
+                        "record_id": "audit:query_failed",
+                        "customer_label": "Unified audit",
+                        "severity": "high",
+                        "action": "query",
+                        "outcome": "failed",
+                        "reason": str(exc),
+                    }
+                ],
+                "source_health": {},
+            }
 
     async def ingest_payload(self, body: dict[str, Any]) -> dict[str, Any]:
         received_at = time.time()
@@ -657,6 +754,11 @@ class FieldOperationsService:
                 "normalized": normalized,
             }
         result = await self.trigger_payload(normalized)
+        event = result.get("event") if isinstance(result.get("event"), dict) else {}
+        if event.get("managed_object_id"):
+            normalized.setdefault("managed_object_id", event.get("managed_object_id"))
+            normalized.setdefault("managed_object_display", event.get("managed_object_display"))
+            normalized.setdefault("managed_object_category", event.get("managed_object_category"))
         result["normalized"] = normalized
         return result
 
@@ -1468,6 +1570,10 @@ class FieldOperationsService:
             "robot_id": self._robot_id,
             "event_id": str(event.get("event_id") or ""),
             "scenario_id": str(event.get("scenario_id") or ""),
+            "customer_id": str(event.get("customer_id") or ""),
+            "project_id": str(event.get("project_id") or ""),
+            "site_id": str(event.get("site_id") or ""),
+            "managed_object_id": str(event.get("managed_object_id") or ""),
             "status": str(event.get("status") or ""),
             "priority": str(event.get("priority") or ""),
             "severity": str(event.get("severity") or ""),
@@ -1828,6 +1934,22 @@ class FieldOperationsService:
         return None
 
     def _build_event(self, scenario: FieldScenario, payload: dict[str, Any]) -> FieldEventRecord:
+        scope = self._event_project_scope(payload)
+        managed_object = self._managed_object_for_payload(
+            scenario.scenario_id,
+            payload,
+            scope=scope,
+        )
+        if managed_object:
+            payload.setdefault("managed_object_id", managed_object.get("object_id"))
+            payload.setdefault("managed_object_category", managed_object.get("category"))
+        for key in ("customer_id", "project_id", "site_id", "site_name", "industry"):
+            if not scope.get(key):
+                continue
+            if payload.get("_ingested"):
+                payload[key] = scope.get(key)
+            else:
+                payload.setdefault(key, scope.get(key))
         incident_topic = self._incident_topic_for(scenario.scenario_id, payload)
         alert = format_incident_alert(incident_topic, payload) if incident_topic else None
         playbook = (
@@ -1886,6 +2008,21 @@ class FieldOperationsService:
             severity=severity,
             location=str(payload.get("location") or "-"),
             created_at=_timestamp_or_now(payload.get("created_at")),
+            customer_id=str(scope.get("customer_id") or ""),
+            project_id=str(scope.get("project_id") or ""),
+            site_id=str(scope.get("site_id") or ""),
+            site_name=str(scope.get("site_name") or ""),
+            industry=str(scope.get("industry") or ""),
+            managed_object_id=str(managed_object.get("object_id") or "") if managed_object else "",
+            managed_object_display=str(managed_object.get("display_name") or "") if managed_object else "",
+            managed_object_category=str(managed_object.get("category") or "") if managed_object else "",
+            managed_object_bindings=dict(managed_object.get("bindings") or {}) if managed_object else {},
+            resource_execution_context=_field_resource_execution_context(
+                scenario,
+                payload,
+                managed_object,
+            ),
+            project_scope=scope,
             payload=payload,
             incident_topic=incident_topic,
             notification_group=notification_group,
@@ -1902,6 +2039,87 @@ class FieldOperationsService:
             playbook=playbook,
             voice_directive=voice_directive,
         )
+
+    def _event_project_scope(self, payload: dict[str, Any]) -> dict[str, Any]:
+        scope = dict(self._project_scope)
+        if payload.get("_ingested"):
+            return scope
+        explicit_scope = payload.get("project_scope")
+        if isinstance(explicit_scope, dict):
+            for key in (
+                "tenant_id",
+                "delivery_namespace",
+                "customer_id",
+                "project_id",
+                "site_id",
+                "site_name",
+                "industry",
+            ):
+                if explicit_scope.get(key):
+                    scope[key] = str(explicit_scope.get(key))
+        for key in (
+            "tenant_id",
+            "delivery_namespace",
+            "customer_id",
+            "project_id",
+            "site_id",
+            "site_name",
+            "industry",
+        ):
+            if payload.get(key):
+                scope[key] = str(payload.get(key))
+        return scope
+
+    def _managed_object_for_payload(
+        self,
+        scenario_id: str,
+        payload: dict[str, Any],
+        *,
+        scope: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        scope = scope or self._event_project_scope(payload)
+        explicit = str(payload.get("managed_object_id") or "").strip()
+        if explicit and explicit in self._managed_objects:
+            item = self._managed_objects.get(explicit)
+            if not isinstance(item, dict):
+                return {}
+            scope_match, _scope_score = _managed_object_scope_score(item, scope)
+            if not scope_match:
+                return {}
+            resolved = dict(item)
+            resolved.setdefault("object_id", explicit)
+            return resolved
+        candidates: list[tuple[int, str, dict[str, Any]]] = []
+        labels = _payload_detection_labels(payload)
+        zone_type = str(payload.get("zone_type") or "").strip()
+        source = str(payload.get("source") or "").strip()
+        for object_id, item in self._managed_objects.items():
+            if not isinstance(item, dict):
+                continue
+            scope_match, scope_score = _managed_object_scope_score(item, scope)
+            if not scope_match:
+                continue
+            score = scope_score
+            scenario_ids = {str(value) for value in _as_list(item.get("scenario_ids"))}
+            if scenario_id in scenario_ids:
+                score += 100
+            object_labels = {str(value) for value in _as_list(item.get("object_labels"))}
+            if object_labels.intersection(labels):
+                score += 20
+            zone_types = {str(value) for value in _as_list(item.get("zone_types"))}
+            if zone_type and zone_type in zone_types:
+                score += 10
+            device_sources = {str(value) for value in _as_list(item.get("device_sources"))}
+            if source and source in device_sources:
+                score += 5
+            if score > 0:
+                resolved = dict(item)
+                resolved.setdefault("object_id", object_id)
+                candidates.append((score, str(object_id), resolved))
+        if not candidates:
+            return {}
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        return candidates[0][2]
 
     def _voice_directive_for(
         self,
@@ -2377,6 +2595,21 @@ def _config_with_site_profile(config: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _field_project_scope_from_config(config: dict[str, Any]) -> dict[str, str]:
+    scope = config.get("customer_project") if isinstance(config.get("customer_project"), dict) else {}
+    return {
+        "tenant_id": str(scope.get("tenant_id") or config.get("tenant_id") or ""),
+        "delivery_namespace": str(
+            scope.get("delivery_namespace") or config.get("delivery_namespace") or ""
+        ),
+        "customer_id": str(scope.get("customer_id") or config.get("customer_id") or ""),
+        "project_id": str(scope.get("project_id") or config.get("project_id") or ""),
+        "site_id": str(scope.get("site_id") or config.get("site_id") or ""),
+        "site_name": str(scope.get("site_name") or config.get("site_name") or ""),
+        "industry": str(scope.get("industry") or config.get("industry") or ""),
+    }
+
+
 def _site_profile_env_check_requested(config: dict[str, Any]) -> bool:
     raw = (
         config.get("site_profile_check_env")
@@ -2606,6 +2839,97 @@ def _field_event_record_from_dict(event: dict[str, Any]) -> FieldEventRecord:
     allowed = {item.name for item in fields(FieldEventRecord)}
     data = {key: value for key, value in event.items() if key in allowed}
     return FieldEventRecord(**data)
+
+
+def _field_resource_execution_context(
+    scenario: FieldScenario,
+    payload: dict[str, Any],
+    managed_object: dict[str, Any],
+) -> dict[str, Any]:
+    if not managed_object:
+        return {
+            "overall_status": "manual_check",
+            "reason": "no_managed_object_matched",
+            "scenario_id": scenario.scenario_id,
+            "ingest_endpoint": "/api/field/ingest",
+        }
+    bindings = managed_object.get("bindings") if isinstance(managed_object.get("bindings"), dict) else {}
+    source = str(payload.get("source") or "").strip()
+    device_sources = [str(item) for item in _as_list(managed_object.get("device_sources")) if str(item).strip()]
+    vision_models = [str(item) for item in _as_list(bindings.get("vision_models")) if str(item).strip()]
+    sensor_protocols = [str(item) for item in _as_list(bindings.get("sensor_protocols")) if str(item).strip()]
+    skill_packages = [str(item) for item in _as_list(bindings.get("skill_packages")) if str(item).strip()]
+    acceptance_tests = [str(item) for item in _as_list(bindings.get("acceptance_tests")) if str(item).strip()]
+    capability_routes = field_capability_routes(
+        skill_packages,
+        scenario_id=scenario.scenario_id,
+        required_inputs=_REQUIRED_PAYLOAD_KEYS.get(scenario.scenario_id, ()),
+    )
+    blockers: list[str] = []
+    manual_checks: list[str] = []
+    for key, values in (
+        ("vision_models", vision_models),
+        ("sensor_protocols", sensor_protocols),
+        ("skill_packages", skill_packages),
+        ("acceptance_tests", acceptance_tests),
+    ):
+        if not values:
+            blockers.append(f"{key} binding missing")
+    if source and device_sources and source not in device_sources:
+        blockers.append(f"payload source {source} is outside managed object device_sources")
+    protocol_sources = sorted({
+        protocol_source
+        for protocol in sensor_protocols
+        for protocol_source in _field_sensor_protocol_sources(protocol)
+    })
+    source_covered = not source or source in protocol_sources or (source == "camera" and bool(vision_models))
+    if not source_covered:
+        manual_checks.append(f"payload source {source} has no explicit protocol coverage")
+    missing_contracts = [
+        str(item.get("package_id") or item.get("capability") or "")
+        for item in capability_routes
+        if not item.get("installed_contract")
+    ]
+    for package_id in missing_contracts:
+        manual_checks.append(f"skill package {package_id} has no installed executable contract")
+    selected_route = capability_routes[0] if capability_routes else {}
+    approval_required = any(bool(item.get("approval_required")) for item in capability_routes)
+    overall_status = "blocked" if blockers else "manual_check" if manual_checks else "ready"
+    return {
+        "overall_status": overall_status,
+        "scenario_id": scenario.scenario_id,
+        "managed_object_id": str(managed_object.get("object_id") or ""),
+        "source": source,
+        "device_sources": device_sources,
+        "vision_models": vision_models,
+        "sensor_protocols": sensor_protocols,
+        "protocol_sources": protocol_sources,
+        "skill_packages": skill_packages,
+        "selected_skill_package": skill_packages[0] if skill_packages else "",
+        "selected_capability": str(selected_route.get("capability") or ""),
+        "capability_routes": capability_routes,
+        "approval_required": approval_required,
+        "action_boundary": str(selected_route.get("hardware_boundary") or ""),
+        "output_contract": str(selected_route.get("output_contract") or ""),
+        "acceptance_tests": acceptance_tests,
+        "ingest_endpoint": "/api/field/ingest",
+        "runtime_callback_endpoint": "/api/field/events/{event_id}/runtime-delivery",
+        "runtime_boundary": "Skill packages can shape the field action, but hardware execution must still pass runtime arbiter and safety preflight.",
+        "blockers": blockers,
+        "manual_checks": manual_checks,
+    }
+
+
+def _field_sensor_protocol_sources(protocol_id: str) -> list[str]:
+    text = str(protocol_id or "").lower()
+    sources: list[str] = []
+    if any(token in text for token in ("camera", "vision", "detection", "video")):
+        sources.append("camera")
+    if any(token in text for token in ("sensor", "smoke", "temperature", "mqtt", "iot")):
+        sources.append("sensor")
+    if any(token in text for token in ("robot", "route", "runtime", "status", "voice")):
+        sources.append("robot")
+    return sorted(set(sources)) or ["custom"]
 
 
 def _field_event_view(event: dict[str, Any]) -> dict[str, Any]:
@@ -3008,11 +3332,17 @@ def _field_event_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     by_status: dict[str, int] = {}
     by_group: dict[str, int] = {}
+    by_project: dict[str, int] = {}
+    by_managed_object: dict[str, int] = {}
     for event in events:
         status = str(event.get("status") or "unknown")
         group = str(event.get("notification_group") or "none")
+        project = str(event.get("project_id") or "unscoped")
+        managed_object = str(event.get("managed_object_id") or "unbound")
         by_status[status] = by_status.get(status, 0) + 1
         by_group[group] = by_group.get(group, 0) + 1
+        by_project[project] = by_project.get(project, 0) + 1
+        by_managed_object[managed_object] = by_managed_object.get(managed_object, 0) + 1
     latest = events[-1] if events else {}
     return {
         "total": len(events),
@@ -3024,6 +3354,8 @@ def _field_event_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
         "acknowledged": by_status.get("acknowledged", 0),
         "by_status": by_status,
         "by_notification_group": by_group,
+        "by_project": by_project,
+        "by_managed_object": by_managed_object,
         "latest_event_id": latest.get("event_id"),
         "latest_scenario": latest.get("scenario_id"),
     }
@@ -3035,19 +3367,97 @@ def _filter_field_events(
     status: str | None = None,
     notification_group: str | None = None,
     needs_attention: bool = False,
+    customer_id: str | None = None,
+    project_id: str | None = None,
+    site_id: str | None = None,
+    managed_object_id: str | None = None,
 ) -> list[dict[str, Any]]:
     status_filter = str(status or "").strip()
     group_filter = str(notification_group or "").strip()
+    customer_filter = str(customer_id or "").strip()
+    project_filter = str(project_id or "").strip()
+    site_filter = str(site_id or "").strip()
+    object_filter = str(managed_object_id or "").strip()
     filtered: list[dict[str, Any]] = []
     for event in events:
         if status_filter and event.get("status") != status_filter:
             continue
         if group_filter and event.get("notification_group") != group_filter:
             continue
+        if customer_filter and event.get("customer_id") != customer_filter:
+            continue
+        if project_filter and event.get("project_id") != project_filter:
+            continue
+        if site_filter and event.get("site_id") != site_filter:
+            continue
+        if object_filter and event.get("managed_object_id") != object_filter:
+            continue
         if needs_attention and not _field_event_needs_attention(event):
             continue
         filtered.append(event)
     return filtered
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    if isinstance(value, str):
+        return [item.strip() for item in value.replace(",", " ").split() if item.strip()]
+    return [value]
+
+
+def _managed_object_scope_score(
+    managed_object: dict[str, Any],
+    scope: dict[str, Any],
+) -> tuple[bool, int]:
+    score = 0
+    for list_key, scope_key in (
+        ("tenant_ids", "tenant_id"),
+        ("delivery_namespaces", "delivery_namespace"),
+        ("customer_ids", "customer_id"),
+        ("project_ids", "project_id"),
+        ("site_ids", "site_id"),
+    ):
+        allowed = [
+            str(item).strip()
+            for item in _as_list(managed_object.get(list_key) or managed_object.get(scope_key))
+            if str(item).strip()
+        ]
+        if not allowed:
+            continue
+        value = str(scope.get(scope_key) or "").strip()
+        if "*" in allowed:
+            score += 1
+            continue
+        if not value or value not in allowed:
+            return False, 0
+        score += 50
+    return True, score
+
+
+def _payload_detection_labels(payload: dict[str, Any]) -> set[str]:
+    labels: set[str] = set()
+    for item in _as_list(payload.get("object_labels")):
+        if str(item).strip():
+            labels.add(str(item).strip())
+    detections = payload.get("detections") if isinstance(payload.get("detections"), list) else []
+    for detection in detections:
+        if not isinstance(detection, dict):
+            continue
+        label = str(
+            detection.get("label")
+            or detection.get("class")
+            or detection.get("class_name")
+            or detection.get("name")
+            or ""
+        ).strip()
+        if label:
+            labels.add(label)
+    return labels
 
 
 def _field_event_needs_attention(event: dict[str, Any]) -> bool:
@@ -3224,6 +3634,24 @@ def _field_event_report(event: dict[str, Any]) -> dict[str, Any]:
         "title": f"{event.get('scenario_name') or event.get('scenario_id')} 处置报告",
         "event_id": event.get("event_id"),
         "scenario_id": event.get("scenario_id"),
+        "customer_id": event.get("customer_id") or "",
+        "project_id": event.get("project_id") or "",
+        "site_id": event.get("site_id") or "",
+        "site_name": event.get("site_name") or "",
+        "industry": event.get("industry") or "",
+        "managed_object_id": event.get("managed_object_id") or "",
+        "managed_object_display": event.get("managed_object_display") or "",
+        "managed_object_category": event.get("managed_object_category") or "",
+        "managed_object_bindings": (
+            event.get("managed_object_bindings")
+            if isinstance(event.get("managed_object_bindings"), dict)
+            else {}
+        ),
+        "resource_execution_context": (
+            event.get("resource_execution_context")
+            if isinstance(event.get("resource_execution_context"), dict)
+            else {}
+        ),
         "status": event.get("status"),
         "incident_state": event.get("incident_state") or "",
         "incident_stage": event.get("incident_stage") or "",

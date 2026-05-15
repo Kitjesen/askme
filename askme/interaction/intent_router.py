@@ -3,8 +3,9 @@ Intent router for askme.
 
 Processes user input through a priority pipeline:
   1. Emergency stop detection (hardcoded, zero-latency, no LLM)
-  2. Voice trigger matching (keyword → skill, no LLM)
-  3. LLM-based intent recognition with tool calling
+  2. Quick replies and built-in commands (no LLM)
+  3. Voice trigger matching (keyword → skill, no LLM)
+  4. General fallback for downstream LLM/tool handling
 
 This ensures safety-critical commands are always handled instantly.
 """
@@ -16,6 +17,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from askme.interaction.routing_policy import DEFAULT_ROUTING_POLICY, RoutingPolicy
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,24 +29,10 @@ class IntentType(Enum):
     QUICK_REPLY = "quick_reply"  # simple greetings — skip LLM, instant response
     GENERAL = "general"         # fallback → LLM
 
-# Hardcoded ESTOP keywords — always active, even without SafetyChecker.
-# Safety-critical: must never depend on an optional runtime service.
-_ESTOP_KEYWORDS: frozenset[str] = frozenset({
-    "紧急停止", "急停", "emergency stop", "estop", "e-stop",
-})
-
-# Instant replies for simple greetings — no LLM needed, <0.5s response
-_QUICK_REPLIES: dict[str, str] = {
-    "你好": "你好，有什么需要帮忙的？",
-    "谢谢": "不客气。",
-    "谢谢你": "不客气，随时叫我。",
-    "再见": "再见，有事随时叫我。",
-    "拜拜": "拜拜。",
-    "在吗": "在的，有什么事？",
-    "你在吗": "在的，说吧。",
-    "嗯": "嗯，我在听。",
-    "好的": "好的。",
-}
+# Backward-compatible aliases for legacy imports/tests that reached into this
+# module. New code should prefer RoutingPolicy.
+_ESTOP_KEYWORDS = DEFAULT_ROUTING_POLICY.estop_keywords
+_QUICK_REPLIES = DEFAULT_ROUTING_POLICY.quick_replies
 
 
 @dataclass
@@ -52,28 +41,34 @@ class Intent:
     skill_name: str | None = None
     command: str | None = None
     raw_text: str = ""
+    reply_text: str | None = None
+    trigger_phrase: str | None = None
+    reason: str | None = None
 
 
 class IntentRouter:
     """Route user input to the correct handler with safety-first priority."""
 
-    # Built-in commands (handled before any AI processing)
-    BUILTIN_COMMANDS = {
-        "/quit", "/exit", "exit", "quit",
-        "/clear", "/history", "/help", "/skills",
-    }
+    BUILTIN_COMMANDS = DEFAULT_ROUTING_POLICY.builtin_commands
+    MIN_TRIGGER_LENGTH = DEFAULT_ROUTING_POLICY.min_trigger_length
+    _NEGATION_PREFIXES = DEFAULT_ROUTING_POLICY.negation_prefixes
+    _QUESTION_SUFFIXES = DEFAULT_ROUTING_POLICY.question_suffixes
+    _QUESTION_SAFE_SKILLS = DEFAULT_ROUTING_POLICY.question_safe_skills
 
     def __init__(
         self,
         safety_checker: Any | None = None,
         voice_triggers: dict[str, str] | None = None,
+        policy: RoutingPolicy | None = None,
     ) -> None:
         """
         Args:
             safety_checker: A SafetyChecker instance with is_estop_command().
             voice_triggers: Mapping of trigger phrase → skill name.
+            policy: Deterministic routing policy values.
         """
         self._safety = safety_checker
+        self._policy = policy or DEFAULT_ROUTING_POLICY
         self._voice_triggers: dict[str, str] = voice_triggers or {}
         self._sorted_triggers: list[tuple[str, str]] = self._build_sorted_triggers()
 
@@ -95,94 +90,88 @@ class IntentRouter:
 
         Priority order:
           1. Emergency stop keywords → IntentType.ESTOP
-          2. Built-in commands (/quit, /clear, etc.) → IntentType.COMMAND
-          3. Voice trigger match → IntentType.VOICE_TRIGGER
-          4. Everything else → IntentType.GENERAL (sent to LLM)
+          2. Quick replies → IntentType.QUICK_REPLY
+          3. Built-in commands (/quit, /clear, etc.) → IntentType.COMMAND
+          4. Voice trigger match → IntentType.VOICE_TRIGGER
+          5. Everything else → IntentType.GENERAL (sent downstream)
         """
         stripped = text.strip()
 
-        # 1. Emergency stop — HIGHEST PRIORITY, zero delay
-        # Works even without SafetyChecker via hardcoded fallback keywords.
-        _is_estop = (
-            (self._safety and self._safety.is_estop_command(stripped))
-            or stripped in _ESTOP_KEYWORDS
-        )
-        if _is_estop:
+        estop_reason = self._estop_reason(stripped)
+        if estop_reason:
             logger.critical("E-STOP detected in text: %s", stripped)
             return Intent(
                 type=IntentType.ESTOP,
                 raw_text=stripped,
+                reason=estop_reason,
             )
 
         # 2. Quick replies — simple greetings, skip LLM entirely
-        quick = _QUICK_REPLIES.get(stripped)
+        quick = self._policy.quick_replies.get(stripped)
         if quick:
             logger.info("Quick reply: '%s' → '%s'", stripped, quick)
             return Intent(
                 type=IntentType.QUICK_REPLY,
                 raw_text=stripped,
-                skill_name=quick,  # reuse skill_name field to carry the reply text
+                reply_text=quick,
+                # Compatibility: older loops read the quick reply from skill_name.
+                skill_name=quick,
+                reason="quick_reply",
             )
 
         # 3. Built-in commands
-        if stripped.lower() in self.BUILTIN_COMMANDS:
+        command = stripped.lower()
+        if command in self._policy.builtin_commands:
             return Intent(
                 type=IntentType.COMMAND,
-                command=stripped.lower(),
+                command=command,
                 raw_text=stripped,
+                reason="builtin_command",
             )
 
-        # 3. Voice trigger matching (substring match)
-        matched_skill = self._match_voice_trigger(stripped)
-        if matched_skill:
-            logger.info("Voice trigger matched: '%s' → skill '%s'", stripped, matched_skill)
+        # 4. Voice trigger matching (substring match)
+        trigger_match = self._match_voice_trigger(stripped)
+        if trigger_match:
+            matched_skill, trigger_phrase = trigger_match
+            logger.info(
+                "Voice trigger matched: '%s' → skill '%s'",
+                stripped,
+                matched_skill,
+            )
             return Intent(
                 type=IntentType.VOICE_TRIGGER,
                 skill_name=matched_skill,
                 raw_text=stripped,
+                trigger_phrase=trigger_phrase,
+                reason="voice_trigger",
             )
 
-        # 4. General → LLM handles it
+        # 5. General → LLM handles it
         return Intent(
             type=IntentType.GENERAL,
             raw_text=stripped,
+            reason="empty_input" if not stripped else "general_fallback",
         )
 
-    # Minimum trigger length to avoid false positives from short substrings
-    # (e.g. "去" matching "进去", "出去", "回去")
-    MIN_TRIGGER_LENGTH = 2
+    def _estop_reason(self, text: str) -> str | None:
+        """Return the ESTOP source when text is a hard-stop command."""
+        if text.lower() in self._policy.estop_keywords:
+            return "estop_keyword"
 
-    # Chinese negation words that immediately precede a trigger phrase.
-    # Ordered longest-first so "不要" matches before "不".
-    _NEGATION_PREFIXES: tuple[str, ...] = (
-        "不要", "不用", "不能", "不想", "不让", "没有", "别再",
-        "不", "别", "没",
-    )
-
-    # Chinese question-ending particles. When any of these appear at the end
-    # of the utterance (within 2 characters of the end), or immediately after
-    # the trigger phrase, the input is treated as a question, not a command.
-    _QUESTION_SUFFIXES: tuple[str, ...] = ("吗", "么", "呢", "嘛")
-
-    # Query/read-only skills remain valid when ASR adds question punctuation.
-    # Example: "ji dian le?" should still dispatch get_time, while
-    # "navigate to warehouse?" must stay GENERAL to avoid accidental movement.
-    _QUESTION_SAFE_SKILLS: frozenset[str] = frozenset({
-        "get_time",
-        "nav_query",
-        "system_status",
-        "recall_memory",
-        "list_skills",
-        "workspace_info",
-        "list_directory",
-        "patrol_report",
-        "daily_summary",
-    })
+        checker = self._safety
+        if checker is None:
+            return None
+        try:
+            if checker.is_estop_command(text):
+                return "safety_checker"
+        except Exception:
+            logger.exception("SafetyChecker failed during ESTOP routing")
+        return None
 
     def _is_negated(self, text: str, trigger_pos: int) -> bool:
         """Return True if the trigger at trigger_pos is preceded by a negation word."""
         prefix = text[max(0, trigger_pos - 4) : trigger_pos]
-        return any(prefix.endswith(neg) for neg in self._NEGATION_PREFIXES)
+        return any(prefix.endswith(neg) for neg in self._policy.negation_prefixes)
 
     def _is_question_context(self, text: str) -> bool:
         """Return True if the utterance is a question, not a command.
@@ -201,13 +190,16 @@ class IntentRouter:
         if stripped.endswith("?") or stripped.endswith("？"):
             return True
         # Ends with question particle
-        return any(stripped.endswith(q) for q in self._QUESTION_SUFFIXES)
+        return any(stripped.endswith(q) for q in self._policy.question_suffixes)
 
     def _question_context_blocks_skill(self, text: str, skill_name: str) -> bool:
         """Return whether question punctuation should suppress this skill."""
-        return self._is_question_context(text) and skill_name not in self._QUESTION_SAFE_SKILLS
+        return (
+            self._is_question_context(text)
+            and skill_name not in self._policy.question_safe_skills
+        )
 
-    def _match_voice_trigger(self, text: str) -> str | None:
+    def _match_voice_trigger(self, text: str) -> tuple[str, str] | None:
         """Find the best matching voice trigger, skipping negated and question occurrences.
 
         Uses substring matching: if any trigger phrase appears in the text,
@@ -232,7 +224,7 @@ class IntentRouter:
         text_lower = text.lower()
 
         for trigger_phrase, skill_name in self._sorted_triggers:
-            if len(trigger_phrase) < self.MIN_TRIGGER_LENGTH:
+            if len(trigger_phrase) < self._policy.min_trigger_length:
                 continue
             pos = text_lower.find(trigger_phrase.lower())
             if (
@@ -240,6 +232,6 @@ class IntentRouter:
                 and not self._is_negated(text_lower, pos)
                 and not self._question_context_blocks_skill(text_lower, skill_name)
             ):
-                return skill_name
+                return skill_name, trigger_phrase
 
         return None

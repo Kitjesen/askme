@@ -1,9 +1,10 @@
-"""Edge Robot — 完整边缘机器人.
+"""Park Patrol Robot Runtime blueprint.
 
-语音 + 感知 + 外部插件。14 个模块。
+This is the primary customer-pilot runtime: voice, perception, field event
+handling, runtime handoff, robot control adapters, indicators, and proactive
+monitoring in one edge composition.
 
-Usage::
-
+Run:
     python -m askme.blueprints.edge_robot
 """
 
@@ -33,4 +34,4 @@ __all__ = ["edge_robot"]
 if __name__ == "__main__":
     from askme.blueprints._runner import run_blueprint
 
-    run_blueprint(edge_robot, "Edge Robot")
+    run_blueprint(edge_robot, "Park Patrol Robot Runtime")

@@ -13,10 +13,12 @@ _DEFAULT_PERMISSIONS: dict[str, set[str]] = {
         "field:event:create",
         "field:event:acknowledge",
         "field:event:request_close",
+        "field:project:read",
         "knowledge:read",
         "knowledge:import",
         "knowledge:preview",
         "runtime:read",
+        "runtime:submit",
         "runtime:pause",
         "runtime:resume",
         "skill:read",
@@ -30,6 +32,9 @@ _DEFAULT_PERMISSIONS: dict[str, set[str]] = {
         "field:event:close",
         "field:event:request_close",
         "field:notification:test",
+        "field:project:read",
+        "field:project:write",
+        "resource:governance:write",
         "knowledge:read",
         "knowledge:import",
         "knowledge:approve",
@@ -37,6 +42,7 @@ _DEFAULT_PERMISSIONS: dict[str, set[str]] = {
         "knowledge:rollback",
         "knowledge:rebuild",
         "runtime:read",
+        "runtime:submit",
         "runtime:pause",
         "runtime:resume",
         "runtime:cancel",
@@ -45,6 +51,14 @@ _DEFAULT_PERMISSIONS: dict[str, set[str]] = {
         "skill:review",
         "voice:profile:read",
         "voice:profile:update",
+    },
+    "product_owner": {
+        "audit:read",
+        "field:project:read",
+        "template:release:write",
+        "template:release:approve",
+        "resource:governance:write",
+        "resource:governance:approve",
     },
     "admin": {"*"},
 }
@@ -58,6 +72,11 @@ _ROLE_METADATA: dict[str, dict[str, str]] = {
     "supervisor": {
         "label": "现场主管",
         "description": "可审批知识、关闭高风险事件、测试通知、推进运行状态和审核技能。",
+        "risk_level": "high",
+    },
+    "product_owner": {
+        "label": "Product Owner",
+        "description": "Owns reusable template release state and customer-facing delivery claims.",
         "risk_level": "high",
     },
     "admin": {
@@ -78,6 +97,11 @@ class OperatorIdentity:
     roles: tuple[str, ...]
     source: str
     display_name: str = ""
+    tenant_ids: tuple[str, ...] = ()
+    delivery_namespaces: tuple[str, ...] = ()
+    customer_ids: tuple[str, ...] = ()
+    project_ids: tuple[str, ...] = ()
+    site_ids: tuple[str, ...] = ()
     authenticated: bool = False
     known: bool = True
 
@@ -114,6 +138,21 @@ class OperatorDirectory:
         self.trusted_display_name_header = str(
             trusted_headers.get("display_name") or "x-askme-iam-display-name"
         ).lower()
+        self.trusted_tenant_ids_header = str(
+            trusted_headers.get("tenant_ids") or "x-askme-iam-tenant-ids"
+        ).lower()
+        self.trusted_delivery_namespaces_header = str(
+            trusted_headers.get("delivery_namespaces") or "x-askme-iam-delivery-namespaces"
+        ).lower()
+        self.trusted_customer_ids_header = str(
+            trusted_headers.get("customer_ids") or "x-askme-iam-customer-ids"
+        ).lower()
+        self.trusted_project_ids_header = str(
+            trusted_headers.get("project_ids") or "x-askme-iam-project-ids"
+        ).lower()
+        self.trusted_site_ids_header = str(
+            trusted_headers.get("site_ids") or "x-askme-iam-site-ids"
+        ).lower()
         self.trusted_source_header = str(
             trusted_headers.get("source") or "x-askme-iam-source"
         ).lower()
@@ -145,6 +184,11 @@ class OperatorDirectory:
             operator_id=clean,
             roles=normalized_roles or ("operator",),
             display_name=str(payload.get("display_name") or clean),
+            tenant_ids=_scope_values(payload, "tenant_ids"),
+            delivery_namespaces=_scope_values(payload, "delivery_namespaces"),
+            customer_ids=_scope_values(payload, "customer_ids"),
+            project_ids=_scope_values(payload, "project_ids"),
+            site_ids=_scope_values(payload, "site_ids"),
             source=self.identity_provider,
             authenticated=self.identity_provider not in {"", "local_config", "demo_config"},
             known=True,
@@ -254,6 +298,7 @@ class OperatorDirectory:
             "identity_provider": self.identity_provider,
             "warnings": warnings,
             "readiness": self.directory_readiness(),
+            "identity_gateway_readiness": self.identity_gateway_readiness(),
         }
 
     def payload(self) -> dict[str, Any]:
@@ -275,6 +320,7 @@ class OperatorDirectory:
             "roles": self.roles_payload(),
             "authorization_matrix": self.authorization_matrix(),
             "readiness": self.directory_readiness(),
+            "identity_gateway_readiness": self.identity_gateway_readiness(),
             "sso": {
                 "configured": self.identity_provider.lower() in {"oidc", "iam", "sso"},
                 "provider": self.identity_provider,
@@ -287,6 +333,11 @@ class OperatorDirectory:
                 "trusted_operator_id_header": self.trusted_operator_id_header,
                 "trusted_roles_header": self.trusted_roles_header,
                 "trusted_display_name_header": self.trusted_display_name_header,
+                "trusted_tenant_ids_header": self.trusted_tenant_ids_header,
+                "trusted_delivery_namespaces_header": self.trusted_delivery_namespaces_header,
+                "trusted_customer_ids_header": self.trusted_customer_ids_header,
+                "trusted_project_ids_header": self.trusted_project_ids_header,
+                "trusted_site_ids_header": self.trusted_site_ids_header,
             },
             "limitations": self.limitations(),
         }
@@ -391,6 +442,138 @@ class OperatorDirectory:
             "findings": findings,
         }
 
+    def identity_gateway_readiness(self) -> dict[str, Any]:
+        """Return a customer-facing gate for enterprise IAM/SSO handoff."""
+
+        provider = self.identity_provider.lower()
+        enterprise_provider = provider in _ENTERPRISE_IDENTITY_PROVIDERS
+        required_headers = [
+            {
+                "claim": "operator_id",
+                "header": self.trusted_operator_id_header,
+                "required": True,
+                "configured": bool(self.trusted_operator_id_header),
+            },
+            {
+                "claim": "roles",
+                "header": self.trusted_roles_header,
+                "required": self.trusted_roles_required,
+                "configured": bool(self.trusted_roles_header),
+            },
+        ]
+        scope_headers = [
+            {
+                "claim": "tenant_ids",
+                "header": self.trusted_tenant_ids_header,
+                "configured": bool(self.trusted_tenant_ids_header),
+            },
+            {
+                "claim": "delivery_namespaces",
+                "header": self.trusted_delivery_namespaces_header,
+                "configured": bool(self.trusted_delivery_namespaces_header),
+            },
+            {
+                "claim": "customer_ids",
+                "header": self.trusted_customer_ids_header,
+                "configured": bool(self.trusted_customer_ids_header),
+            },
+            {
+                "claim": "project_ids",
+                "header": self.trusted_project_ids_header,
+                "configured": bool(self.trusted_project_ids_header),
+            },
+            {
+                "claim": "site_ids",
+                "header": self.trusted_site_ids_header,
+                "configured": bool(self.trusted_site_ids_header),
+            },
+        ]
+        blockers: list[dict[str, str]] = []
+        warnings: list[dict[str, str]] = []
+        if not enterprise_provider:
+            blockers.append({
+                "code": "enterprise_identity_provider_missing",
+                "message": f"生产交付必须绑定 {self.production_target}，不能继续使用本地 demo 操作员目录。",
+            })
+        if enterprise_provider and not self.trusted_identity_headers_enabled:
+            blockers.append({
+                "code": "trusted_gateway_headers_disabled",
+                "message": "企业身份模式未启用受信身份头，应用无法接收网关验签后的操作员身份。",
+            })
+        missing_required = [
+            item["claim"]
+            for item in required_headers
+            if item["required"] and not item["configured"]
+        ]
+        if missing_required:
+            blockers.append({
+                "code": "required_identity_claim_header_missing",
+                "message": "缺少必要身份 claim header：" + ", ".join(missing_required),
+            })
+        if enterprise_provider and self.trusted_identity_headers_enabled and not self.trusted_roles_required:
+            warnings.append({
+                "code": "roles_claim_not_required",
+                "message": "roles claim 未设为必填，高风险操作可能无法稳定执行 RBAC。",
+            })
+        if enterprise_provider and self.trusted_local_role_fallback:
+            warnings.append({
+                "code": "local_role_fallback_enabled",
+                "message": "已启用本地角色兜底；生产环境应优先使用企业身份网关下发的角色 claim。",
+            })
+        configured_scope_claims = [
+            item["claim"]
+            for item in scope_headers
+            if item["configured"]
+        ]
+        if enterprise_provider and self.trusted_identity_headers_enabled and not configured_scope_claims:
+            warnings.append({
+                "code": "tenant_scope_claims_missing",
+                "message": "未配置租户、项目或现场作用域 claim，无法形成企业级数据隔离边界。",
+            })
+        production_ready = enterprise_provider and self.trusted_identity_headers_enabled and not blockers
+        status = "production_ready" if production_ready else "blocked"
+        if not production_ready and not blockers:
+            status = "manual_check"
+        return {
+            "gate_type": "askme.governance.identity_gateway_readiness.v1",
+            "status": status,
+            "production_ready": production_ready,
+            "identity_mode": "enterprise_gateway" if enterprise_provider else "demo_operator_directory",
+            "identity_provider": self.identity_provider,
+            "production_binding_required": self.production_binding_required,
+            "production_target": self.production_target,
+            "trusted_identity_headers_enabled": self.trusted_identity_headers_enabled,
+            "trusted_gateway_contract": {
+                "required_headers": required_headers,
+                "scope_headers": scope_headers,
+                "roles_required": self.trusted_roles_required,
+                "local_role_fallback": self.trusted_local_role_fallback,
+            },
+            "demo_operator_directory": {
+                "operator_count": len(self._operators),
+                "session_operator_header": self.session_operator_header,
+                "allowed_for": ["demo", "lab", "customer_pilot"],
+                "not_allowed_for": ["unattended_production"],
+            },
+            "blockers": blockers,
+            "warnings": warnings,
+            "customer_status": (
+                "企业身份网关已接入，可进入生产准入测试。"
+                if production_ready
+                else "当前只能用于演示、实验室或客户试点，不能声明无人值守生产上线。"
+            ),
+            "release_claim": (
+                "可声明已具备企业身份接入边界，仍需现场账号、审计和权限验收。"
+                if production_ready
+                else "只能承诺演示或试点能力，不能承诺企业级账号体系和生产数据隔离。"
+            ),
+            "next_step": (
+                "用企业 IAM/SSO 网关注入 operator_id、roles 和租户/项目作用域 headers，并跑生产准入测试。"
+                if not production_ready
+                else "保留网关验签证据，执行账号权限、租户隔离和高风险操作审批验收。"
+            ),
+        }
+
     def limitations(self) -> list[str]:
         if self.identity_provider.lower() in _ENTERPRISE_IDENTITY_PROVIDERS:
             return [
@@ -429,6 +612,13 @@ class OperatorDirectory:
             roles=roles,
             display_name=display_name,
             source=source,
+            tenant_ids=_parse_scope_header(self._header_value(headers, self.trusted_tenant_ids_header)),
+            delivery_namespaces=_parse_scope_header(
+                self._header_value(headers, self.trusted_delivery_namespaces_header)
+            ),
+            customer_ids=_parse_scope_header(self._header_value(headers, self.trusted_customer_ids_header)),
+            project_ids=_parse_scope_header(self._header_value(headers, self.trusted_project_ids_header)),
+            site_ids=_parse_scope_header(self._header_value(headers, self.trusted_site_ids_header)),
             authenticated=known,
             known=known,
         )
@@ -461,6 +651,14 @@ class OperatorDirectory:
             "source": identity.source,
             "authenticated": identity.authenticated,
             "known": identity.known,
+            "project_scope": {
+                "tenant_ids": list(identity.tenant_ids),
+                "delivery_namespaces": list(identity.delivery_namespaces),
+                "customer_ids": list(identity.customer_ids),
+                "project_ids": list(identity.project_ids),
+                "site_ids": list(identity.site_ids),
+                "unrestricted": _scope_unrestricted(identity),
+            },
         }
 
     @staticmethod
@@ -472,6 +670,46 @@ class OperatorDirectory:
                 continue
             merged[str(role)] = {str(item) for item in permissions}
         return merged
+
+
+def _scope_values(payload: dict[str, Any], key: str) -> tuple[str, ...]:
+    scope = payload.get("project_scope") if isinstance(payload.get("project_scope"), dict) else {}
+    value = payload.get(key)
+    if value in (None, ""):
+        value = scope.get(key)
+    return _parse_scope_items(value)
+
+
+def _parse_scope_header(value: str) -> tuple[str, ...]:
+    return _parse_scope_items(value)
+
+
+def _parse_scope_items(value: Any) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, str):
+        raw_items = value.replace(";", ",").split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    items = tuple(
+        str(item).strip()
+        for item in raw_items
+        if str(item).strip()
+    )
+    return items
+
+
+def _scope_unrestricted(identity: OperatorIdentity) -> bool:
+    scoped_values = (
+        identity.tenant_ids
+        + identity.delivery_namespaces
+        + identity.customer_ids
+        + identity.project_ids
+        + identity.site_ids
+    )
+    return not scoped_values or "*" in scoped_values
 
 
 def _as_bool(value: Any, *, default: bool = False) -> bool:

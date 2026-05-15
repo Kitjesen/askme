@@ -11,15 +11,24 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Iterable
-from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 from askme.config import get_config
+from askme.tools.execution_control import (
+    CircuitBreaker,
+    ScheduledWork,
+    ToolExecutionScheduler,
+    ToolQueueFullError,
+    WindowRateLimiter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +67,17 @@ _DEFAULT_REJECTION_PHRASES = {
     "deny",
 }
 _DEFAULT_CONFIRMATION_BYPASS_TOOLS: set[str] = set()
+_DEFAULT_EXECUTOR_MAX_WORKERS = 4
+_DEFAULT_QUEUE_MAX_SIZE = 256
+_DEFAULT_JOB_HISTORY_LIMIT = 100
+_DEFAULT_RATE_LIMIT_PER_MINUTE = 0.0
+_DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
+_DEFAULT_CIRCUIT_COOLDOWN_SECONDS = 30.0
+_DEFAULT_PRIORITY_BY_SAFETY = {
+    "critical": 0,
+    "dangerous": 50,
+    "normal": 100,
+}
 # NOTE: robot_emergency_stop is intentionally NOT in this bypass set.
 # LLM-triggered emergency stop requires explicit operator confirmation.
 # Voice-triggered E-STOP goes through IntentRouter → pipeline.handle_estop()
@@ -118,6 +138,9 @@ class BaseTool(ABC):
 
     Optional class attributes:
       - dev_only: if True, the tool is skipped when production_mode is enabled
+      - queue_priority: lower values run before lower-priority queued work
+      - rate_limit_per_minute: per-tool override; None uses registry default
+      - backgroundable: if True, can be submitted as a tracked background job
     """
 
     name: str = ""
@@ -127,6 +150,9 @@ class BaseTool(ABC):
     dev_only: bool = False  # if True, excluded when production_mode=True
     agent_allowed: bool = False  # if True, available in ThunderAgentShell
     voice_label: str = ""  # Chinese TTS label (e.g. "观察环境"), empty = no announce
+    queue_priority: int | None = None
+    rate_limit_per_minute: float | None = None
+    backgroundable: bool = False
 
     @abstractmethod
     def execute(self, **kwargs: Any) -> str:
@@ -164,6 +190,50 @@ class ToolRegistry:
         }
         self._timeout_cooldown: float = max(0.0, float(cfg.get("timeout_cooldown", 30.0)))
         self._cooldown_until: dict[str, float] = {}
+        executor_max_workers = cfg.get(
+            "executor_max_workers",
+            _DEFAULT_EXECUTOR_MAX_WORKERS,
+        )
+        self._executor_max_workers = max(1, int(executor_max_workers))
+        self._queue_max_size = max(
+            1,
+            int(cfg.get("queue_max_size", _DEFAULT_QUEUE_MAX_SIZE)),
+        )
+        priority_cfg = cfg.get("priority_by_safety", {})
+        self._priority_by_safety = dict(_DEFAULT_PRIORITY_BY_SAFETY)
+        if isinstance(priority_cfg, dict):
+            for key, value in priority_cfg.items():
+                level = _normalize_safety_level(str(key))
+                self._priority_by_safety[level] = int(value)
+        self._executor: ToolExecutionScheduler | None = None
+        self._executor_lock = threading.Lock()
+        self._job_history_limit = max(
+            1,
+            int(cfg.get("job_history_limit", _DEFAULT_JOB_HISTORY_LIMIT)),
+        )
+        self._jobs: dict[str, dict[str, Any]] = {}
+        self._job_order: deque[str] = deque()
+        self._job_futures: dict[str, Any] = {}
+        self._jobs_lock = threading.RLock()
+        self._rate_limit_per_minute = max(
+            0.0,
+            float(cfg.get("rate_limit_per_minute", _DEFAULT_RATE_LIMIT_PER_MINUTE)),
+        )
+        self._rate_limiter = WindowRateLimiter(window_seconds=60.0)
+        self._circuit_breaker = CircuitBreaker(
+            failure_threshold=int(
+                cfg.get(
+                    "circuit_failure_threshold",
+                    _DEFAULT_CIRCUIT_FAILURE_THRESHOLD,
+                )
+            ),
+            cooldown_seconds=float(
+                cfg.get(
+                    "circuit_cooldown_seconds",
+                    _DEFAULT_CIRCUIT_COOLDOWN_SECONDS,
+                )
+            ),
+        )
         self._approval_timeout_seconds: float = max(
             0.0,
             float(cfg.get("approval_timeout_seconds", 30.0)),
@@ -273,6 +343,60 @@ class ToolRegistry:
     def __contains__(self, name: str) -> bool:
         return name in self._tools
 
+    def shutdown(self, *, wait: bool = True, cancel_futures: bool = False) -> None:
+        """Shut down the shared tool execution pool.
+
+        The pool is recreated lazily if the registry is used again after
+        shutdown, making this safe to call during tests or application teardown.
+        """
+        with self._executor_lock:
+            executor = self._executor
+            self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=wait, cancel_futures=cancel_futures)
+        if cancel_futures:
+            with self._jobs_lock:
+                for job_id, job in self._jobs.items():
+                    if job.get("status") in {"queued", "running"}:
+                        self._mark_job_cancelled_locked(job_id, "registry_shutdown")
+
+    def close(self) -> None:
+        """Close resources owned by this registry."""
+        self.shutdown()
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Return lightweight runtime diagnostics for health surfaces."""
+        with self._executor_lock:
+            executor = self._executor
+            executor_active = executor is not None
+            scheduler_diag = executor.diagnostics() if executor is not None else {}
+        job_counts = self._job_counts()
+        circuit_diag = self._circuit_breaker.diagnostics()
+        return {
+            "tool_count": len(self._tools),
+            "executor": {
+                "active": executor_active,
+                "max_workers": self._executor_max_workers,
+                "queue_max_size": self._queue_max_size,
+                "queued": int(scheduler_diag.get("queued", 0)),
+                "running": int(scheduler_diag.get("running", 0)),
+                "completed": int(scheduler_diag.get("completed", 0)),
+            },
+            "cooldown_count": sum(
+                1
+                for expires_at in self._cooldown_until.values()
+                if expires_at > time.monotonic()
+            ),
+            "pending_approval": self.has_pending_approval(),
+            "rate_limit": self._rate_limiter.diagnostics(),
+            "circuit_breakers": circuit_diag,
+            "background_jobs": {
+                "history_limit": self._job_history_limit,
+                "stored": len(self._jobs),
+                **job_counts,
+            },
+        }
+
     def has_pending_approval(self) -> bool:
         """Whether a dangerous tool invocation is waiting for approval."""
         self._expire_pending_approval()
@@ -336,6 +460,9 @@ class ToolRegistry:
             pending.tool_name,
             pending.kwargs,
         )
+        guard_error = self._get_operational_guard_error(tool, consume_rate=True)
+        if guard_error:
+            return guard_error
         return self._execute_tool(tool, pending.kwargs, timeout=self._resolve_timeout(tool, None))
 
     def reject_pending(self) -> str:
@@ -395,6 +522,9 @@ class ToolRegistry:
                 return f"[Error] {validation_error}"
 
         if self._requires_confirmation(tool):
+            guard_error = self._get_operational_guard_error(tool, consume_rate=False)
+            if guard_error:
+                return guard_error
             self._expire_pending_approval()
             if self._pending_approval is not None:
                 return self._format_approval_pending(self._pending_approval)
@@ -413,11 +543,123 @@ class ToolRegistry:
             )
             return self._format_approval_required(tool, kwargs)
 
+        guard_error = self._get_operational_guard_error(tool, consume_rate=True)
+        if guard_error:
+            return guard_error
         return self._execute_tool(
             tool,
             kwargs,
             timeout=self._resolve_timeout(tool, timeout),
         )
+
+    def submit_background(
+        self,
+        name: str,
+        args_json: str | None = None,
+        *,
+        allowed_names: Iterable[str] | None = None,
+        max_safety_level: str = "critical",
+        priority: int | None = None,
+    ) -> dict[str, Any]:
+        """Queue a background tool job and return its tracked state."""
+        prepared = self._prepare_tool_call(
+            name,
+            args_json,
+            allowed_names=allowed_names,
+            max_safety_level=max_safety_level,
+        )
+        tool, kwargs, error = prepared
+        if error is not None or tool is None:
+            return {
+                "job_id": "",
+                "tool_name": name,
+                "status": "rejected",
+                "result": error or f"[Error] Tool not found: {name}",
+            }
+        if not bool(getattr(tool, "backgroundable", False)):
+            return {
+                "job_id": "",
+                "tool_name": name,
+                "status": "rejected",
+                "result": f"[Error] Tool '{name}' is not backgroundable.",
+            }
+        if self._requires_confirmation(tool):
+            guard_error = self._get_operational_guard_error(tool, consume_rate=False)
+            if guard_error:
+                return {
+                    "job_id": "",
+                    "tool_name": name,
+                    "status": "rejected",
+                    "result": guard_error,
+                }
+            return {
+                "job_id": "",
+                "tool_name": name,
+                "status": "pending_approval",
+                "result": self._queue_pending_approval(tool, name, kwargs, args_json),
+            }
+
+        guard_error = self._get_operational_guard_error(tool, consume_rate=True)
+        if guard_error:
+            return {
+                "job_id": "",
+                "tool_name": name,
+                "status": "rejected",
+                "result": guard_error,
+            }
+
+        job_id = f"tool_{uuid4().hex}"
+        resolved_priority = self._resolve_priority(tool, priority)
+        self._record_job(
+            job_id,
+            tool=tool,
+            args_json=args_json,
+            kwargs=kwargs,
+            priority=resolved_priority,
+        )
+        try:
+            future = self._submit_tool_execution(
+                tool,
+                kwargs,
+                priority=resolved_priority,
+                job_id=job_id,
+            )
+        except ToolQueueFullError as exc:
+            self._mark_job_failed(job_id, str(exc))
+        else:
+            with self._jobs_lock:
+                self._job_futures[job_id] = future
+        return self.get_job(job_id) or {"job_id": job_id, "status": "unknown"}
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        """Return a copy of one background job state."""
+        with self._jobs_lock:
+            job = self._jobs.get(job_id)
+            return dict(job) if job is not None else None
+
+    def list_jobs(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return recent background jobs, newest first."""
+        with self._jobs_lock:
+            ids = list(reversed(self._job_order))[: max(1, int(limit))]
+            return [dict(self._jobs[job_id]) for job_id in ids if job_id in self._jobs]
+
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
+        """Cancel a queued background job; running sync tools cannot be interrupted."""
+        with self._executor_lock:
+            executor = self._executor
+        cancelled = executor.cancel(job_id) if executor is not None else False
+        with self._jobs_lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return {"job_id": job_id, "status": "not_found", "cancelled": False}
+            if cancelled:
+                self._mark_job_cancelled_locked(job_id, "operator_cancelled")
+                self._job_futures.pop(job_id, None)
+            elif job.get("status") == "running":
+                job["cancel_requested"] = True
+            result = dict(job)
+        result["cancelled"] = bool(cancelled)
+        return result
 
     _RESULT_MAX_CHARS = 5000
     _RESULT_TRUNCATION_SUFFIX = "...[截断]"
@@ -438,28 +680,17 @@ class ToolRegistry:
                 safety,
                 timeout,
             )
-            result = str(self._run_with_timeout(tool, kwargs, timeout=timeout))
-
-            # Task 4: truncate oversized results to prevent information leakage
-            if len(result) > self._RESULT_MAX_CHARS:
-                result = result[: self._RESULT_MAX_CHARS] + self._RESULT_TRUNCATION_SUFFIX
-
-            # Task 3: structured audit log for dangerous / critical tools
-            if safety in ("dangerous", "critical"):
-                _args_preview = self._format_kwargs(kwargs)
-                if len(_args_preview) > 200:
-                    _args_preview = _args_preview[:200] + "..."
-                logger.warning(
-                    "[AUDIT] tool_call tool=%s safety=%s args=%s result_len=%d",
-                    tool.name,
-                    safety,
-                    _args_preview,
-                    len(result),
-                )
-
+            raw_result = str(self._run_with_timeout(tool, kwargs, timeout=timeout))
+            result = self._format_tool_result(raw_result)
+            self._audit_tool_result(tool, kwargs, result)
+            self._circuit_breaker.record_success(tool.name)
             return result
+        except ToolQueueFullError:
+            logger.warning("Tool execution queue is full: %s", tool.name)
+            return "[Busy] Tool execution queue is full. Retry shortly."
         except ToolExecutionTimeoutError:
             self._mark_timed_out(tool.name)
+            self._circuit_breaker.record_failure(tool.name)
             logger.error("Tool execution timed out: %s", tool.name)
             if self._timeout_cooldown > 0:
                 return (
@@ -468,8 +699,100 @@ class ToolRegistry:
                 )
             return f"[Timeout] Tool '{tool.name}' exceeded {timeout:.1f}s."
         except Exception as exc:
+            self._circuit_breaker.record_failure(tool.name)
             logger.exception("Tool execution failed: %s", tool.name)
             return f"[Error] Tool '{tool.name}' execution failed: {exc}"
+
+    def _prepare_tool_call(
+        self,
+        name: str,
+        args_json: str | None,
+        *,
+        allowed_names: Iterable[str] | None,
+        max_safety_level: str,
+    ) -> tuple[BaseTool | None, dict[str, Any], str | None]:
+        tool = self._tools.get(name)
+        if tool is None:
+            return None, {}, f"[Error] Tool not found: {name}"
+
+        allowed = set(allowed_names) if allowed_names is not None else None
+        access_error = self._get_access_error(
+            tool,
+            allowed_names=allowed,
+            max_safety_level=max_safety_level,
+        )
+        if access_error:
+            return tool, {}, access_error
+
+        try:
+            kwargs = json.loads(args_json) if args_json else {}
+        except json.JSONDecodeError as exc:
+            return tool, {}, f"[Error] Invalid JSON arguments: {exc}"
+        if not isinstance(kwargs, dict):
+            return tool, {}, "[Error] Tool arguments must decode to an object."
+
+        schema = getattr(tool, "parameters", None)
+        if schema and isinstance(schema, dict):
+            validation_error = self._validate_args(tool.name, kwargs, schema)
+            if validation_error:
+                logger.warning(
+                    "Tool '%s' argument validation failed: %s",
+                    tool.name,
+                    validation_error,
+                )
+                return tool, kwargs, f"[Error] {validation_error}"
+
+        return tool, kwargs, None
+
+    def _queue_pending_approval(
+        self,
+        tool: BaseTool,
+        name: str,
+        kwargs: dict[str, Any],
+        args_json: str | None,
+    ) -> str:
+        self._expire_pending_approval()
+        if self._pending_approval is not None:
+            return self._format_approval_pending(self._pending_approval)
+        self._pending_approval = PendingToolApproval(
+            tool_name=name,
+            kwargs=kwargs,
+            args_json=args_json,
+            safety_level=_normalize_safety_level(tool.safety_level),
+            requested_at=time.monotonic(),
+        )
+        logger.warning(
+            "Queued %s tool for operator approval: %s(%s)",
+            _normalize_safety_level(tool.safety_level),
+            name,
+            kwargs,
+        )
+        return self._format_approval_required(tool, kwargs)
+
+    def _format_tool_result(self, result: str) -> str:
+        if len(result) > self._RESULT_MAX_CHARS:
+            return result[: self._RESULT_MAX_CHARS] + self._RESULT_TRUNCATION_SUFFIX
+        return result
+
+    def _audit_tool_result(
+        self,
+        tool: BaseTool,
+        kwargs: dict[str, Any],
+        result: str,
+    ) -> None:
+        safety = _normalize_safety_level(tool.safety_level)
+        if safety not in ("dangerous", "critical"):
+            return
+        args_preview = self._format_kwargs(kwargs)
+        if len(args_preview) > 200:
+            args_preview = args_preview[:200] + "..."
+        logger.warning(
+            "[AUDIT] tool_call tool=%s safety=%s args=%s result_len=%d",
+            tool.name,
+            safety,
+            args_preview,
+            len(result),
+        )
 
     @staticmethod
     def _validate_args(tool_name: str, kwargs: dict[str, Any], schema: dict[str, Any]) -> str | None:
@@ -530,6 +853,39 @@ class ToolRegistry:
                 f"Retry in {math.ceil(cooldown_remaining)}s."
             )
 
+        return None
+
+    def _get_operational_guard_error(
+        self,
+        tool: BaseTool,
+        *,
+        consume_rate: bool,
+    ) -> str | None:
+        cooldown_remaining = self._cooldown_remaining(tool.name)
+        if cooldown_remaining > 0:
+            return (
+                f"[Error] Tool '{tool.name}' is temporarily unavailable after a timeout. "
+                f"Retry in {math.ceil(cooldown_remaining)}s."
+            )
+
+        circuit_remaining = self._circuit_breaker.remaining_open_seconds(tool.name)
+        if circuit_remaining > 0:
+            return (
+                f"[Circuit Open] Tool '{tool.name}' is temporarily disabled after "
+                f"repeated failures. Retry in {math.ceil(circuit_remaining)}s."
+            )
+
+        limit = self._resolve_rate_limit(tool)
+        if consume_rate:
+            allowed, retry_after = self._rate_limiter.check_and_consume(
+                tool.name,
+                limit,
+            )
+            if not allowed:
+                return (
+                    f"[Rate Limited] Tool '{tool.name}' exceeded "
+                    f"{limit:.0f}/min. Retry in {math.ceil(retry_after)}s."
+                )
         return None
 
     def _requires_confirmation(self, tool: BaseTool) -> bool:
@@ -613,6 +969,20 @@ class ToolRegistry:
             return float(timeout)
         return self._timeout_by_safety[_normalize_safety_level(tool.safety_level)]
 
+    def _resolve_priority(self, tool: BaseTool, priority: int | None = None) -> int:
+        if priority is not None:
+            return int(priority)
+        tool_priority = getattr(tool, "queue_priority", None)
+        if tool_priority is not None:
+            return int(tool_priority)
+        return self._priority_by_safety[_normalize_safety_level(tool.safety_level)]
+
+    def _resolve_rate_limit(self, tool: BaseTool) -> float:
+        tool_limit = getattr(tool, "rate_limit_per_minute", None)
+        if tool_limit is not None:
+            return max(0.0, float(tool_limit))
+        return self._rate_limit_per_minute
+
     def _run_with_timeout(
         self,
         tool: BaseTool,
@@ -627,16 +997,148 @@ class ToolRegistry:
         # Future object rather than shared mutable dicts, eliminating the
         # race condition where a timed-out thread writes to result_box
         # after the caller has already moved on.
-        with ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix=f"askme-tool-{tool.name}",
-        ) as executor:
-            future = executor.submit(tool.execute, **kwargs)
-            try:
-                return str(future.result(timeout=timeout))
-            except _FuturesTimeoutError:
-                future.cancel()
-                raise ToolExecutionTimeoutError(tool.name)
+        future = self._submit_tool_execution(
+            tool,
+            kwargs,
+            priority=self._resolve_priority(tool),
+        )
+        try:
+            return str(future.result(timeout=timeout))
+        except _FuturesTimeoutError:
+            future.cancel()
+            raise ToolExecutionTimeoutError(tool.name)
+
+    def _submit_tool_execution(
+        self,
+        tool: BaseTool,
+        kwargs: dict[str, Any],
+        *,
+        priority: int,
+        job_id: str | None = None,
+    ):
+        work_id = job_id or f"call_{uuid4().hex}"
+        with self._executor_lock:
+            if self._executor is None:
+                self._executor = ToolExecutionScheduler(
+                    max_workers=self._executor_max_workers,
+                    max_queue_size=self._queue_max_size,
+                    thread_name_prefix="askme-tool",
+                    on_start=self._on_scheduled_work_started,
+                    on_finish=self._on_scheduled_work_finished,
+                )
+            return self._executor.submit(
+                lambda: tool.execute(**kwargs),
+                priority=priority,
+                work_id=work_id,
+                metadata={
+                    "tool_name": tool.name,
+                    "safety": _normalize_safety_level(tool.safety_level),
+                    "background": bool(job_id),
+                },
+            )
+
+    def _record_job(
+        self,
+        job_id: str,
+        *,
+        tool: BaseTool,
+        args_json: str | None,
+        kwargs: dict[str, Any],
+        priority: int,
+    ) -> None:
+        now = time.time()
+        job = {
+            "job_id": job_id,
+            "tool_name": tool.name,
+            "status": "queued",
+            "priority": int(priority),
+            "safety": _normalize_safety_level(tool.safety_level),
+            "submitted_at": now,
+            "started_at": None,
+            "finished_at": None,
+            "elapsed_ms": None,
+            "args_json": args_json or "{}",
+            "args_preview": self._format_kwargs(kwargs)[:500],
+            "result": "",
+            "error": "",
+            "cancel_requested": False,
+        }
+        with self._jobs_lock:
+            self._jobs[job_id] = job
+            self._job_order.append(job_id)
+            while len(self._job_order) > self._job_history_limit:
+                old_id = self._job_order.popleft()
+                self._jobs.pop(old_id, None)
+                self._job_futures.pop(old_id, None)
+
+    def _on_scheduled_work_started(self, work: ScheduledWork) -> None:
+        with self._jobs_lock:
+            job = self._jobs.get(work.work_id)
+            if job is not None and job.get("status") == "queued":
+                job["status"] = "running"
+                job["started_at"] = time.time()
+
+    def _on_scheduled_work_finished(
+        self,
+        work: ScheduledWork,
+        status: str,
+        result: Any,
+        error: BaseException | None,
+        elapsed_ms: float,
+    ) -> None:
+        with self._jobs_lock:
+            job = self._jobs.get(work.work_id)
+            if job is None:
+                return
+            if job.get("status") in {"cancelled", "timeout"}:
+                self._job_futures.pop(work.work_id, None)
+                return
+            job["finished_at"] = time.time()
+            job["elapsed_ms"] = round(float(elapsed_ms), 3)
+            if status == "succeeded":
+                formatted = self._format_tool_result(str(result))
+                job["status"] = "completed"
+                job["result"] = formatted
+                self._circuit_breaker.record_success(str(work.metadata.get("tool_name")))
+            elif status == "cancelled":
+                self._mark_job_cancelled_locked(work.work_id, "cancelled_before_start")
+            else:
+                tool_name = str(work.metadata.get("tool_name") or job["tool_name"])
+                job["status"] = "failed"
+                job["error"] = str(error or "tool execution failed")
+                self._circuit_breaker.record_failure(tool_name)
+            self._job_futures.pop(work.work_id, None)
+
+    def _mark_job_failed(self, job_id: str, error: str) -> None:
+        with self._jobs_lock:
+            job = self._jobs.get(job_id)
+            if job is not None:
+                job["status"] = "failed"
+                job["error"] = error
+                job["finished_at"] = time.time()
+
+    def _mark_job_cancelled_locked(self, job_id: str, reason: str) -> None:
+        job = self._jobs.get(job_id)
+        if job is not None:
+            job["status"] = "cancelled"
+            job["error"] = reason
+            job["finished_at"] = time.time()
+
+    def _job_counts(self) -> dict[str, int]:
+        with self._jobs_lock:
+            counts = {
+                "queued": 0,
+                "running": 0,
+                "completed": 0,
+                "failed": 0,
+                "cancelled": 0,
+                "rejected": 0,
+            }
+            for job in self._jobs.values():
+                status = str(job.get("status") or "unknown")
+                if status in counts:
+                    counts[status] += 1
+            return counts
 
     @staticmethod
     def _format_kwargs(kwargs: dict[str, Any]) -> str:

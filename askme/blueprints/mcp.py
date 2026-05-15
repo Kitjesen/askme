@@ -1,10 +1,9 @@
-"""MCP — Model Context Protocol 服务模式.
+"""MCP Tool Provider blueprint.
 
-Exposes robot control, voice I/O, and skills via MCP (stdio).
-Used by Claude Desktop/Code as a tool provider.
+Use this runtime when askme should expose memory, skills, cognition, and
+controlled robot capabilities to MCP clients.
 
-Usage::
-
+Run:
     python -m askme.blueprints.mcp
 """
 
@@ -48,4 +47,4 @@ __all__ = ["mcp"]
 if __name__ == "__main__":
     from askme.blueprints._runner import run_blueprint
 
-    run_blueprint(mcp, "MCP")
+    run_blueprint(mcp, "MCP Tool Provider")

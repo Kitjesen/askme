@@ -173,6 +173,8 @@ class MemoryModule(Module):
             "rag": {
                 "enabled": health.get("enabled", False),
                 "backend": health.get("backend", ""),
+                "configured_backend": health.get("configured_backend", ""),
+                "backend_selection": health.get("backend_selection", {}),
                 "available": health.get("available", False),
                 "last_backend": health.get("last_backend", ""),
                 "last_retrieve_ms": health.get("last_retrieve_ms"),

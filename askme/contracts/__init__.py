@@ -35,8 +35,11 @@ from askme.contracts.package import (
     CapabilityDependency,
     CapabilityPackageManifest,
     DependencyKind,
+    PackageRuntimeInventory,
     PackageStatus,
     ScenarioPackageManifest,
+    evaluate_capability_package_readiness,
+    evaluate_scenario_package_readiness,
 )
 
 __all__ = [
@@ -54,6 +57,7 @@ __all__ = [
     "LocationRef",
     "PerceptionInput",
     "PackageStatus",
+    "PackageRuntimeInventory",
     "RiskLevel",
     "RobotActionType",
     "ScenarioPackageManifest",
@@ -62,6 +66,8 @@ __all__ = [
     "VisionInput",
     "contract_catalog",
     "contract_examples",
+    "evaluate_capability_package_readiness",
+    "evaluate_scenario_package_readiness",
     "field_event_to_action_decision",
     "field_event_to_evidence_refs",
     "field_event_to_product_contracts",

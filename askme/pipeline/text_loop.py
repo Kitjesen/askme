@@ -6,7 +6,9 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from askme.interaction import attach_intent_route_trace
 from askme.pipeline.external_turns import record_external_turn
+from askme.pipeline.trace import get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -113,8 +115,10 @@ class TextLoop:
 
         consecutive_errors = 0
         idle_task = self._pipeline.start_idle_reflection()
+        _tracer = get_tracer()
         while True:
             memory_task: asyncio.Task[str] | None = None
+            _trace = None
             self._text_audio.spoken.clear()  # prevent unbounded growth across turns
             try:
                 user_text = await asyncio.to_thread(input, "[You]: ")
@@ -122,6 +126,8 @@ class TextLoop:
                 if not user_text:
                     continue
 
+                _trace = _tracer.start_trace("text_turn")
+                _trace.metadata["user_text"] = user_text[:60]
                 consecutive_errors = 0  # reset on successful input
 
                 # Cancel idle reflection on user activity
@@ -139,7 +145,11 @@ class TextLoop:
                 # Start memory prefetch ASAP (overlaps with routing)
                 memory_task = self._pipeline.start_memory_prefetch(user_text)
 
-                intent = self._router.route(user_text)
+                with _tracer.span("intent_route") as _route_span:
+                    intent = self._router.route(user_text)
+                    _route_span.metadata.update(
+                        attach_intent_route_trace(_trace, intent, source="text")
+                    )
 
                 if intent.type == IntentType.ESTOP:
                     self._pipeline.handle_estop()
@@ -195,6 +205,12 @@ class TextLoop:
                                 _result.interrupt_payload,
                             )
                             _reroute_intent = self._router.route(_result.interrupt_payload)
+                            attach_intent_route_trace(
+                                _trace,
+                                _reroute_intent,
+                                source="text",
+                                stage="interrupt_reroute",
+                            )
                             if (
                                 _reroute_intent.type == IntentType.VOICE_TRIGGER
                                 and _reroute_intent.skill_name
@@ -268,6 +284,8 @@ class TextLoop:
                     await asyncio.sleep(3)
                     consecutive_errors = 0
             finally:
+                if _trace is not None:
+                    _tracer.finish_trace()
                 if memory_task is not None and not memory_task.done():
                     memory_task.cancel()
                     try:
@@ -298,8 +316,15 @@ class TextLoop:
         self.last_cognition_result = None
         memory_task = self._pipeline.start_memory_prefetch(user_text)
         source = "voice" if speak else "text"
+        _tracer = get_tracer()
+        _trace = _tracer.start_trace("text_process_turn")
+        _trace.metadata["user_text"] = user_text[:60]
         try:
-            intent = self._router.route(user_text)
+            with _tracer.span("intent_route") as _route_span:
+                intent = self._router.route(user_text)
+                _route_span.metadata.update(
+                    attach_intent_route_trace(_trace, intent, source=source)
+                )
 
             if intent.type == IntentType.ESTOP:
                 self._pipeline.handle_estop()
@@ -308,7 +333,7 @@ class TextLoop:
 
             if intent.type == IntentType.QUICK_REPLY:
                 memory_task.cancel()
-                reply = intent.skill_name or ""
+                reply = intent.reply_text or intent.skill_name or ""
                 if not speak:
                     return reply
                 self._audio.speak(reply)
@@ -367,6 +392,7 @@ class TextLoop:
             memory_task = None
             return reply
         finally:
+            _tracer.finish_trace()
             if memory_task is not None and not memory_task.done():
                 memory_task.cancel()
                 try:
@@ -416,9 +442,9 @@ class TextLoop:
 
         session_id = str(plan.get("planning_session_id") or "").strip()
         stage = str(plan.get("interaction_state") or plan.get("stage") or "")
-        if session_id and stage not in {"cancelled", "ready_for_arbiter"}:
+        if session_id and stage not in {"cancelled", "ready_for_arbiter", "answer_ready"}:
             self._active_planning_session_id = session_id
-        elif stage in {"cancelled", "ready_for_arbiter"}:
+        elif stage in {"cancelled", "ready_for_arbiter", "answer_ready"}:
             self._active_planning_session_id = None
 
         reply = _cognition_reply_text(plan)

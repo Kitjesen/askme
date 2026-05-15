@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from inspect import isawaitable
 from typing import TYPE_CHECKING, Any
 
 from askme.pipeline.hooks import PipelineHooks
@@ -160,7 +161,10 @@ class TurnExecutor:
         # Set structured log context for this turn so all log records carry
         # the trace ID and source without manual argument threading.
         _tracer = get_tracer()
-        _trace = _tracer.start_trace("voice_turn" if source == "voice" else "text_turn")
+        _trace = _tracer.current_trace
+        _owns_trace = _trace is None
+        if _owns_trace:
+            _trace = _tracer.start_trace("voice_turn" if source == "voice" else "text_turn")
         set_log_context(trace_id=_trace.id, session_id=source)
         logger.info("Processing: %s", user_text[:60])
         is_voice = source == "voice"
@@ -218,7 +222,7 @@ class TurnExecutor:
         if scene_desc:
             self._log_episode("perception", scene_desc)
 
-        rag_policy = self._memory_answer_policy()
+        rag_policy = await self._memory_answer_policy()
         system_prompt = self._prompt_builder.build_system_prompt(
             context_str,
             scene_desc=scene_desc,
@@ -359,7 +363,8 @@ class TurnExecutor:
         finally:
             if is_voice:
                 self._audio.stop_playback()
-            _tracer.finish_trace()
+            if _owns_trace:
+                _tracer.finish_trace()
 
     async def shutdown(self) -> None:
         """Cancel all in-flight background tasks (delayed reflections, etc.)."""
@@ -380,12 +385,14 @@ class TurnExecutor:
             return None
         return asyncio.create_task(self._vision.describe_scene())
 
-    def _memory_answer_policy(self) -> dict[str, Any] | None:
+    async def _memory_answer_policy(self) -> dict[str, Any] | None:
         health = getattr(self._memory, "health", None)
         if not callable(health):
             return None
         try:
             snapshot = health()
+            if isawaitable(snapshot):
+                snapshot = await snapshot
         except Exception as exc:
             logger.debug("[TurnExecutor] Memory health unavailable for RAG policy: %s", exc)
             return None

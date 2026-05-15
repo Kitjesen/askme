@@ -3,6 +3,9 @@ Memory bridge — L4 vector memory with pluggable backends.
 
 Supported backends (``memory.backend`` in config.yaml):
 
+- ``"auto"``      - probe installed local backends and select the first ready one
+- ``"mempalace"`` - MemPalace SDK
+
 - ``"mem0"``      — Mem0 (default, backward-compatible)
 - ``"robotmem"``  — robotmem SDK (pip install robotmem)
 - ``"vector"``    — local VectorStore (sentence-transformers, no server)
@@ -24,8 +27,10 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -36,6 +41,8 @@ from askme.memory.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 _UTC = timezone(timedelta(0))
+_SUPPORTED_BACKENDS = {"auto", "mem0", "robotmem", "mempalace", "vector"}
+_DEFAULT_AUTO_BACKEND_ORDER = ("robotmem", "vector", "mem0", "mempalace")
 
 
 class MemoryBridge:
@@ -67,8 +74,26 @@ class MemoryBridge:
         )
         self._retrieve_timeout: float = self._mem_cfg.get("retrieve_timeout", 2.0)
 
-        # Backend selection: "mem0" (default), "robotmem", "mempalace", "vector"
-        self._backend: str = self._mem_cfg.get("backend", "mem0")
+        # Backend selection: "auto", "mem0", "robotmem", "mempalace", "vector"
+        self._configured_backend: str = (
+            str(self._mem_cfg.get("backend", "mem0")).strip().lower()
+        )
+        self._auto_backend_order = self._normalize_auto_backend_order(
+            self._mem_cfg.get("auto_backend_order")
+        )
+        self._backend_selection_reason = ""
+        self._backend: str = self._select_backend(self._configured_backend)
+        self._retrieve_cache_ttl_s: float = max(
+            0.0,
+            float(self._mem_cfg.get("retrieve_cache_ttl_s", 1.0)),
+        )
+        self._retrieve_cache_max_entries: int = max(
+            1,
+            int(self._mem_cfg.get("retrieve_cache_max_entries", 128)),
+        )
+        self._retrieve_cache_empty_results: bool = bool(
+            self._mem_cfg.get("retrieve_cache_empty_results", False)
+        )
         self._robotmem_fallback_backend: str = self._mem_cfg.get(
             "robotmem_fallback_backend", "mem0"
         )
@@ -109,6 +134,14 @@ class MemoryBridge:
         self._last_fallback_reason: str = ""
         self._last_evidence: list[dict[str, Any]] = []
         self._last_dropped_evidence: list[dict[str, Any]] = []
+        self._retrieve_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._retrieve_inflight: dict[str, asyncio.Task[str]] = {}
+        self._retrieve_cache_lock = asyncio.Lock()
+        self._retrieve_cache_hits = 0
+        self._retrieve_cache_misses = 0
+        self._retrieve_coalesced_count = 0
+        self._last_retrieve_cache_hit = False
+        self._last_retrieve_coalesced = False
         self._rag_allowed_statuses = {
             str(status).strip().lower()
             for status in self._mem_cfg.get(
@@ -122,9 +155,71 @@ class MemoryBridge:
             logger.info("[Memory] Memory disabled in config.")
         else:
             logger.info(
-                "[Memory] MemoryBridge ready (backend=%s, fallback VectorStore).",
+                "[Memory] MemoryBridge ready (backend=%s configured=%s).",
                 self._backend,
+                self._configured_backend,
             )
+
+    def _select_backend(self, configured_backend: str) -> str:
+        configured = (
+            configured_backend if configured_backend in _SUPPORTED_BACKENDS else "vector"
+        )
+        if configured != "auto":
+            if configured != configured_backend:
+                self._backend_selection_reason = (
+                    f"invalid_configured_backend:{configured_backend}"
+                )
+            else:
+                self._backend_selection_reason = "explicit_backend"
+            return configured
+
+        for candidate in self._auto_backend_order:
+            if self._candidate_backend_available(candidate):
+                self._backend_selection_reason = f"auto_selected:{candidate}"
+                return candidate
+        self._backend_selection_reason = "auto_no_available_backend_vector_noop"
+        return "vector"
+
+    @staticmethod
+    def _normalize_auto_backend_order(value: Any) -> tuple[str, ...]:
+        if isinstance(value, (list, tuple)):
+            raw_items = [str(item).strip().lower() for item in value]
+        else:
+            raw_items = list(_DEFAULT_AUTO_BACKEND_ORDER)
+        cleaned: list[str] = []
+        for item in raw_items:
+            if item in _SUPPORTED_BACKENDS - {"auto"} and item not in cleaned:
+                cleaned.append(item)
+        return tuple(cleaned or _DEFAULT_AUTO_BACKEND_ORDER)
+
+    @staticmethod
+    def _candidate_backend_available(backend: str) -> bool:
+        if backend == "robotmem":
+            return importlib.util.find_spec("robotmem") is not None
+        if backend == "mempalace":
+            return importlib.util.find_spec("mempalace") is not None
+        if backend == "mem0":
+            return importlib.util.find_spec("mem0") is not None
+        if backend == "vector":
+            return importlib.util.find_spec("sentence_transformers") is not None
+        return False
+
+    def _backend_selection_snapshot(self) -> dict[str, Any]:
+        candidates = [
+            {"backend": backend, "available": self._candidate_backend_available(backend)}
+            for backend in self._auto_backend_order
+        ]
+        return {
+            "configured_backend": self._configured_backend,
+            "selected_backend": self._backend,
+            "reason": self._backend_selection_reason,
+            "auto_order": list(self._auto_backend_order),
+            "candidates": candidates,
+            "fallbacks": {
+                "robotmem": self._robotmem_fallback_backend,
+                "mempalace": self._mempalace_fallback_backend,
+            },
+        }
 
     # ------------------------------------------------------------------
     # VectorStore lazy initialization (fallback)
@@ -318,16 +413,50 @@ class MemoryBridge:
             self._record_retrieve_result("", backend="disabled", elapsed_ms=0.0)
             return ""
         started = time.perf_counter()
+        cache_key = self._retrieve_cache_key(text)
+        cached = await self._get_cached_retrieve(cache_key)
+        if cached is not None:
+            self._restore_cached_retrieve(cached)
+            self._record_retrieve_result(
+                str(cached.get("result") or ""),
+                backend=str(cached.get("backend") or self._backend),
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                cache_hit=True,
+            )
+            return str(cached.get("result") or "")
+
+        task: asyncio.Task[str] | None = None
+        owns_task = False
+        coalesced = False
+        if cache_key and self._retrieve_cache_ttl_s > 0:
+            async with self._retrieve_cache_lock:
+                task = self._retrieve_inflight.get(cache_key)
+                if task is None:
+                    task = asyncio.create_task(self._retrieve_with_fallbacks(text))
+                    task.add_done_callback(self._consume_retrieve_task_exception)
+                    self._retrieve_inflight[cache_key] = task
+                    owns_task = True
+                    self._retrieve_cache_misses += 1
+                else:
+                    coalesced = True
+                    self._retrieve_coalesced_count += 1
+        if task is None:
+            task = asyncio.create_task(self._retrieve_with_fallbacks(text))
+            task.add_done_callback(self._consume_retrieve_task_exception)
+            owns_task = True
         try:
             result = await asyncio.wait_for(
-                self._retrieve_with_fallbacks(text),
+                asyncio.shield(task),
                 timeout=self._retrieve_timeout,
             )
+            if owns_task:
+                await self._store_cached_retrieve(cache_key, result)
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             self._record_retrieve_result(
                 result,
                 backend=self._last_backend or self._backend,
                 elapsed_ms=elapsed_ms,
+                coalesced=coalesced,
             )
             return result
         except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
@@ -338,6 +467,7 @@ class MemoryBridge:
                 backend=self._last_backend or self._backend,
                 elapsed_ms=(time.perf_counter() - started) * 1000.0,
                 fallback_reason="retrieve_timeout",
+                coalesced=coalesced,
             )
             return ""
         except Exception as exc:
@@ -348,8 +478,14 @@ class MemoryBridge:
                 backend=self._last_backend or self._backend,
                 elapsed_ms=(time.perf_counter() - started) * 1000.0,
                 fallback_reason=type(exc).__name__,
+                coalesced=coalesced,
             )
             return ""
+        finally:
+            if owns_task and cache_key:
+                async with self._retrieve_cache_lock:
+                    if self._retrieve_inflight.get(cache_key) is task:
+                        self._retrieve_inflight.pop(cache_key, None)
 
     async def _retrieve_with_fallbacks(self, text: str) -> str:
         """Run backend retrieval under the public retrieve() time budget."""
@@ -480,6 +616,7 @@ class MemoryBridge:
         """
         if not self._enabled:
             return
+        await self._clear_retrieve_cache()
 
         # Try configured backend first — use to_thread so lazy init never blocks.
         if self._backend == "robotmem" and await asyncio.to_thread(self._ensure_robotmem):
@@ -509,6 +646,7 @@ class MemoryBridge:
         clean = str(text or "").strip()
         if not clean:
             return
+        await self._clear_retrieve_cache()
 
         if self._backend == "robotmem" and await asyncio.to_thread(self._ensure_robotmem):
             await self._robotmem.save_fact(clean, metadata or {})
@@ -560,6 +698,7 @@ class MemoryBridge:
         """Patch local knowledge metadata and persist the catalog."""
         if not self._enabled:
             return {"updated": False, "error": "memory_disabled"}
+        await self._clear_retrieve_cache()
         store = self._ensure_store()
         if not store:
             return {"updated": False, "error": "vector_store_unavailable"}
@@ -591,6 +730,7 @@ class MemoryBridge:
         store = self._ensure_store()
         if not self._enabled or not store or not store.available:
             return 0
+        self._retrieve_cache.clear()
 
         # _store_path = <data_dir>/memory/vectors/store.json → parent.parent = <data_dir>/memory
         memory_dir = self._store_path.parent.parent
@@ -639,6 +779,8 @@ class MemoryBridge:
         return {
             "enabled": self._enabled,
             "backend": self._backend,
+            "configured_backend": self._configured_backend,
+            "backend_selection": self._backend_selection_snapshot(),
             "available": self.available,
             "robotmem_ready": robotmem_available,
             "mempalace_ready": mempalace_available,
@@ -655,6 +797,18 @@ class MemoryBridge:
             "last_retrieved_items": self._last_retrieved_items,
             "last_backend": self._last_backend or self._backend,
             "last_fallback_reason": self._last_fallback_reason,
+            "retrieve_cache": {
+                "enabled": self._retrieve_cache_ttl_s > 0,
+                "ttl_s": self._retrieve_cache_ttl_s,
+                "max_entries": self._retrieve_cache_max_entries,
+                "size": len(self._retrieve_cache),
+                "hits": self._retrieve_cache_hits,
+                "misses": self._retrieve_cache_misses,
+                "coalesced": self._retrieve_coalesced_count,
+                "inflight": len(self._retrieve_inflight),
+                "last_hit": self._last_retrieve_cache_hit,
+                "last_coalesced": self._last_retrieve_coalesced,
+            },
             "last_evidence": self._last_evidence,
             "last_dropped_evidence": self._last_dropped_evidence,
             "last_answer_policy": self._answer_policy_snapshot(),
@@ -667,13 +821,88 @@ class MemoryBridge:
         backend: str,
         elapsed_ms: float,
         fallback_reason: str = "",
+        cache_hit: bool = False,
+        coalesced: bool = False,
     ) -> None:
         self._retrieve_count += 1
         self._last_backend = backend
         self._last_retrieve_ms = round(float(elapsed_ms), 2)
-        self._last_retrieved_items = len([line for line in result.splitlines() if line.strip()])
+        self._last_retrieved_items = len(
+            [line for line in result.splitlines() if line.strip()]
+        )
+        self._last_retrieve_cache_hit = cache_hit
+        self._last_retrieve_coalesced = coalesced
         if fallback_reason:
             self._last_fallback_reason = fallback_reason
+
+    def _retrieve_cache_key(self, text: str) -> str:
+        if self._retrieve_cache_ttl_s <= 0:
+            return ""
+        return " ".join(str(text or "").strip().split())
+
+    async def _get_cached_retrieve(self, cache_key: str) -> dict[str, Any] | None:
+        if not cache_key:
+            return None
+        now = time.monotonic()
+        async with self._retrieve_cache_lock:
+            entry = self._retrieve_cache.get(cache_key)
+            if not entry:
+                return None
+            expires_at = float(entry.get("expires_at") or 0.0)
+            if expires_at <= now:
+                self._retrieve_cache.pop(cache_key, None)
+                return None
+            self._retrieve_cache.move_to_end(cache_key)
+            self._retrieve_cache_hits += 1
+            return dict(entry)
+
+    async def _store_cached_retrieve(self, cache_key: str, result: str) -> None:
+        if not cache_key or self._retrieve_cache_ttl_s <= 0:
+            return
+        if not result and not self._retrieve_cache_empty_results:
+            return
+        entry = {
+            "result": result,
+            "backend": self._last_backend or self._backend,
+            "fallback_reason": self._last_fallback_reason,
+            "last_evidence": [dict(item) for item in self._last_evidence],
+            "last_dropped_evidence": [dict(item) for item in self._last_dropped_evidence],
+            "expires_at": time.monotonic() + self._retrieve_cache_ttl_s,
+        }
+        async with self._retrieve_cache_lock:
+            self._retrieve_cache[cache_key] = entry
+            self._retrieve_cache.move_to_end(cache_key)
+            while len(self._retrieve_cache) > self._retrieve_cache_max_entries:
+                self._retrieve_cache.popitem(last=False)
+
+    async def _clear_retrieve_cache(self) -> None:
+        async with self._retrieve_cache_lock:
+            self._retrieve_cache.clear()
+
+    @staticmethod
+    def _consume_retrieve_task_exception(task: asyncio.Task[str]) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except Exception:
+            return
+
+    def _restore_cached_retrieve(self, entry: dict[str, Any]) -> None:
+        self._last_backend = str(entry.get("backend") or self._backend)
+        self._last_fallback_reason = str(entry.get("fallback_reason") or "")
+        evidence = entry.get("last_evidence")
+        dropped = entry.get("last_dropped_evidence")
+        self._last_evidence = (
+            [dict(item) for item in evidence if isinstance(item, dict)]
+            if isinstance(evidence, list)
+            else []
+        )
+        self._last_dropped_evidence = (
+            [dict(item) for item in dropped if isinstance(item, dict)]
+            if isinstance(dropped, list)
+            else []
+        )
 
     def _set_evidence(self, items: list[dict[str, Any]], *, backend: str) -> None:
         self._last_evidence = [

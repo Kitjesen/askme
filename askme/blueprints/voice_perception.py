@@ -1,9 +1,9 @@
-"""Voice + Perception — 语音助手 + 场景感知.
+"""Voice Plus Perception blueprint.
 
-核心 + 感知层。能听能说能看能主动反应。9 个模块。
+Use this when the voice assistant must reason over fresh scene facts,
+interaction-gate evidence, and robot safety state before planning a task.
 
-Usage::
-
+Run:
     python -m askme.blueprints.voice_perception
 """
 
@@ -29,4 +29,4 @@ __all__ = ["voice_perception"]
 if __name__ == "__main__":
     from askme.blueprints._runner import run_blueprint
 
-    run_blueprint(voice_perception, "Voice+Perception")
+    run_blueprint(voice_perception, "Voice Plus Perception")

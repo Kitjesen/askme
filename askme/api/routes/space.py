@@ -42,6 +42,12 @@ def register_space_routes(
     ) -> JSONResponse:
         try:
             body = await optional_json_body(request)
+            body.setdefault(
+                "operator_id",
+                request.headers.get("X-Askme-Operator-Id")
+                or request.headers.get("X-Operator-Id")
+                or "",
+            )
             if authorize is not None:
                 failure = authorize(request, body, permission)
                 if failure is not None:
@@ -67,6 +73,18 @@ def register_space_routes(
     async def space_routes() -> JSONResponse:
         return await _space_get("routes_payload")
 
+    @app.get("/api/space/history", tags=["Space"])
+    async def space_history() -> JSONResponse:
+        return await _space_get("history_payload")
+
+    @app.get("/api/space/proposals", tags=["Space"])
+    async def space_proposals() -> JSONResponse:
+        return await _space_get("proposals_payload")
+
+    @app.get("/api/space/interactions", tags=["Space"])
+    async def space_interactions() -> JSONResponse:
+        return await _space_get("interactions_payload")
+
     @app.post("/api/space/resolve-destination", tags=["Space"])
     async def space_resolve_destination(request: Request) -> JSONResponse:
         return await _space_post(
@@ -83,10 +101,78 @@ def register_space_routes(
             permission="field:event:create",
         )
 
+    @app.post("/api/space/service-point-trigger", tags=["Space"])
+    async def space_service_point_trigger(request: Request) -> JSONResponse:
+        return await _space_post(
+            request,
+            method_name="service_point_trigger_payload",
+            permission="knowledge:read",
+        )
+
+    @app.post("/api/space/manage", tags=["Space"])
+    async def space_manage(request: Request) -> JSONResponse:
+        return await _space_post(
+            request,
+            method_name="manage_payload",
+            permission="knowledge:approve",
+        )
+
+    @app.post("/api/space/proposals", tags=["Space"])
+    async def space_propose(request: Request) -> JSONResponse:
+        return await _space_post(
+            request,
+            method_name="propose_payload",
+            permission="knowledge:import",
+        )
+
+    @app.post("/api/space/proposals/review", tags=["Space"])
+    async def space_review_proposal(request: Request) -> JSONResponse:
+        return await _space_post(
+            request,
+            method_name="review_proposal_payload",
+            permission="knowledge:approve",
+        )
+
+    @app.post("/api/space/rollback", tags=["Space"])
+    async def space_rollback(request: Request) -> JSONResponse:
+        return await _space_post(
+            request,
+            method_name="rollback_payload",
+            permission="knowledge:rollback",
+        )
+
     @app.options("/api/space/resolve-destination", include_in_schema=False)
     async def space_resolve_destination_cors() -> Response:
         return cors_options_response("POST, OPTIONS")
 
     @app.options("/api/space/guide", include_in_schema=False)
     async def space_guide_cors() -> Response:
+        return cors_options_response("POST, OPTIONS")
+
+    @app.options("/api/space/service-point-trigger", include_in_schema=False)
+    async def space_service_point_trigger_cors() -> Response:
+        return cors_options_response("POST, OPTIONS")
+
+    @app.options("/api/space/manage", include_in_schema=False)
+    async def space_manage_cors() -> Response:
+        return cors_options_response("POST, OPTIONS")
+
+    @app.options("/api/space/rollback", include_in_schema=False)
+    async def space_rollback_cors() -> Response:
+        return cors_options_response("POST, OPTIONS")
+
+    @app.options("/api/space/history", include_in_schema=False)
+    async def space_history_cors() -> Response:
+        return cors_options_response("GET, OPTIONS")
+
+    @app.options("/api/space/proposals", include_in_schema=False)
+    async def space_proposals_cors() -> Response:
+        return cors_options_response("GET, POST, OPTIONS")
+
+    @app.options("/api/space/interactions", include_in_schema=False)
+    async def space_interactions_cors() -> Response:
+        return cors_options_response("GET, OPTIONS")
+
+    @app.options("/api/space/proposals/review", include_in_schema=False)
+    async def space_review_proposal_cors() -> Response:
         return cors_options_response("POST, OPTIONS")

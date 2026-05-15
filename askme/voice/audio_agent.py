@@ -256,6 +256,20 @@ class AudioAgent:
         await asyncio.to_thread(self.wait_speaking_done)
         self.stop_playback()
 
+    def start_input(self) -> None:
+        """Open the microphone input stream for long-lived voice sessions."""
+        if not self.voice_mode:
+            return
+        self._mic.start()
+        self._refresh_voice_metrics()
+
+    def stop_input(self) -> None:
+        """Close the microphone input stream for long-lived voice sessions."""
+        if not self.voice_mode:
+            return
+        self._mic.stop()
+        self._refresh_voice_metrics()
+
     def drain_buffers(self) -> None:
         """Clear any leftover TTS text/audio from a previous turn."""
         self.tts.drain_buffers()
@@ -1150,13 +1164,21 @@ class AudioAgent:
             "interaction": self._interaction_status_snapshot(),
             "media": self._media_status_snapshot(),
             "voice_turn": self._turn_traces.snapshot(),
-            "asr": self._asr_mgr.status_snapshot(),
-            "tts": self.tts.status_snapshot(),
+            "asr": self._component_status_snapshot(self._asr_mgr),
+            "tts": self._component_status_snapshot(self.tts),
             "input": self._input_status_snapshot(),
         }
         snapshot.update(overrides)
         self._metrics.update_voice_state(**snapshot)
         return snapshot
+
+    def _component_status_snapshot(self, component: Any) -> dict[str, Any]:
+        status_snapshot = getattr(component, "status_snapshot", None)
+        if callable(status_snapshot):
+            result = status_snapshot()
+            if isinstance(result, dict):
+                return result
+        return {"available": component is not None}
 
     def _interaction_status_snapshot(self) -> dict[str, Any]:
         cooldown_remaining = round(self._in_post_tts_input_cooldown(), 2)

@@ -15,6 +15,7 @@ def build_field_deployment_readiness(
     webhooks: dict[str, str],
     webhook_secrets: dict[str, str],
     action_audit_integrity: dict[str, Any] | None = None,
+    unified_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return an operator-facing readiness report for field operations."""
     archive = _archive_summary(Path(archive_path))
@@ -79,6 +80,7 @@ def build_field_deployment_readiness(
             default=str(Path(archive_path).with_name("audit-delivery-retry.jsonl")),
         )
     )
+    unified_audit_review = _unified_audit_review_summary(unified_audit)
     notifications = _notification_summary(webhooks, webhook_secrets)
     device_trust = _device_trust_summary(config)
     site_profile = _site_profile_summary(config)
@@ -136,6 +138,9 @@ def build_field_deployment_readiness(
         "close_approval_workflow_verified": archive["close_approval_count"] > 0
         and archive["close_request_count"] > 0,
         "event_report_timeline_verified": archive["report_timeline_ready_count"] > 0,
+        "unified_audit_review_clear": unified_audit_review["requires_review_count"] == 0,
+        "unified_audit_review_integrity_verified": unified_audit_review["integrity_valid"],
+        "unified_audit_sources_healthy": unified_audit_review["source_health_healthy"],
     }
     blockers: list[str] = []
     warnings: list[str] = []
@@ -153,6 +158,12 @@ def build_field_deployment_readiness(
         warnings.append("field action audit is not HMAC-signed")
     if not gates["audit_delivery_retry_queue_empty"]:
         blockers.append("field audit delivery retry queue still has pending or invalid items")
+    if not gates["unified_audit_review_clear"]:
+        blockers.append("unified audit review queue has unresolved high-risk records")
+    if not gates["unified_audit_review_integrity_verified"]:
+        blockers.append("unified audit review log integrity has not passed")
+    if not gates["unified_audit_sources_healthy"]:
+        blockers.append("unified audit sources have unreadable or invalid records")
     for group in ("security", "cleaning", "operations"):
         group_report = notifications["groups"][group]
         if not group_report["webhook_configured"]:
@@ -223,6 +234,7 @@ def build_field_deployment_readiness(
         "runtime_roundtrip_report": runtime_roundtrip_report,
         "action_audit_integrity": audit_integrity,
         "audit_delivery_retry_queue": audit_retry_queue,
+        "unified_audit": unified_audit_review,
         "notifications": notifications,
         "device_trust": device_trust,
         "site_profile": site_profile,
@@ -286,6 +298,9 @@ def _add_production_blockers(blockers: list[str], gates: dict[str, bool]) -> Non
         "close_approval_workflow_verified": "production requires verified close approval workflow",
         "event_report_timeline_verified": "production requires verified event report timeline",
         "action_audit_signed": "production requires HMAC-signed field action audit",
+        "unified_audit_review_clear": "production requires unified audit review queue to be cleared",
+        "unified_audit_review_integrity_verified": "production requires valid unified audit review log integrity",
+        "unified_audit_sources_healthy": "production requires readable unified audit sources without invalid records",
     }
     for gate, message in required_gates.items():
         if not gates.get(gate):
@@ -379,6 +394,9 @@ def _delivery_brief(
                     "all_registered_devices_signature_ready",
                     "trusted_device_events_observed",
                     "action_audit_signed",
+                    "unified_audit_review_clear",
+                    "unified_audit_review_integrity_verified",
+                    "unified_audit_sources_healthy",
                 ],
             ),
             _brief_checklist_item(
@@ -470,6 +488,116 @@ def _action_audit_retry_queue_path(config: dict[str, Any], *, default: str) -> P
         or default
     )
     return Path(str(raw))
+
+
+def _unified_audit_review_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "configured": False,
+            "status": "not_configured",
+            "requires_review_count": 0,
+            "high_or_critical_count": 0,
+            "integrity_valid": True,
+            "record_count": 0,
+            "filtered_total": 0,
+            "review_queue": [],
+            "time_window": {},
+            "source_health": {},
+            "source_health_healthy": True,
+            "invalid_source_count": 0,
+            "unreadable_source_count": 0,
+            "unhealthy_sources": [],
+            "review_integrity": {"valid": True, "exists": False, "checked_count": 0, "failures": []},
+        }
+    product_summary = (
+        payload.get("product_summary")
+        if isinstance(payload.get("product_summary"), dict)
+        else {}
+    )
+    review_queue = payload.get("review_queue") if isinstance(payload.get("review_queue"), list) else []
+    requires_review_count = _int_value(
+        product_summary.get("requires_review_count"),
+        default=len(review_queue),
+    )
+    high_or_critical_count = _int_value(
+        product_summary.get("high_or_critical_count"),
+        default=_high_or_critical_count(review_queue),
+    )
+    status = str(product_summary.get("status") or ("needs_review" if requires_review_count else "auditable"))
+    review_integrity = (
+        payload.get("review_integrity")
+        if isinstance(payload.get("review_integrity"), dict)
+        else {"valid": True, "exists": False, "checked_count": 0, "failures": []}
+    )
+    source_health = payload.get("source_health") if isinstance(payload.get("source_health"), dict) else {}
+    source_health_summary = _unified_audit_source_health_summary(source_health)
+    return {
+        "configured": True,
+        "status": status,
+        "customer_status": str(product_summary.get("customer_status") or ""),
+        "requires_review_count": requires_review_count,
+        "high_or_critical_count": high_or_critical_count,
+        "integrity_valid": review_integrity.get("valid") is True,
+        "record_count": _int_value(product_summary.get("record_count"), default=_int_value(payload.get("total"), default=0)),
+        "filtered_total": _int_value(payload.get("filtered_total"), default=0),
+        "review_queue": [_audit_review_item(item) for item in review_queue[:10] if isinstance(item, dict)],
+        "time_window": payload.get("time_window") if isinstance(payload.get("time_window"), dict) else {},
+        "source_health": source_health,
+        **source_health_summary,
+        "review_integrity": review_integrity,
+    }
+
+
+def _unified_audit_source_health_summary(source_health: dict[str, Any]) -> dict[str, Any]:
+    unhealthy_sources: list[dict[str, Any]] = []
+    invalid_source_count = 0
+    unreadable_source_count = 0
+    for source_name, item in source_health.items():
+        if not isinstance(item, dict):
+            continue
+        exists = item.get("exists") is True
+        readable = item.get("readable") is not False
+        invalid_count = _int_value(item.get("invalid_record_count"), default=0)
+        if exists and not readable:
+            unreadable_source_count += 1
+        if invalid_count > 0:
+            invalid_source_count += 1
+        if (exists and not readable) or invalid_count > 0:
+            unhealthy_sources.append({
+                "source": str(source_name),
+                "path": str(item.get("path") or ""),
+                "readable": readable,
+                "invalid_record_count": invalid_count,
+                "error": str(item.get("error") or ""),
+            })
+    return {
+        "source_health_healthy": not unhealthy_sources,
+        "invalid_source_count": invalid_source_count,
+        "unreadable_source_count": unreadable_source_count,
+        "unhealthy_sources": unhealthy_sources,
+    }
+
+
+def _high_or_critical_count(records: list[Any]) -> int:
+    return sum(
+        1
+        for item in records
+        if isinstance(item, dict) and item.get("severity") in {"critical", "high"}
+    )
+
+
+def _audit_review_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "record_id": str(item.get("record_id") or ""),
+        "customer_label": str(item.get("customer_label") or ""),
+        "severity": str(item.get("severity") or ""),
+        "action": str(item.get("action") or ""),
+        "outcome": str(item.get("outcome") or ""),
+        "operator_id": str(item.get("operator_id") or ""),
+        "resource_type": str(item.get("resource_type") or ""),
+        "resource_id": str(item.get("resource_id") or item.get("subject") or ""),
+        "timestamp": str(item.get("timestamp") or ""),
+    }
 
 
 def _audit_retry_queue_summary(path: Path) -> dict[str, Any]:
@@ -853,6 +981,14 @@ def _next_actions(blockers: list[str], warnings: list[str]) -> list[str]:
     if any("audit delivery retry queue" in item for item in blockers):
         actions.append("Run: python -m askme runtime field-audit-retry-delivery --json")
         actions.append("Inspect: python -m askme runtime field-audit-retry-status --fail-on-pending")
+    if any("unified audit review queue" in item for item in blockers):
+        actions.append("Open Dashboard Delivery > Unified Audit and resolve the review queue")
+        actions.append("Export a reviewed audit package after high-risk records are resolved")
+    if any("unified audit review log integrity" in item for item in blockers):
+        actions.append("Inspect artifacts/audit/reviews.jsonl and restore the review log from backup")
+    if any("unified audit sources" in item for item in blockers):
+        actions.append("Open Dashboard Delivery > Audit Source Health and repair invalid audit JSONL records")
+        actions.append("Regenerate the unified audit export after all audit sources are readable")
     if any("audit is not HMAC-signed" in item for item in warnings):
         actions.append("Set ASKME_FIELD_ACTION_AUDIT_HMAC_SECRET and rerun the operator action flow")
     if any("webhook" in item for item in warnings):

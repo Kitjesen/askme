@@ -2340,6 +2340,8 @@ def _task_steps_for_plan(plan: dict[str, Any], *, task_type: str) -> list[TaskSt
         ]
     elif task_type == "field_incident_response":
         sequence = _field_incident_response_sequence(plan, area_id=area_id)
+    elif task_type == "visitor_escort":
+        sequence = _visitor_escort_sequence(plan, area_id=area_id)
     elif task_type == "navigate_to":
         sequence = [("go_to_area", {"area_id": area_id, "speed_limit": "safe"})]
     elif task_type == "capture_evidence":
@@ -2359,6 +2361,30 @@ def _task_steps_for_plan(plan: dict[str, Any], *, task_type: str) -> list[TaskSt
     return [
         _step_from_skill(name, parameters, index)
         for index, (name, parameters) in enumerate(sequence, start=1)
+    ]
+
+
+def _visitor_escort_sequence(
+    plan: dict[str, Any],
+    *,
+    area_id: str,
+) -> list[tuple[str, dict[str, Any]]]:
+    mission = _mission_from_plan(plan)
+    event = mission.get("field_event") if isinstance(mission.get("field_event"), dict) else {}
+    destination = str(event.get("destination") or event.get("destination_name") or area_id)
+    escort_parameters = {
+        "area_id": area_id,
+        "destination": destination,
+        "destination_point_id": str(event.get("destination_point_id") or ""),
+        "route_id": str(event.get("route_id") or ""),
+        "map_id": str(event.get("map_id") or ""),
+        "service_point_id": str(event.get("service_point_id") or ""),
+        "speed_limit": str(event.get("speed_limit") or "low"),
+        "interaction_policy": "visitor_must_remain_tracked",
+    }
+    return [
+        ("low_speed_escort", escort_parameters),
+        ("generate_report", {"format": "escort_summary"}),
     ]
 
 
@@ -2488,6 +2514,8 @@ def _risk_for(task_type: str, mission: dict[str, Any]) -> str:
     if risk:
         return risk
     if task_type in {"inspection_patrol", "navigate_to"}:
+        return "high"
+    if task_type == "visitor_escort":
         return "high"
     if task_type == "capture_evidence":
         return "medium"

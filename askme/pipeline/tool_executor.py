@@ -73,7 +73,7 @@ class ToolExecutor:
           1. Fire ``pre_tool`` hooks; any hook can short-circuit by returning a
              string result, skipping the actual tool execution (like Claude Code's
              PreToolUse hook blocking a dangerous command).
-          2. Execute the tool (with timeout).
+          2. Execute the tool; ToolRegistry owns per-tool timeout/cooldown.
           3. Fire ``post_tool`` hooks; hooks may transform the result before it
              enters the conversation (like Claude Code's PostToolUse hook).
           4. Produce an immutable ``ToolCallRecord`` for hook context.
@@ -116,14 +116,11 @@ class ToolExecutor:
             else:
                 t0 = _time.perf_counter()
                 try:
-                    result = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self._tools.execute,
-                            tool_name,
-                            tool_args,
-                            max_safety_level=self._general_tool_max_safety_level,
-                        ),
-                        timeout=self._TOOL_TIMEOUT,
+                    result = await asyncio.to_thread(
+                        self._tools.execute,
+                        tool_name,
+                        tool_args,
+                        max_safety_level=self._general_tool_max_safety_level,
                     )
                 except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                     logger.error(

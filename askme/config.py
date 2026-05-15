@@ -291,7 +291,119 @@ def validate_config(config: dict | None = None) -> list[str]:
                 f"conversation.max_history must be an integer, got {max_history_val!r}"
             )
 
+    for timeout_key in (
+        "chat_timeout_s",
+        "runtime_voice_turn_timeout_s",
+        "chat_slow_threshold_ms",
+    ):
+        timeout_val = conv.get(timeout_key)
+        if timeout_val is None:
+            continue
+        try:
+            timeout_f = float(timeout_val)
+            if timeout_f < 0:
+                errors.append(
+                    f"conversation.{timeout_key} must be >= 0, got {timeout_val!r}"
+                )
+        except (TypeError, ValueError):
+            errors.append(
+                f"conversation.{timeout_key} must be a number, got {timeout_val!r}"
+            )
+
+    history_limit_val = conv.get("chat_diagnostics_history_limit")
+    if history_limit_val is not None:
+        try:
+            history_limit_i = int(history_limit_val)
+            if not (1 <= history_limit_i <= 1000):
+                errors.append(
+                    "conversation.chat_diagnostics_history_limit must be 1-1000, "
+                    f"got {history_limit_val!r}"
+                )
+        except (TypeError, ValueError):
+            errors.append(
+                "conversation.chat_diagnostics_history_limit must be an integer, "
+                f"got {history_limit_val!r}"
+            )
+
+    concurrency_val = conv.get("chat_max_concurrency")
+    if concurrency_val is not None:
+        try:
+            concurrency_i = int(concurrency_val)
+            if not (1 <= concurrency_i <= 256):
+                errors.append(
+                    "conversation.chat_max_concurrency must be 1-256, "
+                    f"got {concurrency_val!r}"
+                )
+        except (TypeError, ValueError):
+            errors.append(
+                "conversation.chat_max_concurrency must be an integer, "
+                f"got {concurrency_val!r}"
+            )
+
     # health_server.port — must be integer 1024-65535
+    memory_cfg = config.get("memory", {})
+    if memory_cfg is None:
+        memory_cfg = {}
+    if not isinstance(memory_cfg, dict):
+        errors.append("memory must be a mapping")
+        memory_cfg = {}
+
+    backend_val = memory_cfg.get("backend")
+    if backend_val is not None:
+        allowed_memory_backends = {"auto", "mem0", "robotmem", "mempalace", "vector"}
+        if str(backend_val).strip().lower() not in allowed_memory_backends:
+            errors.append(
+                "memory.backend must be one of "
+                f"{sorted(allowed_memory_backends)}, got {backend_val!r}"
+            )
+
+    auto_backend_order_val = memory_cfg.get("auto_backend_order")
+    if auto_backend_order_val is not None:
+        allowed_auto_backends = {"mem0", "robotmem", "mempalace", "vector"}
+        if not isinstance(auto_backend_order_val, list):
+            errors.append("memory.auto_backend_order must be a list")
+        else:
+            invalid = [
+                item
+                for item in auto_backend_order_val
+                if str(item).strip().lower() not in allowed_auto_backends
+            ]
+            if invalid:
+                errors.append(
+                    "memory.auto_backend_order contains unsupported backend(s): "
+                    + ", ".join(str(item) for item in invalid)
+                )
+
+    retrieve_cache_ttl_val = memory_cfg.get("retrieve_cache_ttl_s")
+    if retrieve_cache_ttl_val is not None:
+        try:
+            retrieve_cache_ttl_f = float(retrieve_cache_ttl_val)
+            if retrieve_cache_ttl_f < 0:
+                errors.append(
+                    "memory.retrieve_cache_ttl_s must be >= 0, "
+                    f"got {retrieve_cache_ttl_val!r}"
+                )
+        except (TypeError, ValueError):
+            errors.append(
+                "memory.retrieve_cache_ttl_s must be a number, "
+                f"got {retrieve_cache_ttl_val!r}"
+            )
+
+    retrieve_cache_max_entries_val = memory_cfg.get("retrieve_cache_max_entries")
+    if retrieve_cache_max_entries_val is not None:
+        try:
+            retrieve_cache_max_entries_i = int(retrieve_cache_max_entries_val)
+            if not (1 <= retrieve_cache_max_entries_i <= 10000):
+                errors.append(
+                    "memory.retrieve_cache_max_entries must be 1-10000, "
+                    f"got {retrieve_cache_max_entries_val!r}"
+                )
+        except (TypeError, ValueError):
+            errors.append(
+                "memory.retrieve_cache_max_entries must be an integer, "
+                f"got {retrieve_cache_max_entries_val!r}"
+            )
+
     health_cfg = config.get("health_server", {})
     port_val = health_cfg.get("port")
     if port_val is not None:
@@ -309,6 +421,11 @@ def validate_config(config: dict | None = None) -> list[str]:
     # tools.general_chat_max_safety_level — must be one of the allowed values
     _ALLOWED_SAFETY_LEVELS = {"normal", "dangerous", "critical"}
     tools_cfg = config.get("tools", {})
+    if tools_cfg is None:
+        tools_cfg = {}
+    if not isinstance(tools_cfg, dict):
+        errors.append("tools must be a mapping")
+        tools_cfg = {}
     safety_level_val = tools_cfg.get("general_chat_max_safety_level")
     if safety_level_val is not None:
         if str(safety_level_val) not in _ALLOWED_SAFETY_LEVELS:
@@ -316,6 +433,59 @@ def validate_config(config: dict | None = None) -> list[str]:
                 f"tools.general_chat_max_safety_level must be one of "
                 f"{sorted(_ALLOWED_SAFETY_LEVELS)}, got {safety_level_val!r}"
             )
+
+    for key, min_value, max_value in (
+        ("executor_max_workers", 1, 128),
+        ("queue_max_size", 1, 100000),
+        ("job_history_limit", 1, 100000),
+        ("circuit_failure_threshold", 0, 1000),
+    ):
+        val = tools_cfg.get(key)
+        if val is None:
+            continue
+        try:
+            int_val = int(val)
+            if not (min_value <= int_val <= max_value):
+                errors.append(
+                    f"tools.{key} must be {min_value}-{max_value}, got {val!r}"
+                )
+        except (TypeError, ValueError):
+            errors.append(f"tools.{key} must be an integer, got {val!r}")
+
+    for key in ("rate_limit_per_minute", "circuit_cooldown_seconds"):
+        val = tools_cfg.get(key)
+        if val is None:
+            continue
+        try:
+            float_val = float(val)
+            if float_val < 0:
+                errors.append(f"tools.{key} must be >= 0, got {val!r}")
+        except (TypeError, ValueError):
+            errors.append(f"tools.{key} must be a number, got {val!r}")
+
+    priority_by_safety = tools_cfg.get("priority_by_safety")
+    if priority_by_safety is not None:
+        if not isinstance(priority_by_safety, dict):
+            errors.append("tools.priority_by_safety must be a mapping")
+        else:
+            invalid_levels = [
+                level
+                for level in priority_by_safety
+                if str(level) not in _ALLOWED_SAFETY_LEVELS
+            ]
+            if invalid_levels:
+                errors.append(
+                    "tools.priority_by_safety contains unsupported level(s): "
+                    + ", ".join(str(level) for level in invalid_levels)
+                )
+            for level, priority in priority_by_safety.items():
+                try:
+                    int(priority)
+                except (TypeError, ValueError):
+                    errors.append(
+                        f"tools.priority_by_safety.{level} must be an integer, "
+                        f"got {priority!r}"
+                    )
 
     # Voice TTS (no validation needed -- edge-tts requires no API key)
 

@@ -1,5 +1,6 @@
 """Tests for askme.brain.intent_router module."""
 
+from askme.interaction import RoutingPolicy, intent_route_payload
 from askme.llm.intent_router import IntentRouter, IntentType
 
 
@@ -26,6 +27,37 @@ class TestIntentRouter:
         router = self._make_router()
         intent = router.route("STOP NOW")
         assert intent.type == IntentType.ESTOP
+        assert intent.reason == "safety_checker"
+
+    def test_estop_keyword_is_case_insensitive_without_safety(self):
+        router = self._make_router(safety=False)
+        intent = router.route("Emergency Stop")
+        assert intent.type == IntentType.ESTOP
+        assert intent.reason == "estop_keyword"
+
+    # ── Quick replies ──
+    def test_quick_reply_has_explicit_reply_text(self):
+        router = self._make_router()
+        intent = router.route("你好")
+        assert intent.type == IntentType.QUICK_REPLY
+        assert intent.reply_text == "你好，有什么需要帮忙的？"
+        assert intent.skill_name == intent.reply_text  # legacy compatibility
+        assert intent.reason == "quick_reply"
+
+    def test_intent_route_payload_is_audit_ready(self):
+        router = self._make_router(triggers={"导航到仓库": "navigate"})
+        intent = router.route("帮我导航到仓库")
+
+        payload = intent_route_payload(intent, source="voice")
+
+        assert payload == {
+            "type": "voice_trigger",
+            "reason": "voice_trigger",
+            "source": "voice",
+            "raw_text_preview": "帮我导航到仓库",
+            "skill_name": "navigate",
+            "trigger_phrase": "导航到仓库",
+        }
 
     # ── Built-in commands ──
     def test_quit_command(self):
@@ -46,6 +78,8 @@ class TestIntentRouter:
         intent = router.route("现在几点了")
         assert intent.type == IntentType.VOICE_TRIGGER
         assert intent.skill_name == "get_time"
+        assert intent.trigger_phrase == "现在几点"
+        assert intent.reason == "voice_trigger"
 
     def test_voice_trigger_question_mark_allows_query_skill(self):
         router = self._make_router(triggers={"现在几点": "get_time"})
@@ -78,6 +112,7 @@ class TestIntentRouter:
         router = self._make_router(safety=False)
         intent = router.route("  ")
         assert intent.type == IntentType.GENERAL
+        assert intent.reason == "empty_input"
 
     # ── No safety checker ──
     def test_no_safety_skips_estop(self):
@@ -85,6 +120,19 @@ class TestIntentRouter:
         intent = router.route("停")
         # Without safety checker, "停" is not recognized as e-stop
         assert intent.type == IntentType.GENERAL
+
+    # ── Routing policy ──
+    def test_routing_policy_can_override_deterministic_surfaces(self):
+        policy = RoutingPolicy(
+            builtin_commands={"/status"},
+            estop_keywords={"halt"},
+            quick_replies={"ping": "pong"},
+        )
+        router = IntentRouter(policy=policy)
+
+        assert router.route("ping").reply_text == "pong"
+        assert router.route("/STATUS").command == "/status"
+        assert router.route("HALT").type == IntentType.ESTOP
 
 
 class TestNegationDetection:

@@ -3,8 +3,10 @@ from unittest.mock import patch
 
 import pytest
 
+import askme.pipeline.text_loop as text_loop_module
 from askme.llm.intent_router import Intent, IntentType
 from askme.pipeline.text_loop import TextLoop
+from askme.pipeline.trace import PipelineTracer
 
 
 class _Router:
@@ -17,6 +19,17 @@ class _Router:
 class _QuickReplyRouter:
     def route(self, text: str) -> Intent:
         return Intent(type=IntentType.QUICK_REPLY, skill_name="quick reply", raw_text=text)
+
+
+class _TraceRouter:
+    def route(self, text: str) -> Intent:
+        return Intent(
+            type=IntentType.VOICE_TRIGGER,
+            skill_name="get_time",
+            raw_text=text,
+            trigger_phrase="几点了",
+            reason="voice_trigger",
+        )
 
 
 class _Pipeline:
@@ -243,6 +256,32 @@ async def test_process_turn_text_source_when_speak_false() -> None:
 
     assert reply == "fallback"
     assert pipeline.process_source_calls == ["text"]
+
+
+@pytest.mark.asyncio
+async def test_process_turn_records_intent_route_trace(monkeypatch) -> None:
+    tracer = PipelineTracer()
+    monkeypatch.setattr(text_loop_module, "get_tracer", lambda: tracer)
+    loop = TextLoop(
+        router=_TraceRouter(),
+        pipeline=_Pipeline(),
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+    )
+
+    reply = await loop.process_turn("现在几点了")
+
+    history = tracer.get_history(1)
+    route = history[0]["metadata"]["intent_route"]
+    route_span = next(span for span in history[0]["spans"] if span["name"] == "intent_route")
+    assert reply == "skill"
+    assert route["type"] == "voice_trigger"
+    assert route["source"] == "text"
+    assert route["skill_name"] == "get_time"
+    assert route["trigger_phrase"] == "几点了"
+    assert route_span["metadata"]["reason"] == "voice_trigger"
 
 
 @pytest.mark.asyncio

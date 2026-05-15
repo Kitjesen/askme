@@ -21,6 +21,10 @@ _PHYSICAL_INTENTS = frozenset({
     "inspection_patrol",
     "manipulation",
     "navigation",
+    "visitor_escort",
+})
+_INFORMATION_RESPONSE_INTENTS = frozenset({
+    "visitor_wayfinding",
 })
 
 
@@ -44,7 +48,14 @@ class CognitivePlan:
     missing_inputs: list[str] = field(default_factory=list)
     next_prompt: str = ""
     handoff_ready: bool = False
+    readiness: dict[str, Any] = field(default_factory=dict)
+    handoff_contract: dict[str, Any] = field(default_factory=dict)
+    world_state_snapshot_id: str = ""
     session: dict[str, Any] = field(default_factory=dict)
+    operator_id: str = ""
+    robot_id: str = ""
+    site_id: str = ""
+    channel: str = "cognition"
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
@@ -60,12 +71,19 @@ class CognitivePlan:
             "missing_inputs": list(self.missing_inputs),
             "next_prompt": self.next_prompt,
             "handoff_ready": self.handoff_ready,
+            "readiness": dict(self.readiness),
+            "handoff_contract": dict(self.handoff_contract),
+            "world_state_snapshot_id": self.world_state_snapshot_id,
             "reference": dict(self.reference),
             "context": dict(self.context),
             "safety_constraints": list(self.safety_constraints),
             "steps": [dict(step) for step in self.steps],
             "mission": self.mission,
             "session": dict(self.session),
+            "operator_id": self.operator_id,
+            "robot_id": self.robot_id,
+            "site_id": self.site_id,
+            "channel": self.channel,
             "created_at": self.created_at,
         }
 
@@ -133,7 +151,11 @@ class CognitivePlanner:
         stage = "clarifying" if requires_clarification else "drafting"
         mission = None
 
-        if not requires_clarification and self.mission_service is not None:
+        if (
+            not requires_clarification
+            and self.mission_service is not None
+            and _should_draft_mission(intent)
+        ):
             mission = self._draft_mission(
                 requested_goal,
                 plan_id=plan_id,
@@ -147,7 +169,9 @@ class CognitivePlanner:
             )
 
         if not requires_clarification:
-            if _requires_operator_confirmation(intent):
+            if intent in _INFORMATION_RESPONSE_INTENTS:
+                stage = "answer_ready"
+            elif _requires_operator_confirmation(intent):
                 if confirmation is True:
                     stage = "ready_for_arbiter"
                 else:
@@ -160,6 +184,8 @@ class CognitivePlanner:
         confirmation_status = (
             "confirmed"
             if handoff_ready
+            else "not_required"
+            if stage == "answer_ready"
             else "cancelled"
             if stage == "cancelled"
             else "unconfirmed"
@@ -195,6 +221,8 @@ class CognitivePlanner:
             planning_session_id=active_session.session_id,
             planning_stage=stage,
         )
+        world_snapshot = self.world_state.snapshot(include_stale=False)
+        world_snapshot_id = _world_state_snapshot_id(world_snapshot)
 
         plan = CognitivePlan(
             plan_id=plan_id,
@@ -219,7 +247,28 @@ class CognitivePlanner:
                 handoff_ready=handoff_ready,
             ),
             mission=mission,
+            readiness=_readiness_for(
+                stage,
+                intent,
+                missing_inputs=missing_inputs,
+                handoff_ready=handoff_ready,
+                next_prompt=next_prompt,
+            ),
+            handoff_contract=_handoff_contract_for(
+                plan_id,
+                active_session.session_id,
+                intent,
+                stage=stage,
+                missing_inputs=missing_inputs,
+                handoff_ready=handoff_ready,
+                world_state_snapshot=world_snapshot,
+            ),
+            world_state_snapshot_id=world_snapshot_id,
             session=active_session.to_dict(),
+            operator_id=str(operator_id or ""),
+            robot_id=str(robot_id or ""),
+            site_id=str(site_id or ""),
+            channel=str(channel or "cognition"),
         )
         self.world_state.update_fact(
             "task.last_plan",
@@ -333,6 +382,8 @@ class CognitivePlanner:
             planning_session_id=session.session_id,
             planning_stage="cancelled",
         )
+        world_snapshot = self.world_state.snapshot(include_stale=False)
+        world_snapshot_id = _world_state_snapshot_id(world_snapshot)
         return CognitivePlan(
             plan_id=plan_id,
             planning_session_id=session.session_id,
@@ -352,12 +403,49 @@ class CognitivePlanner:
             safety_constraints=_safety_constraints(intent),
             steps=[{"step": "cancel_planning_session", "status": "done"}],
             mission=None,
+            readiness=_readiness_for(
+                "cancelled",
+                intent,
+                missing_inputs=[],
+                handoff_ready=False,
+                next_prompt="planning_cancelled",
+            ),
+            handoff_contract=_handoff_contract_for(
+                plan_id,
+                session.session_id,
+                intent,
+                stage="cancelled",
+                missing_inputs=[],
+                handoff_ready=False,
+                world_state_snapshot=world_snapshot,
+            ),
+            world_state_snapshot_id=world_snapshot_id,
             session=session.to_dict(),
+            operator_id=str(operator_id or ""),
+            robot_id=str(robot_id or ""),
+            site_id=str(site_id or ""),
+            channel=str(channel or "cognition"),
         )
 
 
 def _intent_for(text: str) -> str:
     lowered = text.lower()
+    if any(marker in lowered for marker in ("急停", "停止", "停下")):
+        return "safety_stop"
+    if any(marker in lowered for marker in ("带我去", "带路", "请带我", "跟你走", "escort me", "lead me")):
+        return "visitor_escort"
+    if _looks_like_wayfinding_question(lowered):
+        return "visitor_wayfinding"
+    if any(marker in lowered for marker in ("巡检", "检查", "巡逻")):
+        return "inspection_patrol"
+    if any(marker in lowered for marker in ("拍照", "截图", "抓拍", "取证")):
+        return "capture_evidence"
+    if any(marker in lowered for marker in ("状态", "电量", "报告")):
+        return "status_report"
+    if any(marker in lowered for marker in ("导航", "前往", "去", "到")):
+        return "navigation"
+    if any(marker in lowered for marker in ("拿", "抓", "夹取")):
+        return "manipulation"
     if any(marker in lowered for marker in ("急停", "停止", "停下", "stop", "estop", "e-stop")):
         return "safety_stop"
     if any(marker in lowered for marker in ("巡检", "检查", "巡逻", "patrol", "inspect")):
@@ -373,6 +461,14 @@ def _intent_for(text: str) -> str:
     return "operator_assist"
 
 
+def _looks_like_wayfinding_question(lowered: str) -> bool:
+    if any(marker in lowered for marker in ("怎么走", "在哪", "在哪里", "路线", "怎么去", "指路", "问路", "nearest", "where is", "how do i get")):
+        return True
+    if any(marker in lowered for marker in ("厕所", "卫生间", "咖啡", "停车场", "出口", "西门", "东门", "南门", "北门")):
+        return any(marker in lowered for marker in ("在哪", "怎么", "找", "where", "route"))
+    return False
+
+
 def _missing_inputs_for(
     text: str,
     intent: str,
@@ -382,7 +478,7 @@ def _missing_inputs_for(
     if reference.get("needs_clarification"):
         missing.append("scene_reference")
     if _is_underspecified(text, intent):
-        if intent == "navigation":
+        if intent in {"navigation", "visitor_escort", "visitor_wayfinding"}:
             missing.append("target_location")
         elif intent == "manipulation":
             missing.append("target_object")
@@ -395,11 +491,15 @@ def _is_underspecified(text: str, intent: str) -> bool:
     compact = "".join(str(text).split())
     if len(compact) < 2:
         return True
-    return intent in {"navigation", "manipulation"} and len(compact) < 4
+    return intent in {"navigation", "visitor_escort", "visitor_wayfinding", "manipulation"} and len(compact) < 4
 
 
 def _requires_operator_confirmation(intent: str) -> bool:
     return intent in _PHYSICAL_INTENTS
+
+
+def _should_draft_mission(intent: str) -> bool:
+    return intent not in _INFORMATION_RESPONSE_INTENTS
 
 
 def _confirmation_value(value: Any | None) -> bool | None:
@@ -408,6 +508,10 @@ def _confirmation_value(value: Any | None) -> bool | None:
     if isinstance(value, bool):
         return value
     text = str(value).strip().lower()
+    if text in {"确认", "可以", "是", "继续"}:
+        return True
+    if text in {"取消", "不是", "不用", "否"}:
+        return False
     if text in {"1", "true", "yes", "y", "confirm", "confirmed", "ok", "确认", "是", "可以"}:
         return True
     if text in {"0", "false", "no", "n", "cancel", "取消", "否"}:
@@ -421,6 +525,22 @@ def _next_prompt(
     missing_inputs: list[str],
     reference: dict[str, Any],
 ) -> str:
+    if stage == "cancelled":
+        return "已取消当前任务规划。"
+    if stage == "answer_ready":
+        return _information_response_prompt(intent)
+    if stage == "awaiting_confirmation":
+        return _confirmation_prompt(intent)
+    if "scene_reference" in missing_inputs or reference.get("reason") == "no_fresh_scene_object":
+        return "我还不能确定你指的是哪个目标，请说出目标名称，或让我先刷新现场画面。"
+    if "target_location" in missing_inputs:
+        return "请补充目标位置或路线名称。"
+    if "target_object" in missing_inputs:
+        return "请补充要操作的目标物和期望动作。"
+    if missing_inputs:
+        return "请补充目标、位置或约束条件。"
+    if stage == "ready_for_arbiter":
+        return "计划已确认，可以交给运行系统做安全检查和任务调度。"
     if stage == "cancelled":
         return "已取消当前规划。"
     if stage == "awaiting_confirmation":
@@ -438,7 +558,19 @@ def _next_prompt(
     return ""
 
 
+def _information_response_prompt(intent: str) -> str:
+    if intent == "visitor_wayfinding":
+        return "这是问路咨询，我会根据园区知识库回答，不会启动机器狗移动；如需带路，请明确说“请带我去目的地”。"
+    return "这是信息咨询，我会直接回答，不会启动机器人任务。"
+
+
 def _confirmation_prompt(intent: str) -> str:
+    if intent in {"navigation", "inspection_patrol", "visitor_escort"}:
+        return "已生成移动/巡检任务草案，请确认后再交给运行系统做安全检查和调度。"
+    if intent == "manipulation":
+        return "已生成操作任务草案，请确认目标和动作后再交给运行系统。"
+    if intent == "capture_evidence":
+        return "已生成取证任务草案，请确认后再执行采集。"
     if intent in {"navigation", "inspection_patrol"}:
         return "已生成移动/巡检任务草案，请确认后再交给运行时仲裁器。"
     if intent == "manipulation":
@@ -465,6 +597,12 @@ def _steps_for(
     ]
     if stage == "cancelled":
         steps.append({"step": "cancel_planning_session", "status": "done"})
+        return steps
+    if intent in _INFORMATION_RESPONSE_INTENTS:
+        steps.append({
+            "step": "answer_with_grounded_park_knowledge",
+            "status": "ready" if stage == "answer_ready" else "blocked",
+        })
         return steps
     if missing_inputs and missing_inputs != [_CONFIRMATION_INPUT]:
         steps.append({"step": "ask_clarifying_question", "status": "ready"})
@@ -497,11 +635,140 @@ def _safety_constraints(intent: str) -> list[str]:
     ]
     if intent in {"navigation", "inspection_patrol"}:
         constraints.append("Navigation must pass geofence, estop, and path safety checks.")
+    if intent == "visitor_wayfinding":
+        constraints.append("Wayfinding answers must stay grounded in the park knowledge base and must not start movement.")
+    if intent == "visitor_escort":
+        constraints.append("Visitor escort requires destination confirmation, safe route availability, and runtime preflight.")
     if intent == "manipulation":
         constraints.append("Manipulation requires target confirmation and control-service arbitration.")
     if intent == "safety_stop":
         constraints.append("Use the dedicated safety/E-STOP path, not a general mission draft.")
     return constraints
+
+
+def _readiness_for(
+    stage: str,
+    intent: str,
+    *,
+    missing_inputs: list[str],
+    handoff_ready: bool,
+    next_prompt: str,
+) -> dict[str, Any]:
+    blocked_by = list(missing_inputs)
+    status = _readiness_status(stage, blocked_by, handoff_ready)
+    return {
+        "status": status,
+        "customer_status": _customer_status_for(status),
+        "handoff_ready": handoff_ready,
+        "can_submit_to_runtime": handoff_ready,
+        "blocked_by": blocked_by,
+        "allowed_next_actions": _allowed_next_actions(status),
+        "requires_operator_confirmation": _requires_operator_confirmation(intent),
+        "requires_safety_preflight": _requires_safety_preflight(intent),
+        "runtime_gate": "safety_preflight_required" if _requires_safety_preflight(intent) else "none",
+        "next_prompt": next_prompt,
+    }
+
+
+def _handoff_contract_for(
+    plan_id: str,
+    planning_session_id: str,
+    intent: str,
+    *,
+    stage: str,
+    missing_inputs: list[str],
+    handoff_ready: bool,
+    world_state_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "contract_version": "task_plan.v1",
+        "producer": "askme.cognition",
+        "consumer": "runtime_handoff",
+        "plan_id": plan_id,
+        "planning_session_id": planning_session_id,
+        "handoff_state": stage,
+        "handoff_ready": handoff_ready,
+        "confirmed": handoff_ready,
+        "blocked_by": list(missing_inputs),
+        "world_state_snapshot_id": _world_state_snapshot_id(world_state_snapshot),
+        "dispatch_authority": "runtime_arbiter_only",
+        "can_dispatch_hardware": False,
+        "requires_operator_confirmation": _requires_operator_confirmation(intent),
+        "requires_safety_preflight": _requires_safety_preflight(intent),
+        "submit_conditions": _submit_conditions(intent),
+    }
+
+
+def _readiness_status(stage: str, blocked_by: list[str], handoff_ready: bool) -> str:
+    if stage == "cancelled":
+        return "cancelled"
+    if stage == "answer_ready":
+        return "ready_to_answer"
+    if handoff_ready:
+        return "ready_for_runtime_handoff"
+    if "scene_reference" in blocked_by:
+        return "needs_fresh_perception"
+    if blocked_by == [_CONFIRMATION_INPUT]:
+        return "awaiting_operator_confirmation"
+    if blocked_by:
+        return "needs_operator_input"
+    return "drafting"
+
+
+def _customer_status_for(status: str) -> str:
+    if status == "ready_to_answer":
+        return "这是园区问询回答，不会启动机器人任务。"
+    messages = {
+        "cancelled": "计划已取消。",
+        "ready_for_runtime_handoff": "已确认，可以进入运行前安全检查。",
+        "needs_fresh_perception": "需要先刷新现场画面，确认目标后再继续。",
+        "awaiting_operator_confirmation": "等待操作员确认，确认后才会交给运行系统。",
+        "needs_operator_input": "还需要补充目标、位置或约束信息。",
+        "drafting": "正在生成任务草案。",
+    }
+    return messages.get(status, messages["drafting"])
+
+
+def _allowed_next_actions(status: str) -> list[str]:
+    if status == "ready_to_answer":
+        return ["answer_with_grounded_knowledge", "offer_escort_after_confirmation", "start_new_plan"]
+    if status == "ready_for_runtime_handoff":
+        return ["submit_to_runtime_arbiter", "revise_plan", "cancel_plan"]
+    if status == "awaiting_operator_confirmation":
+        return ["confirm_plan", "revise_plan", "cancel_plan"]
+    if status == "needs_fresh_perception":
+        return ["refresh_perception", "answer_clarifying_question", "cancel_plan"]
+    if status == "needs_operator_input":
+        return ["answer_clarifying_question", "revise_plan", "cancel_plan"]
+    if status == "cancelled":
+        return ["start_new_plan"]
+    return ["continue_planning", "cancel_plan"]
+
+
+def _requires_safety_preflight(intent: str) -> bool:
+    return intent in _PHYSICAL_INTENTS or intent == "safety_stop"
+
+
+def _submit_conditions(intent: str) -> list[str]:
+    if intent in _INFORMATION_RESPONSE_INTENTS:
+        return [
+            "no_runtime_handoff_for_information_response",
+            "answer_must_use_grounded_park_knowledge",
+        ]
+    conditions = [
+        "operator_confirmation_status_confirmed",
+        "missing_inputs_empty",
+        "task_steps_are_high_level_skills",
+    ]
+    if _requires_safety_preflight(intent):
+        conditions.append("runtime_safety_preflight_passed")
+    return conditions
+
+
+def _world_state_snapshot_id(snapshot: dict[str, Any]) -> str:
+    updated_at = float(snapshot.get("updated_at", time.time()) or time.time())
+    fact_count = int(snapshot.get("fact_count", 0) or 0)
+    return f"world-{int(updated_at * 1000)}-{fact_count}"
 
 
 def _unique(values: list[str]) -> list[str]:

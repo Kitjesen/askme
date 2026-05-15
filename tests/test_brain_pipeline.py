@@ -34,6 +34,7 @@ def _make_pipeline(
     ]
     memory = AsyncMock()
     memory.retrieve = AsyncMock(return_value="")
+    memory.health = MagicMock(return_value={})
     tools = MagicMock()
     tools.get_definitions.return_value = []
     skill_manager = MagicMock()

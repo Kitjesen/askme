@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -79,6 +80,66 @@ class _SlowTool(BaseTool):
         return "slow"
 
 
+class _BrokenTool(BaseTool):
+    name = "broken_tool"
+    description = "broken tool"
+    parameters: dict[str, Any] = {"type": "object", "properties": {}}
+    safety_level = "normal"
+
+    def execute(self, **kwargs: Any) -> str:
+        raise RuntimeError("boom")
+
+
+class _BackgroundTool(BaseTool):
+    name = "background_tool"
+    description = "background tool"
+    parameters: dict[str, Any] = {"type": "object", "properties": {}}
+    safety_level = "normal"
+    backgroundable = True
+
+    def __init__(self, result: str = "background-ok") -> None:
+        self.calls = 0
+        self.result = result
+
+    def execute(self, **kwargs: Any) -> str:
+        self.calls += 1
+        return self.result
+
+
+class _BlockingBackgroundTool(BaseTool):
+    name = "blocking_background_tool"
+    description = "blocking background tool"
+    parameters: dict[str, Any] = {"type": "object", "properties": {}}
+    safety_level = "normal"
+    backgroundable = True
+    queue_priority = 0
+
+    def __init__(self, started: threading.Event, release: threading.Event) -> None:
+        self.started = started
+        self.release = release
+
+    def execute(self, **kwargs: Any) -> str:
+        self.started.set()
+        self.release.wait(timeout=2.0)
+        return "released"
+
+
+class _OrderedBackgroundTool(BaseTool):
+    description = "ordered background tool"
+    parameters: dict[str, Any] = {"type": "object", "properties": {}}
+    safety_level = "normal"
+    backgroundable = True
+
+    def __init__(self, name: str, priority: int, order: list[str]) -> None:
+        self.name = name
+        self.queue_priority = priority
+        self.order = order
+
+    def execute(self, **kwargs: Any) -> str:
+        self.order.append(self.name)
+        return self.name
+
+
 def _make_registry(**overrides: Any) -> ToolRegistry:
     config = {
         "default_timeout": 0.2,
@@ -93,6 +154,24 @@ def _make_registry(**overrides: Any) -> ToolRegistry:
         **overrides,
     }
     return ToolRegistry(config=config)
+
+
+def _wait_job(
+    registry: ToolRegistry,
+    job_id: str,
+    *,
+    terminal: set[str] | None = None,
+    timeout_s: float = 2.0,
+) -> dict[str, Any]:
+    terminal = terminal or {"completed", "failed", "cancelled"}
+    deadline = time.monotonic() + timeout_s
+    last: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        last = registry.get_job(job_id)
+        if last and last.get("status") in terminal:
+            return last
+        time.sleep(0.01)
+    return last or {}
 
 
 def test_get_definitions_filters_by_max_safety_level() -> None:
@@ -260,6 +339,53 @@ def test_critical_bypass_tool_executes_immediately() -> None:
     assert tool.calls == 1
 
 
+def test_tool_executor_is_reused_and_shutdown_is_callable() -> None:
+    registry = _make_registry()
+    registry.register(_SafeTool())
+
+    try:
+        assert registry.execute("safe_tool", "{}") == "safe"
+        first_executor = registry._executor
+        assert first_executor is not None
+
+        assert registry.execute("safe_tool", "{}") == "safe"
+        assert registry._executor is first_executor
+
+        registry.shutdown()
+        assert registry._executor is None
+
+        assert registry.execute("safe_tool", "{}") == "safe"
+        assert registry._executor is not None
+        assert registry._executor is not first_executor
+    finally:
+        registry.shutdown()
+
+
+def test_diagnostics_report_executor_and_cooldown_state() -> None:
+    registry = _make_registry(default_timeout=0.01, timeout_cooldown=1.0)
+    registry.register(_SafeTool())
+    registry.register(_SlowTool())
+
+    try:
+        before = registry.diagnostics()
+        assert before["tool_count"] == 2
+        assert before["executor"]["active"] is False
+        assert before["executor"]["max_workers"] == 4
+        assert before["executor"]["queue_max_size"] == 256
+        assert before["cooldown_count"] == 0
+        assert before["pending_approval"] is False
+
+        assert registry.execute("safe_tool", "{}") == "safe"
+        after_execute = registry.diagnostics()
+        assert after_execute["executor"]["active"] is True
+
+        timeout_result = registry.execute("slow_tool", "{}")
+        assert timeout_result.startswith("[Timeout]")
+        assert registry.diagnostics()["cooldown_count"] == 1
+    finally:
+        registry.shutdown()
+
+
 def test_timeout_places_tool_on_cooldown() -> None:
     registry = _make_registry(default_timeout=0.01, timeout_cooldown=1.0)
     registry.register(_SlowTool())
@@ -269,3 +395,106 @@ def test_timeout_places_tool_on_cooldown() -> None:
 
     assert first.startswith("[Timeout]")
     assert second.startswith("[Error] Tool 'slow_tool' is temporarily unavailable")
+
+
+def test_rate_limit_blocks_excess_tool_calls() -> None:
+    registry = _make_registry(rate_limit_per_minute=1)
+    registry.register(_SafeTool())
+
+    first = registry.execute("safe_tool", "{}")
+    second = registry.execute("safe_tool", "{}")
+
+    assert first == "safe"
+    assert second.startswith("[Rate Limited]")
+
+
+def test_circuit_breaker_opens_after_repeated_failures() -> None:
+    registry = _make_registry(
+        circuit_failure_threshold=2,
+        circuit_cooldown_seconds=1.0,
+    )
+    registry.register(_BrokenTool())
+
+    first = registry.execute("broken_tool", "{}")
+    second = registry.execute("broken_tool", "{}")
+    third = registry.execute("broken_tool", "{}")
+
+    assert first.startswith("[Error]")
+    assert second.startswith("[Error]")
+    assert third.startswith("[Circuit Open]")
+
+
+def test_submit_background_tracks_job_to_completion() -> None:
+    registry = _make_registry(executor_max_workers=1)
+    tool = _BackgroundTool()
+    registry.register(tool)
+
+    job = registry.submit_background("background_tool", "{}")
+    completed = _wait_job(registry, job["job_id"])
+
+    assert job["status"] in {"queued", "running", "completed"}
+    assert completed["status"] == "completed"
+    assert completed["result"] == "background-ok"
+    assert tool.calls == 1
+
+
+def test_cancel_background_job_before_start() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    registry = _make_registry(executor_max_workers=1)
+    queued_tool = _BackgroundTool()
+    registry.register(_BlockingBackgroundTool(started, release))
+    registry.register(queued_tool)
+
+    running = registry.submit_background("blocking_background_tool", "{}")
+    assert started.wait(timeout=1.0)
+    queued = registry.submit_background("background_tool", "{}")
+    cancelled = registry.cancel_job(queued["job_id"])
+    release.set()
+    _wait_job(registry, running["job_id"])
+
+    assert cancelled["cancelled"] is True
+    assert cancelled["status"] == "cancelled"
+    assert queued_tool.calls == 0
+
+
+def test_bounded_queue_rejects_excess_background_jobs() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    registry = _make_registry(executor_max_workers=1, queue_max_size=1)
+    registry.register(_BlockingBackgroundTool(started, release))
+    registry.register(_BackgroundTool())
+
+    running = registry.submit_background("blocking_background_tool", "{}")
+    assert started.wait(timeout=1.0)
+    accepted = registry.submit_background("background_tool", "{}")
+    rejected = registry.submit_background("background_tool", "{}")
+    release.set()
+    _wait_job(registry, running["job_id"])
+    _wait_job(registry, accepted["job_id"])
+
+    assert accepted["status"] == "queued"
+    assert rejected["status"] == "failed"
+    assert "queue is full" in rejected["error"]
+
+
+def test_priority_queue_runs_higher_priority_queued_job_first() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+    registry = _make_registry(executor_max_workers=1)
+    registry.register(_BlockingBackgroundTool(started, release))
+    registry.register(_OrderedBackgroundTool("low_priority_tool", 100, order))
+    registry.register(_OrderedBackgroundTool("high_priority_tool", 10, order))
+
+    running = registry.submit_background("blocking_background_tool", "{}")
+    assert started.wait(timeout=1.0)
+    low = registry.submit_background("low_priority_tool", "{}")
+    high = registry.submit_background("high_priority_tool", "{}")
+    release.set()
+
+    _wait_job(registry, running["job_id"])
+    _wait_job(registry, low["job_id"])
+    _wait_job(registry, high["job_id"])
+
+    assert order == ["high_priority_tool", "low_priority_tool"]

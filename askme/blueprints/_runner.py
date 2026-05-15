@@ -1,10 +1,7 @@
-"""Shared blueprint runner — eliminates __main__ boilerplate.
+"""Shared runtime runner for blueprint modules.
 
-Usage in a blueprint module::
-
-    if __name__ == "__main__":
-        from askme.blueprints._runner import run_blueprint
-        run_blueprint(voice, "Voice")
+Each blueprint can expose a direct module entrypoint without repeating the
+build/start/signal/stop boilerplate.
 """
 
 from __future__ import annotations
@@ -20,12 +17,7 @@ if TYPE_CHECKING:
 
 
 def run_blueprint(blueprint: Runtime, label: str = "Runtime") -> None:
-    """Build, start, wait-for-signal, and stop a blueprint.
-
-    Handles SIGINT/SIGTERM on Unix and falls back to KeyboardInterrupt
-    on Windows where ``add_signal_handler`` is not implemented.
-    """
-    # Basic logging so module build/start messages are visible
+    """Build, start, wait for SIGINT/SIGTERM, and stop a blueprint."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -44,15 +36,16 @@ def run_blueprint(blueprint: Runtime, label: str = "Runtime") -> None:
             try:
                 asyncio.get_running_loop().add_signal_handler(sig, stop.set)
             except NotImplementedError:
-                pass  # Windows — falls back to KeyboardInterrupt
+                pass
 
         await app.start()
-        print(f"{label} running — {len(app.modules)} modules", flush=True)
+        print(f"{label} running - {len(app.modules)} modules", flush=True)
         try:
             await stop.wait()
         except asyncio.CancelledError:
             pass
-        await app.stop()
-        print(f"{label} stopped.", flush=True)
+        finally:
+            await app.stop()
+            print(f"{label} stopped.", flush=True)
 
     asyncio.run(_main())

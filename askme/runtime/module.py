@@ -588,10 +588,37 @@ class RuntimeApp:
         )
 
     def flow_stats(self) -> dict:
-        """Per-port message flow stats."""
+        """Return wiring-derived flow statistics for this runtime."""
+        if self.wire_result is None:
+            return {
+                "wired_ports": len(self.wired_ports),
+                "wired_by_consumer": {},
+                "wired_by_provider": {},
+                "unwired_required_ports": 0,
+                "unwired_optional_ports": 0,
+                "orphan_providers": 0,
+                "orphan_provider_ports": 0,
+                "semantic_matches": 0,
+            }
+
+        wired_by_consumer: dict[str, int] = {}
+        wired_by_provider: dict[str, int] = {}
+        for consumer, _port_name, provider in self.wire_result.wired:
+            wired_by_consumer[consumer] = wired_by_consumer.get(consumer, 0) + 1
+            wired_by_provider[provider] = wired_by_provider.get(provider, 0) + 1
+
+        orphan_provider_names = {
+            provider for provider, _port_name, _type_name in self.wire_result.orphan_outs
+        }
         return {
-            "wired_ports": len(self.wired_ports),
-            "note": "Detailed per-port stats coming soon",
+            "wired_ports": len(self.wire_result.wired),
+            "wired_by_consumer": wired_by_consumer,
+            "wired_by_provider": wired_by_provider,
+            "unwired_required_ports": 0,
+            "unwired_optional_ports": len(self.wire_result.unwired_optional),
+            "orphan_providers": len(orphan_provider_names),
+            "orphan_provider_ports": len(self.wire_result.orphan_outs),
+            "semantic_matches": len(self.wire_result.semantic_matches),
         }
 
     def get(self, name: str) -> Module | None:

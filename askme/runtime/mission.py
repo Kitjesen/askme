@@ -611,6 +611,16 @@ def _required_services(mission_type: str, risk_tier: str) -> list[str]:
 
 def _infer_mission_type(text: str) -> str:
     lowered = text.lower()
+    if any(token in lowered for token in ("急停", "紧急停止", "停止机器人")):
+        return "emergency_stop"
+    if any(token in lowered for token in ("巡检", "巡逻", "检查")):
+        return "inspection_patrol"
+    if any(token in lowered for token in ("带我去", "带路", "请带我", "导航", "前往", "去")):
+        return "navigate_to"
+    if any(token in lowered for token in ("拍照", "截图", "抓拍", "取证")):
+        return "capture_evidence"
+    if any(token in lowered for token in ("状态", "电量", "报告")):
+        return "status_report"
     if any(token in lowered for token in ("急停", "紧急停止", "e-stop", "estop", "emergency stop")):
         return "emergency_stop"
     if any(token in lowered for token in ("巡检", "巡逻", "patrol", "inspect", "inspection")):
@@ -626,6 +636,8 @@ def _infer_mission_type(text: str) -> str:
 
 def _infer_risk(text: str, mission_type: str) -> str:
     lowered = text.lower()
+    if any(token in lowered for token in ("禁用安全", "关闭避障")):
+        return "critical"
     if mission_type == "emergency_stop" or any(
         token in lowered
         for token in ("禁用安全", "关闭避障", "disable safety", "override safety")
@@ -641,6 +653,9 @@ def _infer_risk(text: str, mission_type: str) -> str:
 
 
 def _infer_target(text: str) -> str | None:
+    chinese_target = _infer_chinese_target(text)
+    if chinese_target:
+        return chinese_target
     tokens = text.replace("，", " ").replace(",", " ").replace("。", " ").split()
     for token in tokens:
         cleaned = token.strip(":：;；")
@@ -649,6 +664,24 @@ def _infer_target(text: str) -> str | None:
             return cleaned
         if lowered.startswith(("area-", "zone-", "checkpoint-", "route-")):
             return cleaned
+    return None
+
+
+def _infer_chinese_target(text: str) -> str | None:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return None
+    for sep in ("，", ",", "。", "？", "?", "；", ";"):
+        cleaned = cleaned.replace(sep, " ")
+    for marker in ("请带我去", "带我去", "导航到", "前往", "去", "到", "巡检", "检查"):
+        if marker not in cleaned:
+            continue
+        candidate = cleaned.split(marker, 1)[1].strip()
+        if not candidate:
+            continue
+        for stop in ("然后", "并且", "顺便", "一下", "看看", "进行"):
+            candidate = candidate.split(stop, 1)[0].strip()
+        return candidate or None
     return None
 
 

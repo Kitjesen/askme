@@ -206,11 +206,21 @@ def _maybe_sign_device_payload(
     signed_payload = dict(payload)
     if device_id and not signed_payload.get("device_id"):
         signed_payload["device_id"] = device_id
+    signed_payload.setdefault("device_signature_alg", "hmac-sha256")
     signed_payload.setdefault("device_signature_timestamp", time.time())
     signed_payload["device_signature"] = sign_field_device_payload(signed_payload, secret=secret)
     signing["reason"] = "signed"
     signing["signed"] = True
     return signed_payload, signing
+
+
+def sign_field_ingest_payload(
+    payload: dict[str, Any],
+    device_secrets: dict[str, str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Sign a normalized field-ingest payload with the same rules used by the bridge."""
+
+    return _maybe_sign_device_payload(payload, device_secrets)
 
 
 def _bridge_device_id(payload: dict[str, Any]) -> str:

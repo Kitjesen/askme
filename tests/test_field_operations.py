@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import askme.health_server as health_server
 from askme.cognition import WorldStateService
 from askme.health_server import (
     build_health_snapshot,
@@ -955,6 +956,108 @@ async def test_camera_vehicle_ingest_uses_map_zone_for_illegal_parking(tmp_path:
     assert result["event"]["location"] == "B区主通道"
 
 
+def _vehicle_object(*, project_ids: list[str] | None = None, site_ids: list[str] | None = None) -> dict:
+    return {
+        "display_name": "Vehicle parking objects",
+        "category": "traffic",
+        "object_labels": ["vehicle", "car"],
+        "scenario_ids": ["illegal_parking"],
+        "zone_types": ["main_channel"],
+        "device_sources": ["camera"],
+        "project_ids": project_ids or [],
+        "site_ids": site_ids or [],
+        "bindings": {
+            "vision_models": ["vehicle-detection"],
+            "sensor_protocols": ["camera-detection-json"],
+            "skill_packages": ["capability.detect_illegal_parking"],
+            "acceptance_tests": ["tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking"],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_ingest_infers_managed_object_with_matching_project_scope(tmp_path: Path):
+    service = _service(
+        tmp_path,
+        customer_project={
+            "customer_id": "customer-a",
+            "project_id": "project-a",
+            "site_id": "site-a",
+        },
+        site_map={
+            "zones": {
+                "main-road-1": {
+                    "name": "Main road",
+                    "type": "main_channel",
+                    "parking_allowed": False,
+                }
+            }
+        },
+        managed_objects={
+            "vehicles-a": _vehicle_object(project_ids=["project-a"], site_ids=["site-a"]),
+            "vehicles-b": _vehicle_object(project_ids=["project-b"], site_ids=["site-b"]),
+        },
+    )
+
+    result = await service.ingest_payload(
+        {
+            "source": "camera",
+            "observed_at": time.time(),
+            "zone_id": "main-road-1",
+            "detections": [{"label": "vehicle", "confidence": 0.93}],
+            "duration_s": 180,
+            "image_path": "artifacts/evidence/car.jpg",
+        }
+    )
+
+    assert result["accepted"] is True
+    assert result["normalized"]["managed_object_id"] == "vehicles-a"
+    assert result["event"]["managed_object_id"] == "vehicles-a"
+    assert result["event"]["project_scope"]["project_id"] == "project-a"
+    assert result["event"]["resource_execution_context"]["managed_object_id"] == "vehicles-a"
+
+
+@pytest.mark.asyncio
+async def test_ingest_does_not_bind_managed_object_when_project_scope_mismatches(tmp_path: Path):
+    service = _service(
+        tmp_path,
+        customer_project={
+            "customer_id": "customer-b",
+            "project_id": "project-b",
+            "site_id": "site-b",
+        },
+        site_map={
+            "zones": {
+                "main-road-1": {
+                    "name": "Main road",
+                    "type": "main_channel",
+                    "parking_allowed": False,
+                }
+            }
+        },
+        managed_objects={
+            "vehicles-a": _vehicle_object(project_ids=["project-a"], site_ids=["site-a"]),
+        },
+    )
+
+    result = await service.ingest_payload(
+        {
+            "source": "camera",
+            "observed_at": time.time(),
+            "zone_id": "main-road-1",
+            "managed_object_id": "vehicles-a",
+            "detections": [{"label": "vehicle", "confidence": 0.93}],
+            "duration_s": 180,
+            "image_path": "artifacts/evidence/car.jpg",
+        }
+    )
+
+    assert result["accepted"] is True
+    assert result["event"]["managed_object_id"] == ""
+    assert result["event"]["resource_execution_context"]["reason"] == "no_managed_object_matched"
+    assert result["event"]["project_scope"]["project_id"] == "project-b"
+
+
 @pytest.mark.asyncio
 async def test_sensor_ingest_triggers_fire_or_smoke(tmp_path: Path):
     service = _service(tmp_path)
@@ -1416,6 +1519,145 @@ async def test_duplicate_ingest_does_not_notify_twice(tmp_path: Path):
     assert len(_FakeDispatcher.calls) == 1
 
 
+@pytest.mark.asyncio
+async def test_device_ingest_ignores_client_supplied_project_scope(tmp_path: Path):
+    service = _service(
+        tmp_path,
+        customer_project={
+            "customer_id": "demo-customer",
+            "project_id": "demo-field-ops",
+            "site_id": "inovx-demo-park",
+            "site_name": "Inovx Demo Park",
+        },
+    )
+
+    result = await service.ingest_payload(
+        {
+            "source": "robot",
+            "observed_at": time.time(),
+            "robot": {"fault_type": "joint_motor_fault", "joint_id": "hip-left"},
+            "location": "A区东侧",
+            "customer_id": "other-customer",
+            "project_id": "other-project",
+            "site_id": "other-site",
+            "project_scope": {
+                "customer_id": "other-customer",
+                "project_id": "other-project",
+                "site_id": "other-site",
+            },
+        }
+    )
+
+    assert result["accepted"] is True
+    assert result["event"]["customer_id"] == "demo-customer"
+    assert result["event"]["project_id"] == "demo-field-ops"
+    assert result["event"]["site_id"] == "inovx-demo-park"
+    assert result["event"]["payload"]["customer_id"] == "demo-customer"
+    assert result["event"]["payload"]["project_id"] == "demo-field-ops"
+    assert result["event"]["payload"]["site_id"] == "inovx-demo-park"
+
+
+def test_field_event_write_endpoints_enforce_project_scope(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        health_server,
+        "get_config",
+        lambda: {
+            "field_operations": {
+                "operator_directory": {"mode": "demo_config"},
+                "operators": {
+                    "supervisor-1": {"roles": ["supervisor"]},
+                    "scoped-supervisor": {
+                        "roles": ["supervisor"],
+                        "project_scope": {
+                            "customer_ids": ["other-customer"],
+                            "project_ids": ["other-project"],
+                            "site_ids": ["other-site"],
+                        },
+                    },
+                },
+            }
+        },
+    )
+    service = _service(
+        tmp_path,
+        customer_project={
+            "customer_id": "demo-customer",
+            "project_id": "demo-field-ops",
+            "site_id": "inovx-demo-park",
+            "site_name": "Inovx Demo Park",
+        },
+    )
+    client = TestClient(
+        create_health_app(
+            lambda: _health_snapshot(),
+            field_operations_handler=service,
+        )
+    )
+
+    created = client.post(
+        "/api/field/events",
+        json={
+            "scenario_id": "illegal_parking",
+            "location": "B区主通道",
+            "zone_name": "主通道",
+            "plate_number": "川A12345",
+            "image_path": "artifacts/evidence/car.jpg",
+        },
+        headers={"X-Askme-Operator-Id": "supervisor-1"},
+    )
+    assert created.status_code == 200
+    event_id = created.json()["event"]["event_id"]
+    assert created.json()["event"]["project_id"] == "demo-field-ops"
+
+    denied_create = client.post(
+        "/api/field/events",
+        json={
+            "operator_id": "scoped-supervisor",
+            "scenario_id": "illegal_parking",
+            "location": "B区主通道",
+            "zone_name": "主通道",
+            "plate_number": "川A67890",
+            "image_path": "artifacts/evidence/car-2.jpg",
+            "customer_id": "demo-customer",
+            "project_id": "demo-field-ops",
+            "site_id": "inovx-demo-park",
+        },
+    )
+    assert denied_create.status_code == 403
+    assert denied_create.json()["reason"] == "project_scope_not_allowed"
+
+    denied_detail = client.get(
+        f"/api/field/events/{event_id}",
+        headers={"X-Askme-Operator-Id": "scoped-supervisor"},
+    )
+    assert denied_detail.status_code == 403
+    assert denied_detail.json()["reason"] == "project_scope_not_allowed"
+
+    for path, body in (
+        (f"/api/field/events/{event_id}/acknowledge", {"operator_id": "scoped-supervisor"}),
+        (f"/api/field/events/{event_id}/resend-notification", {"operator_id": "scoped-supervisor"}),
+        (f"/api/field/events/{event_id}/request-close", {"operator_id": "scoped-supervisor"}),
+        (
+            f"/api/field/events/{event_id}/close",
+            {
+                "operator_id": "scoped-supervisor",
+                "supervisor_approved": True,
+                "supervisor_id": "scoped-supervisor",
+            },
+        ),
+    ):
+        denied = client.post(path, json=body)
+        assert denied.status_code == 403
+        assert denied.json()["reason"] == "project_scope_not_allowed"
+
+    denied_report = client.get(
+        f"/api/field/events/{event_id}/report",
+        headers={"X-Askme-Operator-Id": "scoped-supervisor"},
+    )
+    assert denied_report.status_code == 403
+    assert denied_report.json()["reason"] == "project_scope_not_allowed"
+
+
 def test_field_operations_http_endpoints(tmp_path: Path):
     client = TestClient(
         create_health_app(
@@ -1430,6 +1672,10 @@ def test_field_operations_http_endpoints(tmp_path: Path):
     help_payload = client.get("/api/field/ingest")
     assert help_payload.status_code == 200
     assert "field-ingest-bridge" in help_payload.json()["bridge_contract"]["dry_run"]
+    assert "field-sign-device-payload" in help_payload.json()["bridge_contract"]["sign_payload"]
+    assert help_payload.json()["device_trust_contract"]["signing_cli"].endswith(
+        "field-sign-device-payload"
+    )
     assert help_payload.json()["examples"]["camera_vehicle"]["detections"][0]["class_id"] == "2"
     assert help_payload.json()["examples"]["domestic_camera_parking"]["eventType"] == "车辆违停"
     assert help_payload.json()["examples"]["domestic_night_photo"]["alarmType"] == "夜间陌生人拍照"

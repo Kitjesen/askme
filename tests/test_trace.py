@@ -1,6 +1,7 @@
 """Tests for the pipeline tracing module."""
 
 import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -175,3 +176,46 @@ class TestGetTracer:
 
     def test_is_pipeline_tracer(self):
         assert isinstance(get_tracer(), PipelineTracer)
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_reuses_active_trace(monkeypatch):
+    import askme.pipeline.turn_executor as turn_executor_module
+    from askme.pipeline.turn_executor import TurnExecutor
+
+    tracer = PipelineTracer()
+    monkeypatch.setattr(turn_executor_module, "get_tracer", lambda: tracer)
+
+    outer = tracer.start_trace("text_process_turn")
+    memory = MagicMock()
+    memory.retrieve = AsyncMock(return_value="")
+    memory.save = AsyncMock()
+    memory.health.return_value = {}
+    prompt_builder = MagicMock()
+    prompt_builder.build_system_prompt.return_value = "system"
+    prompt_builder.build_forced_rag_reply.return_value = "cached reply"
+    conversation = MagicMock()
+    conversation.history = []
+
+    executor = TurnExecutor(
+        llm=MagicMock(),
+        conversation=conversation,
+        memory=memory,
+        audio=MagicMock(),
+        prompt_builder=prompt_builder,
+        stream_processor=MagicMock(),
+    )
+
+    reply = await executor.process("hello", source="text")
+
+    assert reply == "cached reply"
+    assert tracer.current_trace is outer
+    assert tracer.get_history() == []
+
+    finished = tracer.finish_trace()
+    assert finished is outer
+    history = tracer.get_history()
+    assert len(history) == 1
+    assert history[0]["name"] == "text_process_turn"
+    assert any(span["name"] == "memory_retrieve" for span in history[0]["spans"])
+    await executor.shutdown()

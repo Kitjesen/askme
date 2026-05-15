@@ -79,7 +79,8 @@ memory:
   #   mem0     鈥?Mem0 + Qdrant (pip install mem0ai)
   #   robotmem 鈥?robotmem SDK, SQLite + hybrid search (pip install robotmem jieba)
   #   vector   鈥?local VectorStore with sentence-transformers (no server)
-  backend: robotmem
+  backend: auto
+  auto_backend_order: [robotmem, vector, mem0, mempalace]
   robotmem_fallback_backend: vector
   mempalace_fallback_backend: vector
   embed_model: paraphrase-multilingual-MiniLM-L12-v2
@@ -87,6 +88,11 @@ memory:
   health_check_timeout: 1
   # Timeout (seconds) for retrieval calls
   retrieve_timeout: 3.0
+  # Short-lived exact-query cache for repeated dashboard/voice turns.
+  # Set ttl to 0 to disable. Empty retrievals are not cached by default.
+  retrieve_cache_ttl_s: 1.0
+  retrieve_cache_max_entries: 128
+  retrieve_cache_empty_results: false
   retrieve_method: rag
   user_id: user_1
   # RobotMem settings (used when backend: robotmem)
@@ -120,6 +126,11 @@ memory:
 conversation:
   history_file: data/conversation_history.json
   max_history: 40
+  chat_timeout_s: 30.0
+  chat_max_concurrency: 8
+  chat_slow_threshold_ms: 2000.0
+  chat_diagnostics_history_limit: 20
+  runtime_voice_turn_timeout_s: 30.0
 
 # ----------------------------------------------------------
 # Voice: ASR / VAD / KWS / TTS
@@ -338,11 +349,11 @@ voice:
     # null = system default (PipeWire/PulseAudio).
     # On sunrise: "plughw:1,0" = MCP01 USB Audio direct hardware access,
     # bypassing PipeWire auto_null sink which silently discards audio.
-    output_device: "plughw:1,0"
+    output_device: null
     # Output transport: "auto" uses ALSA/aplay first and falls back to MCP01
     # direct USB playback if Sunrise exposes no ALSA card; "usb_direct" forces
     # the fallback path for the Lenovo MCP01 USB Audio speaker.
-    output_transport: usb_direct
+    output_transport: auto
     # MCP01 wakes slowly when opened through direct USB. Keep one userland USB
     # playback helper alive for the response so the first word does not sit on a
     # fresh stream boundary.
@@ -434,6 +445,16 @@ tools:
   dangerous_timeout: 8.0
   critical_timeout: 4.0
   timeout_cooldown: 30.0
+  executor_max_workers: 4
+  queue_max_size: 256
+  job_history_limit: 100
+  rate_limit_per_minute: 0
+  circuit_failure_threshold: 3
+  circuit_cooldown_seconds: 30.0
+  priority_by_safety:
+    critical: 0
+    dangerous: 50
+    normal: 100
   approval_timeout_seconds: 30.0
   require_confirmation_levels:
     - dangerous
@@ -580,6 +601,20 @@ field_operations:
     security: ${ASKME_DINGTALK_SECURITY_SECRET}
     cleaning: ${ASKME_DINGTALK_CLEANING_SECRET}
     operations: ${ASKME_DINGTALK_OPERATIONS_SECRET}
+  delivery_resource_governance:
+    # Shared delivery-resource changes can affect multiple customer projects.
+    # Keep notification disabled in local demo mode; production can enable one
+    # or more delivery-owner channels below.
+    delivery_owner_notifications:
+      enabled: false
+      webhook_url: ${ASKME_DELIVERY_OWNER_WEBHOOK_URL}
+      dingtalk_webhook: ${ASKME_DELIVERY_OWNER_DINGTALK_WEBHOOK}
+      dingtalk_secret: ${ASKME_DELIVERY_OWNER_DINGTALK_SECRET}
+      wecom_webhook: ${ASKME_DELIVERY_OWNER_WECOM_WEBHOOK}
+      feishu_webhook: ${ASKME_DELIVERY_OWNER_FEISHU_WEBHOOK}
+      incident_archive_path: artifacts/field_ops/delivery-resource-governance-notifications.jsonl
+      severity_routes:
+        warning: ["dingtalk", "log"]
   action_audit:
     enabled: true
     path: artifacts/field_ops/field-action-audit.jsonl
@@ -618,10 +653,12 @@ field_operations:
         - field:event:create
         - field:event:acknowledge
         - field:event:request_close
+        - field:project:read
         - knowledge:read
         - knowledge:import
         - knowledge:preview
         - runtime:read
+        - runtime:submit
         - runtime:pause
         - runtime:resume
         - skill:read
@@ -629,11 +666,15 @@ field_operations:
       supervisor:
         - audit:read
         - audit:export
+        - audit:review
         - field:event:create
         - field:event:acknowledge
         - field:event:close
         - field:event:request_close
         - field:notification:test
+        - field:project:read
+        - field:project:write
+        - resource:governance:write
         - knowledge:read
         - knowledge:import
         - knowledge:approve
@@ -641,6 +682,7 @@ field_operations:
         - knowledge:rollback
         - knowledge:rebuild
         - runtime:read
+        - runtime:submit
         - runtime:pause
         - runtime:resume
         - runtime:cancel
@@ -649,11 +691,24 @@ field_operations:
         - skill:review
         - voice:profile:read
         - voice:profile:update
+      product_owner:
+        - audit:read
+        - field:project:read
+        - template:release:write
+        - template:release:approve
+        - resource:governance:write
+        - resource:governance:approve
       admin:
         - "*"
   operators:
     dashboard.operator:
       roles: [operator]
+      project_scope:
+        tenant_ids: [default]
+        delivery_namespaces: [default]
+        customer_ids: [demo-customer]
+        project_ids: [demo-field-ops]
+        site_ids: [inovx-demo-park]
     guard-1:
       roles: [operator]
     security-1:
@@ -664,6 +719,10 @@ field_operations:
       roles: [operator]
     supervisor-1:
       roles: [supervisor]
+    product.owner:
+      roles: [product_owner]
+    product.reviewer:
+      roles: [product_owner]
     admin-1:
       roles: [admin]
   site_map:
@@ -690,6 +749,7 @@ field_operations:
 space_cognition:
   park_id: fanmu-chuangyi
   map_id: fanmu-phase-1
+  store_path: data/space/space-catalog.json
   points:
     - point_id: sp-west-gate
       park_id: fanmu-chuangyi
@@ -888,6 +948,14 @@ runtime:
     timeout: 2.0
     failure_threshold: 2
     failure_cooldown: 15.0
+
+  dog_control:
+    # Dog-control-service is the only outbound motion-control authority for
+    # askme skills. Keep disabled/unset for demos that must not touch hardware.
+    enabled: false
+    base_url: ${DOG_CONTROL_SERVICE_URL}
+    bearer_token: ${RUNTIME_BEARER_TOKEN}
+    operator_id: askme
 
   dog_safety:
     # dog-safety-service E-STOP notification (Thunder runtime integration)

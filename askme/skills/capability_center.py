@@ -5,6 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from askme.contracts import (
+    CapabilityDependency,
+    CapabilityPackageManifest,
+    DependencyKind,
+    PackageRuntimeInventory,
+    PackageStatus,
+    ScenarioPackageManifest,
+    evaluate_capability_package_readiness,
+    evaluate_scenario_package_readiness,
+)
+from askme.contracts.io import RiskLevel
 from askme.skills.skill_model import SkillDefinition
 
 
@@ -175,6 +186,10 @@ def build_capability_center(
                 group["enabled_count"] += 1
 
     ordered_groups = [group for group in groups.values() if group["skills"]]
+    package_catalog = _build_capability_package_catalog(
+        all_specs=all_specs,
+        skills_by_name=by_name,
+    )
     scenario_blueprints = _build_scenario_blueprints(
         all_specs=all_specs,
         skills_by_name=by_name,
@@ -193,6 +208,7 @@ def build_capability_center(
             "scenario_blocked_count": scenario_blueprints["summary"]["blocked_count"],
         },
         "groups": ordered_groups,
+        "capability_packages": package_catalog,
         "scenario_blueprints": scenario_blueprints,
         "online_growth": {
             "status": "available_with_governance",
@@ -264,6 +280,14 @@ def _build_scenario_blueprints(
         else:
             coverage_status = "blocked"
             next_action = _next_action(missing_skill_names, disabled_skill_names)
+        scenario_manifest = _scenario_package_manifest(
+            scenario,
+            required_skills=required_skills,
+        )
+        scenario_readiness = evaluate_scenario_package_readiness(
+            scenario_manifest,
+            inventory=_scenario_runtime_inventory(required_skills),
+        )
 
         items.append({
             "scenario_id": scenario.scenario_id,
@@ -289,6 +313,8 @@ def _build_scenario_blueprints(
             "acceptance_criteria": list(scenario.acceptance_criteria),
             "runtime_entry": "field_event_trigger",
             "next_action": next_action,
+            "package_manifest": scenario_manifest.to_dict(),
+            "package_readiness": scenario_readiness,
         })
 
     return {
@@ -306,6 +332,180 @@ def _build_scenario_blueprints(
             "customer_claim_rule": "ready means software skill path exists; real sensor, notification, and robot hardware still need site validation",
         },
     }
+
+
+def _build_capability_package_catalog(
+    *,
+    all_specs: dict[str, CapabilitySpec],
+    skills_by_name: dict[str, SkillDefinition],
+) -> dict[str, Any]:
+    manifests: list[dict[str, Any]] = []
+    readiness_items: list[dict[str, Any]] = []
+    inventory = _capability_runtime_inventory(skills_by_name.values())
+    for spec in sorted(all_specs.values(), key=lambda item: (item.group_id, item.priority, item.skill_name)):
+        manifest = _capability_package_manifest(spec)
+        readiness = evaluate_capability_package_readiness(manifest, inventory=inventory)
+        manifests.append(manifest.to_dict())
+        readiness_items.append(readiness)
+    return {
+        "summary": {
+            "package_count": len(manifests),
+            "ready_count": sum(1 for item in readiness_items if item["status"] == "ready"),
+            "manual_check_count": sum(1 for item in readiness_items if item["status"] == "manual_check"),
+            "blocked_count": sum(1 for item in readiness_items if item["status"] == "blocked"),
+        },
+        "items": manifests,
+        "readiness": readiness_items,
+        "policy": {
+            "package_id_rule": "capability.<skill_name>",
+            "customer_enablement_requires_readiness": True,
+            "ready_still_requires_site_validation": True,
+        },
+    }
+
+
+def _capability_package_manifest(spec: CapabilitySpec) -> CapabilityPackageManifest:
+    risk_level = RiskLevel.HIGH if spec.requires_approval else RiskLevel.LOW
+    return CapabilityPackageManifest(
+        package_id=_capability_package_id(spec.skill_name),
+        display_name=spec.display_name,
+        status=PackageStatus.PILOT,
+        capability=spec.skill_name,
+        summary=spec.description,
+        inputs=("operator_intent", "site_context", "runtime_state"),
+        outputs=("customer_visible_result", "audit_record"),
+        dependencies=(
+            CapabilityDependency(
+                name=spec.skill_name,
+                kind=DependencyKind.SKILL,
+                required=True,
+                reason=f"能力包需要底层技能 {spec.skill_name} 已安装并启用。",
+                customer_visible=True,
+            ),
+            *_approval_dependencies(f"approval.{spec.skill_name}", spec.requires_approval),
+        ),
+        risk_level=risk_level,
+        risk_controls=(
+            ("主管审批后才能启用或执行高风险动作。",)
+            if spec.requires_approval
+            else ("记录调用审计，保留人工接管入口。",)
+        ),
+        customer_visible_name=spec.display_name,
+        customer_visible_description=spec.description,
+        customer_visible_outputs=("结果展示", "事件记录", "审计记录"),
+        tags=(spec.group_id, spec.priority),
+        metadata={
+            "skill_name": spec.skill_name,
+            "group_id": spec.group_id,
+            "group_name": spec.group_name,
+            "priority": spec.priority,
+            "requires_approval": spec.requires_approval,
+        },
+    )
+
+
+def _scenario_package_manifest(
+    scenario: Any,
+    *,
+    required_skills: list[dict[str, Any]],
+) -> ScenarioPackageManifest:
+    requires_approval = bool(scenario.requires_operator_approval) or any(
+        item["requires_approval"] for item in required_skills
+    )
+    return ScenarioPackageManifest(
+        package_id=f"scenario.{scenario.scenario_id}",
+        display_name=scenario.name,
+        status=PackageStatus.PILOT,
+        scenario=scenario.scenario_id,
+        site_id="site-profile",
+        customer_name="customer-site",
+        capability_packages=tuple(
+            _capability_package_id(item["skill_name"]) for item in required_skills
+        ),
+        inputs=("site_event", "perception_evidence", "operator_policy", "runtime_context"),
+        outputs=("customer_visible_response", "field_event", "audit_record"),
+        dependencies=(
+            *(
+                CapabilityDependency(
+                    name=item["skill_name"],
+                    kind=DependencyKind.SKILL,
+                    required=True,
+                    reason=f"场景 {scenario.name} 需要技能 {item['display_name']}。",
+                    customer_visible=True,
+                )
+                for item in required_skills
+            ),
+            *_approval_dependencies(
+                f"approval.{scenario.scenario_id}",
+                requires_approval or scenario.interrupts_current_task,
+            ),
+        ),
+        risk_level=RiskLevel.HIGH if requires_approval or scenario.interrupts_current_task else RiskLevel.MEDIUM,
+        risk_controls=(
+            ("需要操作员审批或人工接管入口。",)
+            if requires_approval or scenario.interrupts_current_task
+            else ("仅在已配置服务点或事件规则内触发。", "记录触发证据和回答依据。")
+        ),
+        customer_visible_name=scenario.name,
+        customer_visible_description=scenario.trigger_rule,
+        customer_visible_steps=tuple(scenario.robot_behavior),
+        customer_visible_outputs=tuple(scenario.acceptance_criteria or scenario.required_evidence),
+        rollout_notes="先在演示或试点站点启用；真实硬件、传感器、通知和现场规则通过后再进入生产。",
+        metadata={
+            "category": scenario.category,
+            "priority": scenario.priority,
+            "notification_group": scenario.notification_group,
+            "archive_required": scenario.archive_required,
+            "interrupts_current_task": scenario.interrupts_current_task,
+            "requires_operator_approval": requires_approval,
+        },
+    )
+
+
+def _approval_dependencies(name: str, required: bool) -> tuple[CapabilityDependency, ...]:
+    if not required:
+        return ()
+    return (
+        CapabilityDependency(
+            name=name,
+            kind=DependencyKind.HUMAN_APPROVAL,
+            required=False,
+            reason="Human approval is required before this package is enabled for a customer site.",
+            customer_visible=True,
+        ),
+    )
+
+
+def _capability_runtime_inventory(skills: Any) -> PackageRuntimeInventory:
+    enabled_skill_names = {
+        skill.name
+        for skill in skills
+        if getattr(skill, "enabled", False)
+    }
+    return PackageRuntimeInventory(
+        skills=frozenset(enabled_skill_names),
+        capability_packages=frozenset(
+            _capability_package_id(name) for name in enabled_skill_names
+        ),
+    )
+
+
+def _scenario_runtime_inventory(required_skills: list[dict[str, Any]]) -> PackageRuntimeInventory:
+    enabled_skill_names = {
+        item["skill_name"]
+        for item in required_skills
+        if item.get("installed") and item.get("enabled")
+    }
+    return PackageRuntimeInventory(
+        skills=frozenset(enabled_skill_names),
+        capability_packages=frozenset(
+            _capability_package_id(name) for name in enabled_skill_names
+        ),
+    )
+
+
+def _capability_package_id(skill_name: str) -> str:
+    return f"capability.{skill_name}"
 
 
 def _scenario_skill_entry(

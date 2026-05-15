@@ -636,6 +636,47 @@ class TestModuleExports:
         assert len(pkg.__all__) == 20
 
 
+class TestToolsModule:
+    async def test_stop_shuts_down_tool_registry_without_blocking(self):
+        from askme.runtime.modules.tools_module import ToolsModule
+
+        mod = ToolsModule()
+        mod.registry = MagicMock()
+
+        await mod.stop()
+
+        mod.registry.shutdown.assert_called_once_with(
+            wait=False,
+            cancel_futures=True,
+        )
+
+    def test_health_includes_registry_diagnostics(self):
+        from askme.runtime.modules.tools_module import ToolsModule
+
+        mod = ToolsModule()
+        mod.registry = MagicMock()
+        mod.registry.diagnostics.return_value = {
+            "tool_count": 3,
+            "executor": {"active": True, "max_workers": 4},
+            "cooldown_count": 1,
+            "pending_approval": False,
+            "rate_limit": {"active": {}},
+            "circuit_breakers": {"open": {}},
+            "background_jobs": {"stored": 0},
+        }
+
+        assert mod.health() == {
+            "status": "ok",
+            "tool_count": 3,
+            "executor": {"active": True, "max_workers": 4},
+            "cooldown_count": 1,
+            "pending_approval": False,
+            "rate_limit": {"active": {}},
+            "circuit_breakers": {"open": {}},
+            "background_jobs": {"stored": 0},
+        }
+
+
 # ══════════════════════════════════════════════════════════════════════
 # Async build integration (lightweight — mocked foundation)
 # ══════════════════════════════════════════════════════════════════════

@@ -58,6 +58,27 @@ def test_capability_center_groups_customer_facing_skills() -> None:
         "enable",
         "audit",
     ]
+    assert payload["capability_packages"]["summary"]["package_count"] >= 1
+    patrol_package = next(
+        item
+        for item in payload["capability_packages"]["items"]
+        if item["package_id"] == "capability.patrol_scan"
+    )
+    agent_package = next(
+        item
+        for item in payload["capability_packages"]["items"]
+        if item["package_id"] == "capability.agent_task"
+    )
+    agent_readiness = next(
+        item
+        for item in payload["capability_packages"]["readiness"]
+        if item["package_id"] == "capability.agent_task"
+    )
+    assert patrol_package["capability"] == "patrol_scan"
+    assert patrol_package["customer_visible_name"] == "巡检指定区域"
+    assert agent_package["dependencies"][-1]["kind"] == "human_approval"
+    assert agent_readiness["status"] == "manual_check"
+    assert agent_readiness["manual_check_dependencies"] == ["approval.agent_task"]
     assert payload["scenario_blueprints"]["summary"]["scenario_count"] >= 9
 
 
@@ -75,8 +96,16 @@ def test_skill_manager_exposes_capability_center() -> None:
         for item in payload["scenario_blueprints"]["items"]
     }
     assert scenario_items["wayfinding_help_point"]["coverage_status"] == "ready"
+    assert scenario_items["wayfinding_help_point"]["package_manifest"]["package_id"] == (
+        "scenario.wayfinding_help_point"
+    )
+    assert scenario_items["wayfinding_help_point"]["package_readiness"]["status"] == "ready"
     assert scenario_items["crowd_gathering"]["coverage_status"] == "ready"
     assert scenario_items["visitor_escort"]["coverage_status"] == "partial"
+    assert scenario_items["visitor_escort"]["package_readiness"]["status"] == "blocked"
+    assert "capability.navigate" in scenario_items["visitor_escort"]["package_readiness"][
+        "missing_required_dependencies"
+    ]
     assert scenario_items["visitor_escort"]["disabled_skill_names"] == ["navigate"]
 
 
@@ -105,6 +134,13 @@ def test_capability_center_maps_field_scenarios_to_required_skills() -> None:
 
     illegal_parking = items["illegal_parking"]
     assert illegal_parking["coverage_status"] == "ready"
+    assert illegal_parking["package_manifest"]["capability_packages"] == [
+        "capability.detect_illegal_parking"
+    ]
+    assert illegal_parking["package_readiness"]["status"] == "manual_check"
+    assert illegal_parking["package_readiness"]["manual_check_dependencies"] == [
+        "approval.illegal_parking"
+    ]
     assert illegal_parking["runtime_entry"] == "field_event_trigger"
     assert illegal_parking["required_skills"][0]["skill_name"] == "detect_illegal_parking"
     assert illegal_parking["requires_operator_approval"] is True

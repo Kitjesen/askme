@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from askme.pipeline.hooks import PipelineHooks, ToolCallRecord
 from askme.pipeline.tool_executor import ToolExecutor
@@ -112,15 +112,14 @@ class TestBasicExecution:
 class TestTimeout:
     async def test_timeout_records_error_in_conversation(self):
         """Timeout → tool result in conversation contains error; execute_tools still returns follow-up."""
-        async def fake_wait_for(coro, timeout):
-            coro.close()
-            raise TimeoutError()
-
-        with patch("asyncio.wait_for", new=fake_wait_for):
-            executor = _make_executor()
-            await executor.execute_tools(
-                _make_tool_calls(["slow_tool"]), system_prompt=""
-            )
+        tools = MagicMock()
+        tools.execute = MagicMock(return_value="[Error][Timeout] Tool 'slow_tool' exceeded 1.0s.")
+        tools.has_pending_approval.return_value = False
+        tools.handle_pending_input.return_value = None
+        executor = _make_executor(tools=tools)
+        await executor.execute_tools(
+            _make_tool_calls(["slow_tool"]), system_prompt=""
+        )
 
         # The tool result recorded in conversation should mention timeout
         call_args = executor._conversation.add_tool_exchange.call_args

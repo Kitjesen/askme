@@ -1,0 +1,124 @@
+template:
+  template_id: warehouse-logistics
+  version: 0.1.0
+  publish_status: pilot
+  release_channel: pilot
+  owner: askme-product
+  upgrade_policy: manual_review
+  min_runtime_version: 4.0.0
+  display_name: Warehouse logistics starter
+  industry: warehouse
+  customer_claim: Starter profile for aisle blocking, forklift, shelf, fire, and loading area inspection.
+
+customer:
+  customer_id: template-customer
+  customer_name: Template Customer
+  industry: warehouse
+  project_id: warehouse-logistics-project
+  project_name: Warehouse Logistics Project
+  delivery_model: solution_project
+
+site:
+  site_id: template-warehouse-site
+  name: Template Warehouse Site
+  map_version: template-v1
+
+responder_groups:
+  security:
+    name: Security Team
+    webhook_env: ASKME_DINGTALK_SECURITY_WEBHOOK
+    secret_env: ASKME_DINGTALK_SECURITY_SECRET
+  cleaning:
+    name: Facility Team
+    webhook_env: ASKME_DINGTALK_CLEANING_WEBHOOK
+    secret_env: ASKME_DINGTALK_CLEANING_SECRET
+  operations:
+    name: Warehouse Operations
+    webhook_env: ASKME_DINGTALK_OPERATIONS_WEBHOOK
+    secret_env: ASKME_DINGTALK_OPERATIONS_SECRET
+
+zones:
+  main-aisle:
+    name: Main aisle
+    location: Main aisle
+    type: main_channel
+    parking_allowed: false
+  dock-yard:
+    name: Dock yard
+    location: Dock yard
+    type: parking_area
+    parking_allowed: true
+  dock-help:
+    name: Dock help point
+    location: Dock entrance
+    type: help_point
+    help_point_id: dock-help
+  shelf-a:
+    name: Shelf A
+    location: Shelf A
+    type: storage_shelf
+  fire-cabinet:
+    name: Fire cabinet area
+    location: Fire cabinet area
+    type: smoke_risk_area
+
+devices:
+  camera-main-aisle:
+    name: Main aisle camera
+    source: camera
+    camera_id: cam-warehouse-aisle
+    zone_id: main-aisle
+    secret_env: ASKME_FIELD_CAMERA_MAIN_ROAD_SECRET
+  smoke-cabinet:
+    name: Fire cabinet sensor
+    source: sensor
+    sensor_type: smoke_temperature
+    zone_id: fire-cabinet
+    secret_env: ASKME_FIELD_SMOKE_WAREHOUSE_SECRET
+  robot-warehouse:
+    name: Warehouse robot
+    source: robot
+    robot_id: thunder-warehouse
+    zone_id: main-aisle
+    secret_env: ASKME_FIELD_ROBOT_THUNDER_SECRET
+
+thresholds:
+  parking_duration_s: 120
+  night_stranger_dwell_s: 10
+  fire_temperature_c: 60
+  smoke_level: 0.7
+  trash_fill_ratio: 0.8
+  crowd_person_count: 5
+  crowd_duration_min: 30
+
+managed_objects:
+  aisles:
+    display_name: Warehouse aisles
+    category: logistics
+    object_labels: [obstacle, pallet, forklift]
+    scenario_ids: [aisle_blocking]
+    zone_types: [main_channel]
+    device_sources: [camera, robot]
+    responder_group: operations
+    evidence_required: [photo, location, obstruction_duration]
+    bindings:
+      vision_models: [obstacle-pallet-detection]
+      sensor_protocols: [camera-detection-json, robot-status-json]
+      skill_packages: [capability.detect_aisle_blocking]
+      acceptance_tests: [tests/scenario_tests/test_field_operations_evaluation.py::aisle_blocking]
+    customer_visible: true
+  shelves:
+    display_name: Storage shelves
+    category: inventory
+    object_labels: [shelf, barcode, missing_item]
+    scenario_ids: [shelf_inspection]
+    zone_types: [storage_shelf]
+    device_sources: [camera]
+    responder_group: operations
+    evidence_required: [photo, shelf_id, result]
+    bindings:
+      vision_models: [shelf-barcode-detection]
+      sensor_protocols: [camera-detection-json]
+      skill_packages: [capability.inspect_shelf]
+      acceptance_tests: [tests/scenario_tests/test_field_operations_evaluation.py::shelf_inspection]
+    customer_visible: true

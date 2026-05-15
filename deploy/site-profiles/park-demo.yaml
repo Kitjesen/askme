@@ -3,6 +3,135 @@ site:
   name: Inovx Demo Park
   map_version: 2026-05-demo
 
+customer:
+  customer_id: demo-customer
+  customer_name: Demo Customer
+  industry: creative_park
+  project_id: demo-field-ops
+  project_name: Field Operations Pilot
+  delivery_model: solution_project
+  object_scope_note: Each customer project can define its own managed objects.
+
+managed_objects:
+  vehicles:
+    display_name: Vehicle parking objects
+    category: traffic
+    object_labels:
+      - vehicle
+      - car
+      - truck
+    scenario_ids:
+      - illegal_parking
+    zone_types:
+      - main_channel
+      - parking_area
+    device_sources:
+      - camera
+    responder_group: security
+    evidence_required:
+      - photo
+      - zone
+      - dwell_duration
+    bindings:
+      vision_models:
+        - vehicle-detection
+      sensor_protocols:
+        - camera-detection-json
+      skill_packages:
+        - capability.detect_illegal_parking
+      acceptance_tests:
+        - tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking
+    customer_visible: true
+  smoke_and_fire:
+    display_name: Smoke and fire risk objects
+    category: safety
+    object_labels:
+      - smoke
+      - fire
+      - high_temperature
+    scenario_ids:
+      - fire_or_smoke
+    zone_types:
+      - smoke_risk_area
+    device_sources:
+      - sensor
+      - camera
+    responder_group: security
+    evidence_required:
+      - sensor_reading
+      - photo
+      - location
+    bindings:
+      vision_models:
+        - smoke-fire-detection
+      sensor_protocols:
+        - smoke-temperature-json
+      skill_packages:
+        - capability.detect_fire_smoke
+      acceptance_tests:
+        - tests/scenario_tests/test_field_operations_evaluation.py::fire_or_smoke
+    customer_visible: true
+  trash_bins:
+    display_name: Trash bin stations
+    category: cleaning
+    object_labels:
+      - trash_bin
+      - overflow
+    scenario_ids:
+      - trash_bin_full
+    zone_types:
+      - trash_bin_station
+    device_sources:
+      - camera
+    responder_group: cleaning
+    evidence_required:
+      - photo
+      - fill_ratio
+      - location
+    bindings:
+      vision_models:
+        - trash-bin-fill-detection
+      sensor_protocols:
+        - camera-detection-json
+      skill_packages:
+        - capability.inspect_trash_bin
+      acceptance_tests:
+        - tests/scenario_tests/test_field_operations_evaluation.py::trash_bin_full
+    customer_visible: true
+  visitors:
+    display_name: Visitor wayfinding objects
+    category: visitor_service
+    object_labels:
+      - visitor
+      - help_point
+      - destination
+    scenario_ids:
+      - wayfinding_help_point
+      - visitor_escort
+    zone_types:
+      - help_point
+    device_sources:
+      - camera
+      - robot
+    responder_group: operations
+    evidence_required:
+      - service_point
+      - intent
+      - route_result
+    bindings:
+      vision_models:
+        - person-dwell-detection
+      sensor_protocols:
+        - voice-turn-json
+        - robot-route-status-json
+      skill_packages:
+        - capability.answer_wayfinding
+        - capability.escort_visitor
+      acceptance_tests:
+        - tests/scenario_tests/test_rag_trust_evaluation.py::visitor_wayfinding
+        - tests/test_space_cognition.py::visitor_escort
+    customer_visible: true
+
 responder_groups:
   security:
     name: Security DingTalk Group

@@ -1,0 +1,342 @@
+registry_type: askme.delivery_resource_registry
+registry_version: 1
+updated_by: product.delivery.seed
+update_reason: Seed reusable resources for solution-provider customer projects.
+delivery_resources:
+  vision_models:
+    vehicle-detection:
+      display_name: Vehicle detection
+      category: traffic
+      version: 2026.05-seed
+      source: shared_registry
+      owner: product.vision
+      publish_status: published
+      release_channel: stable
+      description: Detects parked or moving vehicles for restricted-road and parking-area scenarios.
+    smoke-fire-detection:
+      display_name: Smoke and fire detection
+      category: safety
+      version: 2026.05-seed
+      source: shared_registry
+      owner: product.vision
+      publish_status: published
+      release_channel: stable
+      description: Detects visible smoke and fire cues for safety incidents.
+    trash-bin-fill-detection:
+      display_name: Trash bin fill detection
+      category: cleaning
+      version: 2026.05-seed
+      source: shared_registry
+      owner: product.vision
+      publish_status: published
+      release_channel: stable
+      description: Estimates trash-bin fill state for cleaning dispatch.
+    person-dwell-detection:
+      display_name: Person dwell detection
+      category: visitor_service
+      version: 2026.05-seed
+      source: shared_registry
+      owner: product.vision
+      publish_status: published
+      release_channel: stable
+      description: Detects a person waiting at a help point before voice interaction.
+    person-counting:
+      display_name: Person counting
+      category: crowd_safety
+      version: 2026.05-seed
+      source: shared_registry
+      owner: product.vision
+      publish_status: published
+      release_channel: stable
+      description: Counts people in a zone for crowd-gathering scenarios.
+    equipment-panel-detection:
+      display_name: Equipment panel detection
+      category: factory
+      version: 2026.05-seed
+      source: shared_registry
+      owner: product.vision
+      publish_status: published
+      release_channel: stable
+      description: Detects factory equipment panels for inspection prompts and evidence capture.
+    obstacle-pallet-detection:
+      display_name: Obstacle and pallet detection
+      category: warehouse
+      version: 2026.05-seed
+      source: shared_registry
+      owner: product.vision
+      publish_status: published
+      release_channel: stable
+      description: Detects blocked aisles, pallets, and obstacles in warehouse paths.
+    shelf-barcode-detection:
+      display_name: Shelf barcode detection
+      category: warehouse
+      version: 2026.05-seed
+      source: shared_registry
+      owner: product.vision
+      publish_status: published
+      release_channel: stable
+      description: Reads or localizes shelf identifiers for warehouse inspection.
+    gate-detection:
+      display_name: Gate detection
+      category: access
+      version: 2026.05-seed
+      source: shared_registry
+      owner: solution.delivery
+      publish_status: pilot
+      release_channel: pilot
+      description: Pilot detector for customer-specific gate inspection projects.
+  sensor_protocols:
+    camera-detection-json:
+      display_name: Camera detection JSON
+      category: camera
+      version: v1
+      source: shared_registry
+      owner: field.platform
+      publish_status: published
+      release_channel: stable
+      description: Normalized camera detection payload accepted by field ingest.
+    smoke-temperature-json:
+      display_name: Smoke and temperature JSON
+      category: sensor
+      version: v1
+      source: shared_registry
+      owner: field.platform
+      publish_status: published
+      release_channel: stable
+      description: Smoke and temperature sensor payload accepted by field ingest.
+    voice-turn-json:
+      display_name: Voice turn JSON
+      category: voice
+      version: v1
+      source: shared_registry
+      owner: voice.platform
+      publish_status: published
+      release_channel: stable
+      description: Visitor or operator voice-turn payload used by interaction scenarios.
+    robot-route-status-json:
+      display_name: Robot route status JSON
+      category: robot
+      version: v1
+      source: shared_registry
+      owner: robot.platform
+      publish_status: published
+      release_channel: stable
+      description: Robot navigation route status payload for escort and runtime reports.
+    robot-status-json:
+      display_name: Robot status JSON
+      category: robot
+      version: v1
+      source: shared_registry
+      owner: robot.platform
+      publish_status: published
+      release_channel: stable
+      description: Robot health and fault payload used by inspection and abnormal-incident scenarios.
+  skill_packages:
+    capability.detect_illegal_parking:
+      display_name: Illegal parking detection
+      category: traffic
+      version: 2026.05-seed
+      source: shared_registry
+      owner: field.skills
+      publish_status: published
+      release_channel: stable
+      description: Converts vehicle detections into illegal-parking field events.
+    capability.detect_fire_smoke:
+      display_name: Fire and smoke detection
+      category: safety
+      version: 2026.05-seed
+      source: shared_registry
+      owner: field.skills
+      publish_status: published
+      release_channel: stable
+      description: Converts smoke, fire, and high-temperature observations into safety events.
+    capability.inspect_trash_bin:
+      display_name: Trash bin inspection
+      category: cleaning
+      version: 2026.05-seed
+      source: shared_registry
+      owner: field.skills
+      publish_status: published
+      release_channel: stable
+      description: Evaluates trash-bin fill evidence and routes cleaning notifications.
+    capability.answer_wayfinding:
+      display_name: Visitor wayfinding answer
+      category: visitor_service
+      version: 2026.05-seed
+      source: shared_registry
+      owner: voice.skills
+      publish_status: published
+      release_channel: stable
+      description: Answers in-park destination questions using the project spatial knowledge base.
+    capability.escort_visitor:
+      display_name: Visitor escort
+      category: visitor_service
+      version: 2026.05-seed
+      source: shared_registry
+      owner: robot.skills
+      publish_status: published
+      release_channel: stable
+      description: Hands off a confirmed visitor destination to a low-speed robot escort task.
+    capability.detect_crowd_gathering:
+      display_name: Crowd gathering detection
+      category: crowd_safety
+      version: 2026.05-seed
+      source: shared_registry
+      owner: field.skills
+      publish_status: published
+      release_channel: stable
+      description: Evaluates person-count and dwell-time evidence for crowd alerts.
+    capability.inspect_equipment:
+      display_name: Equipment inspection
+      category: factory
+      version: 2026.05-seed
+      source: shared_registry
+      owner: field.skills
+      publish_status: published
+      release_channel: stable
+      description: Evaluates factory equipment inspection observations and report evidence.
+    capability.detect_aisle_blocking:
+      display_name: Aisle blocking detection
+      category: warehouse
+      version: 2026.05-seed
+      source: shared_registry
+      owner: field.skills
+      publish_status: published
+      release_channel: stable
+      description: Detects blocked warehouse aisles and creates operations events.
+    capability.inspect_shelf:
+      display_name: Shelf inspection
+      category: warehouse
+      version: 2026.05-seed
+      source: shared_registry
+      owner: field.skills
+      publish_status: published
+      release_channel: stable
+      description: Evaluates shelf and barcode inspection observations.
+    capability.inspect_gate:
+      display_name: Gate inspection
+      category: access
+      version: 2026.05-seed
+      source: shared_registry
+      owner: solution.delivery
+      publish_status: published
+      release_channel: stable
+      description: Stable skill route for customer-specific gate inspection.
+    capability.navigate:
+      display_name: Navigation
+      category: robot
+      version: 2026.05-seed
+      source: shared_registry
+      owner: robot.skills
+      publish_status: published
+      release_channel: stable
+      description: Robot navigation capability for task handoff and escort flows.
+    capability.patrol_scan:
+      display_name: Patrol scan
+      category: patrol
+      version: 2026.05-seed
+      source: shared_registry
+      owner: robot.skills
+      publish_status: published
+      release_channel: stable
+      description: Patrol scanning capability for inspection and evidence capture.
+    capability.agent_task:
+      display_name: Agent task handoff
+      category: robot_task
+      version: 2026.05-seed
+      source: shared_registry
+      owner: runtime.platform
+      publish_status: published
+      release_channel: stable
+      description: High-level task handoff capability governed by safety and runtime arbiter.
+  acceptance_tests:
+    "tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking":
+      display_name: Illegal parking scenario evaluation
+      category: traffic
+      version: 2026.05-seed
+      source: shared_registry
+      owner: test.engineering
+      publish_status: published
+      release_channel: stable
+      description: Verifies illegal-parking event normalization and dispatch behavior.
+    "tests/scenario_tests/test_field_operations_evaluation.py::fire_or_smoke":
+      display_name: Fire or smoke scenario evaluation
+      category: safety
+      version: 2026.05-seed
+      source: shared_registry
+      owner: test.engineering
+      publish_status: published
+      release_channel: stable
+      description: Verifies fire and smoke event handling.
+    "tests/scenario_tests/test_field_operations_evaluation.py::trash_bin_full":
+      display_name: Trash bin full scenario evaluation
+      category: cleaning
+      version: 2026.05-seed
+      source: shared_registry
+      owner: test.engineering
+      publish_status: published
+      release_channel: stable
+      description: Verifies trash-bin-full event handling and cleaning dispatch.
+    "tests/scenario_tests/test_rag_trust_evaluation.py::visitor_wayfinding":
+      display_name: Visitor wayfinding grounded-answer test
+      category: visitor_service
+      version: 2026.05-seed
+      source: shared_registry
+      owner: test.engineering
+      publish_status: published
+      release_channel: stable
+      description: Verifies wayfinding answers stay grounded in project knowledge.
+    "tests/test_space_cognition.py::visitor_escort":
+      display_name: Visitor escort spatial cognition test
+      category: visitor_service
+      version: 2026.05-seed
+      source: shared_registry
+      owner: test.engineering
+      publish_status: published
+      release_channel: stable
+      description: Verifies visitor escort planning and spatial destination handling.
+    "tests/scenario_tests/test_field_operations_evaluation.py::crowd_gathering":
+      display_name: Crowd gathering scenario evaluation
+      category: crowd_safety
+      version: 2026.05-seed
+      source: shared_registry
+      owner: test.engineering
+      publish_status: published
+      release_channel: stable
+      description: Verifies crowd-gathering event handling.
+    "tests/scenario_tests/test_field_operations_evaluation.py::equipment_inspection":
+      display_name: Equipment inspection scenario evaluation
+      category: factory
+      version: 2026.05-seed
+      source: shared_registry
+      owner: test.engineering
+      publish_status: published
+      release_channel: stable
+      description: Verifies factory equipment inspection scenario behavior.
+    "tests/scenario_tests/test_field_operations_evaluation.py::aisle_blocking":
+      display_name: Aisle blocking scenario evaluation
+      category: warehouse
+      version: 2026.05-seed
+      source: shared_registry
+      owner: test.engineering
+      publish_status: published
+      release_channel: stable
+      description: Verifies warehouse aisle-blocking event handling.
+    "tests/scenario_tests/test_field_operations_evaluation.py::shelf_inspection":
+      display_name: Shelf inspection scenario evaluation
+      category: warehouse
+      version: 2026.05-seed
+      source: shared_registry
+      owner: test.engineering
+      publish_status: published
+      release_channel: stable
+      description: Verifies shelf inspection scenario behavior.
+    "tests/scenario_tests/test_field_operations_evaluation.py::gate_inspection":
+      display_name: Gate inspection scenario evaluation
+      category: access
+      version: 2026.05-seed
+      source: shared_registry
+      owner: test.engineering
+      publish_status: pilot
+      release_channel: pilot
+      description: Pilot validation hook for customer-specific gate inspection.

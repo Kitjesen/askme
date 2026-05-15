@@ -110,7 +110,50 @@ def test_cli_runtime_without_subcommand_prints_help(capsys) -> None:
 
     output = capsys.readouterr().out
     assert "usage: askme runtime" in output
+    assert "blueprints" in output
     assert "s100p-readiness-bundle" in output
+
+
+def test_cli_runtime_blueprints_outputs_catalog(capsys) -> None:
+    cli.main(["runtime", "blueprints", "--name", "park"])
+
+    output = capsys.readouterr().out
+    assert "blueprints=1" in output
+    assert "edge_robot: Park Patrol Robot Runtime" in output
+    assert "valid=True" in output
+
+
+def test_cli_runtime_blueprints_json(capsys) -> None:
+    cli.main(["runtime", "blueprints", "--customer-visible", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    names = {item["name"] for item in payload["items"]}
+    assert "edge_robot" in names
+    assert "mcp" not in names
+    assert payload["summary"]["valid_count"] == payload["summary"]["blueprint_count"]
+
+
+def test_cli_runtime_blueprints_delivery_package_writes_json(tmp_path: Path, capsys) -> None:
+    output = tmp_path / "blueprint-package.json"
+
+    cli.main([
+        "runtime",
+        "blueprints",
+        "--name",
+        "park",
+        "--delivery-package",
+        "--output",
+        str(output),
+    ])
+
+    console = capsys.readouterr().out
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    package = payload["items"][0]["delivery_package"]
+
+    assert "delivery-package: blueprint.edge_robot" in console
+    assert package["package_id"] == "blueprint.edge_robot"
+    assert package["deliverables"]["scenario_acceptance"]
+    assert package["operator_runbook"]["start"] == "python -m askme.blueprints.edge_robot"
 
 
 def test_cli_runtime_s100p_readiness_bundle_help_lists_field_flags(capsys) -> None:
@@ -206,9 +249,11 @@ def test_cli_runtime_field_ingest_file_dry_run_normalizes_camera_frame(tmp_path:
         server="http://runtime.local:8765",
         dry_run=True,
         limit=0,
+        device_secrets=None,
     )
 
     assert payload["status"] == "ok"
+    assert payload["signed"] == 0
     assert payload["results"][0]["status"] == "dry_run"
     normalized = payload["results"][0]["normalized"]
     assert normalized["detections"][0]["label"] == "vehicle"
@@ -227,10 +272,174 @@ def test_cli_runtime_field_ingest_file_accepts_utf8_bom_jsonl(tmp_path: Path) ->
         server="http://runtime.local:8765",
         dry_run=True,
         limit=0,
+        device_secrets=None,
     )
 
     assert payload["status"] == "ok"
     assert payload["results"][0]["normalized"]["source"] == "sensor"
+
+
+def test_cli_runtime_field_ingest_file_can_sign_normalized_events(tmp_path: Path) -> None:
+    from askme.pipeline.field_operations import sign_field_device_payload
+
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        json.dumps({
+            "source": "sensor",
+            "device_id": "smoke-01",
+            "timestamp": 1770000000,
+            "sensor": {"temperature_c": 72, "smoke_level": 0.9},
+            "location": "Power Room",
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = cli._run_field_ingest_file(
+        source=str(path),
+        server="http://runtime.local:8765",
+        dry_run=True,
+        limit=0,
+        device_secrets={"smoke-01": "device-secret"},
+    )
+
+    normalized = payload["results"][0]["normalized"]
+    assert payload["status"] == "ok"
+    assert payload["signed"] == 1
+    assert payload["results"][0]["device_signing"]["signed"] is True
+    assert normalized["device_signature_alg"] == "hmac-sha256"
+    assert normalized["device_signature"]
+    assert normalized["device_signature"] == sign_field_device_payload(
+        normalized,
+        secret="device-secret",
+    )
+
+
+def test_cli_runtime_field_ingest_file_forwards_device_secret_args(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    seen: dict[str, object] = {}
+    path = tmp_path / "events.jsonl"
+    path.write_text(json.dumps({"source": "sensor", "device_id": "smoke-01"}) + "\n", encoding="utf-8")
+
+    def fake_ingest(**kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {
+            "status": "ok",
+            "target": "field-ingest-file",
+            "count": 1,
+            "failed": 0,
+            "signed": 1,
+            "dry_run": True,
+            "results": [{"index": 1, "status": "dry_run", "normalized": {"scenario_id": "fire_or_smoke"}}],
+        }
+
+    monkeypatch.setattr(cli, "_run_field_ingest_file", fake_ingest)
+
+    cli.main([
+        "runtime",
+        "field-ingest-file",
+        str(path),
+        "--dry-run",
+        "--device-secret",
+        "smoke-01=device-secret",
+    ])
+
+    output = capsys.readouterr().out
+    assert seen["device_secrets"] == {"smoke-01": "device-secret"}
+    assert "signed=1" in output
+
+
+def test_cli_runtime_field_ingest_file_loads_device_secrets_from_site_profile(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("ASKME_SMOKE_SECRET", "smoke-secret")
+    profile = tmp_path / "site.yaml"
+    profile.write_text(
+        """
+devices:
+  smoke-01:
+    source: sensor
+    secret_env: ASKME_SMOKE_SECRET
+  camera-01:
+    source: camera
+    secret_env: ASKME_MISSING_CAMERA_SECRET
+""".strip(),
+        encoding="utf-8",
+    )
+    source = tmp_path / "events.jsonl"
+    source.write_text(
+        json.dumps({"source": "sensor", "device_id": "smoke-01", "sensor": {"smoke_level": 0.9}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = cli._run_field_ingest_file(
+        source=str(source),
+        server="http://runtime.local:8765",
+        dry_run=True,
+        limit=0,
+        device_secrets=cli._resolve_field_device_secrets([], site_profile=str(profile)),
+    )
+
+    assert payload["signed"] == 1
+    assert payload["results"][0]["device_signing"]["device_id"] == "smoke-01"
+    assert cli._resolve_field_device_secrets([], site_profile=str(profile)) == {
+        "smoke-01": "smoke-secret"
+    }
+
+
+def test_cli_runtime_field_ingest_bridge_loads_site_profile_secrets_and_allows_override(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("ASKME_SMOKE_SECRET", "smoke-secret")
+    seen: dict[str, object] = {}
+    profile = tmp_path / "site.yaml"
+    profile.write_text(
+        """
+devices:
+  smoke-01:
+    source: sensor
+    secret_env: ASKME_SMOKE_SECRET
+""".strip(),
+        encoding="utf-8",
+    )
+    source = tmp_path / "events.jsonl"
+    source.write_text(json.dumps({"source": "sensor", "device_id": "smoke-01"}) + "\n", encoding="utf-8")
+
+    def fake_bridge(**kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {
+            "status": "ok",
+            "target": "field-ingest-bridge",
+            "count": 1,
+            "failed": 0,
+            "dry_run": True,
+            "state_path": str(tmp_path / "state.json"),
+            "summary": {"signed": 1},
+            "results": [],
+        }
+
+    monkeypatch.setattr(cli, "_run_field_ingest_bridge", fake_bridge)
+
+    cli.main([
+        "runtime",
+        "field-ingest-bridge",
+        str(source),
+        "--site-profile",
+        str(profile),
+        "--device-secret",
+        "smoke-01=override-secret",
+        "--dry-run",
+    ])
+
+    _ = capsys.readouterr()
+    assert seen["device_secrets"] == {"smoke-01": "override-secret"}
 
 
 def test_cli_runtime_field_ingest_bridge_forwards_args(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -289,6 +498,254 @@ def test_cli_runtime_field_ingest_bridge_forwards_args(monkeypatch, tmp_path: Pa
     }
     assert "sources=camera:1" in output
     assert "devices=camera-main-road-1:1" in output
+
+
+def test_cli_runtime_field_sign_device_payload_writes_signed_json(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from askme.pipeline.field_operations import sign_field_device_payload
+
+    monkeypatch.setenv("ASKME_UNIT_DEVICE_SECRET", "unit-device-secret")
+    source = tmp_path / "event.json"
+    output = tmp_path / "signed.json"
+    source.write_text(
+        json.dumps({
+            "source": "sensor",
+            "device_id": "smoke-01",
+            "temperature_c": 72,
+        }),
+        encoding="utf-8",
+    )
+
+    payload = cli._run_field_sign_device_payload(
+        source=str(source),
+        output=str(output),
+        device_id="",
+        secret="",
+        secret_env="ASKME_UNIT_DEVICE_SECRET",
+        timestamp=1770000000.0,
+    )
+
+    signed = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["status"] == "signed"
+    assert payload["count"] == 1
+    assert payload["secret_source"] == "env:ASKME_UNIT_DEVICE_SECRET"
+    assert signed["device_signature_alg"] == "hmac-sha256"
+    assert signed["device_signature_timestamp"] == 1770000000.0
+    assert signed["device_signature"] == sign_field_device_payload(
+        signed,
+        secret="unit-device-secret",
+    )
+
+
+def test_cli_runtime_field_sign_device_payload_can_override_device_id(tmp_path: Path) -> None:
+    source = tmp_path / "events.jsonl"
+    output = tmp_path / "signed.jsonl"
+    source.write_text(
+        json.dumps({"source": "camera", "zone_id": "main-road-1"}) + "\n",
+        encoding="utf-8",
+    )
+
+    cli.main([
+        "runtime",
+        "field-sign-device-payload",
+        str(source),
+        "--output",
+        str(output),
+        "--device-id",
+        "camera-main-road-1",
+        "--secret",
+        "camera-secret",
+        "--timestamp",
+        "1770000001",
+    ])
+
+    signed = json.loads(output.read_text(encoding="utf-8").strip())
+    assert signed["device_id"] == "camera-main-road-1"
+    assert signed["device_signature"]
+
+
+def test_cli_runtime_field_sign_device_payload_exits_when_secret_missing(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "event.json"
+    source.write_text(json.dumps({"source": "sensor", "device_id": "smoke-01"}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["runtime", "field-sign-device-payload", str(source), "--secret-env", "MISSING_SECRET"])
+
+    assert exc.value.code == 2
+
+
+def test_cli_runtime_field_device_trust_reports_missing_secret(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.delenv("ASKME_FIELD_SMOKE_SECRET", raising=False)
+    profile = tmp_path / "site.yaml"
+    profile.write_text(
+        """
+site:
+  site_id: unit-park
+  name: Unit Park
+responder_groups:
+  security: {webhook_env: SECURITY_WEBHOOK, secret_env: SECURITY_SECRET}
+  cleaning: {webhook_env: CLEANING_WEBHOOK, secret_env: CLEANING_SECRET}
+  operations: {webhook_env: OPS_WEBHOOK, secret_env: OPS_SECRET}
+zones:
+  main-road: {type: main_channel, parking_allowed: false, location: Main Road}
+  help-1: {type: help_point, help_point_id: help-1, location: Help Point}
+  smoke-zone: {type: smoke_risk_area, location: Power Room}
+devices:
+  smoke-01:
+    source: sensor
+    sensor_type: smoke_temperature
+    zone_id: smoke-zone
+    secret_env: ASKME_FIELD_SMOKE_SECRET
+  camera-01:
+    source: camera
+    camera_id: cam-01
+    zone_id: main-road
+    secret_env: ASKME_FIELD_CAMERA_SECRET
+  robot-01:
+    source: robot
+    robot_id: thunder-1
+    zone_id: main-road
+    secret_env: ASKME_FIELD_ROBOT_SECRET
+thresholds:
+  parking_duration_s: 120
+  night_stranger_dwell_s: 10
+  fire_temperature_c: 60
+  smoke_level: 0.7
+  trash_fill_ratio: 0.8
+  crowd_person_count: 5
+  crowd_duration_min: 30
+""".strip(),
+        encoding="utf-8",
+    )
+
+    cli.main(["runtime", "field-device-trust", "--site-profile", str(profile), "--show-commands"])
+
+    output = capsys.readouterr().out
+    assert "field-device-trust: needs_secret registered=3 ready=0 missing=3" in output
+    assert "secret_env=ASKME_FIELD_SMOKE_SECRET status=missing_secret" in output
+    assert "field-sign-device-payload" in output
+
+
+def test_cli_runtime_field_device_trust_reports_ready(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("ASKME_FIELD_SMOKE_SECRET", "smoke-secret")
+    monkeypatch.setenv("ASKME_FIELD_CAMERA_SECRET", "camera-secret")
+    monkeypatch.setenv("ASKME_FIELD_ROBOT_SECRET", "robot-secret")
+    profile = tmp_path / "site.yaml"
+    profile.write_text(
+        """
+site:
+  site_id: unit-park
+  name: Unit Park
+responder_groups:
+  security: {webhook_env: SECURITY_WEBHOOK, secret_env: SECURITY_SECRET}
+  cleaning: {webhook_env: CLEANING_WEBHOOK, secret_env: CLEANING_SECRET}
+  operations: {webhook_env: OPS_WEBHOOK, secret_env: OPS_SECRET}
+zones:
+  main-road: {type: main_channel, parking_allowed: false, location: Main Road}
+  help-1: {type: help_point, help_point_id: help-1, location: Help Point}
+  smoke-zone: {type: smoke_risk_area, location: Power Room}
+devices:
+  smoke-01: {source: sensor, sensor_type: smoke_temperature, zone_id: smoke-zone, secret_env: ASKME_FIELD_SMOKE_SECRET}
+  camera-01: {source: camera, camera_id: cam-01, zone_id: main-road, secret_env: ASKME_FIELD_CAMERA_SECRET}
+  robot-01: {source: robot, robot_id: thunder-1, zone_id: main-road, secret_env: ASKME_FIELD_ROBOT_SECRET}
+thresholds:
+  parking_duration_s: 120
+  night_stranger_dwell_s: 10
+  fire_temperature_c: 60
+  smoke_level: 0.7
+  trash_fill_ratio: 0.8
+  crowd_person_count: 5
+  crowd_duration_min: 30
+""".strip(),
+        encoding="utf-8",
+    )
+
+    payload = cli._run_field_device_trust(site_profile=str(profile))
+
+    assert payload["status"] == "ready"
+    assert payload["summary"]["registered_device_count"] == 3
+    assert payload["summary"]["signature_ready_count"] == 3
+    assert payload["summary"]["missing_secret_count"] == 0
+
+
+def test_cli_runtime_field_site_env_template_writes_output(tmp_path: Path, capsys) -> None:
+    profile = tmp_path / "site.yaml"
+    output_path = tmp_path / "field-site.env"
+    profile.write_text(
+        """
+site:
+  site_id: unit-park
+  name: Unit Park
+responder_groups:
+  security: {webhook_env: SECURITY_WEBHOOK, secret_env: SECURITY_SECRET}
+  cleaning: {webhook_env: CLEANING_WEBHOOK, secret_env: CLEANING_SECRET}
+  operations: {webhook_env: OPS_WEBHOOK, secret_env: OPS_SECRET}
+zones:
+  main-road: {type: main_channel, parking_allowed: false, location: Main Road}
+  help-1: {type: help_point, help_point_id: help-1, location: Help Point}
+  smoke-zone: {type: smoke_risk_area, location: Power Room}
+devices:
+  smoke-01:
+    source: sensor
+    sensor_type: smoke_temperature
+    zone_id: smoke-zone
+    secret_env: ASKME_FIELD_SMOKE_SECRET
+  camera-01:
+    source: camera
+    camera_id: cam-01
+    zone_id: main-road
+    secret_env: ASKME_FIELD_CAMERA_SECRET
+  robot-01:
+    source: robot
+    robot_id: thunder-1
+    zone_id: main-road
+    secret_env: ASKME_FIELD_ROBOT_SECRET
+thresholds:
+  parking_duration_s: 120
+  night_stranger_dwell_s: 10
+  fire_temperature_c: 60
+  smoke_level: 0.7
+  trash_fill_ratio: 0.8
+  crowd_person_count: 5
+  crowd_duration_min: 30
+""".strip(),
+        encoding="utf-8",
+    )
+
+    cli.main([
+        "runtime",
+        "field-site-env-template",
+        "--site-profile",
+        str(profile),
+        "--output",
+        str(output_path),
+    ])
+
+    console = capsys.readouterr().out
+    generated = output_path.read_text(encoding="utf-8")
+    assert "field-site-env-template: ok envs=9 configured=" in console
+    assert f"output: {output_path}" in console
+    assert "SECURITY_WEBHOOK=" in generated
+    assert "ASKME_FIELD_SMOKE_SECRET=" in generated
+    assert "ASKME_FIELD_ROBOT_SECRET=" in generated
+
+
+def test_cli_runtime_field_site_env_template_json_keeps_template_when_no_output() -> None:
+    payload = cli._run_field_site_env_template(site_profile="deploy/site-profiles/park-demo.yaml")
+
+    assert payload["status"] == "ok"
+    assert payload["env_count"] >= 10
+    assert payload["output"] == ""
+    assert "ASKME_DINGTALK_SECURITY_WEBHOOK=" in payload["template"]
+    assert "ASKME_FIELD_ROBOT_THUNDER_SECRET=" in payload["template"]
 
 
 def test_cli_runtime_field_ingest_smoke_runs_local_http(tmp_path: Path) -> None:
@@ -852,6 +1309,8 @@ def test_cli_runtime_field_readiness_reads_local_files(monkeypatch, tmp_path: Pa
         "--check-site-env",
         "--audit-hmac-secret",
         "readiness-secret",
+        "--review-path",
+        str(tmp_path / "reviews.jsonl"),
     ])
     output = capsys.readouterr().out
 
@@ -865,6 +1324,7 @@ def test_cli_runtime_field_readiness_reads_local_files(monkeypatch, tmp_path: Pa
         "site_profile": "deploy/site-profiles/park-demo.yaml",
         "check_site_env": True,
         "audit_hmac_secret": "readiness-secret",
+        "review_path": str(tmp_path / "reviews.jsonl"),
     }
     assert "product-stage: pilot_ready_pending_site_launch" in output
     assert "release-scope: pilot_demo_and_site_integration" in output
@@ -888,6 +1348,142 @@ def test_cli_runtime_field_readiness_exits_nonzero_when_blocked(monkeypatch) -> 
         cli.main(["runtime", "field-readiness"])
 
     assert exc.value.code == 1
+
+
+def test_cli_runtime_audit_events_prints_review_queue(monkeypatch, capsys) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_audit_events(**kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {
+            "count": 1,
+            "filtered_total": 1,
+            "product_summary": {"status": "needs_review", "requires_review_count": 1},
+            "customer_report": {
+                "status_label": "待主管复核",
+                "summary_sentence": "当前有 1 条记录需要主管复核。",
+            },
+            "records": [],
+            "review_queue": [
+                {
+                    "record_id": "field:2",
+                    "severity": "critical",
+                    "source": "field",
+                    "action": "acknowledge",
+                    "outcome": "accepted",
+                    "customer_copy": {"review_owner": "安全主管"},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(cli, "_run_unified_audit_events", fake_audit_events)
+
+    cli.main([
+        "runtime",
+        "audit-events",
+        "--review-queue-only",
+        "--limit",
+        "10",
+        "--source",
+        "field",
+    ])
+    output = capsys.readouterr().out
+
+    assert seen["limit"] == 10
+    assert seen["source"] == "field"
+    assert "audit-events: records=1 filtered=1 status=needs_review review_queue=1" in output
+    assert "customer-status: 待主管复核" in output
+    assert "field:2 critical field acknowledge accepted owner=安全主管" in output
+
+
+def test_cli_runtime_audit_events_forwards_source_paths(monkeypatch, tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_audit_events(**kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {
+            "count": 0,
+            "filtered_total": 0,
+            "product_summary": {"status": "auditable", "requires_review_count": 0},
+            "records": [],
+            "review_queue": [],
+        }
+
+    monkeypatch.setattr(cli, "_run_unified_audit_events", fake_audit_events)
+
+    cli.main([
+        "runtime",
+        "audit-events",
+        "--field-action-audit",
+        str(tmp_path / "field-action-audit.jsonl"),
+        "--review-path",
+        str(tmp_path / "reviews.jsonl"),
+    ])
+
+    assert seen["field_action_audit"] == str(tmp_path / "field-action-audit.jsonl")
+    assert seen["review_path"] == str(tmp_path / "reviews.jsonl")
+
+
+def test_cli_runtime_audit_review_submits_decision(monkeypatch, capsys) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_review(**kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {
+            "ok": True,
+            "record": {
+                "record_id": "field:2",
+                "decision": "waived",
+                "clears_review": True,
+            },
+            "path": "artifacts/audit/reviews.jsonl",
+            "post_review": {
+                "review_queue_count": 0,
+                "requires_review_count": 0,
+                "customer_status_label": "可交付审计包",
+            },
+        }
+
+    monkeypatch.setattr(cli, "_run_unified_audit_review", fake_review)
+
+    cli.main([
+        "runtime",
+        "audit-review",
+        "field:2",
+        "waived",
+        "--reviewer-id",
+        "supervisor-1",
+        "--note",
+        "duplicate smoke evidence",
+    ])
+    output = capsys.readouterr().out
+
+    assert seen == {
+        "record_id": "field:2",
+        "reviewer_id": "supervisor-1",
+        "decision": "waived",
+        "note": "duplicate smoke evidence",
+        "skill_audit": "",
+        "field_action_audit": "",
+        "field_event_archive": "",
+        "runtime_audit": "",
+        "review_path": "",
+    }
+    assert "audit-review: ok=True record=field:2 decision=waived clears_review=True" in output
+    assert "post-review: queue=0 requires_review=0 status=可交付审计包" in output
+
+
+def test_cli_runtime_audit_review_exits_nonzero_when_record_missing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "_run_unified_audit_review",
+        lambda **_kwargs: {"ok": False, "reason": "audit_record_not_found"},
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["runtime", "audit-review", "field:missing", "accepted"])
+
+    assert exc.value.code == 2
 
 
 def test_cli_runtime_field_live_demo_forwards_args(monkeypatch, tmp_path: Path, capsys) -> None:

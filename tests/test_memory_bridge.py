@@ -1,5 +1,7 @@
 """Tests for MemoryBridge — Mem0 primary + VectorStore fallback."""
 
+import asyncio
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -74,6 +76,35 @@ class TestInit:
         vs.available = True
         # No Mem0, but VectorStore works
         assert bridge.available is True
+
+    def test_auto_backend_selects_first_available_candidate(self):
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "backend": "auto",
+                "auto_backend_order": ["robotmem", "vector", "mem0"],
+                "embed_model": "test-model",
+                "retrieve_timeout": 2.0,
+            },
+            "app": {"data_dir": "data"},
+            "brain": {"api_key": "test-key", "base_url": "http://test", "model": "test-model"},
+        }
+
+        def fake_find_spec(name):
+            return object() if name == "sentence_transformers" else None
+
+        vs_patch, vs_mock = _patch_vector_store()
+        with patch("askme.memory.bridge.get_config", return_value=cfg), \
+             patch("askme.memory.bridge.importlib.util.find_spec", side_effect=fake_find_spec), \
+             vs_patch:
+            bridge = MemoryBridge()
+        bridge._store = vs_mock
+        health = bridge.health()
+
+        assert health["configured_backend"] == "auto"
+        assert health["backend"] == "vector"
+        assert health["backend_selection"]["reason"] == "auto_selected:vector"
+        assert health["backend_selection"]["auto_order"] == ["robotmem", "vector", "mem0"]
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +600,71 @@ class TestRetrieve:
 
         result = await bridge.retrieve("test")
         assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_retrieve_uses_short_ttl_cache_for_repeated_queries(self):
+        bridge, _ = _make_bridge()
+        bridge._retrieve_cache_ttl_s = 30.0
+        mock_mem0 = _make_mem0_mock(search_results={
+            "results": [{"memory": "cached location"}],
+        })
+        bridge._mem0 = mock_mem0
+
+        first = await bridge.retrieve("gate location")
+        second = await bridge.retrieve(" gate   location ")
+        health = bridge.health()
+
+        assert first == second
+        assert "cached location" in second
+        mock_mem0.search.assert_called_once_with("gate location", user_id="robot")
+        assert health["retrieve_count"] == 2
+        assert health["retrieve_cache"]["hits"] == 1
+        assert health["retrieve_cache"]["misses"] == 1
+        assert health["retrieve_cache"]["last_hit"] is True
+
+    @pytest.mark.asyncio
+    async def test_retrieve_cache_can_be_disabled(self):
+        bridge, _ = _make_bridge()
+        bridge._retrieve_cache_ttl_s = 0.0
+        mock_mem0 = _make_mem0_mock(search_results={
+            "results": [{"memory": "uncached location"}],
+        })
+        bridge._mem0 = mock_mem0
+
+        await bridge.retrieve("gate location")
+        await bridge.retrieve("gate location")
+        health = bridge.health()
+
+        assert mock_mem0.search.call_count == 2
+        assert health["retrieve_cache"]["enabled"] is False
+        assert health["retrieve_cache"]["hits"] == 0
+
+    @pytest.mark.asyncio
+    async def test_retrieve_coalesces_same_query_in_flight_work(self):
+        bridge, _ = _make_bridge()
+        bridge._retrieve_cache_ttl_s = 30.0
+        mock_mem0 = _make_mem0_mock(search_results={
+            "results": [{"memory": "shared location"}],
+        })
+
+        def slow_search(*args, **kwargs):
+            time.sleep(0.03)
+            return {"results": [{"memory": "shared location"}]}
+
+        mock_mem0.search = MagicMock(side_effect=slow_search)
+        bridge._mem0 = mock_mem0
+
+        first, second = await asyncio.gather(
+            bridge.retrieve("same query"),
+            bridge.retrieve("same query"),
+        )
+        health = bridge.health()
+
+        assert first == second
+        assert "shared location" in first
+        assert mock_mem0.search.call_count == 1
+        assert health["retrieve_count"] == 2
+        assert health["retrieve_cache"]["coalesced"] >= 1
 
 
 # ---------------------------------------------------------------------------

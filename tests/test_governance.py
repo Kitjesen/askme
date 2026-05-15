@@ -85,10 +85,41 @@ def test_enterprise_readiness_accepts_external_directory_with_trusted_headers() 
     directory = OperatorDirectory(_enterprise_config())
 
     readiness = directory.directory_readiness()
+    gateway = directory.identity_gateway_readiness()
 
     assert readiness["production_ready"] is True
     assert readiness["status"] == "production_ready"
     assert readiness["findings"] == []
+    assert gateway["gate_type"] == "askme.governance.identity_gateway_readiness.v1"
+    assert gateway["status"] == "production_ready"
+    assert gateway["production_ready"] is True
+    assert gateway["identity_mode"] == "enterprise_gateway"
+    assert gateway["trusted_gateway_contract"]["required_headers"][0]["claim"] == "operator_id"
+
+
+def test_demo_directory_identity_gateway_blocks_production_claim() -> None:
+    directory = OperatorDirectory({})
+
+    readiness = directory.identity_gateway_readiness()
+
+    assert readiness["status"] == "blocked"
+    assert readiness["production_ready"] is False
+    assert readiness["identity_mode"] == "demo_operator_directory"
+    assert readiness["demo_operator_directory"]["allowed_for"] == ["demo", "lab", "customer_pilot"]
+    assert readiness["release_claim"].startswith("只能承诺演示或试点能力")
+    assert any(item["code"] == "enterprise_identity_provider_missing" for item in readiness["blockers"])
+
+
+def test_enterprise_gateway_requires_trusted_identity_headers() -> None:
+    config = _enterprise_config()
+    config["field_operations"]["operator_directory"]["trusted_identity_headers"]["enabled"] = False
+    directory = OperatorDirectory(config)
+
+    readiness = directory.identity_gateway_readiness()
+
+    assert readiness["status"] == "blocked"
+    assert readiness["production_ready"] is False
+    assert any(item["code"] == "trusted_gateway_headers_disabled" for item in readiness["blockers"])
 
 
 def test_http_permission_uses_trusted_iam_identity_over_body_operator(monkeypatch) -> None:
@@ -129,3 +160,16 @@ def test_http_permission_uses_trusted_iam_identity_over_body_operator(monkeypatc
 
     assert response.status_code == 200
     assert runtime.seen["operator_id"] == "iam.operator"
+
+
+def test_identity_readiness_endpoint_exposes_customer_handoff_gate(monkeypatch) -> None:
+    monkeypatch.setattr(health_server, "get_config", lambda: _enterprise_config())
+    client = TestClient(create_health_app(lambda: _runtime_snapshot()))
+
+    response = client.get("/api/governance/identity-readiness")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["gate_type"] == "askme.governance.identity_gateway_readiness.v1"
+    assert payload["status"] == "production_ready"
+    assert payload["customer_status"].startswith("企业身份网关已接入")

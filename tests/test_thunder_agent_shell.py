@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -149,6 +150,73 @@ async def test_tool_call_then_final_response(shell, mock_llm, mock_tools) -> Non
     result = await shell.run_task("列出文件")
     assert mock_tools.execute.called
     assert result  # got a response
+
+
+@pytest.mark.asyncio
+async def test_run_task_persists_redacted_product_summary(
+    shell,
+    mock_llm,
+    mock_tools,
+) -> None:
+    """Completed runs leave a customer-safe local summary with redacted tool arguments."""
+    call_count = 0
+    mock_tools.get_agent_allowed_names.return_value = {"bash"}
+    mock_tools.get_voice_labels.return_value = {}
+    mock_tools.get_definitions.return_value = [
+        {"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}
+    ]
+    mock_tools.execute.return_value = "token=tool-result-secret done"
+
+    async def _stream_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield _make_tool_call_chunk(
+                0,
+                "call_1",
+                "bash",
+                '{"command":"curl","api_key":"secret-key","nested":{"token":"secret-token"}}',
+            )
+        else:
+            yield _make_chunk("任务完成")
+
+    mock_llm.chat_stream.side_effect = _stream_side_effect
+
+    result = await shell.run_task("调用带密钥的工具")
+    summary = shell.last_run_summary()
+    persisted = json.loads((shell._workspace / "last_agent_run.json").read_text(encoding="utf-8"))
+    history_lines = (shell._workspace / "agent_runs.jsonl").read_text(encoding="utf-8").splitlines()
+
+    assert result == "任务完成"
+    assert summary["status"] == "completed"
+    assert summary["tool_call_count"] == 1
+    assert summary["tools_used"] == ["bash"]
+    assert summary["tools"][0]["status"] == "ok"
+    assert "secret-key" not in summary["tools"][0]["arguments_preview"]
+    assert "secret-token" not in summary["tools"][0]["arguments_preview"]
+    assert "tool-result-secret" not in summary["tools"][0]["result_preview"]
+    assert "***" in summary["tools"][0]["arguments_preview"]
+    assert persisted["run_id"] == summary["run_id"]
+    assert len(history_lines) == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_persists_run_summary(shell, mock_llm) -> None:
+    """Timed-out runs are visible in the run summary instead of disappearing."""
+    async def _slow_stream(*args, **kwargs):
+        await asyncio.sleep(10)
+        yield _make_chunk("too late")
+
+    mock_llm.chat_stream.side_effect = _slow_stream
+
+    result = await shell.run_task("slow task", timeout=0.1)
+    summary = shell.last_run_summary()
+    persisted = json.loads((shell._workspace / "last_agent_run.json").read_text(encoding="utf-8"))
+
+    assert "超时" in result or "timeout" in result.lower()
+    assert summary["status"] == "timeout"
+    assert persisted["status"] == "timeout"
+    assert persisted["duration_ms"] >= 0
 
 
 @pytest.mark.asyncio

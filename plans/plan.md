@@ -2588,3 +2588,1758 @@ Product reflection:
 
 - This moves the gate from a developer-friendly smoke check to a deployable product rule: a site cannot be called production-ready if one legacy camera, smoke sensor, or robot diagnostic source is still unsigned.
 - The remaining readiness blockers are real deployment evidence: DingTalk credentials, deployed service smoke, live TTS on target audio, signed runtime callback secret, real hardware dispatch, and external-service evidence.
+# 2026-05-14 Update - Solution Provider Customer Project Layer
+
+This update moves AskMe from a single demo-site robot assistant toward a repeatable solution-provider product for many customers, sites, and managed objects.
+
+Delivered in this slice:
+
+- Customer project and managed object catalog APIs now expose customer_id, project_id, site_id, industry, delivery stage, object categories, and object bindings.
+- Industry starter templates were added for factory inspection, park visitor service, warehouse logistics, and scenic-area service.
+- Customer projects can be created from a template, updated as a profile, imported from a customer project package, exported as a handoff package, and archived.
+- Managed objects can be updated through API/UI and now carry declarative bindings for vision models, sensor protocols, skill packages, and acceptance tests.
+- Dashboard delivery view now shows industry templates, customer project scope, multi-site rollout, export actions, and a managed-object quick edit form.
+- Write operations require the `field:project:write` permission; default supervisor permissions include it.
+- Product documentation records the current boundary: this is project/profile-level delivery separation, not full SaaS tenant isolation.
+
+Still not complete:
+
+- Full enterprise tenant isolation, SSO/IAM, project-scoped audit filters, and data-store namespaces.
+- Runtime execution from managed-object bindings; current bindings are declarative references only.
+- Signed customer project package manifest, package diff, and rollback workflow.
+- Real sensor/vision/robot runtime matching against managed_object_id.
+- Customer-facing template marketplace governance, publishing workflow, and version lifecycle.
+
+Next product step:
+
+1. Bind field ingest and event records to `customer_id`, `project_id`, `site_id`, and `managed_object_id`.
+2. Add package manifest checksum/signature and import dry-run diff.
+3. Add project-scoped audit and permission checks before runtime actions.
+4. Promote industry templates into versioned delivery packages with acceptance-case coverage.
+## 2026-05-14 Customer Project Delivery Update
+
+- Managed object acceptance is no longer just a string list in YAML.
+- `acceptance_status.acceptance_checks` now checks whether each configured acceptance reference points to local repository evidence.
+- Missing acceptance files block customer acceptance.
+- Existing files with unresolved nodes require manual review instead of being marked ready.
+- Known scenario aliases such as `illegal_parking`, `fire_or_smoke`, `trash_bin_full`, `visitor_wayfinding`, and `visitor_escort` resolve to deterministic scenario or pytest evidence.
+- `/dashboard/projects` renders per-object acceptance gates so delivery can see linked, manual, and blocked evidence from the product UI.
+- Customer project export packages now carry `acceptance_summary`, and their manifest records overall/ready/manual/blocked acceptance counts.
+- Customer project import dry-run now reports incoming/current acceptance summaries so delivery can judge whether a copied project package is ready for customer signoff.
+- Customer project packages now have standalone `package/verify` and `package/diff` APIs so delivery tooling can validate a handoff package before import.
+- `/dashboard/projects` now exposes a customer-readable acceptance report action for each project.
+- Acceptance reports split the status into site-profile validity, managed-object acceptance evidence, deployment credentials, and onsite acceptance boundary.
+- Acceptance reports now also attach compact field-readiness evidence: scenario evaluation, ingest smoke, voice smoke, notification smoke, runtime roundtrip, audit, and device-trust gates.
+- Current demo project status is intentionally `blocked`: local managed-object evidence is ready, but field readiness still has an unresolved high-risk audit review plus missing real DingTalk/device/live-service evidence.
+- Customer projects can now export an acceptance dossier JSON handoff file and a printable HTML dossier containing the acceptance report, evidence inventory, per-file SHA-256 hashes, and optional HMAC signature metadata.
+- Customer projects now have an acceptance registry API and Dashboard card. It scans project profiles and industry templates, groups every managed-object acceptance reference, and shows linked/manual/blocked evidence counts before customer signoff.
+- Customer project write operations are now guarded by operator project scope in addition to `field:project:write`. A scoped supervisor cannot create, import, archive, or mutate managed objects outside their assigned customer/project/site.
+- Field event read/write actions now share the same project-scope boundary: out-of-scope operators cannot read event detail/report or acknowledge, request close, close, or resend notifications.
+- Device ingest now ignores client-supplied project ownership fields and applies the server/site-profile scope, preventing camera/sensor/robot payloads from reassigning themselves across customer projects.
+- Remaining gap: this proves local delivery evidence is wired; it does not prove physical cameras, sensors, DingTalk production robots, MiniMax audio, or robot runtime have passed onsite acceptance.
+- Next product step: add browser/PDF export from the printable dossier and replace local smoke paths with live onsite smoke outputs.
+
+## 2026-05-14 Customer Project Namespace Guardrail
+
+This pass closes a product-delivery risk for solution providers: two customer
+spaces may use the same `customer_id`, `project_id`, or `site_id`, but importing
+one handoff package must not overwrite the other.
+
+Delivered:
+
+- Customer project profiles now normalize `customer.tenant_id` and
+  `customer.delivery_namespace`, defaulting legacy projects to `default`.
+- Non-default customer project profiles are written under a scoped path:
+  `{tenant_id}/{delivery_namespace}/{customer_id}/{project_id}.yaml`.
+- Customer project catalogs, field-operation config, package manifests, and
+  acceptance dossier manifests now expose `tenant_id` and
+  `delivery_namespace`.
+- Package verification rejects manifest scope tampering for tenant,
+  namespace, customer, project, or site fields.
+- Import/diff now matches an existing target only when tenant, delivery
+  namespace, customer, and project/site identity match.
+- Import/diff reports same customer/project collisions in other namespaces
+  instead of overwriting them.
+- API project-scope enforcement now reads `tenant_ids` and
+  `delivery_namespaces` from demo operators or trusted IAM headers.
+- The default dashboard operator is explicitly scoped to the demo
+  `default/default` customer delivery space.
+- `/dashboard/projects` now makes the delivery scope visible in project cards,
+  export results, and import dry-run results.
+- Import dry-run now renders package collision candidates so delivery teams can
+  see same-name projects in other namespaces before writing anything.
+- The industry-template create form now exposes `tenant_id` and
+  `delivery_namespace`, and sends both into the project-create API. Delivery can
+  create pilot/lab/prod customer spaces from the UI instead of editing scoped
+  YAML paths by hand.
+- `/dashboard/projects` now includes a Project Metadata Editor. It loads a full
+  customer project profile, edits customer-facing metadata, and writes the full
+  profile back through the existing scoped upsert API without dropping devices,
+  zones, responder groups, or managed objects.
+- `/dashboard/projects` now includes a Managed Object Directory. It shows each
+  customer-visible object with project scope, responder group, model/protocol/
+  skill/test bindings, and a `Load into editor` action that pre-fills the
+  managed-object editor.
+- Managed-object removal is now an explicit offline lifecycle action. The API
+  rejects removals without a customer-visible reason, returns the deleted object
+  snapshot and `offline_reason`, and the Dashboard shows impact before removal.
+- The managed-object editor is now grouped into basic object identity,
+  detection scope, runtime bindings, and acceptance evidence. The field ids stay
+  stable, so existing save logic and tests continue to apply.
+- Managed-object create/update/offline actions now append `object_change_log`
+  records to the customer project profile and surface recent changes in
+  `/dashboard/projects`.
+- Dashboard GET requests now send the selected `X-Askme-Operator-Id` header, so
+  read paths and write paths use the same operator/project-scope identity.
+- Industry templates are now closer to a product template market. The template
+  API returns `delivery_summary` and `delivery_checklist` fields with default
+  managed objects, scenario scope, runtime bindings, acceptance references, and
+  rollout steps. `/dashboard/projects` shows these as customer-readable cards
+  and lets delivery select a template into the project creation form.
+- Customer project catalog/detail payloads now include `delivery_workflow`.
+  Each project gets explicit handoff steps for customer scope, managed objects,
+  runtime bindings, site map/devices, responder credentials, acceptance
+  evidence, and package export. `/dashboard/projects` renders this workflow in
+  each project card so the product shows blockers and next actions directly.
+- Acceptance reports and acceptance dossiers now include the same
+  `delivery_workflow`; the printable HTML dossier renders a Delivery Workflow
+  table, so customer handoff artifacts match the Dashboard state.
+- Unified audit is now project scoped. `AuditQueryService` indexes and filters
+  tenant, delivery namespace, customer, project, site, and managed object ids.
+  `/api/audit/events` and `/api/audit/export` apply the operator's project
+  scope before returning records or building evidence packages.
+- The delivery Dashboard audit panel now lets operators filter by customer
+  project and managed object. Audit export uses the same selected scope, so a
+  customer acceptance package does not accidentally include another customer's
+  field or runtime records.
+- Customer project packages are now reusable handoff packages, not just YAML
+  copies. Export adds `package_schema`, `reuse_assessment`, and
+  `deployment_dependencies`; package manifest records reuse status and
+  dependency counts; verify rejects reuse-status tamper; import dry-run shows
+  incoming/current reuse readiness so delivery can see whether a project can be
+  copied to another customer, needs onsite manual checks, or is blocked.
+- `/dashboard/projects` now renders reuse readiness cards for export and
+  import dry-run results. The UI calls out dependencies such as device sources,
+  vision models, sensor protocols, skill packages, and missing live environment
+  bindings instead of forcing delivery to inspect raw JSON.
+- Customer project changes now have a rollback lane. Before template overwrite,
+  profile upsert, package import, managed-object edit/delete, or rollback, the
+  system writes a JSON revision snapshot under `_revisions` so snapshots are not
+  mistaken for active site profiles. `/history` lists saved revisions and
+  `/rollback` supports dry-run/apply with the same project-scope authorization
+  as other write endpoints.
+- `/dashboard/projects` now exposes View Revisions, Rollback Dry-run, and
+  Rollback actions in the project lifecycle panel, turning mistaken onsite
+  configuration edits into a recoverable product operation.
+- Industry templates are now versioned product packages. The four starter
+  templates declare semantic version, pilot publish status, release channel,
+  owner, upgrade policy, and minimum runtime metadata. The template API returns
+  `template_package` with product status, blockers/manual checks, dependency
+  counts, and a source hash; `/dashboard/projects` renders that readiness in
+  the template market before delivery creates a customer project.
+- Industry templates now have release governance operations. Product/delivery
+  owners can use `/api/field/customer-project-templates/{template_id}/release`
+  to mark a template as pilot, published, deprecated, or blocked, and
+  `/history` to review prior release snapshots. The Dashboard template market
+  exposes Publish, Mark pilot, Deprecate, and Release history actions.
+- Template release routes now use product-owner permissions instead of generic
+  project write permission. Non-published changes require
+  `template:release:write`; published promotion requires
+  `template:release:approve`.
+- Published template promotion now requires a release request and second
+  approver. Product owners create requests through
+  `/api/field/customer-project-templates/{template_id}/release-requests`; a
+  different product owner reviews them through
+  `/api/field/customer-project-template-release-requests/{request_id}/review`.
+  Direct `published` writes return `published_release_requires_approval_request`.
+  The Dashboard template market now exposes Request publish, Release requests,
+  Approve, and Reject controls.
+- Approved published template requests now feed
+  `/api/field/customer-project-template-release-notes` and the Dashboard
+  Template Release Notes card. This is the customer-facing allowlist for what
+  sales and delivery can claim as an approved reusable template package.
+- Release notes can now be exported as a proposal/handoff bundle through
+  `/api/field/customer-project-template-release-notes/export`. The bundle
+  includes customer/project context, a manifest hash, JSON payload, and printable
+  HTML so sales and delivery can attach only approved published template
+  packages to customer-facing material.
+- `/dashboard/projects` now turns that bundle into browser downloads: clicking
+  Export proposal bundle downloads both the JSON bundle and printable HTML, so
+  the feature is usable by sales or delivery without inspecting raw API output.
+- The release-note bundle now includes a controlled `proposal_insert` section:
+  customer message, approved template ids, safe claims, and delivery boundaries.
+  This gives sales a reusable proposal block without allowing unsupported
+  production claims.
+- Customer projects now have a proposal bundle export:
+  `/api/field/customer-projects/{identifier}/proposal-bundle` combines the
+  customer project handoff package, acceptance dossier, approved template release
+  notes, `proposal_insert`, and delivery boundaries into JSON + printable HTML.
+  `/dashboard/projects` exposes this as Proposal / Proposal Bundle and downloads
+  both files in the browser.
+- Proposal bundles now have a verification gate:
+  `/api/field/customer-projects/proposal-bundle/verify` recomputes the proposal
+  manifest hash, checks tenant and delivery namespace scope, verifies the package,
+  dossier, and release-note hashes, and rejects changed delivery boundaries.
+  `/dashboard/projects` can paste or auto-load a proposal JSON and show a
+  customer-readable verification result before delivery uses it.
+- Customer projects now have an onsite acceptance evidence registry:
+  `/api/field/customer-projects/{identifier}/onsite-evidence` lists and registers
+  receipts for device ingest, voice playback, notification delivery, runtime
+  roundtrip, and customer review. Registration snapshots the profile revision
+  before writing. Acceptance reports now turn the onsite boundary into a real gate
+  (`4/4 required onsite evidence receipts passed`), and acceptance dossiers carry
+  onsite status/count fields plus per-file evidence hashes in the inventory.
+- Customer projects now also have a closure layer:
+  `/api/field/customer-projects/{identifier}/acceptance-closure` summarizes the
+  customer-facing status across acceptance report, onsite evidence, and manual
+  delivery-owner review. `/api/field/customer-projects/{identifier}/acceptance-review`
+  writes a revisioned review decision and requires risk acknowledgement before
+  `accepted` is allowed.
+- `/dashboard/projects` now exposes a small onsite evidence form in the lifecycle
+  panel plus an acceptance-closure review form, so delivery can register
+  customer-visible proof and submit a controlled review without editing YAML.
+- Acceptance closure now verifies the customer acceptance dossier in memory and
+  looks for the latest matching proposal bundle and scoped audit export. The
+  closure payload exposes `artifact_verification.acceptance_dossier`,
+  `artifact_verification.proposal_bundle`, and `artifact_verification.audit_export`
+  so delivery can see whether the customer handoff is complete from one screen.
+- Acceptance dossiers now have a write-free verification endpoint:
+  `/api/field/customer-projects/acceptance-dossier/verify`. `/dashboard/projects`
+  adds a "验签验收包" action next to proposal verification, so exported or pasted
+  customer handoff material can be validated without using curl or editing files.
+- Negative acceptance coverage now locks the critical failure cases: unsupported
+  onsite evidence type/status does not write to the profile, the latest failed
+  required onsite receipt blocks acceptance, a later recovered receipt can restore
+  readiness, tampered dossier payloads are rejected, signed dossiers require the
+  configured HMAC secret, and out-of-scope operators cannot verify dossiers.
+
+Next product step:
+
+- Automate onsite evidence ingestion from real camera/sensor/voice/runtime
+  callbacks instead of relying on manual delivery receipts.
+- Turn proposal and acceptance HTML into formal PDF/browser export with customer
+  branding, signature blocks, and versioned cover pages.
+
+Validation evidence:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py -q` -> 29 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_field_customer_project_write_endpoints_enforce_project_scope tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 4 passed, 1 existing httpx deprecation warning.
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py -q` -> 26 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_field_customer_project_write_endpoints_enforce_project_scope tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 3 passed, 1 existing httpx deprecation warning.
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py -q` -> 25 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 2 passed, 1 existing httpx deprecation warning.
+- `pytest tests\test_governance.py tests\test_health.py::TestHealthServer::test_governance_operator_directory_exposes_demo_boundary tests\test_health.py::TestHealthServer::test_governance_current_operator_resolves_permissions tests\test_health.py::TestHealthServer::test_field_customer_project_read_endpoints_require_known_operator tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 10 passed, 1 existing httpx deprecation warning.
+- `pytest tests\test_field_operations.py::test_field_event_write_endpoints_enforce_project_scope tests\test_field_operations.py::test_device_ingest_ignores_client_supplied_project_scope -q` -> 2 passed.
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py::test_customer_project_proposal_bundle_binds_package_dossier_and_release_notes tests\test_field_site_profile.py::test_customer_project_template_release_request_requires_second_approver -q` -> 2 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 2 passed, 1 existing httpx deprecation warning.
+- `pytest tests\test_field_site_profile.py -q` -> 25 passed.
+- `pytest tests\test_governance.py tests\test_health.py::TestHealthServer::test_governance_operator_directory_exposes_demo_boundary tests\test_health.py::TestHealthServer::test_governance_current_operator_resolves_permissions tests\test_health.py::TestHealthServer::test_field_customer_project_read_endpoints_require_known_operator tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 10 passed, 1 existing httpx deprecation warning.
+- `git diff --check -- askme\governance.py askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\static\dashboard\app.js config.yaml tests\test_field_site_profile.py tests\test_health.py docs\PRODUCT.md plans\plan.md` -> no whitespace errors; Git reported LF/CRLF normalization warnings.
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py::test_customer_project_template_release_request_requires_second_approver -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 2 passed, 1 existing httpx deprecation warning.
+- `pytest tests\test_field_site_profile.py -q` -> 24 passed.
+- `pytest tests\test_governance.py tests\test_health.py::TestHealthServer::test_governance_operator_directory_exposes_demo_boundary tests\test_health.py::TestHealthServer::test_governance_current_operator_resolves_permissions tests\test_health.py::TestHealthServer::test_field_customer_project_read_endpoints_require_known_operator tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 10 passed, 1 existing httpx deprecation warning.
+- `git diff --check -- askme\governance.py askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\static\dashboard\app.js config.yaml tests\test_field_site_profile.py tests\test_health.py docs\PRODUCT.md plans\plan.md` -> no whitespace errors; Git reported LF/CRLF normalization warnings.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py` -> passed.
+- `pytest tests\test_field_site_profile.py::test_customer_project_template_release_request_requires_second_approver -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 2 passed, 1 existing httpx deprecation warning.
+- `pytest tests\test_field_site_profile.py -q` -> 24 passed.
+- `pytest tests\test_governance.py tests\test_health.py::TestHealthServer::test_governance_operator_directory_exposes_demo_boundary tests\test_health.py::TestHealthServer::test_governance_current_operator_resolves_permissions tests\test_health.py::TestHealthServer::test_field_customer_project_read_endpoints_require_known_operator tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 10 passed, 1 existing httpx deprecation warning.
+- `git diff --check -- askme\governance.py askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\static\dashboard\app.js config.yaml tests\test_field_site_profile.py tests\test_health.py docs\PRODUCT.md plans\plan.md` -> no whitespace errors; Git reported LF/CRLF normalization warnings.
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py::test_customer_project_template_release_request_requires_second_approver -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 2 passed, 1 existing httpx deprecation warning.
+- `pytest tests\test_field_site_profile.py -q` -> 24 passed.
+- `pytest tests\test_governance.py tests\test_health.py::TestHealthServer::test_governance_operator_directory_exposes_demo_boundary tests\test_health.py::TestHealthServer::test_governance_current_operator_resolves_permissions tests\test_health.py::TestHealthServer::test_field_customer_project_read_endpoints_require_known_operator tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 10 passed, 1 existing httpx deprecation warning.
+- `git diff --check -- askme\governance.py askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\static\dashboard\app.js config.yaml tests\test_field_site_profile.py tests\test_health.py docs\PRODUCT.md plans\plan.md` -> no whitespace errors; Git reported LF/CRLF normalization warnings.
+- `python -m py_compile askme\pipeline\field_site_profile.py tests\test_field_site_profile.py` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py` -> passed.
+- `pytest tests\test_field_site_profile.py -q` -> 21 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_field_customer_project_write_endpoints_enforce_project_scope tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints -q` -> 3 passed.
+- `pytest tests\test_governance.py tests\test_health.py::TestHealthServer::test_governance_operator_directory_exposes_demo_boundary tests\test_health.py::TestHealthServer::test_governance_current_operator_resolves_permissions tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace -q` -> 7 passed.
+- `pytest tests\test_field_operations.py tests\test_field_site_profile.py tests\test_health.py -q` -> 149 passed, 1 warning.
+- `pytest tests\test_field_deployment_readiness.py -q` -> 11 passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `python -m py_compile askme\governance.py askme\api\routes\field.py askme\pipeline\field_site_profile.py` -> passed.
+- `ruff check askme\governance.py askme\api\routes\field.py askme\pipeline\field_site_profile.py tests\test_health.py tests\test_field_site_profile.py` -> passed.
+- `pytest tests\test_field_site_profile.py -q` -> 23 passed.
+- `pytest tests\test_governance.py tests\test_health.py::TestHealthServer::test_governance_operator_directory_exposes_demo_boundary tests\test_health.py::TestHealthServer::test_governance_current_operator_resolves_permissions tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints -q` -> 7 passed, 1 existing httpx deprecation warning.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_read_endpoints_require_known_operator tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 4 passed, 1 existing httpx deprecation warning.
+- `pytest tests\test_field_site_profile.py -q` -> 24 passed.
+- `pytest tests\test_governance.py tests\test_health.py::TestHealthServer::test_governance_operator_directory_exposes_demo_boundary tests\test_health.py::TestHealthServer::test_governance_current_operator_resolves_permissions tests\test_health.py::TestHealthServer::test_field_customer_project_read_endpoints_require_known_operator tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 10 passed, 1 existing httpx deprecation warning.
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py -q` -> 24 passed.
+- `pytest tests\test_governance.py tests\test_health.py::TestHealthServer::test_governance_operator_directory_exposes_demo_boundary tests\test_health.py::TestHealthServer::test_governance_current_operator_resolves_permissions tests\test_health.py::TestHealthServer::test_field_customer_project_read_endpoints_require_known_operator tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 10 passed, 1 existing httpx deprecation warning.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_projects_endpoint_returns_solution_scope tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 2 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace -q` -> 2 passed, 1 warning.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls tests\test_health.py::TestHealthServer::test_field_customer_projects_endpoint_returns_solution_scope tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace -q` -> 3 passed.
+- `ruff check tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py::test_customer_project_profile_upsert_updates_metadata_without_losing_objects tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 2 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls tests\test_health.py::TestHealthServer::test_field_customer_project_read_endpoints_require_known_operator tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace -q` -> 3 passed.
+- `pytest tests\test_field_site_profile.py::test_customer_project_template_create_update_export_import_and_archive tests\test_field_site_profile.py::test_customer_project_profile_upsert_updates_metadata_without_losing_objects -q` -> 2 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `python -m py_compile askme\audit\query.py askme\audit\export.py askme\api\routes\audit.py` -> passed.
+- `ruff check askme\audit\query.py askme\audit\export.py askme\api\routes\audit.py tests\test_audit_query.py` -> passed.
+- `pytest tests\test_audit_query.py -q` -> 33 passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `pytest tests\test_field_site_profile.py::test_customer_project_template_create_update_export_import_and_archive tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 2 passed.
+- `pytest tests\test_field_site_profile.py::test_customer_project_template_create_update_export_import_and_archive -q` -> 1 passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\audit\query.py askme\audit\export.py askme\api\routes\audit.py` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py askme\audit\query.py askme\audit\export.py askme\api\routes\audit.py tests\test_audit_query.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_audit_query.py tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints -q` -> 57 passed, 1 warning.
+- `git diff --check -- askme\pipeline\field_site_profile.py tests\test_field_site_profile.py askme\static\dashboard\app.js askme\static\dashboard\app.css docs\PRODUCT.md plans\plan.md askme\audit\query.py askme\audit\export.py askme\api\routes\audit.py tests\test_audit_query.py` -> no whitespace errors; Git reported existing LF/CRLF normalization warnings.
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_health.py::TestHealthServer::test_field_customer_project_read_endpoints_require_known_operator tests\test_health.py::TestHealthServer::test_field_customer_project_write_endpoints_enforce_project_scope tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 26 passed, 1 warning.
+- `git diff --check -- askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py askme\static\dashboard\app.js docs\PRODUCT.md plans\plan.md` -> no whitespace errors; Git reported LF/CRLF normalization warnings.
+- `python -m py_compile askme\pipeline\field_site_profile.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 24 passed, 1 warning.
+- `git diff --check -- askme\pipeline\field_site_profile.py askme\static\dashboard\app.js tests\test_field_site_profile.py tests\test_health.py deploy\customer-project-templates\factory-inspection.yaml deploy\customer-project-templates\park-visitor-service.yaml deploy\customer-project-templates\scenic-area-service.yaml deploy\customer-project-templates\warehouse-logistics.yaml docs\PRODUCT.md plans\plan.md` -> no whitespace errors; Git reported LF/CRLF normalization warnings.
+
+Remaining gap:
+
+- This is still product/package-level isolation. Full enterprise tenant
+  isolation still requires SSO/IAM-backed claims, data-store namespace
+  enforcement, row-level storage policies, and customer-managed key strategy.
+
+## 2026-05-15 Productization checkpoint: Readiness evidence can satisfy onsite acceptance when it is real
+
+This checkpoint moves customer project acceptance from manual receipt-only
+tracking toward evidence-driven delivery closure.
+
+Implemented:
+
+- `customer_project_acceptance_report()` now combines manually registered onsite
+  receipts with deterministic read-only receipts auto-surfaced from field
+  readiness reports.
+- Auto receipts are created only for real-link evidence:
+  - trusted device events plus real hardware flags and non-local ingest smoke;
+  - live TTS plus non-local voice smoke;
+  - external notification services plus non-local notification smoke;
+  - trusted non-local runtime callbacks with a verified final status.
+- Local server, mock, recorded, missing, or unverifiable evidence does not
+  satisfy the onsite acceptance boundary.
+- Auto receipts are read-only: they appear in reports and exported acceptance
+  dossiers, but they do not write back to the customer project YAML or replace
+  the manual onsite evidence registry.
+- Dashboard receipt rows now label auto-surfaced readiness evidence separately
+  from manually registered delivery receipts, including evidence type, SHA-256
+  prefix, and external reference/path.
+- The onsite-evidence endpoint now shares the same default evidence view as the
+  acceptance report. `include_readiness_auto=false` remains available when a
+  caller needs the raw manual registry only.
+- Acceptance reports and exported dossiers now include `site_acceptance_checklist`,
+  a customer-delivery checklist across site profile, managed-object bindings,
+  deployment credentials, device ingest, live voice, external notification,
+  runtime roundtrip, and audit/operator review. Dashboard renders the checklist
+  with customer-readable owner/status/next-step cards.
+- Acceptance closure now includes the checklist as a gate, and acceptance dossier
+  manifests expose checklist status plus ready/manual/blocked counts.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py`
+- `node --check askme\static\dashboard\app.js`
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py`
+- `pytest tests\test_field_site_profile.py -q` -> 31 passed
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_field_customer_project_write_endpoints_enforce_project_scope tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 4 passed, 1 existing httpx deprecation warning
+
+Remaining:
+
+- Run the same path against a real deployed AskMe service, MiniMax voice,
+  DingTalk, signed device samples, and runtime callbacks before claiming final
+  customer-site acceptance.
+
+## 2026-05-15 Productization checkpoint: Managed objects now have a delivery resource catalog
+
+This checkpoint strengthens the solution-provider layer for many customers and
+many customer object types. A managed object is no longer just a YAML block with
+free-form strings; the project can now show whether each object is bound to
+known product resources.
+
+Implemented:
+
+- Added a delivery resource catalog for managed-object bindings:
+  `vision_models`, `sensor_protocols`, `skill_packages`, and
+  `acceptance_tests`.
+- Each managed object now carries `resource_binding_status`, including linked,
+  manual-check, blocked, and unregistered resource counts.
+- Customer project catalogs now include `resource_catalog_summary` and
+  `binding_readiness_summary` so delivery can see whether all objects have
+  usable product resources.
+- Added `GET /api/field/customer-project-resource-catalog`, scoped by the same
+  customer/project/tenant rules as the rest of the customer project API.
+- Dashboard `/dashboard/projects` now renders a delivery resource catalog card
+  and shows per-object resource readiness beside acceptance readiness.
+- Customer project export/import/diff/verify now carries the same resource
+  binding readiness in the package manifest. Dashboard import and export
+  results show incoming/current resource readiness, unregistered resources, and
+  catalog resource counts before a delivery team imports a customer package.
+  Unregistered resource details include object id, resource type, and resource
+  id so the delivery owner can decide whether to register a project extension
+  or block reuse.
+- Customer project import/export/verify result panels now use readable product
+  copy for the paths a customer or delivery engineer sees during package
+  preflight, proposal verification, dossier verification, and export.
+- Acceptance report, onsite evidence, acceptance closure, acceptance dossier,
+  and onsite checklist panels now also render readable customer-facing copy on
+  the reachable Dashboard path.
+- Dashboard source was scanned for common legacy mojibake markers across the
+  customer-facing static app and the targeted health tests. The remaining
+  customer-facing project, field event, package, dossier, and acceptance paths
+  now have readable copy covered by static assertions.
+- Tests cover backend resource registry output, per-object resource readiness,
+  package tamper detection, read-permission enforcement, the API endpoint, and
+  Dashboard static wiring.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py -q` -> 32 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_field_customer_project_write_endpoints_enforce_project_scope tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 4 passed, 1 existing httpx deprecation warning.
+
+Remaining:
+
+- Resource catalog is still local/product-config based. Production should bind
+  it to the real model registry, sensor protocol registry, skill package
+  registry, and acceptance execution service.
+- Before customer demonstration, still run browser visual QA against the live
+  Dashboard and capture screenshots for `/dashboard`, `/dashboard/field`,
+  `/dashboard/projects`, `/dashboard/knowledge`, and `/dashboard/conversation`.
+
+## 2026-05-15 Productization checkpoint: Customer project CRUD now edits the full object contract
+
+This checkpoint closes two product-facing gaps in the solution-provider project
+console. The goal is to let delivery teams configure a customer's real managed
+objects from the Dashboard without falling back to YAML edits or hidden defaults.
+
+Implemented:
+
+- `/dashboard/projects` managed-object quick edit now exposes object labels,
+  responder group, required evidence, vision models, sensor protocols, skill
+  packages, and acceptance-test references.
+- Loading an existing managed object now hydrates those full bindings back into
+  the editor, so delivery can review and update the same contract that export,
+  import, resource catalog, and acceptance checks use.
+- Saving an object now submits explicit `vision_models` and `sensor_protocols`.
+  The UI no longer saves empty vision bindings or derives sensor protocols from
+  `device_sources`.
+- Acceptance review now accepts comma-separated `evidence_refs`, so a delivery
+  lead can bind the review decision to onsite receipts, reports, dossiers, or
+  audit/export evidence instead of sending an empty review trail.
+- Dashboard static regression tests now lock these fields and request payloads.
+
+Validation:
+
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check tests\test_health.py` -> passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `pytest tests\test_field_site_profile.py -q` -> 33 passed.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed. Screenshots:
+  `askme-dashboard-desktop.png`, `askme-dashboard-mobile.png`,
+  `askme-dashboard-field-interaction.png`,
+  `askme-dashboard-capability-readiness.png`, and
+  `askme-dashboard-audit-dossier.png`.
+- `git diff --check -- askme\static\dashboard\app.js tests\test_health.py docs\PRODUCT.md plans\plan.md` -> no whitespace errors; Git reported LF/CRLF normalization warnings.
+- `scripts/check_text_encoding.py` and the dashboard/static string checks -> no new mojibake markers.
+
+Remaining:
+
+- Evidence references are entered manually today. A better customer-facing flow
+  should let the user select receipts/reports from the onsite evidence list.
+- The project page still needs browser visual QA and likely information
+  architecture cleanup before it is shown as a polished customer demo.
+
+## 2026-05-15 Productization checkpoint: Customer project workspace navigation and artifact separation
+
+This checkpoint improves the solution-provider handoff console from a long mixed
+control page into a more readable customer-project workspace.
+
+Implemented:
+
+- `/dashboard/projects` now has a sticky workspace navigation with anchors for
+  project catalog, template market, managed-object directory, package import,
+  acceptance evidence, resource bindings, template release governance, event
+  scope, and multi-site rollout.
+- `/dashboard/projects` now has a template release governance board. It shows
+  pending, approved, rejected, and total release requests, separates pending
+  second-approver reviews from recently reviewed requests, and wires approve or
+  reject actions from the central board.
+- Project package import is now separated from proposal bundle verification and
+  acceptance dossier verification. Each artifact has its own text area and
+  purpose copy, so delivery users do not paste customer-facing proposal material
+  into the same box used for project imports.
+- Proposal bundle export now fills the proposal verifier input; acceptance
+  dossier export now fills the dossier verifier input. Project package export
+  still fills only the project handoff package input.
+- Acceptance review now has an onsite-evidence picker. Loading an acceptance
+  report or onsite evidence receipts populates selectable `onsite:<receipt_id>`
+  references, and the UI appends the selected references into the review payload
+  without requiring manual ID copying.
+- Error copy for parsing and verifier failures now uses one reachable Chinese
+  message per path instead of duplicated unreachable branches.
+- Dashboard static tests now lock the new navigation anchors and separate
+  artifact verifier inputs, the evidence-reference picker, and the template
+  release governance board.
+
+Validation:
+
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `python -m py_compile scripts\eval\check_dashboard_visual.py` -> passed.
+- `ruff check scripts\eval\check_dashboard_visual.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed. The visual smoke now includes `/dashboard/projects` and writes
+  `askme-dashboard-projects-workspace.png`; it also verifies no horizontal
+  overflow after long resource/test-path wrapping.
+
+## 2026-05-15 Productization checkpoint: Delivery resources can be registered from the project workspace
+
+This checkpoint moves customer-project resource binding into a reusable
+solution-provider resource layer. The resource catalog was already computed and
+shown, but delivery users still had to edit YAML or duplicate resource metadata
+inside one customer project. The project workspace now writes a shared Delivery
+Resource Registry that can be reused across customer projects when scope allows.
+
+Implemented:
+
+- `/dashboard/projects` resource section now includes a Delivery Resource
+  Registry form.
+- The registry lets a delivery user choose a customer project, resource type,
+  resource ID, display name, version, owner, source, and description.
+- `GET /api/field/delivery-resource-registry` exposes the shared registry under
+  `deploy/delivery-resources`.
+- `POST /api/field/delivery-resource-registry` registers one shared resource
+  with owner/version/scope metadata and snapshots the previous registry before
+  overwrite.
+- The project resource catalog now merges built-in resources, the shared
+  registry, and project-level `delivery_resources`; project-level resources
+  remain available as customer-specific overrides.
+- Registered shared resources are immediately available to the existing resource
+  catalog and managed-object binding checks.
+- Scoped operators cannot read with missing permissions or register resources
+  outside their tenant/customer/project/site scope.
+- Managed Object Quick Edit now includes a registered-resource picker. Selecting
+  a resource appends its ID to the correct binding field (`vision_models`,
+  `sensor_protocols`, `skill_packages`, or `acceptance_tests`) before the normal
+  managed-object save action persists the object.
+- The resource section now renders a resource binding action plan. It either
+  lists unresolved string-only resources that must be registered, or tells the
+  delivery team that the visible scope is ready to continue to package export,
+  onsite evidence, and acceptance review.
+- Dashboard static and visual smoke checks now assert that the registry is
+  present on the customer-project workspace and that the object binding picker
+  is visible.
+
+Validation:
+
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py` -> passed.
+- `python -m py_compile scripts\eval\check_dashboard_visual.py` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py scripts\eval\check_dashboard_visual.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `pytest tests\test_field_site_profile.py::test_profile_delivery_resources_register_project_specific_bindings tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 2 passed.
+- `pytest tests\test_field_site_profile.py::test_shared_delivery_resource_registry_resolves_object_bindings tests\test_field_site_profile.py::test_profile_delivery_resources_register_project_specific_bindings -q` -> 2 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_read_endpoints_require_known_operator tests\test_health.py::TestHealthServer::test_field_customer_project_write_endpoints_enforce_project_scope -q` -> 2 passed.
+- `pytest tests\test_field_site_profile.py -q` -> 35 passed.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed after adding both registry and object binding picker. The project workspace visual smoke now asserts
+  `has_delivery_resource_registry: true`, `has_resource_action_plan: true`,
+  `has_object_resource_picker: true`, `object_resource_binding_added: true`,
+  and no horizontal overflow.
+
+Remaining:
+
+- The shared registry is still YAML-backed and file-scoped. Production should
+  eventually connect it to a database-backed resource service with ownership
+  workflow and stricter SaaS tenant isolation.
+- The Dashboard registration smoke still uses mocked browser data; the next
+  step is to exercise a real POST registration in the visual smoke without
+  mutating production delivery resources.
+
+## 2026-05-15 Productization checkpoint: Delivery resource governance now blocks unsafe customer bindings
+
+This checkpoint upgrades the shared Delivery Resource Registry from simple
+registration into a product governance surface. Solution teams can now audit
+registry history, disable a resource, and dry-run or apply rollback before a
+customer project exports a package.
+
+Implemented:
+
+- `publish_status` is now validated for shared resources. Supported values are
+  `draft`, `pilot`, `published`, `deprecated`, `disabled`, and `blocked`.
+- `GET /api/field/delivery-resource-registry/history` exposes registry revision
+  history for unrestricted delivery operators.
+- `POST /api/field/delivery-resource-registry/{resource_type}/{resource_id}/disable`
+  marks a shared resource as disabled and snapshots the previous registry.
+- `POST /api/field/delivery-resource-registry/rollback` supports dry-run and
+  apply rollback to a previous revision. Scoped project operators are rejected
+  because rollback can affect multiple customers.
+- Managed-object binding readiness now treats disabled or blocked shared
+  resources as blocking failures. Draft, pilot, and deprecated resources require
+  delivery review. This applies to vision models, sensor protocols, skill
+  packages, and acceptance tests.
+- `/dashboard/projects` now renders a resource governance panel with history,
+  disable, and rollback actions. The visible resource list also shows publish
+  status and a disable control for shared resources.
+- Customer-visible Chinese copy in the resource section was corrected so the
+  page reads as a product workspace instead of a corrupted engineering panel.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py` -> passed.
+- `python -m py_compile scripts\eval\check_dashboard_visual.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py scripts\eval\check_dashboard_visual.py tests\test_field_site_profile.py tests\test_health.py` -> passed.
+- `pytest tests\test_field_site_profile.py -q` -> 37 passed.
+- `pytest tests\test_health.py -q` -> 76 passed, 1 existing httpx deprecation warning.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed; the project workspace now asserts
+  `has_resource_governance: true`,
+  `resource_governance_history_loaded: true`,
+  `resource_governance_rollback_previewed: true`, and
+  `resource_governance_disable_handled: true`.
+
+Remaining:
+
+- Governance is still local YAML-backed. The production version should move to
+  a database service with tenant isolation, release-owner approval, and
+  searchable audit trails.
+- The browser visual smoke now verifies the non-mutating mocked click flow for
+  history, disable, and rollback controls. The remaining gap is a database-backed
+  production service and real enterprise approval workflow.
+
+## 2026-05-15 Productization checkpoint: Delivery resource governance now requires two-person review
+
+This checkpoint closes the main product-risk gap in the shared Delivery
+Resource Registry. A solution-provider resource can affect many customer
+projects, so disable and rollback actions should not be one-click mutations
+from the Dashboard.
+
+Implemented:
+
+- Added resource-governance request lifecycle functions:
+  `create_delivery_resource_governance_request`,
+  `list_delivery_resource_governance_requests`, and
+  `review_delivery_resource_governance_request`.
+- Supported two high-risk operations: `disable_resource` and
+  `rollback_registry`. Both create a pending request with a dry-run preview,
+  requester, reason, operation payload, and current registry hash.
+- Enforced second-person review: the same operator that requested the resource
+  change cannot approve it. Rejecting a request leaves the registry unchanged;
+  approving a request applies the disable or rollback.
+- Added API routes:
+  `GET/POST /api/field/delivery-resource-governance-requests` and
+  `POST /api/field/delivery-resource-governance-requests/{request_id}/review`.
+- Added explicit RBAC permissions:
+  `resource:governance:write` for creating requests and
+  `resource:governance:approve` for review/apply paths. Direct rollback and
+  direct disable are now approval-gated administrative paths.
+- Updated `/dashboard/projects`: shared resource rows now submit disable
+  requests, rollback apply now submits a rollback request, and the Resource
+  Governance card includes an Approval Queue that displays request id, status,
+  target, requester, reason, and approve/reject controls.
+- Updated visual smoke mocks so Dashboard click coverage remains non-mutating
+  while exercising history, rollback dry-run, disable request, and queue load.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py` -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_health.py -q` -> 116 passed, 1 existing httpx deprecation warning.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed; `resource_governance_history_loaded`, `resource_governance_rollback_previewed`, `resource_governance_disable_handled`, and `resource_governance_requests_loaded` were all true.
+
+Remaining:
+
+- The queue is still file-backed under the delivery-resource root. Production
+  should move it to a tenant-aware database workflow with searchable audit,
+  notification, SLA/escalation, and enterprise identity binding.
+- Current approval is single-step second-person review. Multi-level approval,
+  delegation, scheduled windows, and rollback blast-radius analysis remain
+  future product work.
+
+## 2026-05-15 Productization checkpoint: Resource governance requests now show customer impact
+
+This checkpoint upgrades resource governance from "approve a technical action"
+to "approve with visible customer-project impact". A delivery owner can now see
+which customer projects, objects, templates, and consumers are connected to a
+shared resource before approving a disable or rollback request.
+
+Implemented:
+
+- Disable-request preview now includes an `impact` object generated from
+  `build_customer_project_resource_catalog`.
+- Impact fields include `analysis_status`, `generated_at`, `resource_type`,
+  `resource_id`, `affected_consumer_count`,
+  `affected_customer_project_count`, `affected_object_count`,
+  `affected_template_count`, `affected_projects`, `affected_objects`,
+  `affected_templates`, `affected_consumers`, `truncated`, and a reviewer
+  message.
+- Rollback preview now includes a registry-wide manual-review impact summary
+  with current and target resource counts.
+- Dashboard resource governance request cards render a `Resource governance
+  impact` block with project/object/template/consumer counts and a short sample
+  of affected consumers.
+- The approval queue now shows impact counts inline, so the approver can judge
+  blast radius before clicking approve/reject.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py askme\governance.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py` -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_health.py -q` -> 116 passed, 1 existing httpx deprecation warning.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed with no console errors, no page errors, no response errors, and no horizontal overflow.
+
+Remaining:
+
+- Impact analysis only covers structured in-product resource bindings. It does
+  not detect free-text notes, external scripts, customer-side integrations, or
+  offline operational dependencies.
+- Rollback impact is still registry-wide and manual-review oriented; field-level
+  diff and automatic remediation recommendations remain future work.
+
+## 2026-05-15 Productization checkpoint: Resource governance queue now has review SLA and overdue operation
+
+This checkpoint upgrades the resource governance queue from a passive approval
+list into an operations queue. Delivery owners can now see which shared-resource
+change requests are active, due soon, overdue, or closed before they approve a
+customer-facing mutation.
+
+Implemented:
+
+- Resource governance requests now store `sla_target_s`, `due_at`,
+  `escalation_policy`, and computed `review_sla`.
+- `review_sla` exposes `state`, `remaining_s`, `age_s`, `overdue_s`,
+  `due_soon_threshold_s`, `escalation_required`, and reviewer-facing message.
+- `list_delivery_resource_governance_requests` now supports
+  `overdue_only=True` and summary counts for active, due-soon, and overdue
+  requests.
+- `GET /api/field/delivery-resource-governance-requests` accepts
+  `overdue_only=true`; `POST /api/field/delivery-resource-governance-requests`
+  can accept `sla_target_s` for customer-specific review windows.
+- `/dashboard/projects` now shows Review SLA on each request, due time,
+  remaining/overdue duration, escalation policy, and an "Overdue only" queue
+  filter.
+- Visual smoke now verifies the resource governance SLA is actually visible in
+  the project workspace and that desktop/mobile layouts have no horizontal
+  overflow.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py` -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_health.py -q` -> 116 passed, 1 existing httpx deprecation warning.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed; `resource_governance_sla_visible` was true and no console, page, response, or overflow failures were reported.
+
+Remaining:
+
+- SLA is visible and queryable, but notification/escalation delivery is not yet
+  automatic. Production should bind overdue requests to DingTalk/enterprise
+  identity and an on-call delivery owner.
+- The governance queue is still local-file backed; production needs a tenant
+  isolated workflow store with searchable audit and retention policy.
+
+## 2026-05-15 Productization checkpoint: Overdue resource governance can be escalated
+
+This checkpoint turns resource-governance SLA from a visible status into an
+operable delivery action. Delivery owners can now scan overdue shared-resource
+requests, create escalation records, and see the escalation result in the
+Dashboard.
+
+Implemented:
+
+- Added `escalate_overdue_delivery_resource_governance_requests`.
+- The escalation scan filters pending requests through the existing
+  `review_sla.state == overdue` contract and records one escalation per
+  request/due-time window.
+- Escalation records include `escalation_id`, `escalated_at`, `escalated_by`,
+  request target, overdue duration, escalation policy, local delivery owner
+  queue notification payload, and delivery report.
+- Public request payloads now include `escalation_count`, `last_escalation`,
+  and recent `escalations`.
+- Added
+  `POST /api/field/delivery-resource-governance-requests/escalate-overdue`.
+  It requires unrestricted `resource:governance:approve` authority because it
+  can expose multi-customer resource impact to delivery owners.
+- `/dashboard/projects` now includes an `Escalate overdue` action and renders
+  escalation result cards plus per-request escalation status.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py` -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_health.py -q` -> 116 passed, 1 existing httpx deprecation warning.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed; `resource_governance_escalated` was true and there were no console, page, response, or overflow failures.
+
+Remaining:
+
+- Escalation now has a configurable delivery-owner notification outlet, but it
+  still needs an environment-backed smoke test with a real customer DingTalk,
+  WeCom, Feishu, or webhook target before a deployment can claim external
+  delivery.
+- Production should connect notification routing to tenant-specific delivery
+  owner contacts, retry policy, and immutable audit export.
+
+## 2026-05-15 Productization checkpoint: Resource governance overdue escalation now supports configured delivery-owner notifications
+
+This checkpoint upgrades overdue resource-governance escalation from a local
+queue-only artifact to a deployable notification contract. The product behavior
+is now: local demo mode records a queue item; production mode can route the same
+payload through configured delivery-owner channels and persist the channel
+delivery report on the governance request.
+
+Implemented:
+
+- `escalate_overdue_delivery_resource_governance_requests` accepts an injected
+  `notification_delivery` function, so pipeline logic stays testable and API
+  deployment logic can attach real delivery channels.
+- `register_field_routes` now receives `config_provider` and builds a
+  resource-governance delivery outlet from
+  `field_operations.delivery_resource_governance.delivery_owner_notifications`.
+- Configurable channels use the existing `AlertDispatcher`: webhook, DingTalk,
+  WeCom, Feishu, and log. Disabled config falls back to the local
+  `delivery_owner_queue`.
+- Dashboard escalation cards show `delivery_mode`, sent channels, and
+  per-channel delivery report instead of hiding whether notification actually
+  went anywhere.
+- `config.yaml` documents the production notification keys:
+  `ASKME_DELIVERY_OWNER_WEBHOOK_URL`,
+  `ASKME_DELIVERY_OWNER_DINGTALK_WEBHOOK`,
+  `ASKME_DELIVERY_OWNER_DINGTALK_SECRET`,
+  `ASKME_DELIVERY_OWNER_WECOM_WEBHOOK`, and
+  `ASKME_DELIVERY_OWNER_FEISHU_WEBHOOK`.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py`
+  -> passed.
+- `node --check askme\static\dashboard\app.js`
+  -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py`
+  -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_health.py -q`
+  -> 116 passed, 1 existing httpx deprecation warning.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright`
+  -> passed; resource-governance escalation, SLA visibility, project workspace,
+  capability readiness, and audit dossier checks passed with no console, page,
+  response, or overflow failures.
+
+Remaining:
+
+- Need one environment-backed smoke test against a real customer notification
+  group before claiming external delivery in a customer acceptance report.
+
+## 2026-05-15 Productization checkpoint: Customer project catalog now exposes solution-delivery acceptance gates
+
+This checkpoint turns the方案商交付 P0 checklist into a customer-project catalog
+contract. Delivery users no longer need to infer signoff readiness from raw YAML,
+separate object cards, and separate acceptance reports; the catalog itself now
+returns a product acceptance gate for every visible customer project and an
+aggregate gate for the whole filtered customer-project set.
+
+Implemented:
+
+- `build_customer_project_catalog` now attaches `product_acceptance_gate` to
+  each project. The gate checks customer/delivery scope, site profile validity,
+  managed-object catalog, vision/sensor/skill/acceptance resource bindings,
+  acceptance references, object-change audit policy, and handoff artifacts.
+- The same catalog response now includes `delivery_acceptance_gate` plus summary
+  fields: `delivery_acceptance_gate_status`,
+  `delivery_acceptance_blocked_count`,
+  `delivery_acceptance_manual_check_count`, and
+  `delivery_acceptance_ready_count`.
+- `/dashboard/projects` renders the aggregate Product acceptance gate and each
+  project's Product gate, so a delivery lead can see blocked/manual/ready status
+  before opening the deeper acceptance report, dossier, proposal, or export
+  tools.
+- Tests now assert the new gate shape through both pipeline and HTTP API paths.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py`
+  -> passed.
+- `node --check askme\static\dashboard\app.js`
+  -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py`
+  -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_health.py -q`
+  -> 116 passed, 1 existing httpx deprecation warning.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright`
+  -> passed; no console, page, response, or overflow failures.
+
+Remaining:
+
+- The catalog gate is a signoff readiness summary. Final customer acceptance
+  still requires project-level onsite evidence, manual review, dossier verify,
+  proposal verify, and scoped audit export.
+
+## 2026-05-15 Productization checkpoint: Customer project directory now supports delivery filters
+
+This checkpoint makes the multi-customer project catalog usable as a delivery
+directory instead of a static list. A solution-provider delivery lead can now
+filter projects by customer, tenant, delivery namespace, industry, site,
+project id, product gate status, or deployment stage and still get correct
+summary counts and aggregate acceptance gates for the filtered result set.
+
+Implemented:
+
+- `build_customer_project_catalog` accepts `tenant_id`, `delivery_namespace`,
+  `customer_id`, `project_id`, `site_id`, `industry`, `gate_status`, and
+  `deployment_stage` filters.
+- `/api/field/customer-projects` exposes the same filters as query parameters.
+- Permission scope filtering now recomputes `delivery_acceptance_gate`, summary
+  counts, and managed-object category counts instead of returning stale
+  aggregate numbers from the unfiltered catalog.
+- `/dashboard/projects` now includes project filter controls backed by
+  localStorage and API-side filtering.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py`
+  -> passed.
+- `node --check askme\static\dashboard\app.js`
+  -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py`
+  -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_health.py -q`
+  -> 116 passed, 1 existing httpx deprecation warning.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright`
+  -> passed; project workspace, resource governance, capability readiness, and
+  audit dossier checks passed with no console, page, response, or overflow
+  failures.
+
+Remaining:
+
+- Filters are directory filters, not enterprise tenant isolation. Production
+  still needs IAM/SSO enforced claims and storage isolation before SaaS-style
+  tenant guarantees can be claimed.
+
+## 2026-05-15 Productization checkpoint: Template market now supports delivery filters
+
+This checkpoint makes the reusable industry template market usable for a
+solution-provider team with many customers and many scenario packages. Delivery
+users can now narrow the template catalog before creating a customer project,
+and the API returns counts for the visible template set instead of forcing the
+UI to guess from the full folder.
+
+Implemented:
+
+- `list_customer_project_templates` now accepts `tenant_id`,
+  `delivery_namespace`, `industry`, `publish_status`, `product_status`,
+  `template_id`, `release_channel`, and `owner` filters.
+- Template items now expose `tenant_id`, `delivery_namespace`,
+  `release_channel`, `owner`, and `product_status` as first-class catalog
+  fields.
+- `/api/field/customer-project-templates` exposes the same filters as query
+  parameters and recomputes template, tenant, namespace, industry, publish
+  status, product status, and managed-object counts for the filtered set.
+- The same endpoint now applies operator tenant/delivery namespace scope:
+  shared default templates remain visible as common product starters, and
+  tenant-specific templates can be hidden from unrelated delivery spaces.
+- `/dashboard/projects` now includes template filter controls backed by
+  localStorage and API-side filtering, so the template market behaves like a
+  managed product catalog rather than a raw YAML list.
+- Tests now assert pipeline filtering, HTTP filtering, and Dashboard static
+  hooks for template filters.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py`
+  -> passed.
+- `node --check askme\static\dashboard\app.js`
+  -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py`
+  -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_health.py -q`
+  -> 116 passed, 1 existing httpx deprecation warning.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright`
+  -> passed; no console, page, response, or overflow failures.
+
+Remaining:
+
+- Template filters help delivery users find the right product package. They do
+  not replace the release-request approval flow or onsite binding and
+  acceptance evidence for each real customer project.
+
+## 2026-05-15 Productization checkpoint: Solution delivery readiness now has a single product gate
+
+This checkpoint reduces delivery ambiguity. Instead of asking a product owner or
+delivery lead to inspect separate project cards, template cards, resource
+bindings, and governance queues, the product now exposes one rollup gate that
+states the current customer-facing claim boundary.
+
+Implemented:
+
+- Added `build_solution_delivery_readiness`, a deterministic rollup over:
+  customer project acceptance, template-market readiness, model/protocol/skill
+  resource bindings, and shared-resource governance requests.
+- Added `GET /api/field/solution-delivery-readiness`, protected by
+  `field:project:read` and project/tenant scope filtering. Scoped operators see
+  their visible projects/templates/resources; shared governance queue access is
+  reported as a manual-check gate unless the operator is unrestricted.
+- `/dashboard/projects` and the delivery overview now render "客户交付总门禁"
+  with gate cards and a customer-facing release-claim sentence.
+- Tests now assert the pure pipeline rollup, HTTP endpoint, and Dashboard
+  static hooks.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py`
+  -> passed.
+- `node --check askme\static\dashboard\app.js`
+  -> passed.
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py scripts\eval\check_dashboard_visual.py`
+  -> passed.
+- `pytest tests\test_field_site_profile.py tests\test_health.py -q`
+  -> 118 passed, 1 existing httpx deprecation warning.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright`
+  -> passed; no console, page, response, or overflow failures.
+
+Remaining:
+
+- This is a product readiness rollup, not a replacement for signed customer
+  acceptance. A real customer handoff still needs onsite evidence, verified
+  dossier/proposal packages, scoped audit export, and customer signoff.
+
+## 2026-05-15 Productization checkpoint: Customer signoff is now part of the acceptance lifecycle
+
+This checkpoint closes the gap between internal delivery readiness and actual
+customer acceptance. The product no longer stops at "ready for signoff"; it can
+record customer decisions, preserve rejected/needs-fix feedback, and only claim
+acceptance after a risk-acknowledged customer signoff is archived.
+
+Implemented:
+
+- Added customer signoff records to customer project profiles, with decision,
+  signatory, organization, reason, risk acknowledgement, evidence references,
+  operator, timestamp, and profile revision.
+- Hardened signoff evidence with credential reference, credential SHA-256, a
+  snapshot of the acceptance gates at signing time, handoff-material references,
+  and a signoff payload hash for later integrity checks.
+- Added `GET/POST /api/field/customer-projects/{identifier}/customer-signoff`,
+  protected by project read/write permissions and project/tenant scope checks.
+- Acceptance closure now separates internal readiness from customer acceptance:
+  `ready_for_customer_signoff` means the evidence package is ready for customer
+  review; `accepted_by_customer` means the customer has signed off.
+- Accepted signoff is rejected until the internal closure gates are ready.
+  Accepted signoff also requires credential reference/hash. `needs_fix` and
+  `rejected` are still allowed so customer feedback is not lost.
+- Acceptance dossiers and manifests now carry customer signoff history, latest
+  decision, and signoff count.
+- `/dashboard/projects` now has a customer signoff form and history renderer in
+  the project lifecycle workspace, so delivery teams can register and show the
+  customer decision without editing YAML.
+
+Product impact:
+
+- A solution-provider delivery lead can now answer: "Is this internally ready,
+  waiting for customer signoff, or already accepted by the customer?"
+- Customer-facing claims are stricter: internal readiness cannot be presented as
+  customer acceptance.
+
+Remaining:
+
+- This is still a software signoff registry, not an enterprise e-signature or
+  SSO/IAM system. Production deployments still need customer identity binding,
+  legal signature workflow, and database/storage-level tenant isolation.
+
+## 2026-05-15 Productization checkpoint: Managed-object bindings now produce executable field-ingest plans
+
+This checkpoint starts closing the P0 gap between a configured object directory
+and real field execution. Managed objects no longer only show model/protocol/
+skill/test strings; the project can now explain how each object should enter
+`/api/field/ingest`, which devices and protocols cover it, which skill package
+will shape the field action, and where runtime callbacks must be recorded.
+
+Implemented:
+
+- Added `build_customer_project_execution_bindings` for one customer project.
+  It returns per-object source coverage, matched devices, ingest adapter,
+  vision model references, skill routes, acceptance tests, sample ingest
+  payload, runtime callback boundary, blockers, and manual-review notes.
+- Added `GET /api/field/customer-projects/{identifier}/execution-bindings`,
+  protected by the same project read permission and tenant/project scope checks
+  as the rest of the customer project API.
+- `/dashboard/projects` now has an "执行接入计划" action in the project
+  lifecycle workspace. It renders ready/manual/blocked object plans in customer
+  language instead of exposing raw binding strings only.
+- Field events created by `FieldOperationsService.ingest_payload` now archive a
+  `resource_execution_context` with the matched managed object, payload source,
+  bound vision models, sensor protocols, selected skill package, acceptance
+  tests, and runtime callback endpoint.
+
+Product impact:
+
+- A delivery lead can now show a customer not only that an object is configured,
+  but exactly how its device payload enters the product and which skill/runtime
+  boundary handles the action.
+- This still does not execute a real vision model or hardware command by
+  itself. It creates the auditable adapter contract that real device/model
+  integrations must satisfy before customer signoff.
+
+Remaining:
+
+- Connect the execution plan to real vendor adapters and live device payload
+  samples per customer site.
+
+## 2026-05-15 Productization checkpoint: Skill packages now resolve to auditable field capability contracts
+
+This checkpoint upgrades managed-object execution plans from "the object has a
+skill package string" to "the object has a named capability with an installed
+contract, safety level, approval policy, required inputs, output contract, tool
+route, and hardware boundary." It is still not a hardware driver; it is the
+product contract that prevents delivery from claiming an unbound package is
+ready for a real customer site.
+
+Implemented:
+
+- Added `askme.skills.field_capability_contracts`, which normalizes package ids
+  such as `capability.detect_illegal_parking` to executable capability names and
+  resolves built-in skill contracts from the code-defined skill registry.
+- Customer-project execution bindings now show per-skill `capability`,
+  `installed_contract`, `safety_level`, `confirm_before_execute`,
+  `approval_policy`, `required_inputs`, `tool`, `output_contract`, and
+  `hardware_boundary`.
+- Field events created from `/api/field/ingest` now archive
+  `capability_routes`, `selected_capability`, `approval_required`,
+  `output_contract`, and `action_boundary` inside
+  `resource_execution_context`.
+- Customer acceptance reports now include an `execution_bindings` summary and a
+  `managed_object_execution_bindings` gate, so signoff review can see whether
+  objects have executable ingest plans instead of only checking static bindings.
+- `/dashboard/projects` renders those capability contracts in the "执行接入计划"
+  card so the customer-facing page can explain which ability will run, what it
+  is allowed to output, and where hardware authority stops.
+
+Validation:
+
+- `python -m py_compile askme\skills\field_capability_contracts.py askme\pipeline\field_site_profile.py askme\pipeline\field_operations.py tests\test_field_site_profile.py tests\test_health.py`
+- `node --check askme\static\dashboard\app.js`
+- `ruff check askme\skills\field_capability_contracts.py askme\pipeline\field_site_profile.py askme\pipeline\field_operations.py tests\test_field_site_profile.py tests\test_health.py`
+- `pytest tests\test_field_site_profile.py tests\test_health.py -q` -> 119 passed.
+
+Remaining:
+
+- Connect these capability contracts to actual vendor vision/sensor adapters and
+  live device payload samples per customer site.
+- Connect the `tool` routes to a controlled execution adapter when the runtime
+  is explicitly enabled, while keeping SafetyPreflight and runtime arbiter as
+  the hardware authority.
+
+## 2026-05-15 Productization checkpoint: Real device adapter bridge contracts are visible in customer projects
+
+This checkpoint turns the already implemented JSON/JSONL device bridge into a
+customer-project handoff contract. The product can now tell a delivery engineer
+how each managed object should receive real camera, sensor, or robot payloads,
+how to dry-run parsing, how to live-post into `/api/field/ingest`, and what
+signature evidence is needed before customer signoff.
+
+Implemented:
+
+- Execution bindings now attach an `adapter_contract` to every sensor protocol:
+  normalizer module, `field-ingest-bridge`, supported formats, dry-run command,
+  live watch command, signing command, sample fixture, verification outputs, and
+  device secret env vars.
+- Object plans now include a `bridge_contract` summarizing the required ingest
+  endpoint, bridge state file, live-post requirement, production signature
+  boundary, and bridge summary fields.
+- Acceptance reports now include compact `execution_bindings.object_contracts`
+  so reviewers can audit object-level adapter/bridge/signing readiness without
+  opening the full execution plan.
+- `/dashboard/projects` renders device adapter contracts, matched device counts,
+  bridge commands, and live-post requirements in the execution-access plan.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `node --check askme\static\dashboard\app.js`
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `pytest tests\test_field_site_profile.py tests\test_health.py tests\test_field_ingest_bridge.py tests\test_field_ingest_adapters.py -q` -> 136 passed, 1 warning.
+
+Remaining:
+
+- Run the same `field-ingest-bridge --watch` contract against actual customer
+  camera/VMS, MQTT smoke/temperature, and robot diagnostics feeds.
+- Promote observed live-post, trusted-device, DingTalk, voice playback, and
+  runtime callback evidence into onsite acceptance only when the deployment is
+  non-local and signed/trusted.
+
+## 2026-05-15 Productization checkpoint: Managed objects can run lab ingest rehearsals
+
+This checkpoint closes the first customer-project execution loop after showing
+adapter contracts. A delivery engineer can now select a managed object in the
+project execution plan and run a lab-only接入演练, seeing the exact raw payload,
+normalized `/api/field/ingest` payload, bound capability route, and production
+claim boundary.
+
+Implemented:
+
+- Added `POST /api/field/customer-projects/{identifier}/execution-bindings/{object_id}/rehearsal`.
+- `dry_run` mode merges the object sample payload, project scope, matched device
+  identity, and bridge contract, then normalizes it through
+  `normalize_field_ingest_payload` without creating a field event.
+- `shadow_post` mode is available but requires explicit confirmation, because it
+  can create a lab field event and may exercise configured external routes.
+- `/dashboard/projects` now renders per-object "接入演练" and "实验室投递"
+  actions in the execution binding card and shows the normalized payload plus
+  release boundary.
+
+Validation:
+
+- `python -m py_compile askme\api\routes\field.py tests\test_health.py`
+- `node --check askme\static\dashboard\app.js`
+- `ruff check askme\api\routes\field.py tests\test_health.py`
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_field_customer_project_write_endpoints_enforce_project_scope -q` -> 2 passed, 1 warning.
+
+Remaining:
+
+- Add automated browser interaction tests for the Dashboard rehearsal buttons.
+
+## 2026-05-15 Productization checkpoint: Rehearsal results have acceptance-evidence boundaries
+
+This checkpoint prevents a solution-delivery demo from being mistaken for
+customer production signoff. Object execution rehearsal remains useful for
+delivery, but the system now separates lab rehearsal, acceptance candidate, and
+site acceptance evidence in data, API, and Dashboard output.
+
+Implemented:
+
+- Onsite evidence receipts now carry `evidence_tier` and
+  `production_eligible`. Manual receipts default to
+  `acceptance_candidate` / `false`; auto-collected real-link readiness receipts
+  are marked `site_acceptance` / `false`.
+- Object rehearsal responses expose `evidence_tier=lab_rehearsal` and
+  `production_eligible=false`.
+- `dry_run` requests with `register_onsite_evidence=true` are rejected as
+  `dry_run_rehearsal_not_onsite_evidence` without writing a receipt.
+- Confirmed `shadow_post` can request onsite evidence registration, but it only
+  writes a `device_ingest` acceptance-candidate receipt. It stays
+  `manual_check` unless trusted device signature and runtime completion callback
+  evidence are present.
+- Dashboard rehearsal and onsite evidence rows now show boundary tags so
+  delivery teams and customers can distinguish lab checks from production
+  go-live proof.
+
+Validation target:
+
+- Run targeted health, site-profile, and dashboard syntax tests.
+
+## 2026-05-15 Productization checkpoint: Customer-readable managed object directory
+
+This checkpoint improves the solution-provider product surface for many
+customers and many site object types. The backend already builds object,
+resource, and acceptance status; the Dashboard now makes that status readable
+and exportable for delivery managers.
+
+Implemented:
+
+- `/dashboard/projects` shows a Managed Object Directory summary: total
+  customer objects, deliverable objects, manual-check objects, blocked objects,
+  acceptance-test count, and tenant/scope-guard count.
+- Each object card now displays the combined delivery status derived from
+  resource binding plus acceptance status.
+- Object cards show compact resource and acceptance check details so a delivery
+  manager can see which model, sensor protocol, skill package, or test is
+  blocking delivery.
+- Added object directory exports: full JSON for audit/reuse and deliverable-only
+  CSV for customer handoff preparation.
+
+Validation target:
+
+- Run Dashboard syntax/static assertions plus field health tests.
+
+## 2026-05-15 Productization checkpoint: Scoped managed-object directory API
+
+This checkpoint moves the managed-object directory from a Dashboard-only
+presentation into a reusable product API for delivery scripts, customer handoff
+automation, and acceptance checks.
+
+Implemented:
+
+- Added `GET /api/field/customer-projects/managed-object-directory`.
+- The API reuses the same customer-project filters and operator project-scope
+  rules as `/api/field/customer-projects`.
+- Each row includes tenant, delivery namespace, customer, project, site,
+  object, device source, scenario, resource binding, acceptance check, and a
+  derived `delivery_status`.
+- The response includes summary counts for ready, manual-check, blocked,
+  customer-visible, acceptance-test, and scoped objects.
+- Each non-ready object now exposes an `action_plan` that tells delivery and QA
+  which resource, binding, or acceptance-test reference needs to be registered,
+  replaced, reviewed, or fixed.
+- Dashboard project loading now fetches this API and shows the scoped object
+  count plus object repair actions in the Managed Object Directory section.
+
+Validation target:
+
+- Run field health tests plus Dashboard JS syntax checks.
+
+## 2026-05-15 Productization checkpoint: Managed-object matching is project-scope aware
+
+This checkpoint tightens the multi-customer product boundary for solution
+provider deployments. A real device event can still infer its managed object
+from scenario, detection labels, zone type, and source, but object binding now
+honors optional tenant/customer/project/site constraints.
+
+Implemented:
+
+- Managed-object catalog payloads now expose optional `tenant_ids`,
+  `delivery_namespaces`, `customer_ids`, `project_ids`, and `site_ids`.
+- Execution binding plans show those constraints in `scope_constraints`.
+- `FieldOperationsService` includes tenant and delivery namespace in project
+  scope and filters candidate managed objects by scope before scoring
+  `scenario/source/zone/label`.
+- A device payload cannot bypass the constraint by sending a mismatched
+  `managed_object_id`; the event is kept unbound and its execution context says
+  `no_managed_object_matched`.
+- `/dashboard/projects` managed-object editor now has a "Customer scope guard"
+  section for tenant, namespace, customer, project, and site constraints, and
+  execution plans render the active scope constraints per object.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field_operations.py askme\pipeline\field_site_profile.py tests\test_field_operations.py`
+- `ruff check askme\pipeline\field_operations.py askme\pipeline\field_site_profile.py tests\test_field_operations.py`
+
+Remaining:
+
+- Add browser interaction tests for configuring scope constraints from the UI.
+
+## 2026-05-15 Productization checkpoint: Customer package delivery gate
+
+This checkpoint prevents solution-provider handoff packages from being
+mistaken for customer-ready deliverables when managed objects still have
+blocked bindings, missing acceptance evidence, or unresolved manual checks.
+
+Implemented:
+
+- Customer project package export now writes `managed_object_action_plan`.
+  The plan lists per-object repair actions such as registering resources,
+  replacing blocked resources, binding missing requirements, and fixing missing
+  acceptance-test references.
+- Customer project package export now writes `package_delivery_gate` with
+  `delivery_gate_status`, `delivery_gate_reasons`, `export_allowed`,
+  `import_allowed`, `customer_handoff_ready`, source version, and customer
+  next step.
+- Package manifests now mirror delivery-gate status and action counts so
+  package verification can detect tampered handoff readiness metadata.
+- Package diff now returns incoming/current delivery gates and action plans.
+- Package import dry-run still shows blocked packages for diagnosis, but real
+  import rejects a blocked gate with `package_delivery_gate_blocked`.
+- Manual-check packages remain importable into controlled pilot work, but they
+  are explicitly not `customer_handoff_ready`.
+
+Validation target:
+
+- `pytest tests\test_field_site_profile.py::test_customer_project_template_create_update_export_import_and_archive tests\test_field_site_profile.py::test_customer_project_package_blocks_import_when_delivery_gate_is_blocked -q`
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_projects_endpoint_returns_solution_scope -q`
+- `ruff check askme\pipeline\field_site_profile.py askme\api\routes\field.py tests\test_field_site_profile.py tests\test_health.py`
+
+## 2026-05-15 Productization checkpoint: Solution-provider project workbench copy
+
+This checkpoint fixes the customer-project page as a product surface for a
+solution provider. The underlying panels already expose projects, templates,
+objects, resources, and packages; the page now adds a customer-readable
+workbench layer so delivery and sales can explain what each surface does.
+
+Implemented:
+
+- `/dashboard/projects` now injects a solution-provider workbench strip with
+  five delivery surfaces: customer project catalog, industry template market,
+  managed-object directory, delivery resources, and package delivery gate.
+- `/dashboard/projects` now consumes `/api/field/customer-project-workbench`
+  directly and renders a golden-path strip: industry template -> customer
+  project catalog -> managed-object directory -> delivery resources -> package
+  delivery gate.
+- The workbench badges reuse backend readiness states instead of hardcoded
+  marketing status.
+- `/api/field/customer-project-workbench` now exposes the same five surfaces in
+  one API payload for delivery tools, customer demos, and future multi-page UI.
+- The same polish pass rewrites the most visible project-page labels and
+  placeholders into readable Chinese while preserving the existing controls and
+  API calls.
+
+Validation target:
+
+- `node --check askme\static\dashboard\app.js`
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q`
+
+## 2026-05-15 Productization checkpoint: Enterprise identity readiness gate
+
+This checkpoint turns the remaining "demo operator directory vs enterprise
+IAM/SSO" risk into a product contract that delivery teams can show and test.
+It does not implement a customer SSO provider; it makes the deployment boundary
+explicit so a local demo cannot be presented as production tenant isolation.
+
+Implemented:
+
+- `OperatorDirectory.identity_gateway_readiness()` returns a versioned gate with
+  identity mode, trusted gateway header contract, required operator/role
+  claims, tenant/project/site scope headers, blockers, warnings, customer
+  status, release claim, and next step.
+- `GET /api/governance/identity-readiness` exposes the same gate independently
+  of the full operator-directory payload.
+- `/api/governance/operator-directory` and `/api/governance/current-operator`
+  now include the gate so existing clients do not need another call just to
+  understand the production boundary.
+- `/dashboard` now shows an "企业身份准入" card with production/demo status and
+  the trusted header contract.
+
+Validation target:
+
+- `python -m py_compile askme\governance.py askme\api\routes\governance.py askme\health_server.py tests\test_governance.py tests\test_health.py`
+- `node --check askme\static\dashboard\app.js`
+- `pytest tests\test_governance.py tests\test_health.py::TestHealthServer::test_governance_operator_directory_exposes_demo_boundary tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q`
+
+## 2026-05-15 Productization checkpoint: Customer launch readiness summary
+
+This checkpoint gives the product a single customer-facing launch decision
+instead of scattered engineering panels. It is meant for a solution provider:
+one screen must say whether a customer project is demo/integration only,
+ready for pilot/site trial, or ready for production acceptance.
+
+Implemented:
+
+- Added `askme.pipeline.product_launch_readiness.build_product_launch_readiness()`.
+  It rolls up enterprise identity readiness, field runtime readiness,
+  solution-delivery readiness, and the customer-project workbench.
+- Added `GET /api/field/product-launch-readiness`. The endpoint exposes
+  `readiness_type=askme.product_launch_readiness.v1`, `overall_status`,
+  `launch_stage`, `production_ready`, customer-readable status, release claim,
+  next step, gates, evidence-source API refs, and a compact source snapshot.
+- Demo operator identity is treated as a production-claim blocker, not as a
+  demo/trial blocker. This keeps the product honest without making customer
+  pilot work look unusable.
+- `/dashboard/delivery` now renders "客户上线准入总览" before lower-level
+  delivery cards, with four gates: identity, field operations, solution
+  delivery, and customer project workbench.
+- Added pure rollup tests plus endpoint and Dashboard assertions.
+
+Validation target:
+
+- `python -m py_compile askme\pipeline\product_launch_readiness.py askme\api\routes\field.py askme\health_server.py tests\test_product_launch_readiness.py tests\test_health.py`
+- `node --check askme\static\dashboard\app.js`
+- `ruff check askme\pipeline\product_launch_readiness.py askme\api\routes\field.py askme\health_server.py tests\test_product_launch_readiness.py tests\test_health.py`
+- `pytest tests\test_product_launch_readiness.py tests\test_health.py::TestHealthServer::test_field_solution_delivery_readiness_endpoint_returns_product_gate tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q`
+
+## 2026-05-15 Productization checkpoint: Customer project launch readiness in handoff artifacts
+
+This checkpoint moves launch readiness from a Dashboard-only rollup into the
+actual customer handoff chain. The delivery team now exports the same
+"can we claim this is ready?" answer inside the project acceptance report,
+acceptance dossier, and proposal bundle.
+
+Implemented:
+
+- `customer_project_acceptance_report()` now returns
+  `launch_readiness=askme.customer_project_launch_readiness.v1`. It rolls up the
+  project acceptance status, managed-object execution bindings, deployment
+  credentials, required onsite evidence, real field link, and site acceptance
+  checklist into `demo_or_integration_only`, `pilot_or_site_trial`, or
+  `production_acceptance_ready`.
+- Acceptance dossier JSON and printable HTML now include "上线准入" with launch
+  stage, readiness status, production-ready boolean, customer status, release
+  claim, next step, and per-gate evidence.
+- Acceptance dossier manifests now expose `launch_readiness_status`,
+  `launch_stage`, and `production_ready`, and the existing payload hash catches
+  any tampering with launch-readiness claims.
+- Proposal bundles now carry the same launch-readiness section at top level and
+  inside the embedded acceptance dossier summary. Their manifest records the
+  launch status/stage, and proposal verification rejects launch-readiness
+  tampering.
+
+Validation target:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `pytest tests\test_field_site_profile.py::test_customer_project_acceptance_report_summarizes_delivery_gates tests\test_field_site_profile.py::test_acceptance_report_auto_backfills_required_onsite_evidence_from_real_link_reports tests\test_field_site_profile.py::test_customer_project_acceptance_dossier_exports_hash_manifest tests\test_field_site_profile.py::test_customer_project_acceptance_dossier_verify_rejects_tamper_and_bad_signature tests\test_field_site_profile.py::test_customer_project_proposal_bundle_binds_package_dossier_and_release_notes -q`
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_projects_endpoint_returns_solution_scope -q`
+
+## 2026-05-15 Productization checkpoint: Shared delivery resource seed registry
+
+This checkpoint turns the resource registry from a UI/API capability into a
+real solution-provider starting point. Customer projects can still override
+resources, but the normal delivery path now starts from a shared registry file
+instead of only relying on Python defaults.
+
+Implemented:
+
+- Added `deploy/delivery-resources/resources.yaml` as the shared delivery
+  resource registry seed. It registers the reusable vision models, sensor
+  protocols, skill packages, and acceptance test references used by the demo
+  project and the factory, park, warehouse, and scenic-area templates.
+- Each seeded resource has product metadata: `display_name`, `category`,
+  `version`, `source=shared_registry`, `owner`, `publish_status`,
+  `release_channel`, and a short description.
+- Published resources remain customer-deliverable; pilot resources such as
+  customer-specific gate inspection stay visible but require delivery review.
+- Added a regression test proving the default registry is found, contains the
+  seed resources, and leaves current project/template consumers without
+  unregistered resource gaps.
+
+Validation target:
+
+- `python -m py_compile tests\test_field_site_profile.py`
+- `ruff check tests\test_field_site_profile.py`
+- `pytest tests\test_field_site_profile.py::test_default_delivery_resource_registry_seed_covers_customer_projects -q`
+
+## 2026-05-15 Productization checkpoint: Customer-readable reusable delivery scope
+
+This checkpoint turns industry templates and exported customer-project packages
+into handoff material a solution provider can actually sell, deploy, test, and
+review with a customer. The fields are deliberately customer-readable and avoid
+claiming production readiness before onsite evidence exists.
+
+Implemented:
+
+- Industry template payloads now expose `applicability_scope`, `out_of_scope`,
+  `customer_prerequisites`, `scenario_acceptance_criteria`, and
+  `dependency_matrix`.
+- Exported customer project packages carry the same structures, and their
+  manifest records counts for prerequisites, scenario acceptance criteria,
+  dependency matrix rows, and delivery-boundary items. Package verification
+  rejects tampered manifest counts.
+- Approved template release notes and proposal inserts now include scenario
+  coverage and dependency summaries, so proposals can explain reusable scope
+  without hiding behind internal runtime terms.
+- Proposal bundles now include a `customer_readable_delivery` section and render
+  prerequisites plus scenario acceptance criteria in the printable HTML.
+- `/dashboard/projects` template cards now show applicability, customer
+  prerequisites, scenario acceptance evidence, and out-of-scope boundaries.
+
+Validation target:
+
+- `python -m py_compile askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `pytest tests\test_field_site_profile.py::test_customer_project_templates_are_valid_solution_starters tests\test_field_site_profile.py::test_customer_project_template_release_request_requires_second_approver tests\test_field_site_profile.py::test_customer_project_template_create_update_export_import_and_archive tests\test_field_site_profile.py::test_customer_project_package_blocks_import_when_delivery_gate_is_blocked tests\test_field_site_profile.py::test_customer_project_package_rejects_manifest_scope_tamper tests\test_field_site_profile.py::test_customer_project_proposal_bundle_binds_package_dossier_and_release_notes -q`
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_health.py::TestHealthServer::test_field_customer_projects_endpoint_returns_solution_scope -q`
+
+## 2026-05-15 Productization checkpoint: Solution-provider delivery workbench language
+
+This checkpoint addresses the customer-facing product gap in the multi-customer
+delivery layer. The platform already had project catalogs, template packages,
+object directories, scoped permissions, and import/export APIs, but the
+Dashboard still exposed too many implementation words. The customer should see a
+delivery product, not a developer console.
+
+Implemented:
+
+- `/api/field/customer-project-workbench` now returns `customer_vocabulary`,
+  `customer_acceptance_flow`, and `customer_readable_contract`.
+- Delivery surfaces now include customer labels, descriptions, action guidance,
+  and count labels for customer projects, industry templates, object directory,
+  delivery resources, and package preflight.
+- `/dashboard/projects` now uses customer-facing terms such as customer space,
+  delivery space, site object, capability configuration, package preflight, and
+  acceptance evidence in the primary project flow.
+- Object directory cards now explain vision, device, skill, and acceptance
+  bindings with customer-readable labels while keeping the underlying IDs for
+  audit and export.
+- Follow-up polish removed customer-visible engineering labels such as runtime,
+  managed object, tenant, acceptance dossier, delivery workflow, package
+  collision, and review SLA from the project handoff, audit dossier, delivery
+  resource, and onsite acceptance panels.
+- Second-pass polish localized the customer enablement package panel, template
+  market actions, template release governance results, delivery-resource
+  impact/review flows, project rollback messages, onsite-evidence empty states,
+  proposal-bundle generation status, and project/template filter placeholders.
+  The underlying API field names are intentionally preserved for imports,
+  exports, audit, and tests.
+- Customer project package verify, diff preview, and import dry-run responses now
+  return both the incoming package scope and the operator project scope. This
+  makes tenant/delivery-space separation auditable before a solution provider
+  copies a package into a new customer project.
+- `/dashboard/projects` now exposes package verification, difference preview,
+  import rehearsal, and final import as separate actions. The result card shows
+  customer-readable package ownership, current project ownership, current
+  operator authorization scope, integrity, change type, write intent, and
+  resource binding status before anything is written.
+- Managed-object action plans now carry customer-readable action labels, reason
+  labels, owner labels, and customer next steps. The object directory card uses
+  those fields first, so delivery sees "what to fix, why, who owns it, and the
+  next step" instead of raw action codes.
+- The customer project creation form now includes a template creation-readiness
+  preview. Selecting a template shows applicability, starter objects, customer
+  prerequisites, scenario acceptance criteria, and out-of-scope boundaries before
+  a delivery user creates a new customer project.
+- After a customer project is created, the Dashboard now renders a Chinese
+  implementation handoff card instead of raw Created/Failed text. It shows the
+  selected template, customer/project, site, starter-object count, next steps,
+  and buttons to load the new project or jump directly to object resource
+  binding.
+- `create_customer_project_from_template` now returns a reusable
+  `implementation_handoff` contract. The contract includes customer/project/site
+  scope, object binding readiness, customer-readable implementation steps, and
+  per-object missing binding labels so the UI, package flow, and external
+  delivery automation do not need to guess next steps.
+- The `/api/field/customer-projects/from-template` HTTP route now has a direct
+  contract test proving it returns the same implementation handoff when creating
+  a customer project through the product API.
+- Customer project package import now returns the same `implementation_handoff`
+  for dry-run previews, blocked imports, and successful imports. This means a
+  solution provider can copy a package into another customer project and still
+  receive the next implementation steps, object-binding todos, and acceptance
+  evidence guidance from the API response.
+- `/dashboard/projects` now renders package-import implementation handoffs.
+  Import rehearsal and confirmed import results show the next implementation
+  steps, object readiness summary, and the first objects that still need binding
+  work.
+- `/api/field/customer-projects/import` now has a direct product-route test:
+  it creates a package from a template-backed customer project, imports it
+  through HTTP in dry-run and write modes, and verifies both responses include
+  the implementation handoff.
+- Explicit customer project profile upsert now also returns
+  `implementation_handoff`. The `/api/field/customer-projects` write route has a
+  direct test proving saved customer/project/site profiles receive the same
+  implementation contract as template creation and package import.
+- The object resource picker now uses customer-readable Chinese guidance for
+  binding vision models, sensor protocols, capability packages, and acceptance
+  tests to a site object.
+- Managed-object save and offline routes now return the same
+  `implementation_handoff`. The Dashboard renders an object-change result card
+  with the changed object, operator, saved path, and post-change implementation
+  steps, so object CRUD is no longer a raw Saved/Deleted control.
+- Customer project detail now also returns `implementation_handoff`, and the
+  Dashboard project loader renders a project-detail handoff card immediately
+  after loading a customer project. Delivery can see "what is ready and what is
+  missing" before editing or saving anything.
+- The shared delivery-resource registry now treats the gate-inspection skill as
+  a published stable resource, so customer-specific gate objects can become
+  ready after their project-specific vision model is registered.
+
+Validation target:
+
+- `python -m py_compile askme\api\routes\field.py tests\test_health.py`
+- `node --check askme\static\dashboard\app.js`
+- `ruff check askme\api\routes\field.py tests\test_health.py`
+- `pytest tests\test_health.py::TestHealthServer::test_field_solution_delivery_readiness_endpoint_returns_product_gate tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q`
+
+Validation completed:
+
+- `node --check askme\static\dashboard\app.js`
+- `python -m py_compile askme\api\routes\field.py tests\test_health.py`
+- `python scripts\check_text_encoding.py askme\api\routes\field.py askme\static\dashboard\app.js askme\static\dashboard\app.css tests\test_health.py docs\PRODUCT.md plans\plan.md`
+- `ruff check askme\api\routes\field.py tests\test_health.py`
+- `pytest tests\test_health.py -q` -> 79 passed, 1 existing httpx deprecation warning.
+- `node --check askme\static\dashboard\app.js`
+- `python -m py_compile tests\test_health.py`
+- `python scripts\check_text_encoding.py askme\static\dashboard\app.js tests\test_health.py plans\plan.md`
+- `ruff check tests\test_health.py`
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q`
+- `pytest tests\test_health.py -q` -> 79 passed, 1 existing httpx deprecation warning.
+- `python -m py_compile askme\api\routes\field.py tests\test_health.py`
+- `python scripts\check_text_encoding.py askme\api\routes\field.py tests\test_health.py plans\plan.md`
+- `ruff check askme\api\routes\field.py tests\test_health.py`
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace -q` -> 1 passed.
+- `pytest tests\test_health.py -q` -> 79 passed, 1 existing httpx deprecation warning.
+- `node --check askme\static\dashboard\app.js`
+- `python -m py_compile tests\test_health.py`
+- `python scripts\check_text_encoding.py askme\static\dashboard\app.js askme\static\dashboard\app.css tests\test_health.py`
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `ruff check tests\test_health.py`
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls tests\test_health.py::TestHealthServer::test_field_customer_project_scope_enforces_tenant_namespace -q` -> 2 passed.
+- `pytest tests\test_health.py -q` -> 79 passed, 1 existing httpx deprecation warning.
+- `python -m py_compile askme\api\routes\field.py tests\test_health.py`
+- `node --check askme\static\dashboard\app.js`
+- `python scripts\check_text_encoding.py askme\api\routes\field.py askme\static\dashboard\app.js tests\test_health.py`
+- `ruff check askme\api\routes\field.py tests\test_health.py`
+- `pytest tests\test_health.py::TestHealthServer::test_managed_object_directory_generates_action_plan_for_blocked_bindings -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `pytest tests\test_health.py -q` -> 79 passed, 1 existing httpx deprecation warning.
+- `node --check askme\static\dashboard\app.js`
+- `python -m py_compile tests\test_health.py`
+- `python scripts\check_text_encoding.py askme\static\dashboard\app.js askme\static\dashboard\app.css tests\test_health.py plans\plan.md`
+- `ruff check tests\test_health.py`
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `pytest tests\test_health.py -q` -> 79 passed, 1 existing httpx deprecation warning.
+- `python -m py_compile askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `node --check askme\static\dashboard\app.js`
+- `python scripts\check_text_encoding.py askme\pipeline\field_site_profile.py askme\static\dashboard\app.js askme\static\dashboard\app.css tests\test_field_site_profile.py tests\test_health.py plans\plan.md`
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `pytest tests\test_field_site_profile.py::test_customer_project_template_create_update_export_import_and_archive -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `python scripts\check_text_encoding.py deploy\delivery-resources\resources.yaml askme\pipeline\field_site_profile.py tests\test_field_site_profile.py`
+- `pytest tests\test_field_site_profile.py -q` -> 43 passed.
+- `pytest tests\test_health.py -q` -> 79 passed, 1 existing httpx deprecation warning.
+- `python -m py_compile tests\test_health.py`
+- `python scripts\check_text_encoding.py tests\test_health.py`
+- `ruff check tests\test_health.py`
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_from_template_returns_implementation_handoff -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `pytest tests\test_health.py -q` -> 80 passed, 1 existing httpx deprecation warning.
+- `pytest tests\test_field_site_profile.py -q` -> 43 passed.
+- `python -m py_compile askme\pipeline\field_site_profile.py tests\test_field_site_profile.py`
+- `python scripts\check_text_encoding.py askme\pipeline\field_site_profile.py tests\test_field_site_profile.py`
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py`
+- `pytest tests\test_field_site_profile.py::test_customer_project_template_create_update_export_import_and_archive -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_from_template_returns_implementation_handoff -q` -> 1 passed.
+- `pytest tests\test_field_site_profile.py -q` -> 43 passed.
+- `pytest tests\test_health.py -q` -> 80 passed, 1 existing httpx deprecation warning.
+- `node --check askme\static\dashboard\app.js`
+- `python -m py_compile tests\test_health.py`
+- `python scripts\check_text_encoding.py askme\static\dashboard\app.js tests\test_health.py`
+- `ruff check tests\test_health.py`
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_from_template_returns_implementation_handoff -q` -> 1 passed.
+- `pytest tests\test_health.py -q` -> 80 passed, 1 existing httpx deprecation warning.
+- `python -m py_compile tests\test_health.py`
+- `python scripts\check_text_encoding.py tests\test_health.py`
+- `ruff check tests\test_health.py`
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_import_route_returns_implementation_handoff -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_from_template_returns_implementation_handoff -q` -> 1 passed.
+- `pytest tests\test_health.py -q` -> 81 passed, 1 existing httpx deprecation warning.
+- `python -m py_compile askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `python scripts\check_text_encoding.py askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `pytest tests\test_field_site_profile.py::test_customer_project_profile_upsert_updates_metadata_without_losing_objects -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_upsert_route_returns_implementation_handoff -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_import_route_returns_implementation_handoff -q` -> 1 passed.
+- `pytest tests\test_field_site_profile.py -q` -> 43 passed.
+- `pytest tests\test_health.py -q` -> 82 passed, 1 existing httpx deprecation warning.
+- `python -m py_compile askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `node --check askme\static\dashboard\app.js`
+- `python scripts\check_text_encoding.py askme\pipeline\field_site_profile.py askme\static\dashboard\app.js tests\test_field_site_profile.py tests\test_health.py`
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `pytest tests\test_field_site_profile.py::test_customer_project_template_create_update_export_import_and_archive -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_managed_object_routes_return_implementation_handoff -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
+- `python -m py_compile askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `node --check askme\static\dashboard\app.js`
+- `python scripts\check_text_encoding.py askme\pipeline\field_site_profile.py askme\static\dashboard\app.js tests\test_field_site_profile.py tests\test_health.py`
+- `ruff check askme\pipeline\field_site_profile.py tests\test_field_site_profile.py tests\test_health.py`
+- `pytest tests\test_field_site_profile.py::test_customer_project_template_create_update_export_import_and_archive -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_field_customer_project_detail_route_returns_implementation_handoff -q` -> 1 passed.
+- `pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 1 passed.
