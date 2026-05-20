@@ -23,9 +23,9 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from askme.llm.client import LLMClient
-    from askme.memory.episodic_memory import EpisodicMemory
-    from askme.memory.session import SessionMemory
+    from askme.llm.core.client import LLMClient
+    from askme.memory.core.episodic_memory import EpisodicMemory
+    from askme.memory.core.session import SessionMemory
 
 logger = logging.getLogger(__name__)
 

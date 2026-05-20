@@ -141,7 +141,19 @@ def _start_server(archive_path: Path) -> dict[str, Any]:
     )
     voice.speak = lambda text: None  # type: ignore[method-assign]
     voice.start_playback = lambda: None  # type: ignore[method-assign]
-    field_ops = FieldOperationsService(config={"archive_path": str(archive_path)})
+    field_ops = FieldOperationsService(
+        config={
+            "archive_path": str(archive_path),
+            "customer_project": {
+                "tenant_id": "default",
+                "delivery_namespace": "default",
+                "customer_id": "demo-customer",
+                "project_id": "demo-field-ops",
+                "site_id": "inovx-demo-park",
+                "site_name": "Visual Smoke Park",
+            },
+        }
+    )
     app = create_health_app(
         _health_snapshot,
         capabilities_provider=_capabilities_payload,
@@ -186,6 +198,33 @@ def _seed_field_event(base_url: str, output_dir: Path) -> None:
     }
     response = requests.post(f"{base_url}/api/field/events", json=payload, timeout=5)
     response.raise_for_status()
+    blocked_payload = {
+        "scenario_id": "night_stranger_photo",
+        "location": "visual north window",
+        "zone_name": "visual north window",
+        "operator_id": "dashboard.operator",
+    }
+    blocked_response = requests.post(f"{base_url}/api/field/events", json=blocked_payload, timeout=5)
+    if blocked_response.status_code not in {200, 422}:
+        blocked_response.raise_for_status()
+    blocked_body = blocked_response.json()
+    if "event" not in blocked_body:
+        raise RuntimeError(f"blocked field event did not archive an event: {blocked_body}")
+    stale_evidence_path = output_dir / "visual-stale-smoke.png"
+    stale_evidence_path.write_bytes(_ONE_PIXEL_PNG)
+    stale_payload = {
+        "source": "sensor",
+        "observed_at": time.time() - 120,
+        "sensor": {"temperature_c": 72, "smoke_level": 0.9},
+        "location": "visual transformer room",
+        "image_path": str(stale_evidence_path).replace("\\", "/"),
+    }
+    stale_response = requests.post(f"{base_url}/api/field/ingest", json=stale_payload, timeout=5)
+    if stale_response.status_code not in {200, 422}:
+        stale_response.raise_for_status()
+    stale_body = stale_response.json()
+    if "event" not in stale_body:
+        raise RuntimeError(f"stale ingest did not archive an event: {stale_body}")
 
 
 def _check_viewport(page: Any, *, name: str, width: int, height: int, output_dir: Path) -> dict[str, Any]:
@@ -199,20 +238,12 @@ def _check_viewport(page: Any, *, name: str, width: int, height: int, output_dir
     body_text = page.locator("body").inner_text(timeout=5000)
     required = [
         "现场任务平台",
-        "现场事件闭环看板",
-        "客户现在能看什么",
+        "客户验收视角",
+        "客户项目",
         "知识库",
         "现场事件",
         "语音音色",
         "交付检查",
-    ]
-    required = [
-        "Customer acceptance view",
-        "Field operations",
-        "Customer projects",
-        "Knowledge base",
-        "Voice profiles",
-        "Delivery checks",
     ]
     missing = [text for text in required if text not in body_text]
     overflow = page.evaluate(
@@ -254,6 +285,230 @@ def _exercise_interactions(page: Any, *, output_dir: Path) -> dict[str, Any]:
     }
 
 
+_FIELD_SCENARIO_MATRIX = (
+    {
+        "scenario_id": "wayfinding_help_point",
+        "location": "西门问询点",
+        "note": "矩阵验收：游客问咖啡店在哪",
+        "markers": ("路人指路", "问路", "guide-point-01"),
+    },
+    {
+        "scenario_id": "visitor_escort",
+        "location": "主入口服务点",
+        "note": "矩阵验收：游客请求带路去服务中心",
+        "markers": ("路人带路", "带路", "demo-route-01"),
+    },
+    {
+        "scenario_id": "illegal_parking",
+        "location": "B区主通道",
+        "note": "矩阵验收：车辆停在主通道",
+        "markers": ("车辆违停", "违停", "DEMO-123"),
+    },
+    {
+        "scenario_id": "fire_or_smoke",
+        "location": "3号楼一层",
+        "note": "矩阵验收：检测到烟雾和高温",
+        "markers": ("火灾", "烟雾", "72"),
+    },
+    {
+        "scenario_id": "trash_bin_full",
+        "location": "西门垃圾桶",
+        "note": "矩阵验收：垃圾桶满溢",
+        "markers": ("垃圾桶", "满溢", "trash-bin-demo"),
+    },
+    {
+        "scenario_id": "night_stranger_photo",
+        "location": "北侧窗边",
+        "note": "矩阵验收：夜间陌生人在窗边拍照",
+        "markers": ("陌生人", "夜间", "北侧窗边"),
+    },
+    {
+        "scenario_id": "crowd_gathering",
+        "location": "中央广场",
+        "note": "矩阵验收：人数超过阈值并长时间停留",
+        "markers": ("人群聚集", "聚集", "8"),
+    },
+    {
+        "scenario_id": "urgent_patrol_dispatch",
+        "location": "A区北门",
+        "note": "矩阵验收：管理员临时派遣巡检",
+        "markers": ("突发任务巡检", "派遣", "dashboard-task"),
+    },
+    {
+        "scenario_id": "robot_abnormal_incident",
+        "location": "A区坡道",
+        "note": "矩阵验收：机器狗卡住无法运动",
+        "markers": ("机器人异常", "卡住", "immobilized"),
+    },
+)
+
+
+def _exercise_field_scenario_matrix(page: Any, *, output_dir: Path) -> dict[str, Any]:
+    """Submit the customer-critical field scenarios through the real Dashboard form."""
+
+    page.goto("/dashboard/field", wait_until="domcontentloaded")
+    page.wait_for_selector("#field-submit", timeout=8000)
+    page.wait_for_function(
+        "() => document.querySelectorAll('#field-scenario option').length > 0"
+    )
+    option_values = set(
+        page.eval_on_selector_all(
+            "#field-scenario option",
+            "(options) => options.map((option) => option.value)",
+        )
+    )
+    covered: list[str] = []
+    missing_options: list[str] = []
+    scenario_results: dict[str, bool] = {}
+
+    for item in _FIELD_SCENARIO_MATRIX:
+        scenario_id = item["scenario_id"]
+        if scenario_id not in option_values:
+            missing_options.append(scenario_id)
+            scenario_results[scenario_id] = False
+            continue
+
+        page.select_option("#field-scenario", scenario_id)
+        page.fill("#field-location", item["location"])
+        page.fill("#field-note", item["note"])
+        page.click("#field-submit")
+        page.wait_for_selector(".field-detail-card", timeout=8000)
+        page.wait_for_timeout(500)
+        body_text = page.locator("body").inner_text(timeout=5000)
+        markers = item["markers"]
+        passed = item["location"] in body_text and any(marker in body_text for marker in markers)
+        scenario_results[scenario_id] = passed
+        if passed:
+            covered.append(scenario_id)
+        page.wait_for_selector("#field-submit", timeout=8000)
+
+    body_text = page.locator("body").inner_text(timeout=5000)
+    screenshot_path = output_dir / "askme-dashboard-field-scenario-matrix.png"
+    page.screenshot(path=str(screenshot_path), full_page=True)
+    return {
+        "name": "field_scenario_matrix",
+        "screenshot": str(screenshot_path),
+        "scenario_count": len(_FIELD_SCENARIO_MATRIX),
+        "covered_scenarios": covered,
+        "missing_scenarios": [
+            item["scenario_id"]
+            for item in _FIELD_SCENARIO_MATRIX
+            if not scenario_results.get(item["scenario_id"], False)
+        ],
+        "missing_options": missing_options,
+        "has_submit_result": "操作已提交" in body_text,
+        "has_event_context": all(item["location"] in body_text for item in _FIELD_SCENARIO_MATRIX),
+        "has_customer_language": "现场事件处置" in body_text and "最近现场事件" in body_text,
+        "has_illegal_parking": scenario_results.get("illegal_parking", False),
+        "has_fire_or_smoke": scenario_results.get("fire_or_smoke", False),
+        "has_trash_bin_full": scenario_results.get("trash_bin_full", False),
+        "has_night_stranger_photo": scenario_results.get("night_stranger_photo", False),
+        "has_wayfinding_help_point": scenario_results.get("wayfinding_help_point", False),
+        "has_visitor_escort": scenario_results.get("visitor_escort", False),
+        "has_crowd_gathering": scenario_results.get("crowd_gathering", False),
+        "has_urgent_patrol_dispatch": scenario_results.get("urgent_patrol_dispatch", False),
+        "has_robot_abnormal_incident": scenario_results.get("robot_abnormal_incident", False),
+        "has_notification_or_delivery": any(marker in body_text for marker in ("通知", "送达", "保安", "保洁")),
+        "has_evidence_or_archive": any(marker in body_text for marker in ("证据", "归档", "照片", "事件")),
+    }
+
+
+def _exercise_scenario_acceptance_page(page: Any, *, output_dir: Path) -> dict[str, Any]:
+    """Verify the customer scenario page exposes acceptance boundaries and site gaps."""
+
+    page.goto("/dashboard/scenarios", wait_until="domcontentloaded")
+    page.wait_for_selector(".scenario-acceptance-strip", timeout=8000)
+    page.wait_for_selector(".scenario-product-grid", timeout=8000)
+    body_text = page.locator("body").inner_text(timeout=5000)
+    screenshot_path = output_dir / "askme-dashboard-scenario-acceptance.png"
+    page.screenshot(path=str(screenshot_path), full_page=True)
+    return {
+        "name": "scenario_acceptance_page",
+        "screenshot": str(screenshot_path),
+        "has_acceptance_boundary": "验收边界" in body_text and "演示与集成验收" in body_text,
+        "has_production_boundary": "无人值守生产上线" in body_text or "生产上线" in body_text,
+        "has_real_dependency_copy": "真实接入还缺什么" in body_text,
+        "has_device_entrypoint_copy": "设备入口" in body_text,
+        "has_all_customer_scenarios": all(
+            marker in body_text
+            for marker in (
+                "路人指路",
+                "路人带路",
+                "车辆违停",
+                "火灾",
+                "垃圾桶",
+                "夜间陌生人",
+                "突发任务巡检",
+                "机器人异常",
+            )
+        ),
+    }
+
+
+def _exercise_field_admission_decision(page: Any, *, output_dir: Path) -> dict[str, Any]:
+    """Verify blocked/non-escalated events show a customer-readable reason."""
+
+    page.goto("/dashboard/field", wait_until="domcontentloaded")
+    page.wait_for_selector(".field-detail-card", timeout=8000)
+    stale_row = page.locator(".field-event-row", has_text="visual transformer room").first
+    if stale_row.count():
+        stale_row.locator(".field-event-select").click()
+        page.wait_for_function(
+            "() => document.body && document.body.innerText.includes('visual transformer room')"
+        )
+    page.wait_for_selector(".field-admission-card", timeout=8000)
+    page.wait_for_selector(".field-admission-facts span", timeout=8000)
+    page.wait_for_selector(".field-ingest-scope-card", timeout=8000)
+    page.wait_for_timeout(500)
+    body_text = page.locator("body").inner_text(timeout=5000)
+    screenshot_path = output_dir / "askme-dashboard-field-admission-decision.png"
+    page.screenshot(path=str(screenshot_path), full_page=True)
+    return {
+        "name": "field_admission_decision",
+        "screenshot": str(screenshot_path),
+        "has_admission_card": page.locator(".field-admission-card").count() > 0,
+        "has_admission_facts": page.locator(".field-admission-facts span").count() > 0,
+        "has_block_reason_fact": "freshness" in body_text and "stale" in body_text,
+        "has_next_step": page.locator(".field-admission-card .muted-line").count() > 0,
+        "has_blocked_event_context": "visual transformer room" in body_text,
+        "has_ingest_scope_card": page.locator(".field-ingest-scope-card").count() > 0,
+        "has_ingest_scope_grid": page.locator(".field-ingest-scope-grid div").count() >= 4,
+        "has_ingest_scope_gate": (
+            "managed_object_binding_required" in body_text
+            or "设备接入还不能作为生产验收证据" in body_text
+            or "生产验收证据" in body_text
+        ),
+    }
+
+
+def _exercise_conversation_wayfinding(page: Any, *, output_dir: Path) -> dict[str, Any]:
+    """Exercise the customer chat page with a deterministic park-space answer."""
+
+    page.goto("/dashboard/conversation", wait_until="domcontentloaded")
+    page.wait_for_selector("#chat-service-point", timeout=8000)
+    page.wait_for_function(
+        "() => document.querySelectorAll('#chat-service-point option').length > 0"
+    )
+    if page.locator('#chat-service-point option[value="guide-west-gate"]').count():
+        page.select_option("#chat-service-point", "guide-west-gate")
+    page.fill("#chat-input", "咖啡店在哪")
+    page.click("#chat-send")
+    page.wait_for_selector(".chat-message.assistant", timeout=8000)
+    page.wait_for_timeout(700)
+    body_text = page.locator("body").inner_text(timeout=5000)
+    screenshot_path = output_dir / "askme-dashboard-conversation-wayfinding.png"
+    page.screenshot(path=str(screenshot_path), full_page=True)
+    return {
+        "name": "conversation_wayfinding",
+        "screenshot": str(screenshot_path),
+        "has_context_selector": "现场上下文" in body_text and "当前问询点" in body_text,
+        "has_space_answer": "梵木咖啡" in body_text,
+        "has_evidence": "回答依据" in body_text and "园区空间认知库" in body_text,
+        "has_no_guide_policy": "只回答，不启动带路" in body_text,
+        "has_no_chat_503": "chat not available" not in body_text and "服务没有返回可展示内容" not in body_text,
+    }
+
+
 def _exercise_capability_readiness(page: Any, *, output_dir: Path) -> dict[str, Any]:
     """Exercise scenario package readiness from the customer capability page."""
 
@@ -270,17 +525,16 @@ def _exercise_capability_readiness(page: Any, *, output_dir: Path) -> dict[str, 
     return {
         "name": "capability_scenario_readiness",
         "screenshot": str(screenshot_path),
-        "has_customer_package_catalog": "Customer Enablement Packages" in body_before,
+        "has_customer_package_catalog": "客户可启用能力包" in body_before,
         "has_capability_page": "场景能力蓝图" in body_before,
-        "has_inline_gate": "Enablement gate" in body_before,
-        "has_release_summary": "Production claim" in body_before
-        and "Production launch claims" in body_before,
-        "has_release_claim_copy": "Release claim:" in body_before or "Release claim:" in body_text,
-        "has_recheck_button": "Recheck enablement" in body_before,
-        "has_readiness_panel": "Enablement Check" in body_text,
-        "has_package_status": "package ready" in body_text or "package blocked" in body_text,
-        "has_missing_dependency_copy": "Missing" in body_text,
-        "has_next_step_copy": "Next step:" in body_text,
+        "has_inline_gate": "启用准入" in body_before,
+        "has_release_summary": "生产声明" in body_before and "发布声明规则" in body_before,
+        "has_release_claim_copy": "交付声明：" in body_before or "交付声明：" in body_text,
+        "has_recheck_button": "重新检查" in body_before,
+        "has_readiness_panel": "启用检查" in body_text,
+        "has_package_status": "交付包" in body_before or "交付包" in body_text,
+        "has_missing_dependency_copy": "缺失" in body_text,
+        "has_next_step_copy": "下一步：" in body_text,
     }
 
 
@@ -296,10 +550,12 @@ def _exercise_audit_delivery_dossier(page: Any, *, output_dir: Path) -> dict[str
     return {
         "name": "audit_delivery_dossier",
         "screenshot": str(screenshot_path),
-        "has_audit_dossier": "Customer Delivery Audit Dossier" in body_text,
-        "has_allowed_uses": "Allowed use" in body_text,
-        "has_blocked_uses": "Blocked claim" in body_text,
-        "has_production_claim_boundary": "unattended production launch claim" in body_text,
+        "has_audit_dossier": "Customer Delivery Audit Dossier" in body_text
+        or "客户交付审计材料" in body_text,
+        "has_allowed_uses": "允许用途" in body_text,
+        "has_blocked_uses": "禁止声明" in body_text,
+        "has_production_claim_boundary": "无人值守生产上线声明" in body_text
+        or "unattended production launch claim" in body_text,
     }
 
 
@@ -348,6 +604,9 @@ def _exercise_project_workspace(page: Any, *, output_dir: Path) -> dict[str, Any
         resource_governance_sla_visible = (
             "SLA" in governance_text
             and ("overdue" in governance_text.lower() or "due" in governance_text.lower())
+        ) or (
+            "逾期" in governance_text
+            and ("visual-resource-request-001" in governance_text or "交付资源治理" in governance_text)
         )
     if page.locator("[data-resource-governance-escalate-overdue]").count():
         page.once("dialog", lambda dialog: dialog.accept("visual smoke overdue escalation"))
@@ -371,7 +630,9 @@ def _exercise_project_workspace(page: Any, *, output_dir: Path) -> dict[str, Any
         resource_id = resource_option.split("::", 1)[1]
         resource_binding_value = page.locator("#object-vision-models").input_value(timeout=5000)
         resource_binding_result = page.locator("#object-resource-picker-result").inner_text(timeout=5000)
-        resource_binding_added = resource_id in resource_binding_value and "Added" in resource_binding_result
+        resource_binding_added = resource_id in resource_binding_value and any(
+            marker in resource_binding_result for marker in ("Added", "加入", "已把")
+        )
     body_text = page.locator("body").inner_text(timeout=5000)
     overflow = page.evaluate(
         "() => ({scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth})"
@@ -381,6 +642,8 @@ def _exercise_project_workspace(page: Any, *, output_dir: Path) -> dict[str, Any
     return {
         "name": "project_workspace",
         "screenshot": str(screenshot_path),
+        "has_project_acceptance_snapshot": page.locator("[data-project-acceptance-snapshot]").count() > 0,
+        "has_project_acceptance_summary_anchor": page.locator("#project-section-acceptance-summary").count() > 0,
         "has_project_positioning": "客户项目不是配置文件，是交付产品" in body_text,
         "has_workspace_nav": all(
             text in body_text
@@ -397,25 +660,38 @@ def _exercise_project_workspace(page: Any, *, output_dir: Path) -> dict[str, Any
             )
         ),
         "has_template_governance": "模板发布治理" in body_text and "待复核发布" in body_text,
+        "has_template_runtime_blueprint_binding": "运行蓝图绑定" in body_text
+        and "blueprint" in body_text
+        and "package" in body_text,
         "has_separate_artifact_inputs": all(
             text in body_text
             for text in ("项目交付包", "客户提案包", "验收证据包")
         ),
         "has_evidence_picker": "加入引用" in body_text and "先点击“查看现场证据”" in body_text,
-        "has_delivery_resource_registry": "Delivery resource registry" in body_text
-        and "Register resource" in body_text,
-        "has_resource_action_plan": "Resource binding action plan" in body_text,
-        "has_resource_governance": "Resource governance" in body_text
-        and "Request rollback" in body_text
-        and "Approval queue" in body_text,
+        "has_delivery_resource_registry": (
+            "交付资源目录" in body_text or "Delivery resource registry" in body_text
+        )
+        and ("登记资源" in body_text or "Register resource" in body_text),
+        "has_resource_action_plan": "资源绑定行动计划" in body_text
+        or "Resource binding action plan" in body_text,
+        "has_resource_governance": (
+            ("资源治理" in body_text and "回滚申请" in body_text and "审批队列" in body_text)
+            or (
+                "Resource governance" in body_text
+                and "Request rollback" in body_text
+                and "Approval queue" in body_text
+            )
+        ),
         "resource_governance_history_loaded": governance_history_loaded,
         "resource_governance_rollback_previewed": governance_rollback_previewed,
         "resource_governance_disable_handled": governance_disable_handled,
         "resource_governance_requests_loaded": governance_requests_loaded,
         "resource_governance_sla_visible": resource_governance_sla_visible,
         "resource_governance_escalated": resource_governance_escalated,
-        "has_object_resource_picker": "Bind registered resource" in body_text
-        and "Add binding" in body_text,
+        "has_object_resource_picker": (
+            ("绑定交付资源" in body_text and "加入绑定" in body_text)
+            or ("Bind registered resource" in body_text and "Add binding" in body_text)
+        ),
         "object_resource_binding_added": resource_binding_added,
         "object_resource_binding_result": resource_binding_result,
         "has_project_scope_copy": "solution provider" in body_text.lower()
@@ -692,7 +968,11 @@ def run(output_dir: Path) -> dict[str, Any]:
                     else None,
                 )
                 checks.append(_check_viewport(page, name="desktop", width=1600, height=900, output_dir=output_dir))
+                interactions.append(_exercise_conversation_wayfinding(page, output_dir=output_dir))
+                interactions.append(_exercise_scenario_acceptance_page(page, output_dir=output_dir))
+                interactions.append(_exercise_field_admission_decision(page, output_dir=output_dir))
                 interactions.append(_exercise_interactions(page, output_dir=output_dir))
+                interactions.append(_exercise_field_scenario_matrix(page, output_dir=output_dir))
                 interactions.append(_exercise_project_workspace(page, output_dir=output_dir))
                 interactions.append(_exercise_capability_readiness(page, output_dir=output_dir))
                 interactions.append(_exercise_audit_delivery_dossier(page, output_dir=output_dir))
@@ -737,6 +1017,54 @@ def run(output_dir: Path) -> dict[str, Any]:
             failures.append(f"{interaction['name']}: missing event context")
         if "has_customer_language" in interaction and not interaction["has_customer_language"]:
             failures.append(f"{interaction['name']}: missing customer language")
+        if "missing_scenarios" in interaction and interaction["missing_scenarios"]:
+            failures.append(
+                f"{interaction['name']}: missing scenarios {interaction['missing_scenarios']}"
+            )
+        if "missing_options" in interaction and interaction["missing_options"]:
+            failures.append(
+                f"{interaction['name']}: missing scenario options {interaction['missing_options']}"
+            )
+        if "has_notification_or_delivery" in interaction and not interaction["has_notification_or_delivery"]:
+            failures.append(f"{interaction['name']}: missing notification or delivery copy")
+        if "has_evidence_or_archive" in interaction and not interaction["has_evidence_or_archive"]:
+            failures.append(f"{interaction['name']}: missing evidence or archive copy")
+        if "has_context_selector" in interaction and not interaction["has_context_selector"]:
+            failures.append(f"{interaction['name']}: missing conversation space context selector")
+        if "has_space_answer" in interaction and not interaction["has_space_answer"]:
+            failures.append(f"{interaction['name']}: missing park-space answer")
+        if "has_evidence" in interaction and not interaction["has_evidence"]:
+            failures.append(f"{interaction['name']}: missing conversation evidence")
+        if "has_no_guide_policy" in interaction and not interaction["has_no_guide_policy"]:
+            failures.append(f"{interaction['name']}: missing no-guide policy")
+        if "has_no_chat_503" in interaction and not interaction["has_no_chat_503"]:
+            failures.append(f"{interaction['name']}: chat endpoint unavailable in dashboard-only mode")
+        if "has_acceptance_boundary" in interaction and not interaction["has_acceptance_boundary"]:
+            failures.append(f"{interaction['name']}: missing acceptance boundary")
+        if "has_production_boundary" in interaction and not interaction["has_production_boundary"]:
+            failures.append(f"{interaction['name']}: missing production boundary")
+        if "has_real_dependency_copy" in interaction and not interaction["has_real_dependency_copy"]:
+            failures.append(f"{interaction['name']}: missing real dependency copy")
+        if "has_device_entrypoint_copy" in interaction and not interaction["has_device_entrypoint_copy"]:
+            failures.append(f"{interaction['name']}: missing device entrypoint copy")
+        if "has_all_customer_scenarios" in interaction and not interaction["has_all_customer_scenarios"]:
+            failures.append(f"{interaction['name']}: missing customer scenarios")
+        if "has_admission_card" in interaction and not interaction["has_admission_card"]:
+            failures.append(f"{interaction['name']}: missing admission decision card")
+        if "has_admission_facts" in interaction and not interaction["has_admission_facts"]:
+            failures.append(f"{interaction['name']}: missing admission evidence facts")
+        if "has_block_reason_fact" in interaction and not interaction["has_block_reason_fact"]:
+            failures.append(f"{interaction['name']}: missing blocked admission reason fact")
+        if "has_next_step" in interaction and not interaction["has_next_step"]:
+            failures.append(f"{interaction['name']}: missing admission next step")
+        if "has_blocked_event_context" in interaction and not interaction["has_blocked_event_context"]:
+            failures.append(f"{interaction['name']}: missing blocked event context")
+        if "has_ingest_scope_card" in interaction and not interaction["has_ingest_scope_card"]:
+            failures.append(f"{interaction['name']}: missing ingest scope card")
+        if "has_ingest_scope_grid" in interaction and not interaction["has_ingest_scope_grid"]:
+            failures.append(f"{interaction['name']}: missing ingest scope grid")
+        if "has_ingest_scope_gate" in interaction and not interaction["has_ingest_scope_gate"]:
+            failures.append(f"{interaction['name']}: missing ingest production gate")
         if "has_capability_page" in interaction and not interaction["has_capability_page"]:
             failures.append(f"{interaction['name']}: missing capability page")
         if (
@@ -775,8 +1103,23 @@ def run(output_dir: Path) -> dict[str, Any]:
             failures.append(f"{interaction['name']}: missing project positioning")
         if "has_workspace_nav" in interaction and not interaction["has_workspace_nav"]:
             failures.append(f"{interaction['name']}: missing workspace navigation")
+        if (
+            "has_project_acceptance_snapshot" in interaction
+            and not interaction["has_project_acceptance_snapshot"]
+        ):
+            failures.append(f"{interaction['name']}: missing project acceptance snapshot")
+        if (
+            "has_project_acceptance_summary_anchor" in interaction
+            and not interaction["has_project_acceptance_summary_anchor"]
+        ):
+            failures.append(f"{interaction['name']}: missing project acceptance summary anchor")
         if "has_template_governance" in interaction and not interaction["has_template_governance"]:
             failures.append(f"{interaction['name']}: missing template governance")
+        if (
+            "has_template_runtime_blueprint_binding" in interaction
+            and not interaction["has_template_runtime_blueprint_binding"]
+        ):
+            failures.append(f"{interaction['name']}: missing template runtime blueprint binding")
         if (
             "has_separate_artifact_inputs" in interaction
             and not interaction["has_separate_artifact_inputs"]

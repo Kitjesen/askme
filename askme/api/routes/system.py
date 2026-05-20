@@ -14,6 +14,9 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
+from askme.api.schemas.monitor import HealthSnapshotResponse, TraceSnapshotResponse
+from askme.api.schemas.surfaces import ApiSurfacesResponse
+
 HealthProvider = Callable[[], dict[str, Any]]
 MetricsProvider = Callable[[], dict[str, Any]]
 RenderPrometheusMetrics = Callable[[dict[str, Any]], str]
@@ -33,13 +36,55 @@ def register_system_routes(
 ) -> None:
     """Register base health, metrics, and trace routes on ``app``."""
 
-    @app.get("/health", tags=["System"])
+    @app.get(
+        "/health",
+        tags=["System"],
+        response_model=HealthSnapshotResponse,
+        response_model_exclude_none=True,
+    )
     async def health() -> JSONResponse:
         return json_snapshot_response(health_provider, "health")
 
-    @app.get("/healthz", include_in_schema=False, tags=["System"])
+    @app.get(
+        "/healthz",
+        include_in_schema=False,
+        tags=["System"],
+        response_model=HealthSnapshotResponse,
+        response_model_exclude_none=True,
+    )
     async def healthz() -> JSONResponse:
         return json_snapshot_response(health_provider, "healthz")
+
+    @app.get(
+        "/api/surfaces",
+        tags=["System"],
+        response_model=ApiSurfacesResponse,
+        response_model_exclude_none=True,
+    )
+    async def api_surfaces() -> JSONResponse:
+        """Return the product boundary map for public, admin, and internal APIs."""
+        from askme.api.composition import (
+            api_route_inventory,
+            api_surface_manifest,
+            api_surface_readiness,
+        )
+
+        route_inventory = api_route_inventory(app)
+        readiness = api_surface_readiness(route_inventory)
+
+        payload = ApiSurfacesResponse.model_validate(
+            {
+                "ok": True,
+                "surfaces": api_surface_manifest(),
+                "readiness": readiness,
+                "route_inventory": route_inventory,
+                "policy": readiness["policy"],
+            }
+        )
+        return JSONResponse(
+            payload.model_dump(mode="python"),
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get(
         "/metrics",
@@ -78,18 +123,26 @@ def register_system_routes(
             headers={"Cache-Control": "no-store"},
         )
 
-    @app.get("/trace", tags=["System"])
+    @app.get(
+        "/trace",
+        tags=["System"],
+        response_model=TraceSnapshotResponse,
+        response_model_exclude_none=True,
+    )
     async def trace() -> JSONResponse:
         """Return recent pipeline timing traces for diagnostics."""
         try:
-            from askme.pipeline.trace import get_tracer
+            from askme.pipeline.core.trace import get_tracer
 
             tracer = get_tracer()
-            return JSONResponse(
+            payload = TraceSnapshotResponse.model_validate(
                 {
                     "summary": tracer.get_summary(),
                     "recent": tracer.get_history(limit=10),
-                },
+                }
+            )
+            return JSONResponse(
+                payload.model_dump(mode="python", exclude_unset=True),
                 headers={"Cache-Control": "no-store"},
             )
         except Exception as exc:

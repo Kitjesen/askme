@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-
 from askme.pipeline.turn_executor import TurnExecutor
 
 
@@ -14,9 +13,55 @@ def _make_executor(**kwargs) -> TurnExecutor:
     """Build a TurnExecutor with all heavy deps mocked."""
     conversation = MagicMock()
     conversation.history = []
-    conversation.add_user_message = MagicMock()
-    conversation.add_assistant_message = MagicMock()
-    conversation.get_messages = MagicMock(return_value=[])
+    conversation.max_history = 40
+    session_histories: dict[str, list[dict[str, object]]] = {}
+
+    def _history_for(conversation_session_id: str | None = None) -> list[dict[str, object]]:
+        session = str(conversation_session_id or "").strip()
+        if not session:
+            return conversation.history
+        return session_histories.setdefault(session, [])
+
+    def _add_user_message(
+        content: str,
+        *,
+        conversation_session_id: str | None = None,
+    ) -> None:
+        _history_for(conversation_session_id).append({"role": "user", "content": content})
+
+    def _add_assistant_message(
+        content: str,
+        *,
+        conversation_session_id: str | None = None,
+    ) -> None:
+        _history_for(conversation_session_id).append({"role": "assistant", "content": content})
+
+    def _get_messages(
+        system_prompt: str,
+        *,
+        conversation_session_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        return [{"role": "system", "content": system_prompt}] + list(
+            _history_for(conversation_session_id)
+        )
+
+    def _remove_latest_user_message(
+        content: str,
+        *,
+        conversation_session_id: str | None = None,
+    ) -> bool:
+        history = _history_for(conversation_session_id)
+        for i in range(len(history) - 1, -1, -1):
+            item = history[i]
+            if item.get("role") == "user" and item.get("content") == content:
+                history.pop(i)
+                return True
+        return False
+
+    conversation.add_user_message = MagicMock(side_effect=_add_user_message)
+    conversation.add_assistant_message = MagicMock(side_effect=_add_assistant_message)
+    conversation.get_messages = MagicMock(side_effect=_get_messages)
+    conversation.remove_latest_user_message = MagicMock(side_effect=_remove_latest_user_message)
     conversation.maybe_compress = AsyncMock()
 
     memory = MagicMock()
@@ -188,6 +233,43 @@ class TestProcessHappyPath:
         te._audio.drain_buffers.assert_not_called()
         te._audio.start_playback.assert_not_called()
         te._audio.stop_playback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explicit_conversation_session_uses_scoped_history(self):
+        stream_processor = MagicMock()
+        stream_processor.stream_with_tools = AsyncMock(
+            side_effect=["answer a1", "answer b1", "answer a2"]
+        )
+        te = _make_executor(stream_processor=stream_processor)
+
+        await te.process("hello a", source="text", conversation_session_id="conv-a")
+        await te.process("hello b", source="text", conversation_session_id="conv-b")
+        await te.process("again a", source="text", conversation_session_id="conv-a")
+
+        third_messages = stream_processor.stream_with_tools.call_args_list[2].args[0]
+        assert {"role": "user", "content": "hello a"} in third_messages
+        assert {"role": "assistant", "content": "answer a1"} in third_messages
+        assert {"role": "user", "content": "again a"} in third_messages
+        assert {"role": "user", "content": "hello b"} not in third_messages
+        assert te._conversation.add_user_message.call_args_list == [
+            call("hello a", conversation_session_id="conv-a"),
+            call("hello b", conversation_session_id="conv-b"),
+            call("again a", conversation_session_id="conv-a"),
+        ]
+        assert te._conversation.add_assistant_message.call_args_list == [
+            call("answer a1", conversation_session_id="conv-a"),
+            call("answer b1", conversation_session_id="conv-b"),
+            call("answer a2", conversation_session_id="conv-a"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_default_conversation_path_still_uses_conversation_manager(self):
+        te = _make_executor()
+
+        await te.process("hello", source="text")
+
+        te._conversation.add_user_message.assert_called_once_with("hello")
+        te._conversation.add_assistant_message.assert_called_once_with("robot answer")
 
 
 class TestCancelToken:

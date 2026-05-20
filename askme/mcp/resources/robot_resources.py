@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import logging
 
-from askme.mcp.server import mcp
+from askme.mcp.registration import mcp
+from askme.mcp.resource_surface import get_resource_surface
 
 logger = logging.getLogger(__name__)
 
@@ -24,17 +25,7 @@ _JOINT_NAMES = [
 @mcp.resource("robot://status")
 def robot_status() -> str:
     """Robot arm connection status, mode, and e-stop state."""
-    # Note: resources cannot easily receive lifespan context in all MCP SDK
-    # versions, so we import the config directly for a lightweight check.
-    from askme.config import get_section
-
-    robot_cfg = get_section("robot")
-    return json.dumps({
-        "enabled": robot_cfg.get("enabled", False),
-        "simulate": robot_cfg.get("simulate", True),
-        "serial_port": robot_cfg.get("serial_port", "COM3"),
-        "message": "Use robot_state() tool for live joint data",
-    })
+    return json.dumps(get_resource_surface().robot_status_payload())
 
 
 @mcp.resource("robot://joint/{joint_id}/state")
@@ -65,12 +56,7 @@ def robot_joint_info(joint_id: str) -> str:
 @mcp.resource("robot://safety/config")
 def robot_safety_config() -> str:
     """Safety system configuration: joint limits, velocity limits, e-stop keywords."""
-    from askme.robot.safety import _DEFAULT_CONFIG as safety_defaults
-
-    return json.dumps({
-        "arm_joint_limits_rad": ["-pi", "pi"],
-        "finger_limits_rad": [0.0, 1.5],
-        "arm_max_velocity_rad_per_step": 0.5,
-        "finger_max_velocity_rad_per_step": 0.3,
-        "estop_keywords": safety_defaults["estop_words"],
-    }, ensure_ascii=False)
+    return json.dumps(
+        get_resource_surface().robot_safety_config_payload(),
+        ensure_ascii=False,
+    )

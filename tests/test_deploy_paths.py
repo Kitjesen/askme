@@ -15,7 +15,7 @@ def test_production_service_defaults_to_sunrise_data_path() -> None:
     assert f"WorkingDirectory={SUNRISE_ASKME_DIR}" in service
     assert f"Environment=ASKME_DIR={SUNRISE_ASKME_DIR}" in service
     assert "EnvironmentFile=-/etc/default/askme" in service
-    assert "askme.blueprints.edge_robot" in service
+    assert "askme.blueprints.presets.edge_robot" in service
     assert LEGACY_ASKME_DIR not in service
 
 

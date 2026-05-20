@@ -119,18 +119,62 @@ def test_cli_runtime_blueprints_outputs_catalog(capsys) -> None:
 
     output = capsys.readouterr().out
     assert "blueprints=1" in output
-    assert "edge_robot: Park Patrol Robot Runtime" in output
+    assert "edge_robot: 园区巡检机器人运行时" in output
     assert "valid=True" in output
 
 
 def test_cli_runtime_blueprints_json(capsys) -> None:
     cli.main(["runtime", "blueprints", "--customer-visible", "--json"])
 
-    payload = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr().out
+    assert "园区巡检机器人运行时" in output
+    payload = json.loads(output)
     names = {item["name"] for item in payload["items"]}
     assert "edge_robot" in names
     assert "mcp" not in names
     assert payload["summary"]["valid_count"] == payload["summary"]["blueprint_count"]
+
+
+def test_cli_json_falls_back_to_ascii_when_stdout_cannot_encode(monkeypatch) -> None:
+    class AsciiStdout:
+        encoding = "ascii"
+
+    monkeypatch.setattr(cli.sys, "stdout", AsciiStdout())
+
+    output = cli._json({"title": "园区巡检机器人运行时"})
+
+    assert "\\u56ed\\u533a" in output
+    assert "园区巡检机器人运行时" not in output
+
+
+def test_cli_json_preserves_chinese_for_local_gbk_terminal(monkeypatch) -> None:
+    class GbkTerminal:
+        encoding = "gbk"
+
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(cli.sys, "stdout", GbkTerminal())
+
+    output = cli._json({"title": "园区巡检机器人运行时"})
+
+    assert "园区巡检机器人运行时" in output
+    assert "\\u56ed\\u533a" not in output
+
+
+def test_cli_json_escapes_chinese_for_non_utf8_pipe(monkeypatch) -> None:
+    class GbkPipe:
+        encoding = "gbk"
+
+        def isatty(self) -> bool:
+            return False
+
+    monkeypatch.setattr(cli.sys, "stdout", GbkPipe())
+
+    output = cli._json({"title": "园区巡检机器人运行时"})
+
+    assert "\\u56ed\\u533a" in output
+    assert "园区巡检机器人运行时" not in output
 
 
 def test_cli_runtime_blueprints_delivery_package_writes_json(tmp_path: Path, capsys) -> None:
@@ -148,12 +192,29 @@ def test_cli_runtime_blueprints_delivery_package_writes_json(tmp_path: Path, cap
 
     console = capsys.readouterr().out
     payload = json.loads(output.read_text(encoding="utf-8"))
-    package = payload["items"][0]["delivery_package"]
 
     assert "delivery-package: blueprint.edge_robot" in console
-    assert package["package_id"] == "blueprint.edge_robot"
-    assert package["deliverables"]["scenario_acceptance"]
-    assert package["operator_runbook"]["start"] == "python -m askme.blueprints.edge_robot"
+    assert payload["package_id"] == "blueprint.edge_robot"
+    assert payload["deliverables"]["scenario_acceptance"]
+    assert payload["operator_runbook"]["start"] == "python -m askme.blueprints.presets.edge_robot"
+
+
+def test_cli_runtime_blueprints_delivery_package_json_is_direct_package(capsys) -> None:
+    cli.main([
+        "runtime",
+        "blueprints",
+        "--name",
+        "park",
+        "--delivery-package",
+        "--json",
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["package_id"] == "blueprint.edge_robot"
+    assert payload["blueprint"] == "edge_robot"
+    assert "items" not in payload
+    assert payload["operator_runbook"]["start"] == "python -m askme.blueprints.presets.edge_robot"
 
 
 def test_cli_runtime_s100p_readiness_bundle_help_lists_field_flags(capsys) -> None:

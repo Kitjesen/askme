@@ -1,8 +1,9 @@
-"""Register all default backend implementations into their registries.
+"""Compatibility entry point for default backend registrations.
 
-Import this module once at startup to populate the registries.
-Existing classes predate the ABC interfaces, so the registry uses a soft
-type check (warn, not raise) until all classes inherit their interface.
+Import this module once at startup to populate the registries. Concrete
+provider-backed implementations are registered by ``askme.providers``; product
+reaction engines are registered by ``askme.pipeline.reactions``. This file stays
+as the stable startup import used by legacy entry points.
 
 Usage::
 
@@ -11,86 +12,8 @@ Usage::
 
 from __future__ import annotations
 
-import logging
+from askme.pipeline.reactions.register_defaults import register_default_reactions
+from askme.providers.register_defaults import register_default_provider_backends
 
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# LLM
-# ---------------------------------------------------------------------------
-from askme.interfaces.llm import llm_registry  # noqa: E402
-from askme.llm.core.client import LLMClient  # noqa: E402
-
-llm_registry.register("openai_compatible")(LLMClient)
-llm_registry.register("openai")(LLMClient)
-llm_registry.register("minimax")(LLMClient)
-llm_registry.register("doubao")(LLMClient)
-llm_registry.register("dashscope")(LLMClient)
-llm_registry.register("deepseek")(LLMClient)
-llm_registry.register("zhipu")(LLMClient)
-llm_registry.register("fake")(LLMClient)
-
-# ---------------------------------------------------------------------------
-# ASR
-# ---------------------------------------------------------------------------
-from askme.interfaces.asr import asr_registry  # noqa: E402
-from askme.voice.asr import ASREngine  # noqa: E402
-
-asr_registry.register("sherpa")(ASREngine)
-
-try:
-    from askme.voice.cloud_asr import CloudASR  # noqa: E402
-
-    asr_registry.register("cloud")(CloudASR)
-except ImportError:
-    logger.debug("CloudASR not available (missing dependencies), skipping registration")
-
-# ---------------------------------------------------------------------------
-# TTS
-# ---------------------------------------------------------------------------
-from askme.interfaces.tts import tts_registry  # noqa: E402
-from askme.voice.tts import TTSEngine  # noqa: E402
-
-tts_registry.register("minimax")(TTSEngine)
-
-# ---------------------------------------------------------------------------
-# Bus
-# ---------------------------------------------------------------------------
-from askme.interfaces.bus import bus_registry  # noqa: E402
-from askme.robot.pulse import Pulse  # noqa: E402
-
-bus_registry.register("pulse")(Pulse)
-
-from askme.robot.mock_pulse import MockPulse  # noqa: E402
-
-bus_registry.register("mock")(MockPulse)
-
-# ---------------------------------------------------------------------------
-# Detector — ChangeDetector registered as a stub.  It does not implement the
-#            full DetectorBackend ABC (no detect()/model_name), but the soft
-#            type check allows registration for discovery purposes.
-#            A proper BPU YOLO backend will be added when the on-device model
-#            wrapper is created.
-# ---------------------------------------------------------------------------
-from askme.interfaces.detector import detector_registry  # noqa: E402
-
-try:
-    from askme.perception.change_detector import ChangeDetector  # noqa: E402
-
-    detector_registry.register("change_detector")(ChangeDetector)
-except ImportError:
-    logger.debug("ChangeDetector not available, skipping registration")
-
-# ---------------------------------------------------------------------------
-# Reaction
-# ---------------------------------------------------------------------------
-from askme.interfaces.reaction import reaction_registry  # noqa: E402
-from askme.pipeline.reaction_engine import HybridReaction, RuleBasedReaction  # noqa: E402
-
-reaction_registry.register("hybrid")(HybridReaction)
-reaction_registry.register("rules")(RuleBasedReaction)
-
-# ---------------------------------------------------------------------------
-# Navigator — no NavigatorBackend adapter exists yet.  LingTu gRPC bridge
-#             will be registered here when wrapped as a NavigatorBackend.
-# ---------------------------------------------------------------------------
+register_default_provider_backends()
+register_default_reactions()

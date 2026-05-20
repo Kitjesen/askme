@@ -23,10 +23,10 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
 from askme.tools.builtin_tools import GetTimeTool, SandboxedBashTool, WriteFileTool
 from askme.tools.tool_registry import ToolRegistry
+
+from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
 
 # ── Mock LLM helpers ──────────────────────────────────────────────────────────
 
@@ -286,6 +286,8 @@ async def test_brain_pipeline_routes_agent_task(tmp_path: Path) -> None:
     """BrainPipeline.execute_skill('agent_task') routes to ThunderAgentShell.run_task()."""
     from askme.pipeline.brain_pipeline import BrainPipeline
 
+    from askme.pipeline.skills.skill_gate import SkillGate
+
     # Minimal mock deps
     audio = MagicMock()
     audio.speak = MagicMock()
@@ -301,6 +303,7 @@ async def test_brain_pipeline_routes_agent_task(tmp_path: Path) -> None:
     skill_mgr.get.return_value = mock_skill
     skill_mgr.get_enabled.return_value = []
     skill_mgr.get_skill_catalog.return_value = "agent_task"
+    skill_executor = MagicMock()
 
     agent_shell = AsyncMock()
     agent_shell.run_task.return_value = "任务完成，脚本已创建。"
@@ -311,10 +314,17 @@ async def test_brain_pipeline_routes_agent_task(tmp_path: Path) -> None:
         memory=MagicMock(),
         tools=MagicMock(),
         skill_manager=skill_mgr,
-        skill_executor=MagicMock(),
+        skill_executor=skill_executor,
         audio=audio,
         splitter=MagicMock(),
         agent_shell=agent_shell,
+    )
+    pipeline.set_skill_gate(
+        SkillGate(
+            skill_manager=skill_mgr,
+            skill_executor=skill_executor,
+            **pipeline.skill_gate_context(),
+        )
     )
 
     result = await pipeline.execute_skill("agent_task", "帮我写一个脚本")
@@ -330,8 +340,9 @@ async def test_brain_pipeline_routes_agent_task(tmp_path: Path) -> None:
 
 def _make_pipeline_with_agent_shell(tmp_path):
     """Build a minimal BrainPipeline with a mock agent_shell."""
-    from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
     from askme.pipeline.brain_pipeline import BrainPipeline
+
+    from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
 
     audio = MagicMock()
     audio.speak = MagicMock()

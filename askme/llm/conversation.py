@@ -1,4 +1,4 @@
-"""Compatibility alias for :mod:`askme.memory.conversation`."""
+"""Compatibility alias for :mod:`askme.memory.core.conversation`."""
 
 from __future__ import annotations
 

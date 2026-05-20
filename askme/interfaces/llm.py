@@ -6,13 +6,13 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from askme.runtime.registry import BackendRegistry
+from askme.interfaces.core.registry import BackendRegistry
 
 
 class LLMBackend(ABC):
     """Abstract LLM interface — chat, stream, tool calling.
 
-    Matches the public API of :class:`askme.llm.client.LLMClient`.
+    Matches the public API of :class:`askme.llm.core.client.LLMClient`.
     """
 
     @abstractmethod

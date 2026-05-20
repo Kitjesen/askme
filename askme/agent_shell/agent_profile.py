@@ -1,4 +1,4 @@
-"""Product-level agent profiles for ThunderAgentShell.
+"""Product-level agent profiles for the autonomous agent shell.
 
 The profile layer mirrors the useful part of Claude Code subagents: a named
 role has a clear purpose, an instruction overlay, and an explicit tool
@@ -15,7 +15,7 @@ from typing import Any
 
 import yaml
 
-from askme.skills.audit import SkillAuditLog
+from askme.skills.governance.audit import SkillAuditLog
 
 
 @dataclass(frozen=True)

@@ -1,14 +1,35 @@
 """Product LLM package.
 
-Root imports stay backward compatible.  Real implementation lives under
+Root imports stay backward compatible. Real implementation lives under
 ``core/``, provider adapters under ``providers/``, and runtime policy under
-``policy/``.
+``policy/``. Cross-domain exports are resolved lazily so importing
+``askme.llm`` does not eagerly initialize memory or interaction modules.
 """
 
-from askme.interaction.intent_router import IntentRouter
-from askme.llm.core.client import LLMClient
-from askme.llm.core.config import LLMConfig
-from askme.llm.core.gateway import LLMGateway
-from askme.memory.conversation import ConversationManager
+from __future__ import annotations
 
-__all__ = ["LLMClient", "LLMConfig", "LLMGateway", "ConversationManager", "IntentRouter"]
+from importlib import import_module
+from typing import Any
+
+_LAZY_EXPORTS = {
+    "ConversationManager": ("askme.memory.core.conversation", "ConversationManager"),
+    "IntentRouter": ("askme.robot_interaction.intent_router", "IntentRouter"),
+    "LLMClient": ("askme.llm.core.client", "LLMClient"),
+    "LLMConfig": ("askme.llm.core.config", "LLMConfig"),
+    "LLMGateway": ("askme.llm.core.gateway", "LLMGateway"),
+}
+
+__all__ = sorted(_LAZY_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = _LAZY_EXPORTS[name]
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

@@ -9,7 +9,8 @@ import logging
 from mcp.server.fastmcp import Context
 
 from askme.errors import INTERNAL_ERROR, SKILL_DISABLED, SKILL_NOT_FOUND, error_response
-from askme.mcp.server import AppContext, mcp
+from askme.mcp.context import AppContext
+from askme.mcp.registration import mcp
 
 logger = logging.getLogger(__name__)
 

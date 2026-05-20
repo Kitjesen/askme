@@ -10,14 +10,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.llm.client import LLMClient
-from askme.runtime.module import In, Module, ModuleRegistry
+from askme.llm.core.client import LLMClient
+from askme.ports import AudioFrontendPort
+from askme.runtime.core.module import In, Module, ModuleRegistry
 from askme.schemas.messages import MemoryContext
-
-try:
-    from askme.voice.audio_agent import AudioAgent
-except ModuleNotFoundError:
-    AudioAgent = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +32,10 @@ class ReactionModule(Module):
     # In ports (auto-wired from provider modules)
     llm_in: In[LLMClient]
     memory_in: In[MemoryContext]
-    voice_in: In[AudioAgent]
+    voice_in: In[AudioFrontendPort]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        from askme.pipeline.reaction_engine import (
+        from askme.pipeline.reactions.reaction_engine import (
             HybridReaction,
             LLMReaction,
             RuleBasedReaction,
@@ -55,14 +51,14 @@ class ReactionModule(Module):
         audio = getattr(voice_mod, "audio", None) if voice_mod else None
 
         # Create our own AlertDispatcher
-        from askme.pipeline.alert_dispatcher import AlertDispatcher
+        from askme.pipeline.field.alert_dispatcher import AlertDispatcher
 
         pro_cfg = cfg.get("proactive", {})
         alert_dispatcher = AlertDispatcher(
             voice=audio,
             config=pro_cfg.get("alerts", {}),
             robot_id=cfg.get("robot", {}).get("robot_id"),
-            robot_name=cfg.get("robot", {}).get("robot_name", "Thunder"),
+            robot_name=cfg.get("robot", {}).get("robot_name", "现场机器人"),
         )
 
         # Read reaction config
@@ -122,4 +118,3 @@ class ReactionModule(Module):
             "status": "ok",
             "backend": self._backend_name,
         }
-

@@ -80,10 +80,17 @@ ignore = [
 "**/__init__.py" = ["F401"]  # re-exports are intentional
 "tests/**" = ["F841"]        # tests often assign for inspection
 # Conditional imports for backend availability detection (cyclonedds/telegram/numpy)
-"askme/robot/pulse.py" = ["F401"]
+"askme/robot/telemetry/pulse.py" = ["F401"]
 "askme/runtime/modules/telegram_module.py" = ["F401"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 norecursedirs = ["tests/tmp", "data/pytest-tmp"]
+addopts = ["-m", "not slow"]
+markers = [
+    "slow: slower integration/scenario coverage excluded from the default fast shard",
+    "scenario: customer or runtime scenario evaluation tests",
+    "e2e: end-to-end workflow tests",
+    "benchmark: benchmark/regression threshold tests",
+]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 
 def test_save_and_load_summary(tmp_path, monkeypatch):
     """Session summaries are saved as .md files and loaded back."""
@@ -63,6 +65,31 @@ def test_max_sessions_limit(tmp_path, monkeypatch):
     # Should only include the most recent ones
     assert f"Session {MAX_RECENT_SESSIONS + 3}" in summaries
     assert "Session 1" not in summaries
+
+
+def test_recent_summaries_cache_expires_and_reloads(tmp_path, monkeypatch):
+    from askme.memory.session import SessionMemory
+
+    clock = {"now": 10.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+
+    sm = SessionMemory(sessions_dir=tmp_path / "sessions")
+    first = sm._sessions_dir / "2026-03-01_120000.md"
+    second = sm._sessions_dir / "2026-03-02_120000.md"
+    first.write_text("first summary", encoding="utf-8")
+
+    summaries = sm.get_recent_summaries()
+    assert "first summary" in summaries
+
+    second.write_text("second summary", encoding="utf-8")
+    clock["now"] = 12.0
+    cached = sm.get_recent_summaries()
+    assert "second summary" not in cached
+
+    clock["now"] = 16.0
+    refreshed = sm.get_recent_summaries()
+    assert "second summary" in refreshed
+    assert "first summary" in refreshed
 
 
 def test_format_messages():

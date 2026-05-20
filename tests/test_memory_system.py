@@ -11,6 +11,7 @@ def _make_system(
     has_episodic=True,
     has_vector=True,
     has_session=True,
+    config=None,
 ):
     llm = MagicMock()
     conversation = MagicMock()
@@ -43,6 +44,7 @@ def _make_system(
         session_memory=session,
         episodic=episodic,
         vector_memory=vector,
+        config=config,
     )
     return ms, llm, conversation, session, episodic, vector
 
@@ -93,6 +95,18 @@ class TestGetMemoryContext:
         # No episodic/session content, but L6 policy rules may be present
         assert "world knowledge" not in ctx
         assert "session context" not in ctx
+
+    def test_policy_context_heading_is_readable_chinese(self, tmp_path):
+        ms, _, _, _, _, _ = _make_system(
+            has_episodic=False,
+            has_session=False,
+            config={"app": {"data_dir": str(tmp_path)}},
+        )
+
+        ctx = ms.get_memory_context("test")
+
+        assert "行为规则:" in ctx
+        assert "琛屼负瑙勫垯" not in ctx
 
 
 class TestReflection:

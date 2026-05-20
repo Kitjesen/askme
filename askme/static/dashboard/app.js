@@ -7,6 +7,7 @@ const pageDescription = document.getElementById("page-description");
 const globalStatusDot = document.getElementById("global-status-dot");
 const globalStatusText = document.getElementById("global-status-text");
 const ENDPOINTS = {
+  chat: "/api/chat",
   governance: "/api/governance/operator-directory",
   identityReadiness: "/api/governance/identity-readiness",
   currentOperator: "/api/governance/current-operator",
@@ -21,6 +22,7 @@ const ENDPOINTS = {
   knowledgeList: "/api/knowledge/list",
   knowledgeUpdate: "/api/knowledge/update",
   memorySearch: "/api/memory/search",
+  memoryHealth: "/api/memory/health",
   spaceHealth: "/api/space/health",
   spacePoints: "/api/space/points",
   spaceServicePoints: "/api/space/service-points",
@@ -69,13 +71,37 @@ const ENDPOINTS = {
   generatedSkills: "/api/skills/generated",
   skillPackages: "/api/skill-packages",
   skillGrowthBacklog: "/api/skill-growth/backlog",
+  scenarioIntents: "/api/scenario-intents",
+  scenarioIntentPreview: "/api/scenario-intents/preview",
+  dashboardPages: "/api/dashboard/pages",
+  apiSurfaces: "/api/surfaces",
   blueprints: "/api/blueprints",
+  parkBlueprint: "/api/blueprints/park",
 };
 
-const pages = [
+const KNOWLEDGE_CATEGORIES = [
+  { id: "route", label: "路线与带路", group: "空间", description: "道路、路线说明、带路路径、不可通行路段" },
+  { id: "location", label: "地点与点位", group: "空间", description: "楼宇、入口、卫生间、服务点、打卡点" },
+  { id: "zone", label: "区域与地图", group: "空间", description: "园区分区、禁行区、停车区、巡检区域" },
+  { id: "merchant", label: "商户与服务", group: "访客", description: "商户、业态、服务窗口、开放状态和别名" },
+  { id: "visitor_service", label: "游客服务话术", group: "访客", description: "问询、欢迎、解释、固定话术和服务边界" },
+  { id: "equipment", label: "设备资产", group: "运维", description: "设备位置、编号、状态说明、保养要求" },
+  { id: "inspection", label: "巡检 SOP", group: "运维", description: "巡检步骤、检查项、拍照要求、记录规范" },
+  { id: "incident", label: "异常处置", group: "运维", description: "摔倒、卡住、挡路、故障、违停、垃圾桶满" },
+  { id: "safety", label: "安防应急", group: "安全", description: "陌生人、烟火、人员聚集、危险区域" },
+  { id: "contact", label: "通知联系人", group: "安全", description: "保安、保洁、值班、物业、钉钉群和升级联系人" },
+  { id: "schedule", label: "时间与班次", group: "运营", description: "开放时间、巡检频次、值班时间、任务窗口" },
+  { id: "sensor", label: "传感器与协议", group: "技术", description: "摄像头、烟感、温度、电机、定位和第三方协议" },
+  { id: "policy", label: "管理制度", group: "治理", description: "客户规章、权限、审批、运营要求和交付边界" },
+  { id: "faq", label: "常见问答", group: "访客", description: "客户和访客高频问题及标准回答" },
+  { id: "general", label: "其他资料", group: "通用", description: "暂未归类但需要保留来源和责任人的资料" },
+];
+
+const fallbackPages = [
   { path: "/dashboard", key: "overview", label: "总览", hint: "功能地图", title: "现场任务平台", kicker: "产品总览", desc: "给客户和交付团队看的功能地图：语音入口、客户项目、现场事件、知识库、能力中心和交付检查分开验收。" },
   { path: "/dashboard/conversation", key: "conversation", label: "对话", hint: "语音文本", title: "语音和文本对话", kicker: "真实交互", desc: "用于输入任务、问路、知识问答和安全确认。回答需要展示证据、任务状态和拒答原因。" },
   { path: "/dashboard/projects", key: "projects", label: "客户项目", hint: "对象目录", title: "客户项目与对象目录", kicker: "方案商交付", desc: "为每个客户项目维护园区、厂区、仓储或景区对象目录，并绑定视觉模型、传感器协议、技能包、验收用例和交付包。" },
+  { path: "/dashboard/scenarios", key: "scenarios", label: "场景验收", hint: "客户能看懂", title: "场景验收矩阵", kicker: "产品页", desc: "把问路、带路、违停、烟火、垃圾桶、陌生人、机器人故障、恶意挡路和人群聚集逐条展示成客户能验收的业务能力。" },
   { path: "/dashboard/field", key: "field", label: "现场事件", hint: "安防巡检", title: "现场事件处置", kicker: "园区场景", desc: "覆盖摔倒、卡住、陌生人拍照、违停、烟雾火灾、垃圾桶满溢、人群聚集、游客问路和带路。" },
   { path: "/dashboard/space", key: "space", label: "空间认知", hint: "问路带路", title: "园区空间认知", kicker: "访客服务", desc: "管理园区点位、别名、问询服务点和带路路线，模拟访客停留后的主动问候、目的地解析和带路决策。" },
   { path: "/dashboard/knowledge", key: "knowledge", label: "知识库", hint: "上传审批", title: "知识管理", kicker: "可审计回答", desc: "上传、预览、审批、检索和重建索引。过期、冲突或未审批知识不能直接进入回答。" },
@@ -83,6 +109,54 @@ const pages = [
   { path: "/dashboard/voice", key: "voice", label: "语音音色", hint: "播报策略", title: "语音音色和实时链路", kicker: "声音系统", desc: "按巡检、访客、安防、紧急告警、夜间低扰等场景切换音色和提示音，并查看端到端延迟。" },
   { path: "/dashboard/delivery", key: "delivery", label: "交付检查", hint: "可验收", title: "交付检查", kicker: "上线门禁", desc: "把演示、试点、真实硬件和外部通知的缺口拆成清晰门禁，避免把实验室能力说成生产上线。" },
   { path: "/dashboard/audit", key: "audit", label: "审计", hint: "证据包", title: "审计证据包", kicker: "交付证据", desc: "查看客户可读的事件证据、复核状态、导出历史和交付声明边界。" },
+];
+
+const fallbackPageSections = {
+  customer: { label: "客户可见", description: "客户、交付和销售一眼能看懂的产品页面。" },
+  operations: { label: "运行操作", description: "现场运行、语音交互和业务处置入口。" },
+  governance: { label: "治理交付", description: "权限、审计、验收和交付证据。" },
+};
+let pages = fallbackPages;
+let pageSections = fallbackPageSections;
+let dashboardPageRegistryReady = false;
+
+const customerInterfacePrinciples = [
+  {
+    surface: "对话入口",
+    humanQuestion: "我现在能不能说话，说完会发生什么？",
+    customerPromise: "先理解、再确认；问路和知识问答直接回答，机器人任务必须展示目标和风险。",
+    guardrail: "听不清就澄清，证据不足就拒答，高风险动作不直接执行。",
+  },
+  {
+    surface: "现场事件",
+    humanQuestion: "这件事严重吗，通知了谁，现场还要做什么？",
+    customerPromise: "每个异常都显示地点、证据、响应组、处理状态和关闭条件。",
+    guardrail: "高风险事件不能一键关闭，必须留下复核人和处理说明。",
+  },
+  {
+    surface: "空间问路",
+    humanQuestion: "机器人真的知道我要去哪里吗？",
+    customerPromise: "先列出候选点位和别名，再确认唯一目的地，最后给语音指路或带路。",
+    guardrail: "点位不存在、路线不可通行或目的地模糊时不编造路线。",
+  },
+  {
+    surface: "知识库",
+    humanQuestion: "这句话的依据在哪里，能不能对客户说？",
+    customerPromise: "先看已有知识和证据，再上传、预览、审批；只有可对外知识进入回答。",
+    guardrail: "仅内部、待复核、过期、冲突和未审批资料不能进入客户回答。",
+  },
+  {
+    surface: "客户项目",
+    humanQuestion: "这套能力属于哪个客户、哪个现场、哪些对象？",
+    customerPromise: "客户、项目、现场对象、资源、技能包和验收用例必须绑定在一起。",
+    guardrail: "跨客户数据不能混用，复制项目要带边界、资源和验收缺口。",
+  },
+  {
+    surface: "交付审计",
+    humanQuestion: "这套系统现在能不能交付，证据够不够？",
+    customerPromise: "用交付门禁和审计包说明可演示、可试点还是可上线。",
+    guardrail: "未接真实硬件、身份系统或通知链路时，页面不能暗示生产可用。",
+  },
 ];
 let health = {};
 let governance = { operators: [] };
@@ -98,7 +172,14 @@ let selectedAgentProfilePreview = null;
 let auditRecordCache = [];
 let selectedAuditReview = null;
 let latestSpaceGuidePayload = null;
+let conversationSpaceContext = {
+  servicePoints: [],
+  points: [],
+  selectedServicePointId: localStorage.getItem("askme.chat.servicePointId") || "",
+  selectedPointId: "",
+};
 let capabilityScenarioItems = {};
+let scenarioPreviewResult = null;
 let currentProjectEditProfile = null;
 let currentCustomerProjectItems = [];
 let currentCustomerProjectTemplateItems = [];
@@ -118,6 +199,48 @@ function safeDomId(value) {
   return String(value || "item").replace(/[^A-Za-z0-9_-]/g, "-");
 }
 
+function normalizeDashboardPage(page, fallback = {}) {
+  const order = Number(page?.order ?? fallback.order ?? 999);
+  return {
+    ...fallback,
+    ...page,
+    path: page?.path || fallback.path || "/dashboard",
+    key: page?.key || fallback.key || "overview",
+    label: page?.label || fallback.label || page?.key || "Page",
+    hint: page?.hint || fallback.hint || "",
+    title: page?.title || fallback.title || page?.label || fallback.label || "Askme",
+    kicker: page?.kicker || fallback.kicker || "",
+    desc: page?.description || page?.desc || fallback.description || fallback.desc || "",
+    section: page?.section || fallback.section || "customer",
+    audience: page?.audience || fallback.audience || "customer",
+    order: Number.isFinite(order) ? order : 999,
+  };
+}
+
+function applyDashboardPagePayload(payload) {
+  const items = Array.isArray(payload?.pages) ? payload.pages : [];
+  if (!items.length) return false;
+  const fallbackByKey = Object.fromEntries(fallbackPages.map((page) => [page.key, page]));
+  const nextPages = items
+    .map((page) => normalizeDashboardPage(page, fallbackByKey[page?.key] || {}))
+    .filter((page) => page.path && page.key)
+    .sort((left, right) => left.order - right.order || left.label.localeCompare(right.label));
+  if (!nextPages.length) return false;
+  pages = nextPages;
+  pageSections = { ...fallbackPageSections, ...(payload.sections || {}) };
+  dashboardPageRegistryReady = true;
+  return true;
+}
+
+async function loadDashboardPageRegistry() {
+  const payload = await getJson(ENDPOINTS.dashboardPages, null);
+  if (!applyDashboardPagePayload(payload)) {
+    pages = fallbackPages;
+    pageSections = fallbackPageSections;
+    dashboardPageRegistryReady = false;
+  }
+}
+
 function currentPage() {
   const path = location.pathname.replace(/\/$/, "") || "/dashboard";
   return pages.find((page) => page.path === path) || pages[0];
@@ -130,11 +253,33 @@ function setHeader(page) {
 }
 
 function renderNav(activePage) {
-  nav.innerHTML = pages.map((page) => `
-    <a class="nav-link ${page.key === activePage.key ? "active" : ""}" href="${page.path}">
-      <span>${page.label}</span><small>${page.hint}</small>
-    </a>
-  `).join("");
+  const knownSections = ["customer", "operations", "governance"];
+  const grouped = pages.reduce((acc, page) => {
+    const key = page.section || "customer";
+    acc[key] = acc[key] || [];
+    acc[key].push(page);
+    return acc;
+  }, {});
+  const sectionOrder = [
+    ...knownSections,
+    ...Object.keys(grouped).filter((section) => !knownSections.includes(section)).sort(),
+  ];
+  const renderedSections = sectionOrder
+    .filter((section) => grouped[section]?.length)
+    .map((section) => {
+      const meta = pageSections[section] || {};
+      return `
+        <div class="nav-section" data-dashboard-page-section="${esc(section)}">
+          <div class="nav-section-title">${esc(meta.label || section)}</div>
+          ${grouped[section].map((page) => `
+            <a class="nav-link ${page.key === activePage.key ? "active" : ""}" href="${page.path}" title="${esc(page.hint || page.desc || page.label)}">
+              <span>${esc(page.label)}</span>
+            </a>
+          `).join("")}
+        </div>
+      `;
+    });
+  nav.innerHTML = renderedSections.join("");
 }
 
 function routeTo(path) {
@@ -237,22 +382,38 @@ function renderOperatorCard() {
   const readiness = governance.readiness || operatorSession?.readiness || {};
   const findings = Array.isArray(readiness.findings) ? readiness.findings : [];
   const warnings = Array.isArray(operatorSession?.warnings) ? operatorSession.warnings : [];
+  const permissions = currentOperatorPermissions();
+  const activeLabel = active.display_name || active.operator_id || "operator";
+  const initial = String(activeLabel).trim().slice(0, 1).toUpperCase() || "A";
+  const identityText = active.authenticated ? "企业身份系统" : "本地演示账号";
+  const directoryText = activeKnown ? "已在账号目录" : "未登记账号";
+  const modeText = `${governance.mode || "demo_config"} / ${governance.identity_provider || "local_config"}`;
   const options = operators.length
     ? `${activeKnown ? "" : `<option value="${esc(active.operator_id)}" selected>${esc(active.operator_id)}（未登记）</option>`}${operators.map((operator) => `<option value="${esc(operator.operator_id)}" ${operator.operator_id === active.operator_id ? "selected" : ""}>${esc(operator.display_name || operator.operator_id)} (${esc(operatorRolesText(operator))})</option>`).join("")}`
     : `<option value="${esc(active.operator_id)}">${esc(active.operator_id)} (${esc(operatorRolesText(active))})</option>`;
   return `
     <div class="operator-card">
-      <div>
-        <strong>当前操作人</strong>
-        <p>${esc(active.display_name || active.operator_id)} · ${esc(operatorRolesText(active))}</p>
+      <div class="operator-card-head">
+        <span class="operator-avatar">${esc(initial)}</span>
+        <div>
+          <span class="operator-kicker">当前操作人</span>
+          <strong>${esc(activeLabel)}</strong>
+          <p>${esc(operatorRolesText(active))}</p>
+        </div>
       </div>
-      <select id="operator-select">${options}</select>
+      <label class="operator-select-label">
+        <span>切换演示身份</span>
+        <select id="operator-select">${options}</select>
+      </label>
       <div class="operator-meta">
-        ${badge(activeKnown ? "已在目录" : "未登记", activeKnown ? "ok" : "err")}
-        ${badge(active.authenticated ? "企业身份" : "本地演示身份", active.authenticated ? "ok" : "warn")}
-        ${badge(`${currentOperatorPermissions().length} 项权限`, currentOperatorPermissions().length ? "ok" : "err")}
+        ${badge(directoryText, activeKnown ? "ok" : "err")}
+        ${badge(identityText, active.authenticated ? "ok" : "warn")}
+        ${badge(`${permissions.length} 项权限`, permissions.length ? "ok" : "err")}
       </div>
-      <p>${esc(governance.mode || "demo_config")} / ${esc(governance.identity_provider || "local_config")}；${esc(readiness.status || "demo_or_trial_only")}</p>
+      <div class="operator-detail-row">
+        <span>身份源：${esc(modeText)}</span>
+        <span>准入状态：${esc(readiness.status || "demo_or_trial_only")}</span>
+      </div>
       ${warnings.length ? `<div class="operator-warnings">${warnings.slice(0, 2).map((item) => `<span>${esc(item)}</span>`).join("")}</div>` : ""}
       ${findings.length ? `<div class="operator-warnings">${findings.slice(0, 2).map((item) => `<span>${esc(item.message || item.code)}</span>`).join("")}</div>` : ""}
     </div>
@@ -314,8 +475,8 @@ function badge(text, cls = "") {
 
 function statusClass(value) {
   const text = String(value || "").toLowerCase();
-  if (["ok", "ready", "healthy", "normal", "production_ready", "passed"].includes(text)) return "ok";
-  if (["degraded", "warning", "disabled", "ready_for_lab", "insufficient_evidence"].includes(text)) return "warn";
+  if (["ok", "ready", "healthy", "normal", "production_ready", "passed", "ready_for_validation", "ready_for_site_validation"].includes(text)) return "ok";
+  if (["degraded", "warning", "disabled", "ready_for_lab", "insufficient_evidence", "configuration_incomplete", "missing_configuration"].includes(text)) return "warn";
   if (["error", "failed", "unhealthy", "missing", "blocked"].includes(text)) return "err";
   return "";
 }
@@ -351,13 +512,15 @@ async function refreshGlobalStatus() {
 }
 
 async function renderOverview() {
-  const [eventsPayload, scenariosPayload, readiness, notification, siteProfiles, customerProjects] = await Promise.all([
+  const [eventsPayload, scenariosPayload, readiness, notification, siteProfiles, customerProjects, apiSurfaces, dashboardPages] = await Promise.all([
     getJson("/api/field/events?limit=6&needs_attention=true", { events: [] }),
     getJson("/api/field/scenarios", { scenarios: [] }),
     getJson("/api/field/readiness", {}),
     getJson("/api/field/notification-preflight?status_as_200=true", {}),
     getJson(ENDPOINTS.fieldSiteProfiles, { sites: [], summary: {} }),
     getJson(ENDPOINTS.fieldCustomerProjects, { projects: [], customers: [], summary: {} }),
+    getJson(ENDPOINTS.apiSurfaces, { surfaces: [], policy: {} }),
+    getJson(ENDPOINTS.dashboardPages, { pages: [], summary: {}, policy: {} }),
   ]);
   const events = eventsPayload.events || eventsPayload.items || [];
   const scenarios = scenariosPayload.scenarios || scenariosPayload.items || [];
@@ -377,6 +540,9 @@ async function renderOverview() {
         <div><b>${esc(readiness.status || "unknown")}</b><span>交付门禁</span></div>
       </div>
     </section>
+    ${renderCustomerInterfacePrinciples()}
+    ${renderApiSurfaceMap(apiSurfaces)}
+    ${renderDashboardPageContracts(dashboardPages)}
     <section class="grid three">
       ${renderOperatorCard()}
       ${renderIdentityGatewayCard()}
@@ -404,6 +570,146 @@ async function renderOverview() {
     </section>
   `;
   wireOperatorControls();
+}
+
+function renderCustomerInterfacePrinciples() {
+  return `
+    <section class="card interface-principles-card">
+      <div class="section-title-row">
+        <div>
+          <p class="page-kicker">客户接口原则</p>
+          <h2>每个页面都要让客户知道：能做什么、依据什么、风险在哪里</h2>
+        </div>
+        ${badge("人能理解，才算产品")}
+      </div>
+      <div class="interface-principles-grid">
+        ${customerInterfacePrinciples.map((item) => `
+          <article class="interface-principle">
+            <strong>${esc(item.surface)}</strong>
+            <p>${esc(item.humanQuestion)}</p>
+            <span>${esc(item.customerPromise)}</span>
+            <small>${esc(item.guardrail)}</small>
+          </article>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+const surfaceProductNames = {
+  platform: "平台监控",
+  product: "客户可见",
+  admin: "交付治理",
+  internal: "内部集成",
+};
+
+const surfaceProductNotes = {
+  platform: "只展示运行健康、指标和部署状态，帮助交付判断系统是否在线。",
+  product: "给客户和现场操作员使用，承载对话、知识、事件、问路、能力和语音页面。",
+  admin: "给交付工程师、主管和产品运营使用，处理账号、审批、审计和技能治理。",
+  internal: "给机器人 runtime、设备和低层集成使用，不直接出现在客户页面里。",
+};
+
+function renderApiSurfaceMap(payload = {}) {
+  const surfaces = Array.isArray(payload.surfaces) ? payload.surfaces : [];
+  const byName = Object.fromEntries(surfaces.map((item) => [item.name, item]));
+  const ordered = ["product", "admin", "platform", "internal"]
+    .map((name) => byName[name])
+    .filter(Boolean);
+  if (!ordered.length) return "";
+  const policy = payload.policy || {};
+  return `
+    <section class="card api-surface-card">
+      <div class="section-title-row">
+        <div>
+          <p class="page-kicker">产品接口边界</p>
+          <h2>客户页面只看产品能力，交付和内部调试分层管理</h2>
+          <p>上层页面必须依赖客户可见接口；审批、审计和机器人底层回调不能混进客户说明里。</p>
+        </div>
+        ${badge(policy.internal_surface_must_not_drive_customer_ui ? "边界已启用" : "待检查", policy.internal_surface_must_not_drive_customer_ui ? "ok" : "warn")}
+      </div>
+      <div class="api-surface-grid">
+        ${ordered.map((surface) => renderApiSurfaceCard(surface)).join("")}
+      </div>
+      <div class="row-meta api-surface-rule">
+        <span>产品页：${policy.product_surface_is_customer_visible ? "客户可见" : "待确认"}</span>
+        <span>内部接口：${policy.internal_surface_must_not_drive_customer_ui ? "不驱动客户 UI" : "需要隔离"}</span>
+        <span>旧接口：${policy.legacy_health_server_paths_are_migration_only ? "迁移期兼容" : "未标注"}</span>
+      </div>
+    </section>
+  `;
+}
+
+function renderDashboardPageContracts(payload = {}) {
+  const pageItems = Array.isArray(payload.pages) ? payload.pages : [];
+  if (!pageItems.length) return "";
+  const summary = payload.summary || {};
+  const policy = payload.policy || {};
+  const blockedCount = Number(summary.primary_endpoint_missing_count || 0)
+    + Number(summary.primary_endpoint_internal_count || 0)
+    + Number(summary.primary_endpoint_unclassified_count || 0);
+  return `
+    <section class="card dashboard-page-contract-card">
+      <div class="section-title-row">
+        <div>
+          <p class="page-kicker">页面入口自检</p>
+          <h2>每个客户页面都绑定真实后端入口和证据承诺</h2>
+          <p>页面不是展示壳：主入口必须存在于 API 路由表，不能指向 internal 或未归类接口。</p>
+        </div>
+        ${badge(blockedCount ? `阻塞 ${blockedCount}` : "入口正常", blockedCount ? "warn" : "ok")}
+      </div>
+      <div class="dashboard-page-contract-summary">
+        <div><b>${esc(summary.page_count ?? pageItems.length)}</b><span>页面</span></div>
+        <div><b>${esc(summary.primary_endpoint_available_count ?? "-")}</b><span>主入口可用</span></div>
+        <div><b>${esc(summary.primary_endpoint_missing_count ?? 0)}</b><span>缺失入口</span></div>
+        <div><b>${esc(summary.primary_endpoint_internal_count ?? 0)}</b><span>误指内部</span></div>
+      </div>
+      <div class="dashboard-page-contract-grid">
+        ${pageItems.map((page) => renderDashboardPageContractItem(page)).join("")}
+      </div>
+      <div class="row-meta api-surface-rule">
+        <span>页面注册表：${policy.dashboard_shell_uses_registered_pages ? "后端驱动" : "待确认"}</span>
+        <span>入口存在：${policy.primary_endpoints_must_exist_in_route_inventory ? "已检查" : "有缺口"}</span>
+        <span>内部隔离：${policy.customer_pages_must_not_point_to_internal_or_unclassified_routes ? "已隔离" : "需整改"}</span>
+      </div>
+    </section>
+  `;
+}
+
+function renderDashboardPageContractItem(page = {}) {
+  const status = page.primary_endpoint_status || {};
+  const safe = status.customer_safe === true;
+  const surfaces = Array.isArray(status.surfaces) ? status.surfaces.join(" / ") : "-";
+  const methods = Array.isArray(status.methods) ? status.methods.join(" / ") : "-";
+  const evidence = Array.isArray(page.evidence_promises) ? page.evidence_promises.slice(0, 3) : [];
+  return `
+    <article class="dashboard-page-contract-item ${safe ? "ok" : "warn"}">
+      <div>
+        <strong>${esc(page.label || page.key || "页面")}</strong>
+        ${badge(safe ? "可用" : "需检查", safe ? "ok" : "warn")}
+      </div>
+      <p>${esc(page.primary_endpoint || "-")}</p>
+      <small>${esc(surfaces)} · ${esc(methods || "-")}</small>
+      <span>${esc(evidence.join(" / ") || "未配置证据承诺")}</span>
+    </article>
+  `;
+}
+
+function renderApiSurfaceCard(surface = {}) {
+  const name = String(surface.name || "unknown");
+  const owns = Array.isArray(surface.owns) ? surface.owns.slice(0, 4) : [];
+  const blocked = Array.isArray(surface.must_not_expose) ? surface.must_not_expose.slice(0, 3) : [];
+  return `
+    <article class="api-surface-item ${esc(name)}">
+      <div>
+        <span>${esc(surfaceProductNames[name] || name)}</span>
+        <strong>${esc(surface.package || "-")}</strong>
+      </div>
+      <p>${esc(surfaceProductNotes[name] || surface.audience || "未配置说明")}</p>
+      <small>负责：${esc(owns.join(" / ") || "-")}</small>
+      ${blocked.length ? `<small class="risk">不暴露：${esc(blocked.join(" / "))}</small>` : ""}
+    </article>
+  `;
 }
 
 function renderReadinessCard(readiness = {}, notification = {}) {
@@ -474,12 +780,23 @@ function renderConversation() {
   app.innerHTML = `
     <section class="split-view">
       <div>
+        <div class="chat-context-card">
+          <div>
+            <strong>现场上下文</strong>
+            <p id="chat-location-summary">正在读取问询点，未读取前仍可普通对话。</p>
+          </div>
+          <label>当前问询点
+            <select id="chat-service-point">
+              <option value="">正在读取问询点</option>
+            </select>
+          </label>
+        </div>
         <div id="chat-box" class="chat-window"><div class="empty-state">输入或说出任务，例如：巡检 A 区</div></div>
         <div class="quick-actions">
           <button data-fill="巡检 A 区">巡检 A 区</button>
           <button data-fill="发现陌生人拍照">陌生人拍照</button>
           <button data-fill="垃圾桶满溢">垃圾桶满溢</button>
-          <button data-fill="去 3 号楼怎么走">访客问路</button>
+          <button data-fill="咖啡店在哪">访客问路</button>
         </div>
         <div class="chat-input">
           <input id="chat-input" placeholder="输入任务或问题，例如：巡检 A 区">
@@ -506,18 +823,189 @@ function renderConversation() {
     if (event.key === "Enter") sendChat();
   });
   renderVoiceState();
+  loadConversationSpaceContext();
   pollLive();
 }
 
-function addChatMessage(text, role = "system") {
+async function loadConversationSpaceContext() {
+  const [servicePointsPayload, pointsPayload] = await Promise.all([
+    getJson(ENDPOINTS.spaceServicePoints, { service_points: [] }),
+    getJson(ENDPOINTS.spacePoints, { points: [] }),
+  ]);
+  if (!document.getElementById("chat-service-point")) return;
+  conversationSpaceContext.servicePoints = Array.isArray(servicePointsPayload.service_points) ? servicePointsPayload.service_points : [];
+  conversationSpaceContext.points = Array.isArray(pointsPayload.points) ? pointsPayload.points : [];
+  const stored = localStorage.getItem("askme.chat.servicePointId") || conversationSpaceContext.selectedServicePointId || "";
+  const first = conversationSpaceContext.servicePoints[0]?.service_point_id || "";
+  const next = conversationSpaceContext.servicePoints.some((item) => item.service_point_id === stored) ? stored : first;
+  conversationSpaceContext.selectedServicePointId = next;
+  renderConversationSpaceControls();
+}
+
+function renderConversationSpaceControls() {
+  const select = document.getElementById("chat-service-point");
+  if (!select) return;
+  const items = conversationSpaceContext.servicePoints;
+  if (!items.length) {
+    select.innerHTML = `<option value="">未配置问询点</option>`;
+    select.disabled = true;
+    conversationSpaceContext.selectedServicePointId = "";
+    conversationSpaceContext.selectedPointId = "";
+    renderConversationLocationSummary();
+    return;
+  }
+  select.disabled = false;
+  select.innerHTML = items.map((item) => `
+    <option value="${esc(item.service_point_id)}">${esc(item.service_point_name || item.service_point_id)}</option>
+  `).join("");
+  select.value = conversationSpaceContext.selectedServicePointId || items[0].service_point_id || "";
+  setConversationSpaceSelection(select.value, false);
+  select.addEventListener("change", () => setConversationSpaceSelection(select.value, true));
+}
+
+function setConversationSpaceSelection(servicePointId, persist = true) {
+  const servicePoint = conversationSpaceContext.servicePoints.find((item) => item.service_point_id === servicePointId) || {};
+  conversationSpaceContext.selectedServicePointId = servicePoint.service_point_id || "";
+  conversationSpaceContext.selectedPointId = servicePoint.point_id || "";
+  if (persist && conversationSpaceContext.selectedServicePointId) {
+    localStorage.setItem("askme.chat.servicePointId", conversationSpaceContext.selectedServicePointId);
+  }
+  renderConversationLocationSummary();
+}
+
+function conversationPointName(pointId) {
+  const point = conversationSpaceContext.points.find((item) => item.point_id === pointId) || {};
+  return point.point_name || pointId || "";
+}
+
+function renderConversationLocationSummary() {
+  const el = document.getElementById("chat-location-summary");
+  if (!el) return;
+  const servicePoint = conversationSpaceContext.servicePoints.find(
+    (item) => item.service_point_id === conversationSpaceContext.selectedServicePointId,
+  ) || {};
+  if (!servicePoint.service_point_id) {
+    el.textContent = "未选择问询点时，可以普通对话；最近地点、路线和带路判断会缺少当前位置。";
+    return;
+  }
+  const pointName = conversationPointName(servicePoint.point_id);
+  el.textContent = `按 ${servicePoint.service_point_name || servicePoint.service_point_id} 判断当前位置${pointName ? `，关联点位：${pointName}` : ""}。问路只回答，不自动启动带路。`;
+}
+
+function chatSpaceContextPayload() {
+  const servicePoint = conversationSpaceContext.servicePoints.find(
+    (item) => item.service_point_id === conversationSpaceContext.selectedServicePointId,
+  ) || {};
+  const payload = { operator_id: operatorId() };
+  if (servicePoint.service_point_id) payload.service_point_id = servicePoint.service_point_id;
+  const pointId = servicePoint.point_id || conversationSpaceContext.selectedPointId;
+  if (pointId) payload.current_point_id = pointId;
+  return payload;
+}
+
+function addChatMessage(text, role = "system", meta = {}) {
   const box = document.getElementById("chat-box");
   if (!box) return;
   if (box.querySelector(".empty-state")) box.innerHTML = "";
   const div = document.createElement("div");
   div.className = `chat-message ${role}`;
-  div.textContent = text;
+  div.innerHTML = `
+    <div class="chat-message-text">${esc(text || "")}</div>
+    ${role === "assistant" ? renderChatEvidenceMeta(meta) : ""}
+  `;
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
+}
+
+function renderChatEvidenceMeta(payload = {}) {
+  const evidence = Array.isArray(payload.evidence) ? payload.evidence : [];
+  const rag = payload.rag || {};
+  const dropped = Array.isArray(rag.dropped_evidence) ? rag.dropped_evidence : [];
+  const policy = rag.answer_policy || payload.answer_policy || {};
+  const policyHtml = renderChatRagPolicy(policy, Boolean(payload.rag_blocked));
+  const spaceHtml = renderChatSpacePolicy(payload);
+  if (evidence.length) {
+    return `
+      <div class="chat-evidence-panel">
+        <div class="chat-evidence-head">
+          <strong>回答依据</strong>
+          <span>${esc(rag.last_backend || rag.backend || "")}</span>
+        </div>
+        ${evidence.slice(0, 3).map((item) => renderChatEvidenceItem(item, false)).join("")}
+      </div>
+      ${spaceHtml}
+      ${policyHtml}
+    `;
+  }
+  if (dropped.length) {
+    return `
+      <div class="chat-evidence-panel warn">
+        <div class="chat-evidence-head">
+          <strong>未采用资料</strong>
+          <span>${esc(policy.state || "blocked")}</span>
+        </div>
+        ${dropped.slice(0, 3).map((item) => renderChatEvidenceItem(item, true)).join("")}
+      </div>
+      ${spaceHtml}
+      ${policyHtml}
+    `;
+  }
+  return `${spaceHtml}${policyHtml}`;
+}
+
+function renderChatEvidenceItem(item = {}, dropped = false) {
+  const text = item.text || item.memory || item.summary || "";
+  const source = item.source || item.source_file || item.record_id || item.source_record_id || "知识库";
+  const category = item.category || item.kind || "证据";
+  const version = item.evidence_version || item.source_version || "";
+  const reason = dropped ? item.drop_reason || item.reason || "未进入回答" : item.freshness_state || "已采用";
+  return `
+    <div class="chat-evidence-item ${dropped ? "dropped" : ""}">
+      <p>${esc(text)}</p>
+      <div class="chat-evidence-meta">
+        <span>${esc(category)}</span>
+        <span>${esc(source)}</span>
+        ${version ? `<span>版本 ${esc(version)}</span>` : ""}
+        <span>${esc(reason)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderChatRagPolicy(policy = {}, blocked = false) {
+  if (!policy || !Object.keys(policy).length) return "";
+  const state = policy.state || "";
+  const action = policy.action || "";
+  const reason = policy.reason || "";
+  if (!state && !action && !reason) return "";
+  const kind = blocked || ["stale", "conflict", "unapproved"].includes(state) ? "warn" : "ok";
+  return `
+    <div class="chat-rag-policy ${kind}">
+      <span>证据策略：${esc(state || "-")}</span>
+      ${action ? `<span>${esc(action)}</span>` : ""}
+      ${reason ? `<span>${esc(reason)}</span>` : ""}
+    </div>
+  `;
+}
+
+function renderChatSpacePolicy(payload = {}) {
+  const space = payload.space_resolution || {};
+  const resolution = space.resolution || {};
+  if (!space.available || !resolution || !Object.keys(resolution).length) return "";
+  const point = resolution.point || {};
+  const candidates = Array.isArray(resolution.candidates) ? resolution.candidates : [];
+  const candidateCount = resolution.candidate_count ?? candidates.length;
+  const firstCandidate = candidates[0] || {};
+  const pointName = point.point_name || firstCandidate.point_name || "";
+  const action = space.does_not_start_guide ? "只回答，不启动带路" : "需要人工确认后再执行";
+  return `
+    <div class="chat-rag-policy ok">
+      <span>园区空间认知</span>
+      <span>${esc(action)}</span>
+      ${pointName ? `<span>${esc(pointName)}</span>` : ""}
+      ${candidateCount ? `<span>候选 ${esc(candidateCount)}</span>` : ""}
+    </div>
+  `;
 }
 
 async function sendChat() {
@@ -527,9 +1015,14 @@ async function sendChat() {
   chatStarted = true;
   input.value = "";
   addChatMessage(text, "user");
-  const response = await postJson("/api/chat", { text, speak: true, play_audio: true });
+  const response = await postJson(ENDPOINTS.chat, {
+    text,
+    speak: true,
+    play_audio: true,
+    ...chatSpaceContextPayload(),
+  });
   const payload = response.payload || {};
-  if (payload.reply) addChatMessage(payload.reply, "assistant");
+  if (payload.reply) addChatMessage(payload.reply, "assistant", payload);
   else addChatMessage(payload.error || "服务没有返回可展示内容", "system");
 }
 
@@ -544,7 +1037,11 @@ async function pollLive() {
   if (visible.length === chatRenderedCount) return;
   chatRenderedCount = visible.length;
   box.innerHTML = "";
-  visible.forEach((message) => addChatMessage(message.content, message.role === "user" ? "user" : "assistant"));
+  visible.forEach((message) => addChatMessage(
+    message.content,
+    message.role === "user" ? "user" : "assistant",
+    message,
+  ));
 }
 
 function renderVoiceState() {
@@ -552,6 +1049,417 @@ function renderVoiceState() {
   const interaction = voice.interaction || {};
   const el = document.getElementById("voice-state-text");
   if (el) el.textContent = interaction.can_talk ? "可以说话" : interaction.hint || voice.agent_state || "未知";
+}
+
+const CUSTOMER_SCENARIO_DEFINITIONS = [
+  {
+    id: "wayfinding_help_point",
+    title: "路人指路",
+    category: "访客服务",
+    customerValue: "在固定问询点识别访客停留，主动询问目的地，并用中文语音给出可执行路线。",
+    trigger: "服务点停留、主动问询、或访客说“厕所在哪 / 咖啡店怎么走”。",
+    actions: ["主动问候", "解析目的地和别名", "播报路线说明", "保存交互记录"],
+    evidence: ["服务点", "目的地解析", "播报文本", "交互时间"],
+    acceptance: ["在配置点位能主动发起问询", "常见别名能解析到标准地点", "不把游客问路误判成机器人任务"],
+    examples: ["厕所在哪", "咖啡店怎么走", "停车场在哪里"],
+  },
+  {
+    id: "visitor_escort",
+    title: "路人带路",
+    category: "访客服务",
+    customerValue: "访客确认目的地后，机器狗低速引导到已配置的园区点位，结束后回到巡检流程。",
+    trigger: "访客说“带我去 / 请带路”，且目标点位允许机器狗通行。",
+    actions: ["二次确认目的地", "生成可通行路线", "低速引导", "访客丢失时等待或结束"],
+    evidence: ["起点", "目标点", "带路路线", "完成状态"],
+    acceptance: ["只对可通行路线带路", "到达后播报完成", "取消后能恢复原任务"],
+    examples: ["请带我去西门", "带我去梵木咖啡"],
+  },
+  {
+    id: "illegal_parking",
+    title: "车辆违停检测",
+    category: "安防巡检",
+    customerValue: "在主通道、消防通道、普通道路等禁停区域识别车辆停留，拍照并通知保安。",
+    trigger: "视觉识别车辆 + 区域规则判定为禁停 + 停留超过阈值。",
+    actions: ["拍照取证", "附带地点和区域规则", "通知保安", "归档事件"],
+    evidence: ["车辆照片", "车牌", "区域规则", "停留时长"],
+    acceptance: ["停车专用区不误报", "禁停区触发通知", "事件可确认、关闭、导出"],
+    examples: ["主通道有车违停", "消防通道有车"],
+  },
+  {
+    id: "fire_or_smoke",
+    title: "火灾及烟雾监测",
+    category: "安全事件",
+    customerValue: "融合烟感、温度和视觉烟火线索，触发紧急播报、通知保安并保留现场证据。",
+    trigger: "烟雾、温度、火苗或视觉烟火识别超过安全阈值。",
+    actions: ["紧急语音播报", "退到安全距离", "通知保安", "上传照片和传感器数据"],
+    evidence: ["温度", "烟雾浓度", "现场照片", "传感器时间"],
+    acceptance: ["风险触发后立即通知", "机器人不继续进入危险区域", "记录传感器 freshness"],
+    examples: ["有烟味", "温度太高", "发现火苗"],
+  },
+  {
+    id: "trash_bin_full",
+    title: "垃圾桶满溢监测",
+    category: "保洁巡检",
+    customerValue: "对定点垃圾桶拍照识别满溢，通知保洁处理，并保留清理前证据。",
+    trigger: "巡检到垃圾桶点位，视觉判断容量超过阈值或垃圾外溢。",
+    actions: ["拍照识别", "通知保洁", "记录点位", "归档处理状态"],
+    evidence: ["垃圾桶照片", "点位", "满溢等级", "通知记录"],
+    acceptance: ["只在配置垃圾桶点位触发", "通知到保洁群", "事件可复核"],
+    examples: ["垃圾桶满了", "通知保洁清理垃圾桶"],
+  },
+  {
+    id: "night_stranger_photo",
+    title: "夜间陌生人拍照",
+    category: "安防巡检",
+    customerValue: "夜间在窗户、围栏、角落等敏感区域识别陌生人停留或拍照，通知保安并留证。",
+    trigger: "夜间时段 + 敏感区域 + 人员停留/拍照动作。",
+    actions: ["拍照取证", "标注当前地点", "通知保安", "记录事件"],
+    evidence: ["人员照片", "敏感区域", "时间段", "地点"],
+    acceptance: ["白天普通经过不误报", "夜间敏感区停留触发", "通知包含位置和照片"],
+    examples: ["夜里有人在窗户拍照", "角落有人拍照"],
+  },
+  {
+    id: "robot_abnormal_incident",
+    title: "机器人异常事件",
+    category: "设备安全",
+    customerValue: "覆盖摔倒无法恢复、卡住无法运动、人为恶意挡路、关节电机故障，并通知保安或运维接管。",
+    trigger: "机器人姿态、电机状态、运动状态或交互线索表明无法安全继续。",
+    actions: ["停止危险动作", "语音播报异常", "通知保安/运维", "记录故障档案"],
+    evidence: ["姿态状态", "电机状态", "运动状态", "现场照片", "人工接管记录"],
+    acceptance: ["摔倒/卡住/恶意挡路/电机故障能分型", "高风险事件不能静默关闭", "事件有处置记录"],
+    examples: ["机器狗摔倒起不来", "有人恶意挡路", "关节电机故障", "卡住动不了"],
+  },
+  {
+    id: "crowd_gathering",
+    title: "人群聚集检测",
+    category: "秩序巡检",
+    customerValue: "识别人数和停留时间超过阈值的人群聚集，按规则语音提示或通知保安复查。",
+    trigger: "画面人数超过配置阈值，并在同一区域持续停留。",
+    actions: ["人数统计", "停留计时", "复查或语音提示", "通知保安"],
+    evidence: ["人数", "停留时长", "地点", "复查结果"],
+    acceptance: ["短时路过不误报", "持续聚集触发记录", "复查后仍聚集可升级通知"],
+    examples: ["这里人群聚集", "人太多停留太久"],
+  },
+  {
+    id: "urgent_patrol_dispatch",
+    title: "突发任务巡检",
+    category: "调度任务",
+    customerValue: "管理员可打断当前自动巡检，派遣机器狗到指定位置查看，并按权限决定是否打开实时画面。",
+    trigger: "管理员通过语音或平台下达指定地点巡检任务。",
+    actions: ["确认管理员权限", "暂停当前任务", "生成巡检任务", "回传现场结果"],
+    evidence: ["下发人", "目标地点", "任务状态", "现场回传"],
+    acceptance: ["普通游客不能触发派遣", "管理员任务可暂停/取消", "完成后有报告"],
+    examples: ["去 A 区北门巡检", "打开相机看一下三号楼"],
+  },
+];
+
+function canonicalScenarioId(value) {
+  const id = String(value || "").trim();
+  return ({
+    wayfinding: "wayfinding_help_point",
+    wayfinding_help: "wayfinding_help_point",
+    guide: "wayfinding_help_point",
+    escort: "visitor_escort",
+    fire_smoke: "fire_or_smoke",
+    smoke_fire: "fire_or_smoke",
+    parking: "illegal_parking",
+    trash: "trash_bin_full",
+    night_intruder: "night_stranger_photo",
+    robot_fault: "robot_abnormal_incident",
+    malicious_blocking: "robot_abnormal_incident",
+    stuck: "robot_abnormal_incident",
+  })[id] || id;
+}
+
+function scenarioProductRows(fieldRows = [], blueprintRows = [], intentRules = [], acceptanceRows = []) {
+  const fieldById = Object.fromEntries(fieldRows.map((row) => [canonicalScenarioId(row.scenario_id || row.id), row]));
+  const blueprintById = Object.fromEntries(blueprintRows.map((row) => [canonicalScenarioId(row.scenario_id || row.id), row]));
+  const acceptanceById = Object.fromEntries(
+    acceptanceRows.map((row) => [canonicalScenarioId(row.scenario_id || row.id), row])
+  );
+  const intentsById = intentRules.reduce((acc, rule) => {
+    const id = canonicalScenarioId(rule.scenario_id);
+    if (!id) return acc;
+    acc[id] = acc[id] || [];
+    acc[id].push(rule);
+    return acc;
+  }, {});
+  return CUSTOMER_SCENARIO_DEFINITIONS.map((definition) => {
+    const field = fieldById[definition.id] || {};
+    const blueprint = blueprintById[definition.id] || {};
+    const acceptanceRow = acceptanceById[definition.id] || {};
+    const intents = intentsById[definition.id] || [];
+    const skills = Array.isArray(blueprint.required_skills) ? blueprint.required_skills : [];
+    const enabledSkillCount = skills.filter((skill) => skill.enabled || skill.status === "enabled").length;
+    const hasFieldFlow = Boolean(field.scenario_id || field.id);
+    const hasIntent = intents.length > 0;
+    const hasBlueprint = Boolean(blueprint.scenario_id || blueprint.id);
+    const statusKey = acceptanceRow.acceptance_status === "demo_ready" || (hasFieldFlow && (hasIntent || definition.id === "urgent_patrol_dispatch"))
+      ? "demo_ready"
+      : hasFieldFlow || hasBlueprint
+        ? "integration_needed"
+        : "missing";
+    const status = statusKey === "demo_ready"
+      ? "可演示"
+      : statusKey === "integration_needed"
+        ? "待现场联调"
+        : "需补场景";
+    const deviceEntrypoints = Array.isArray(acceptanceRow.device_entrypoints) ? acceptanceRow.device_entrypoints : [];
+    const onsiteDependencies = Array.isArray(acceptanceRow.onsite_dependencies) ? acceptanceRow.onsite_dependencies : [];
+    const acceptanceRoutes = Array.isArray(acceptanceRow.natural_language_routes) ? acceptanceRow.natural_language_routes : [];
+    return {
+      ...definition,
+      field,
+      blueprint,
+      acceptanceRow,
+      intents,
+      status,
+      statusKey,
+      hasFieldFlow,
+      hasIntent,
+      hasBlueprint,
+      skillCount: skills.length,
+      enabledSkillCount,
+      priority: field.priority || blueprint.priority || "P2",
+      productionStatus: acceptanceRow.production_status || "onsite_evidence_required",
+      deviceEntrypoints,
+      onsiteDependencies,
+      acceptanceRoutes,
+      notificationGroup: acceptanceRow.notification_group || field.notification_group || blueprint.notification_group || "按项目配置",
+      trigger: field.trigger_rule || blueprint.trigger_rule || definition.trigger,
+      actions: Array.isArray(field.robot_behavior) && field.robot_behavior.length ? field.robot_behavior : definition.actions,
+      evidence: Array.isArray(field.required_evidence) && field.required_evidence.length ? field.required_evidence : definition.evidence,
+      acceptance: Array.isArray(field.acceptance_criteria) && field.acceptance_criteria.length ? field.acceptance_criteria : definition.acceptance,
+      nextStep: acceptanceRow.customer_next_step || blueprint.next_action || scenarioDefaultNextStep(definition.id, hasIntent, hasFieldFlow),
+    };
+  });
+}
+
+function scenarioDefaultNextStep(id, hasIntent, hasFieldFlow) {
+  if (!hasFieldFlow) return "先补现场事件流程和验收字段。";
+  if (!hasIntent && id !== "urgent_patrol_dispatch") return "补语音/文本触发意图，让客户能直接测试这类说法。";
+  return "接入真实传感器或现场数据后，按本卡片逐项验收。";
+}
+
+async function renderScenarios() {
+  const [fieldPayload, centerPayload, intentsPayload, acceptancePayload] = await Promise.all([
+    getJson("/api/field/scenarios", { scenarios: [] }),
+    getJson(ENDPOINTS.capabilityCenter, { scenario_blueprints: { items: [], summary: {} }, summary: {} }),
+    getJson(ENDPOINTS.scenarioIntents, { rules: [], summary: {}, policy: {} }),
+    getJson("/api/field/scenario-acceptance", { rows: [], summary: {}, policy: {} }),
+  ]);
+  const fieldRows = fieldPayload?.scenarios || fieldPayload?.items || [];
+  const blueprintRows = centerPayload?.scenario_blueprints?.items || [];
+  const intentRules = intentsPayload?.rules || intentsPayload?.items || [];
+  const acceptanceRows = acceptancePayload?.rows || acceptancePayload?.items || [];
+  const acceptanceSummary = acceptancePayload?.summary || {};
+  const acceptancePolicy = acceptancePayload?.policy || {};
+  const rows = scenarioProductRows(fieldRows, blueprintRows, intentRules, acceptanceRows);
+  const readyCount = rows.filter((row) => row.statusKey === "demo_ready").length;
+  const wiredCount = rows.filter((row) => row.hasFieldFlow).length;
+  const intentCount = rows.filter((row) => row.hasIntent).length;
+  const evidenceCount = rows.filter((row) => row.evidence.length).length;
+  const deviceEntrypointCount = acceptanceSummary.device_entrypoint_count ?? rows.filter((row) => row.deviceEntrypoints.length).length;
+  app.innerHTML = `
+    <section class="scenario-product-hero">
+      <div>
+        <p class="page-kicker">客户视角</p>
+        <h2>产品页不是广告页，是客户能逐条验收的场景清单</h2>
+        <p>这里不展示内部工程名词，而是回答客户最关心的四个问题：什么情况下触发、机器人会做什么、通知谁、留下什么证据。</p>
+      </div>
+      <div class="scenario-product-scoreboard">
+        <div><b>${esc(readyCount)}/${esc(rows.length)}</b><span>可演示场景</span></div>
+        <div><b>${esc(wiredCount)}</b><span>已接入处置流</span></div>
+        <div><b>${esc(intentCount)}</b><span>可语音/文本触发预览</span></div>
+        <div><b>${esc(deviceEntrypointCount)}</b><span>设备/传感器入口</span></div>
+      </div>
+    </section>
+    <section class="scenario-acceptance-strip card">
+      <div>
+        <p class="page-kicker">验收边界</p>
+        <h2>当前证明的是演示与集成验收，不等于无人值守生产上线</h2>
+        <p>${esc(acceptancePolicy.customer_claim_zh || acceptancePolicy.customer_claim || "生产上线仍需要真实设备、凭证、运行回调和客户签收证据。")}</p>
+      </div>
+      <div class="scenario-acceptance-metrics">
+        <div><b>${esc(acceptanceSummary.scenario_count ?? rows.length)}</b><span>客户场景</span></div>
+        <div><b>${esc(acceptanceSummary.natural_language_route_count ?? intentCount)}</b><span>语音/文本入口</span></div>
+        <div><b>${esc(acceptanceSummary.device_entrypoint_count ?? deviceEntrypointCount)}</b><span>设备入口</span></div>
+        <div><b>${acceptanceSummary.production_ready ? "是" : "否"}</b><span>生产上线声明</span></div>
+      </div>
+    </section>
+    <section class="scenario-preview-card card">
+      <div>
+        <h2>一句话触发预览</h2>
+        <p>输入客户现场会说的话，系统只判断“属于哪个场景、会调用哪个能力、风险等级是什么”，不会直接派发机器人任务。</p>
+      </div>
+      <div class="scenario-preview-form">
+        <input id="scenario-preview-text" value="${esc(scenarioPreviewResult?.text || "有人恶意挡住机器狗")}" placeholder="例如：咖啡店怎么走 / 主通道有车违停 / 垃圾桶满了">
+        <button id="scenario-preview-submit" class="primary-button">预览判断</button>
+      </div>
+      <div class="scenario-preview-examples">
+        ${["咖啡店怎么走", "请带我去西门", "主通道有车违停", "有烟味", "垃圾桶满了", "有人恶意挡路"].map((text) => `<button class="ghost-button" data-scenario-preview-example="${esc(text)}">${esc(text)}</button>`).join("")}
+      </div>
+      <div id="scenario-preview-result">${renderScenarioIntentPreview(scenarioPreviewResult?.payload || null)}</div>
+    </section>
+    <section class="scenario-product-grid">
+      ${rows.map(renderScenarioProductCard).join("")}
+    </section>
+    <section class="card">
+      <div class="section-title-row">
+        <div>
+          <h2>这页要解决的问题</h2>
+          <p>客户不需要知道底层有多少模块，他们只需要知道每个场景是否能验收、怎么测、失败时谁接管。</p>
+        </div>
+        ${badge("产品验收口径")}
+      </div>
+      <div class="scenario-product-principles">
+        <div><strong>能触发</strong><span>语音、文本、传感器或视觉事件都要进入统一场景入口。</span></div>
+        <div><strong>能解释</strong><span>每次判断要留下命中词、场景、风险等级和阻断原因。</span></div>
+        <div><strong>能通知</strong><span>保安、保洁、运维和管理员按场景分组通知。</span></div>
+        <div><strong>能归档</strong><span>照片、地点、时间、处置流程和人工操作都要可追溯。</span></div>
+      </div>
+    </section>
+  `;
+  wireScenarioControls();
+}
+
+function renderScenarioProductCard(row = {}) {
+  const actions = Array.isArray(row.actions) ? row.actions : [];
+  const evidence = Array.isArray(row.evidence) ? row.evidence : [];
+  const acceptance = Array.isArray(row.acceptance) ? row.acceptance : [];
+  const intentTerms = row.intents.flatMap((rule) => Array.isArray(rule.match_terms) ? rule.match_terms.slice(0, 3) : []);
+  const onsiteDependencies = Array.isArray(row.onsiteDependencies) ? row.onsiteDependencies : [];
+  const deviceEntrypoints = Array.isArray(row.deviceEntrypoints) ? row.deviceEntrypoints : [];
+  const statusClassName = row.statusKey === "demo_ready" ? "ok" : row.statusKey === "integration_needed" ? "warn" : "err";
+  return `
+    <article class="scenario-product-card ${statusClassName}">
+      <div class="scenario-product-head">
+        <div>
+          <span>${esc(row.category)}</span>
+          <h3>${esc(row.title)}</h3>
+          <p>${esc(row.customerValue)}</p>
+        </div>
+        <div class="scenario-product-badges">
+          ${badge(row.status, statusClassName)}
+          ${badge(row.priority || "P2", statusClass(row.priority))}
+        </div>
+      </div>
+      <div class="scenario-product-checks">
+        <div class="${row.hasFieldFlow ? "ok" : "err"}"><b>处置流</b><span>${row.hasFieldFlow ? "已接入" : "未接入"}</span></div>
+        <div class="${row.hasIntent ? "ok" : "warn"}"><b>语音/文本</b><span>${row.hasIntent ? "可预览" : "待补触发词"}</span></div>
+        <div class="${row.skillCount ? (row.enabledSkillCount >= row.skillCount ? "ok" : "warn") : "warn"}"><b>技能</b><span>${esc(row.enabledSkillCount)}/${esc(row.skillCount || "待确认")}</span></div>
+        <div class="${evidence.length ? "ok" : "err"}"><b>证据</b><span>${evidence.length ? "已定义" : "待定义"}</span></div>
+      </div>
+      <div class="scenario-product-section">
+        <strong>怎么触发</strong>
+        <p>${esc(row.trigger)}</p>
+        ${intentTerms.length ? `<div class="scenario-term-list">${intentTerms.slice(0, 8).map((term) => `<span>${esc(term)}</span>`).join("")}</div>` : ""}
+      </div>
+      <div class="scenario-product-section">
+        <strong>机器人会做什么</strong>
+        <ul>${actions.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>
+      </div>
+      <div class="scenario-product-section">
+        <strong>验收证据</strong>
+        <div class="scenario-term-list">${evidence.map((item) => `<span>${esc(item)}</span>`).join("")}</div>
+      </div>
+      <div class="scenario-product-section">
+        <strong>真实接入还缺什么</strong>
+        <div class="scenario-term-list">
+          ${(onsiteDependencies.length ? onsiteDependencies : ["现场设备/凭证/回调证据"]).map((item) => `<span>${esc(item)}</span>`).join("")}
+        </div>
+        ${deviceEntrypoints.length ? `<p class="muted-line">设备入口：${esc(deviceEntrypoints.join(" / "))}</p>` : ""}
+      </div>
+      <div class="scenario-product-section">
+        <strong>客户怎么验收</strong>
+        <ul>${acceptance.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>
+      </div>
+      <div class="scenario-product-foot">
+        <span>通知对象：${esc(row.notificationGroup)}</span>
+        <span>下一步：${esc(row.nextStep)}</span>
+      </div>
+    </article>
+  `;
+}
+
+function renderScenarioIntentPreview(payload = null) {
+  if (!payload) return `<div class="mini-list-empty">还没有预览结果。先输入一句现场话术。</div>`;
+  const decision = payload.decision || {};
+  const spacePreview = renderScenarioSpacePreview(payload.space_resolution || null);
+  if (!payload.matched || !decision.skill_name) {
+    return `
+      <div class="scenario-preview-result warn">
+        <strong>不会直接触发任务</strong>
+        <p>这句话没有命中可执行场景。系统应继续追问、转为普通问答，或要求人工确认。</p>
+      </div>
+      ${spacePreview}
+    `;
+  }
+  return `
+    <div class="scenario-preview-result ok">
+      <div>
+        <strong>${esc(canonicalScenarioId(decision.scenario_id))}</strong>
+        <p>命中能力：${esc(decision.skill_name)}；风险等级：${esc(decision.risk_level || "-")}；置信度：${esc(decision.confidence ?? "-")}</p>
+        <p>依据：${esc(decision.evidence || decision.reason || "规则命中")}</p>
+      </div>
+      ${badge("仅预览，不执行", "ok")}
+    </div>
+    ${spacePreview}
+  `;
+}
+
+function renderScenarioSpacePreview(spaceResolution = null) {
+  const resolution = spaceResolution?.resolution || null;
+  if (!spaceResolution || !spaceResolution.available || !resolution) return "";
+  const candidates = Array.isArray(resolution.candidates)
+    ? resolution.candidates
+    : (resolution.point ? [resolution.point] : []);
+  const status = resolution.resolved ? "ok" : (candidates.length ? "warn" : "warn");
+  const title = resolution.resolved
+    ? "已找到园区点位"
+    : (candidates.length ? "找到候选地点" : "未找到园区点位");
+  const reply = resolution.reply || resolution.confirmation_prompt || "";
+  return `
+    <div class="scenario-space-preview ${status}">
+      <div>
+        <strong>${esc(title)}</strong>
+        <p>${esc(reply || "空间认知库没有返回可展示说明。")}</p>
+      </div>
+      ${candidates.length ? `
+        <div class="scenario-space-candidates">
+          ${candidates.slice(0, 5).map((point) => `
+            <span>${esc(point.point_name || point.name || point.point_id || "地点")}<small>${esc(point.point_type || "-")}</small></span>
+          `).join("")}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function wireScenarioControls() {
+  const submit = document.getElementById("scenario-preview-submit");
+  const input = document.getElementById("scenario-preview-text");
+  const result = document.getElementById("scenario-preview-result");
+  const runPreview = async (text) => {
+    const phrase = String(text || input?.value || "").trim();
+    if (!phrase) return;
+    if (submit) submit.disabled = true;
+    const response = await postJson(ENDPOINTS.scenarioIntentPreview, { text: phrase, operator_id: operatorId() });
+    if (submit) submit.disabled = false;
+    scenarioPreviewResult = { text: phrase, payload: response.payload || {} };
+    if (result) result.innerHTML = renderScenarioIntentPreview(response.payload || {});
+  };
+  submit?.addEventListener("click", () => runPreview());
+  input?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") runPreview();
+  });
+  document.querySelectorAll("[data-scenario-preview-example]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const text = button.dataset.scenarioPreviewExample || "";
+      if (input) input.value = text;
+      runPreview(text);
+    });
+  });
 }
 
 async function renderField() {
@@ -673,6 +1581,8 @@ function renderFieldEventDetail(event) {
         <div><b>当前阶段</b><span>${esc(workflow.stage || event.incident_stage || "-")}</span></div>
         <div><b>SLA</b><span>${esc(event.sla?.state || "-")} / ${esc(event.sla?.remaining_s ?? "-")}s</span></div>
       </div>
+      ${renderFieldAdmissionDecision(event)}
+      ${renderFieldIngestScopeContract(event)}
       ${renderFieldActionResult(fieldEventId(event))}
       <div class="field-action-panel">
         <textarea id="field-action-note" placeholder="处置备注，例如：已联系保安到场，等待主管审批"></textarea>
@@ -708,6 +1618,123 @@ function renderFieldEventDetail(event) {
           ${renderFieldAudit(audit)}
         </div>
       </div>
+    </div>
+  `;
+}
+
+function renderFieldAdmissionDecision(event = {}) {
+  const decision = event.admission_decision || {};
+  const status = String(event.status || "");
+  const action = String(event.operator_action || event.narrative || "");
+  const missingEvidence = Array.isArray(event.missing_evidence) ? event.missing_evidence : [];
+  const freshness = event.freshness_status || "";
+  const confidence = event.confidence;
+  const duplicateOf = event.duplicate_of || "";
+  const isBlocked = Boolean(decision.blocked) || ["needs_review", "needs_evidence", "duplicate", "rejected", "ignored"].includes(status);
+  const title = decision.title || ({
+    needs_review: "未升级告警：需要人工复核",
+    needs_evidence: "未通知处置群：缺少必需证据",
+    duplicate: "未重复通知：重复事件已合并",
+    rejected: "未接收：来源或权限不可信",
+    ignored: "未触发：没有匹配到现场场景",
+    triggered: "已触发现场处置",
+    closed: "事件已关闭",
+  })[status] || "触发准入判定";
+  const hasDecisionFacts = Array.isArray(decision.evidence_facts);
+  const facts = hasDecisionFacts
+    ? decision.evidence_facts.map((item) => {
+      let value = item.age_s == null ? item.value : `${item.value} / age ${Number(item.age_s).toFixed(1)}s`;
+      if (item.status) value = `${value} / ${item.status}`;
+      return [item.label || "fact", value];
+    })
+    : [];
+  if (!hasDecisionFacts && freshness && freshness !== "fresh" && freshness !== "not_applicable") {
+    const age = event.freshness_age_s == null ? "-" : `${Number(event.freshness_age_s).toFixed(1)}s`;
+    facts.push(["freshness", `${freshness} / age ${age}`]);
+  }
+  if (!hasDecisionFacts && confidence !== undefined && confidence !== null && confidence !== "") {
+    facts.push(["confidence", Number(confidence).toFixed(2)]);
+  }
+  if (!hasDecisionFacts && missingEvidence.length) {
+    facts.push(["missing evidence", missingEvidence.join(" / ")]);
+  }
+  if (!hasDecisionFacts && duplicateOf) {
+    facts.push(["duplicate", `merged into ${duplicateOf}`]);
+  }
+  if (!facts.length && !action) {
+    facts.push(["status", status || "-"]);
+  }
+  return `
+    <div class="field-admission-card ${isBlocked ? "warn" : "ok"}">
+      <div>
+        <strong>${esc(title)}</strong>
+        <p>${esc(decision.reason || action || (isBlocked ? "系统已归档，但没有升级为现场通知或机器人动作。" : "准入条件满足，已进入处置流程。"))}</p>
+        ${decision.next_step ? `<p class="muted-line">下一步：${esc(decision.next_step)}</p>` : ""}
+      </div>
+      <div class="field-admission-facts">
+        ${facts.map(([key, value]) => `<span><b>${esc(key)}</b>${esc(value)}</span>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderFieldIngestScopeContract(event = {}) {
+  const contract = event.ingest_scope_contract || {};
+  if (!contract.contract_type) return "";
+  const device = contract.device || {};
+  const project = contract.customer_project || {};
+  const managedObject = contract.managed_object || {};
+  const resource = contract.resource_execution || {};
+  const gate = contract.production_gate || {};
+  const audit = contract.audit || {};
+  const ready = gate.ready === true;
+  const bound = managedObject.bound === true;
+  const blockers = Array.isArray(resource.blockers) ? resource.blockers : [];
+  const manualChecks = Array.isArray(resource.manual_checks) ? resource.manual_checks : [];
+  const reviewItems = blockers.length ? blockers : manualChecks;
+  const projectLabel = [project.customer_id, project.project_id, project.site_id].filter(Boolean).join(" / ") || "server scope";
+  const objectLabel = managedObject.display_name || managedObject.object_id || "未绑定现场对象";
+  const title = ready
+    ? "设备接入已绑定客户现场"
+    : bound
+      ? "设备接入已绑定现场对象，仍需交付复核"
+      : "设备接入还不能作为生产验收证据";
+  return `
+    <div class="field-ingest-scope-card ${ready ? "ok" : "warn"}">
+      <div class="field-ingest-scope-head">
+        <div>
+          <strong>${esc(title)}</strong>
+          <p>${esc(gate.customer_message || "系统已记录该设备事件的客户项目、设备可信度和现场对象绑定状态。")}</p>
+        </div>
+        ${badge(ready ? "可验收" : "待补齐", ready ? "ok" : "warn")}
+      </div>
+      <div class="field-ingest-scope-grid">
+        <div>
+          <b>设备来源</b>
+          <span>${esc(device.source || "-")} / ${esc(device.device_id || "未登记设备ID")}</span>
+          <small>${device.trusted ? "设备可信" : esc(device.trust_reason || device.trust_status || "设备信任待确认")}</small>
+        </div>
+        <div>
+          <b>客户项目</b>
+          <span>${esc(projectLabel)}</span>
+          <small>${project.client_scope_ignored ? "已忽略设备自带项目字段" : esc(project.scope_source || "server scope")}</small>
+        </div>
+        <div>
+          <b>现场对象</b>
+          <span>${esc(objectLabel)}</span>
+          <small>${esc(managedObject.binding_status || "-")}</small>
+        </div>
+        <div>
+          <b>能力绑定</b>
+          <span>${esc(resource.selected_skill_package || resource.selected_capability || "未选择能力包")}</span>
+          <small>${esc(resource.overall_status || "-")}${resource.approval_required ? " / 需要审批" : ""}</small>
+        </div>
+      </div>
+      <div class="field-ingest-scope-foot">
+        <span>${esc(gate.required_action || "归档事件证据并按验收用例复核。")}</span>
+        <span>证据 ${esc(audit.evidence_count ?? 0)} / freshness ${esc(audit.freshness_status || "-")} / confidence ${esc(audit.confidence ?? "-")}</span>
+      </div>
+      ${reviewItems.length ? `<div class="field-ingest-scope-review">${reviewItems.slice(0, 4).map((item) => `<span>${esc(item)}</span>`).join("")}</div>` : ""}
     </div>
   `;
 }
@@ -1406,77 +2433,223 @@ async function applyVoice(speakSample) {
   alert(response.ok ? "音色已应用" : (response.payload.error || "音色切换失败"));
 }
 
+function renderKnowledgeCategoryPicker() {
+  const buttons = KNOWLEDGE_CATEGORIES.map((category, index) => `
+    <button
+      type="button"
+      class="${index === 0 ? "active" : ""}"
+      data-knowledge-category="${esc(category.id)}"
+      title="${esc(category.description)}"
+      aria-checked="${index === 0 ? "true" : "false"}"
+      role="radio"
+    >
+      <span>${esc(category.label)}</span>
+      <small>${esc(category.group)}</small>
+    </button>
+  `).join("");
+  return `
+    <div class="knowledge-category-field">
+      <div class="field-label-row">
+        <strong>知识类型</strong>
+        <span>用于后端准入、检索过滤和回答证据标签</span>
+      </div>
+      <div class="knowledge-category-picker" role="radiogroup" aria-label="知识类型">
+        <input id="knowledge-category" type="hidden" value="${esc(KNOWLEDGE_CATEGORIES[0].id)}">
+        ${buttons}
+      </div>
+    </div>
+  `;
+}
+
 function renderKnowledge() {
   app.innerHTML = `
-    <section class="grid four">
-      ${renderOperatorCard()}
-      <div class="card knowledge-step">
-        <span class="badge ok">1 上传</span>
-        <h3>把园区路线、SOP、设备说明粘贴进来</h3>
-        <p>先预览解析结果，确认一条条知识是否正确。</p>
+    <section class="knowledge-command">
+      <div>
+        <h2>客户知识库</h2>
+        <p>把园区路线、点位、SOP、设备说明和常见问答变成机器人可引用的回答依据。</p>
       </div>
-      <div class="card knowledge-step">
-        <span class="badge warn">2 审批</span>
-        <h3>发布前检查过期、冲突和重复</h3>
-        <p>只有可回答的知识才会进入问答证据。</p>
-      </div>
-      <div class="card knowledge-step">
-        <span class="badge ok">3 使用</span>
-        <h3>语音或文本提问时自动检索</h3>
-        <p>回答气泡会展示引用依据；没有证据时要求确认或拒答。</p>
+      <div class="knowledge-hero-actions">
+        <button id="knowledge-hero-refresh" class="ghost-button">刷新知识</button>
+        <button id="knowledge-hero-search" class="primary-button">测试问答依据</button>
       </div>
     </section>
-    <section class="grid two">
-      <div class="card">
-        <h2>上传知识</h2>
-        <div class="knowledge-form">
-          <input id="knowledge-title" placeholder="知识标题或来源文件，例如：site-routes.md">
-          <input id="knowledge-owner" placeholder="负责人，例如：交付工程师 / 客户管理员">
-          <select id="knowledge-category">
-            <option value="route">路线和点位</option>
-            <option value="sop">巡检 SOP</option>
-            <option value="device">设备说明</option>
-            <option value="policy">制度规则</option>
-            <option value="faq">常见问答</option>
-          </select>
-          <input id="knowledge-file" type="file" accept=".txt,.md,.csv,.json">
-          <textarea id="knowledge-content" placeholder="粘贴知识内容。示例：&#10;- 3 号楼在主路尽头左转 80 米。&#10;- A 区消防栓每晚 22:00 巡检一次。"></textarea>
-          <div class="panel-actions">
-            <button id="knowledge-preview" class="ghost-button">预览解析</button>
-            <button id="knowledge-import" class="primary-button">导入并发布</button>
+    <section class="knowledge-upload-guide">
+      <div>
+        <h2>上传说明</h2>
+        <p>先上传或粘贴客户资料，预览解析结果，确认每条知识正确后再导入发布。发布后的知识会出现在“已有知识”里，并作为语音和文本回答的依据。</p>
+      </div>
+      <div class="knowledge-guide-steps">
+        <span><b>1</b> 上传路线、SOP、设备说明或 FAQ</span>
+        <span><b>2</b> 预览解析成一条条知识</span>
+        <span><b>3</b> 确认后导入发布</span>
+      </div>
+      <button id="knowledge-jump-upload" class="primary-button">去上传</button>
+    </section>
+    <section class="knowledge-workbar knowledge-workbench">
+      <section class="card knowledge-library-card">
+        <div class="section-title-row">
+          <div>
+            <h2>已有知识</h2>
+            <p>这里确认机器人现在知道什么、哪些知识能回答、回答依据在哪里。</p>
+          </div>
+          <div class="panel-actions compact">
+            <button id="knowledge-list" class="ghost-button">刷新列表</button>
             <button id="knowledge-rebuild" class="ghost-button">重建索引</button>
           </div>
         </div>
+        <div id="knowledge-summary" class="knowledge-summary-panel">正在读取知识库...</div>
+        <div id="memory-health" class="memory-health-panel">正在检查记忆后端...</div>
+        <div id="knowledge-results" class="knowledge-record-grid">正在读取知识库...</div>
+      </section>
+      <aside class="knowledge-side-stack">
+        <section class="card knowledge-use-card">
+          <div class="section-title-row compact">
+            <div>
+              <h2>回答依据验证</h2>
+              <p>输入客户真实问题，看机器人会引用哪些知识；没有证据时应要求确认或拒答。</p>
+            </div>
+            ${badge("可验收", "ok")}
+          </div>
+          <div class="chat-input">
+            <input id="knowledge-query" placeholder="例如：3 号楼怎么走 / 咖啡店在哪里">
+            <button id="knowledge-search" class="primary-button">检索</button>
+          </div>
+          <div id="memory-search-result" class="knowledge-search-result">
+            <strong>回答依据</strong>
+            <p>检索后这里展示可引用证据、被拦截知识和拒答原因。</p>
+          </div>
+        </section>
+        <section class="knowledge-operator-compact">${renderOperatorCard()}</section>
+      </aside>
+    </section>
+    <section class="knowledge-action-grid">
+      <div id="knowledge-upload-card" class="card knowledge-upload-card">
+        <div class="section-title-row compact">
+          <div>
+            <h2>新增知识</h2>
+            <p>把客户资料按业务类型放进知识库，后端会按同一套分类做准入、索引和证据展示。</p>
+          </div>
+          ${badge("运营入口")}
+        </div>
+        <div class="knowledge-form">
+          <input id="knowledge-title" placeholder="来源文件或标题，例如：fanmu-routes.md">
+          <input id="knowledge-owner" placeholder="负责人，例如：交付工程师 / 客户管理员">
+          <div class="knowledge-governance-grid">
+            <label>资料质量
+              <select id="knowledge-quality-status">
+                <option value="public">可对外回答</option>
+                <option value="internal">仅内部使用</option>
+                <option value="needs_review">待复核</option>
+                <option value="draft">草稿</option>
+              </select>
+            </label>
+            <label>可见范围
+              <select id="knowledge-visibility">
+                <option value="external">客户/访客可见</option>
+                <option value="internal">仅员工可见</option>
+              </select>
+            </label>
+            <input id="knowledge-customer-id" placeholder="客户编号，例如：fanmu">
+            <input id="knowledge-project-id" placeholder="项目编号，例如：fanmu-phase-1">
+            <input id="knowledge-product-area" placeholder="关联产品模块，例如：space / inspection / voice">
+            <input id="knowledge-workstream" placeholder="推进事项，例如：wayfinding / sop / acceptance">
+            <input id="knowledge-linked-object-type" placeholder="关联对象类型，例如：park_point / device / scenario">
+            <input id="knowledge-linked-object-id" placeholder="关联对象 ID，例如：poi-fanmu-coffee">
+          </div>
+          ${renderKnowledgeCategoryPicker()}
+          <div class="file-control">
+            <input id="knowledge-file" class="file-input" type="file" accept=".txt,.md,.markdown,.csv,.json,.jsonl,.ndjson">
+            <label for="knowledge-file">选择文件</label>
+            <span id="knowledge-file-name">未选择文件</span>
+          </div>
+          <textarea id="knowledge-content" placeholder="粘贴知识内容。示例：&#10;- 3 号楼在主路尽头左转 80 米。&#10;- 梵木咖啡在 2 号楼一层，靠近西门。&#10;- 发现垃圾桶满溢时通知保洁群并拍照归档。"></textarea>
+          <div class="panel-actions">
+            <button id="knowledge-preview" class="ghost-button">预览解析</button>
+            <button id="knowledge-import" class="primary-button">导入并发布</button>
+          </div>
+        </div>
       </div>
-      <div class="card">
-        <h2>问答怎么使用知识</h2>
-        <div class="metric"><b>上传后怎么用</b><span>直接在“对话”页问，系统会自动检索知识库</span></div>
-        <div class="metric"><b>回答哪里看依据</b><span>回答气泡会显示引用证据和拒答原因</span></div>
-        <div class="metric"><b>哪些不能回答</b><span>已删除、过期、冲突、未审批或未命中的知识</span></div>
-        <div class="chat-input">
-          <input id="knowledge-query" placeholder="测试检索，例如：3 号楼怎么走">
-          <button id="knowledge-search" class="primary-button">测试检索</button>
+      <div class="knowledge-flow-card">
+        <div class="section-title-row">
+          <div>
+            <h2>知识进入回答的规则</h2>
+            <p>页面不再把流程放在首屏，但产品逻辑必须清楚：只有可回答知识能进入对话证据。</p>
+          </div>
+          ${badge("准入规则", "ok")}
+        </div>
+        <div class="knowledge-flow-steps">
+          <div>
+            <span class="step-index">1</span>
+            <strong>先结构化</strong>
+            <p>路线、点位、设备和 FAQ 先变成可追踪记录。</p>
+            <small>来源 / 负责人</small>
+          </div>
+          <div>
+            <span class="step-index">2</span>
+            <strong>再治理</strong>
+            <p>过期、冲突、重复、未审批和未索引都会拦截。</p>
+            <small>审批 / 索引</small>
+          </div>
+          <div>
+            <span class="step-index">3</span>
+            <strong>最后引用</strong>
+            <p>语音或文本回答必须展示依据；无证据就拒答。</p>
+            <small>证据和审计</small>
+          </div>
+        </div>
+        <div id="knowledge-operations" class="knowledge-ops-panel">正在读取运营队列...</div>
+      </div>
+    </section>
+    <section class="card knowledge-help-card">
+        <div class="section-title-row compact">
+          <div>
+            <h2>这个页面解决什么问题</h2>
+            <p>客户不关心“RAG”这个词，客户关心机器人为什么这么回答、知识从哪里来、错了谁来改。</p>
+          </div>
+          ${badge("产品边界")}
+        </div>
+        <div class="knowledge-use-rules">
+          <div><b>问路</b><span>从园区点位和路线知识回答，不把游客问路误触发成机器人任务。</span></div>
+          <div><b>巡检</b><span>SOP 和设备说明进入巡检解释与报告依据。</span></div>
+          <div><b>拒答</b><span>没有证据、知识过期或冲突时，系统要求确认或拒答。</span></div>
         </div>
       </div>
     </section>
-    <section class="card">
-      <div class="section-title-row">
-        <h2>已有知识</h2>
-        <div class="panel-actions compact"><button id="knowledge-list" class="ghost-button">刷新列表</button></div>
-      </div>
-      <div id="knowledge-summary" class="knowledge-summary-panel">正在读取知识库...</div>
-      <div id="knowledge-operations" class="knowledge-ops-panel">正在读取运营队列...</div>
-      <div id="knowledge-results" class="knowledge-record-grid">正在读取知识库...</div>
-    </section>
   `;
   wireOperatorControls();
+  wireKnowledgeCategoryPicker();
   document.getElementById("knowledge-file").addEventListener("change", loadKnowledgeFile);
   document.getElementById("knowledge-preview").addEventListener("click", () => knowledgeAction("preview"));
   document.getElementById("knowledge-import").addEventListener("click", () => knowledgeAction("import"));
   document.getElementById("knowledge-rebuild").addEventListener("click", rebuildKnowledge);
   document.getElementById("knowledge-list").addEventListener("click", () => listKnowledge());
   document.getElementById("knowledge-search").addEventListener("click", searchKnowledge);
+  document.getElementById("knowledge-jump-upload").addEventListener("click", () => {
+    document.getElementById("knowledge-upload-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  document.getElementById("knowledge-hero-refresh").addEventListener("click", () => listKnowledge());
+  document.getElementById("knowledge-hero-search").addEventListener("click", () => {
+    const query = document.getElementById("knowledge-query");
+    if (!query.value.trim()) query.value = "3号楼怎么走";
+    query.focus();
+    searchKnowledge();
+  });
   listKnowledge();
+}
+
+function wireKnowledgeCategoryPicker() {
+  const hidden = document.getElementById("knowledge-category");
+  const buttons = Array.from(document.querySelectorAll("[data-knowledge-category]"));
+  buttons.forEach((button) => {
+    button.addEventListener("click", () => {
+      if (hidden) hidden.value = button.dataset.knowledgeCategory || "route";
+      buttons.forEach((item) => {
+        const active = item === button;
+        item.classList.toggle("active", active);
+        item.setAttribute("aria-checked", active ? "true" : "false");
+      });
+    });
+  });
 }
 
 function knowledgePayload() {
@@ -1487,12 +2660,22 @@ function knowledgePayload() {
     category: document.getElementById("knowledge-category").value,
     content: document.getElementById("knowledge-content").value,
     owner: document.getElementById("knowledge-owner").value,
+    quality_status: document.getElementById("knowledge-quality-status")?.value || "public",
+    visibility: document.getElementById("knowledge-visibility")?.value || "external",
+    customer_id: document.getElementById("knowledge-customer-id")?.value || "",
+    project_id: document.getElementById("knowledge-project-id")?.value || "",
+    product_area: document.getElementById("knowledge-product-area")?.value || "",
+    workstream: document.getElementById("knowledge-workstream")?.value || "",
+    linked_object_type: document.getElementById("knowledge-linked-object-type")?.value || "",
+    linked_object_id: document.getElementById("knowledge-linked-object-id")?.value || "",
     operator_id: operatorId(),
   };
 }
 
 async function loadKnowledgeFile(event) {
   const file = event.target.files?.[0];
+  const fileName = document.getElementById("knowledge-file-name");
+  if (fileName) fileName.textContent = file?.name || "未选择文件";
   if (!file) return;
   document.getElementById("knowledge-title").value = file.name;
   document.getElementById("knowledge-content").value = await file.text();
@@ -1520,20 +2703,41 @@ async function knowledgeAction(action) {
 
 async function listKnowledge(showLoading = true) {
   const result = document.getElementById("knowledge-results");
-  if (showLoading) result.innerHTML = `<div class="loading-card">正在读取知识库...</div>`;
+  const operations = document.getElementById("knowledge-operations");
+  if (showLoading) result.innerHTML = `<div class="loading-card">正在读取已有知识和记忆...</div>`;
   const response = await postJson(ENDPOINTS.knowledgeList, { limit: 100 });
+  if (!response.ok || response.payload.error) {
+    renderKnowledgeSummary(response.payload);
+    renderMemoryHealth(response.payload.memory_health || {});
+    if (operations) operations.innerHTML = renderKnowledgeServiceError(response.payload, "知识运营队列");
+    result.innerHTML = renderKnowledgeServiceError(response.payload, "已有知识");
+    return;
+  }
   renderKnowledgeSummary(response.payload);
+  renderMemoryHealth(response.payload.memory_health || {});
+  loadMemoryHealth(false);
   renderKnowledgeOperations(response.payload);
   result.innerHTML = renderKnowledgeList(response.payload);
   wireKnowledgeActions();
 }
 
+async function loadMemoryHealth(showLoading = true) {
+  const target = document.getElementById("memory-health");
+  if (!target) return;
+  if (showLoading) target.innerHTML = `<div class="loading-card">正在检查记忆后端...</div>`;
+  const payload = await getJson(ENDPOINTS.memoryHealth, null);
+  renderMemoryHealth(payload || { error: "memory_health_unavailable" });
+}
+
 async function searchKnowledge() {
   const query = document.getElementById("knowledge-query").value || "";
-  const result = document.getElementById("knowledge-results");
+  const result = document.getElementById("memory-search-result") || document.getElementById("knowledge-results");
   result.innerHTML = `<div class="loading-card">正在检索证据...</div>`;
   const response = await postJson(ENDPOINTS.memorySearch, { query });
-  renderKnowledgeSummary(response.payload);
+  if (!response.ok || response.payload.error) {
+    result.innerHTML = renderKnowledgeServiceError(response.payload, "记忆检索");
+    return;
+  }
   result.innerHTML = renderKnowledgeSearch(response.payload);
 }
 
@@ -1546,6 +2750,11 @@ async function updateKnowledgeRecord(recordId, action) {
   });
   if (!response.ok || response.payload.error) {
     document.getElementById("knowledge-results").innerHTML = `<div class="row-item"><strong>操作失败</strong><p>${esc(response.payload.error || response.payload.reason || "未知错误")}</p></div>`;
+    return;
+  }
+  if (action === "diff") {
+    document.getElementById("knowledge-results").innerHTML = renderKnowledgeDiff(response.payload);
+    wireKnowledgeActions();
     return;
   }
   await listKnowledge(false);
@@ -1572,18 +2781,132 @@ function wireKnowledgeActions() {
 function renderKnowledgeSummary(payload = {}) {
   const target = document.getElementById("knowledge-summary");
   if (!target) return;
+  if (payload.error) {
+    target.innerHTML = `
+      <div class="knowledge-summary-grid">
+        <span>${badge("知识服务未接入", "err")}</span>
+        <span>${badge("已有知识暂不可读", "warn")}</span>
+        <span>${badge("记忆检索不可用", "warn")}</span>
+      </div>
+      <p>${esc(payload.error)}。请启动带 MemoryModule 的 Dashboard 服务；页面不会把接口故障误显示成“没有知识”。</p>
+    `;
+    return;
+  }
   const catalog = payload.catalog || {};
   const rag = payload.rag || {};
+  const taxonomy = payload.category_taxonomy || {};
+  const categoryCount = Array.isArray(taxonomy.categories) ? taxonomy.categories.length : KNOWLEDGE_CATEGORIES.length;
+  const externalCount = catalog.by_visibility?.external ?? 0;
+  const internalCount = catalog.by_visibility?.internal ?? 0;
+  const customerCount = Object.keys(catalog.by_customer || {}).length;
+  const projectCount = Object.keys(catalog.by_project || {}).length;
   target.innerHTML = `
     <div class="knowledge-summary-grid">
       <span>${badge(`总数 ${catalog.total ?? payload.total ?? 0}`)}</span>
       <span>${badge(`可回答 ${catalog.prompt_eligible ?? 0}`, "ok")}</span>
+      <span>${badge(`可对外 ${externalCount}`, "ok")}</span>
+      <span>${badge(`仅内部 ${internalCount}`, internalCount ? "warn" : "")}</span>
+      <span>${badge(`客户 ${customerCount}`)}</span>
+      <span>${badge(`项目 ${projectCount}`)}</span>
+      <span>${badge(`类型 ${categoryCount}`)}</span>
       <span>${badge(`待复核 ${catalog.needs_review ?? 0}`, catalog.needs_review ? "warn" : "")}</span>
       <span>${badge(`冲突 ${catalog.conflicted ?? 0}`, catalog.conflicted ? "err" : "")}</span>
       <span>${badge(`过期 ${catalog.expired ?? 0}`, catalog.expired ? "err" : "")}</span>
       <span>${badge(`已删除 ${catalog.deleted ?? 0}`, catalog.deleted ? "warn" : "")}</span>
     </div>
     <p>当前检索后端：${esc(rag.last_backend || rag.backend || payload.backend || "-")}；只有“可回答”的知识会进入对话证据。</p>
+  `;
+}
+
+function renderMemoryHealth(payload = {}) {
+  const target = document.getElementById("memory-health");
+  if (!target) return;
+  if (payload.error) {
+    target.innerHTML = `
+      <div class="memory-health-head">
+        <strong>记忆后端未接通</strong>
+        ${badge("需检查", "warn")}
+      </div>
+      <p>页面可以管理本地目录，但当前无法确认检索后端状态：${esc(payload.error)}。</p>
+    `;
+    return;
+  }
+  const strategy = payload.memory_strategy || {};
+  const customer = strategy.customer_knowledge || {};
+  const robot = strategy.robot_behavior_memory || {};
+  const counts = payload.counts || {};
+  const paths = payload.paths || {};
+  const selectedDependency = payload.selected_backend_dependency || {};
+  const fallbackDependency = payload.fallback_backend_dependency || {};
+  const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+  const statusLabel = payload.status === "catalog_only"
+    ? "目录可用"
+    : payload.ready
+      ? (payload.status === "degraded" ? "降级可用" : "可用")
+      : payload.status === "disabled"
+        ? "未启用"
+        : "未就绪";
+  const statusKind = payload.status === "catalog_only"
+    ? "warn"
+    : payload.ready
+      ? (payload.status === "degraded" ? "warn" : "ok")
+      : "err";
+  const selectedVersion = selectedDependency.version ? `v${selectedDependency.version}` : "版本未知";
+  const fallbackVersion = fallbackDependency.version ? `v${fallbackDependency.version}` : "";
+  target.innerHTML = `
+    <div class="memory-health-head">
+      <div>
+        <strong>记忆与知识检索</strong>
+        <p>客户知识库用于回答证据；机器人长期行为记忆单独管理，不混入客户资料。</p>
+      </div>
+      ${badge(statusLabel, statusKind)}
+    </div>
+    <div class="memory-health-grid">
+      <div>
+        <span>客户知识库</span>
+        <strong>${esc(customer.backend || payload.configured_backend || "-")}</strong>
+        <small>${payload.status === "catalog_only" ? "目录检索" : "当前"} ${esc(payload.current_backend || payload.selected_backend || "-")} ${esc(selectedVersion)}</small>
+      </div>
+      <div>
+        <span>备用检索</span>
+        <strong>${esc(payload.fallback_backend || "无")}</strong>
+        <small>${payload.fallback_ready ? "已就绪" : "未启用"} ${esc(fallbackVersion)}</small>
+      </div>
+      <div>
+        <span>机器人长期记忆</span>
+        <strong>${esc(robot.backend || "robotmem")}</strong>
+        <small>${robot.enabled ? (robot.ready ? "已启用" : "未就绪") : "未启用"}</small>
+      </div>
+      <div>
+        <span>可回答知识</span>
+        <strong>${esc(counts.prompt_eligible ?? 0)}</strong>
+        <small>总数 ${esc(counts.catalog_total ?? 0)}</small>
+      </div>
+      <div>
+        <span>索引数量</span>
+        <strong>${esc(counts.vector_size ?? 0)}</strong>
+        <small>任务 ${esc(counts.index_jobs ?? 0)}</small>
+      </div>
+    </div>
+    <div class="memory-paths">
+      <span>目录：${esc(paths.catalog || "-")}</span>
+      <span>索引：${esc(paths.vector_store || "-")}</span>
+      ${paths.mempalace ? `<span>MemPalace：${esc(paths.mempalace)}</span>` : ""}
+    </div>
+    ${warnings.length ? `<p class="memory-warning">注意：${warnings.map(esc).join("；")}</p>` : ""}
+  `;
+}
+
+function renderKnowledgeServiceError(payload = {}, title = "知识服务") {
+  return `
+    <div class="knowledge-service-error">
+      <strong>${esc(title)}暂时不可用</strong>
+      <p>${esc(payload.error || "本地 Dashboard 没有连接知识库处理器。")}</p>
+      <div class="row-meta">
+        <span>影响：已有知识、记忆检索、证据引用不会显示</span>
+        <span>处理：启动带 MemoryModule 的 Dashboard 服务</span>
+      </div>
+    </div>
   `;
 }
 
@@ -1595,6 +2918,7 @@ function renderKnowledgeOperations(payload = {}) {
   const conflicts = operations.conflict_queue || [];
   const expiry = operations.expiry_queue || [];
   const reindex = operations.reindex_queue || [];
+  const blocked = operations.release_cadence?.blocked;
   target.innerHTML = `
     <div class="knowledge-ops-grid">
       <div><strong>${esc(approval.length)}</strong><span>待审批</span></div>
@@ -1603,8 +2927,82 @@ function renderKnowledgeOperations(payload = {}) {
       <div><strong>${esc(reindex.length)}</strong><span>待重建索引</span></div>
       <div><strong>${esc(operations.release_cadence?.mode || "manual")}</strong><span>发布节奏</span></div>
     </div>
-    <p>未完成产品能力：版本回滚、字段级变更对比、定时过期提醒、发布日历。当前先把队列和风险显性化。</p>
+    <p>${blocked ? "当前知识发布被治理队列阻塞，请先处理待审批、冲突、过期或待重建索引项。" : "当前治理队列无阻塞，知识可以进入回答证据。"} 下一个发布窗口：${esc(operations.release_cadence?.next_release_window || "未配置")}。</p>
   `;
+}
+
+function repairMojibake(value) {
+  const text = String(value ?? "");
+  if (!/[ÃÂâäåæéèç]/.test(text)) return text;
+  try {
+    const bytes = new Uint8Array(Array.from(text, (char) => char.charCodeAt(0) & 0xff));
+    const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    const decodedChinese = (decoded.match(/[\u4e00-\u9fff]/g) || []).length;
+    const originalChinese = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+    if (decodedChinese > originalChinese || /[。，“”]/.test(decoded)) return decoded;
+  } catch {
+    return text;
+  }
+  return text;
+}
+
+function knowledgeEsc(value) {
+  return esc(repairMojibake(value));
+}
+
+function knowledgeCategoryLabel(category = "") {
+  const key = String(category || "").toLowerCase();
+  const normalized = key === "note" || key === "sop" ? "inspection" : key;
+  const item = KNOWLEDGE_CATEGORIES.find((entry) => entry.id === normalized);
+  return item?.label || "客户知识";
+}
+
+function knowledgeRecordText(record = {}) {
+  return repairMojibake(record.text || record.memory_text || record.content || "");
+}
+
+function knowledgeRecordTitle(record = {}) {
+  const categoryLabel = record.category_label || knowledgeCategoryLabel(record.category);
+  const text = knowledgeRecordText(record).replace(/^\[[^\]]+\]\s*/, "").trim();
+  const subject = text.match(/^(.{1,24}?)(?:在|位于|靠近|从|需要|每|为|是|：|:|，|。|\s)/)?.[1]?.trim();
+  if (subject && subject.length >= 2 && subject.length <= 24) return `${categoryLabel}：${subject}`;
+  if (text) return `${categoryLabel}：${text.slice(0, 18)}${text.length > 18 ? "..." : ""}`;
+  return categoryLabel;
+}
+
+function knowledgeQualityLabel(value = "") {
+  const key = String(value || "public").toLowerCase();
+  const labels = {
+    public: "可对外",
+    external: "可对外",
+    approved: "可对外",
+    published: "可对外",
+    internal: "仅内部",
+    needs_review: "待复核",
+    pending_review: "待复核",
+    draft: "草稿",
+    expired: "已过期",
+    conflict: "冲突",
+    conflicted: "冲突",
+    rejected: "已驳回",
+    deleted: "已删除",
+  };
+  return labels[key] || value || "可对外";
+}
+
+function knowledgeVisibilityLabel(value = "") {
+  const key = String(value || "external").toLowerCase();
+  const labels = {
+    external: "客户/访客可见",
+    public: "客户/访客可见",
+    customer: "客户可见",
+    visitor: "访客可见",
+    internal: "仅员工可见",
+    staff: "仅员工可见",
+    operator: "仅操作员可见",
+    private: "内部私有",
+  };
+  return labels[key] || value || "客户/访客可见";
 }
 
 function knowledgeStateLabel(record = {}) {
@@ -1612,6 +3010,7 @@ function knowledgeStateLabel(record = {}) {
   const status = String(record.approval_status || "").toLowerCase();
   if (state === "ready" || record.prompt_eligible) return ["可回答", "ok"];
   if (state === "deleted" || status === "deleted") return ["已删除", "warn"];
+  if (state === "internal_only" || record.visibility === "internal") return ["仅内部", "warn"];
   if (state === "expired") return ["已过期", "err"];
   if (state === "conflicted" || record.conflict_set_id) return ["有冲突", "err"];
   if (record.needs_reindex) return ["需重建索引", "warn"];
@@ -1626,17 +3025,29 @@ function renderKnowledgeList(payload = {}) {
   return records.map((record) => {
     const [label, cls] = knowledgeStateLabel(record);
     const canDelete = String(record.approval_status || "").toLowerCase() !== "deleted";
-    const text = record.text || record.memory_text || "";
+    const text = knowledgeRecordText(record);
+    const title = knowledgeRecordTitle(record);
+    const source = repairMojibake(record.source || record.record_id || "-");
     return `
       <article class="knowledge-card">
         <div class="knowledge-card-head">
-          <strong>${esc(record.source || record.record_id || "知识记录")}</strong>
+          <div>
+            <span class="knowledge-kind">${knowledgeEsc(record.category_label || knowledgeCategoryLabel(record.category))}</span>
+            <strong class="knowledge-readable-title">${knowledgeEsc(title)}</strong>
+          </div>
           ${badge(label, cls)}
         </div>
-        <p>${esc(text)}</p>
+        <p>${knowledgeEsc(text)}</p>
         <div class="row-meta">
-          <span>分类 ${esc(record.category || "-")}</span>
-          <span>负责人 ${esc(record.owner || "-")}</span>
+          <span>来源文件 ${knowledgeEsc(source)}</span>
+          <span>负责人 ${knowledgeEsc(record.owner || "-")}</span>
+          <span>质量 ${knowledgeEsc(knowledgeQualityLabel(record.quality_status))}</span>
+          <span>范围 ${knowledgeEsc(knowledgeVisibilityLabel(record.visibility))}</span>
+          <span>客户 ${knowledgeEsc(record.customer_id || "-")}</span>
+          <span>项目 ${knowledgeEsc(record.project_id || "-")}</span>
+          <span>模块 ${knowledgeEsc(record.product_area || "-")}</span>
+          <span>事项 ${knowledgeEsc(record.workstream || "-")}</span>
+          <span>关联 ${knowledgeEsc(record.linked_object_type || "-")}/${knowledgeEsc(record.linked_object_id || "-")}</span>
           <span>版本 ${esc(record.evidence_version || "-")}</span>
           <span>更新 ${esc(record.updated_at || "-")}</span>
           <span>过期 ${esc(record.expires_at || "无")}</span>
@@ -1657,9 +3068,34 @@ function renderKnowledgeList(payload = {}) {
 
 function renderKnowledgePreview(payload = {}) {
   const records = Array.isArray(payload.records) ? payload.records : [];
-  if (payload.errors?.length) return `<div class="row-item"><strong>解析失败</strong><p>${esc(payload.errors.join("；"))}</p></div>`;
-  if (!records.length) return `<div class="row-item"><strong>没有解析到知识</strong><p>请检查文本内容。</p></div>`;
-  return `<div class="notice-card">${badge(`预览 ${records.length} 条`, "ok")} 这些内容还没有进入问答，确认后点击“导入并发布”。</div>${renderKnowledgeList({ records })}`;
+  const profile = payload.document_profile || {};
+  const profileLine = `文件类型 ${knowledgeEsc(profile.document_type || "-")}，预览方式 ${knowledgeEsc(profile.preview_mode || "-")}，大小 ${knowledgeEsc(profile.bytes ?? 0)} bytes`;
+  if (payload.errors?.length) {
+    return `
+      <div class="row-item">
+        <strong>解析失败</strong>
+        <p>${esc(payload.errors.join("；"))}</p>
+        <p>${profileLine}</p>
+        ${profile.guidance ? `<p>${knowledgeEsc(profile.guidance)}</p>` : ""}
+      </div>
+    `;
+  }
+  if (!records.length) {
+    return `
+      <div class="row-item">
+        <strong>没有解析到知识</strong>
+        <p>请检查文本内容。</p>
+        <p>${profileLine}</p>
+      </div>
+    `;
+  }
+  return `
+    <div class="notice-card">
+      ${badge(`预览 ${records.length} 条`, "ok")}
+      ${profileLine}。这些内容还没有进入问答，确认后点击“导入并发布”。
+    </div>
+    ${renderKnowledgeList({ records })}
+  `;
 }
 
 function renderKnowledgeDiff(payload = {}) {
@@ -1686,7 +3122,7 @@ function renderKnowledgeImport(payload = {}) {
   return `
     <div class="notice-card">
       ${badge(errors.length ? "导入有问题" : "导入完成", errors.length ? "warn" : "ok")}
-      解析 ${esc(payload.parsed ?? payload.scanned ?? 0)} 条，导入 ${esc(payload.imported ?? payload.indexed ?? 0)} 条，跳过 ${esc(payload.skipped ?? 0)} 条。
+      解析 ${esc(payload.parsed ?? payload.scanned ?? 0)} 条，入库 ${esc(payload.cataloged ?? payload.imported ?? payload.indexed ?? 0)} 条，索引 ${esc(payload.indexed ?? payload.imported ?? 0)} 条，跳过 ${esc(payload.skipped ?? 0)} 条。
     </div>
     ${errors.map((error) => `<div class="row-item"><strong>错误</strong><p>${esc(error)}</p></div>`).join("")}
   `;
@@ -1697,11 +3133,57 @@ function renderKnowledgeSearch(payload = {}) {
   const rag = payload.rag || {};
   const dropped = Array.isArray(rag.dropped_evidence) ? rag.dropped_evidence : [];
   const policy = rag.answer_policy || payload.answer_policy || {};
-  if (!results.length && !dropped.length) return `<div class="row-item"><strong>没有可引用证据</strong><p>${esc(policy.message || "系统会要求用户补充信息或拒答。")}</p></div>`;
+  const query = payload.query || rag.query || "";
+  if (!results.length && !dropped.length) {
+    return `
+      <div class="knowledge-search-empty">
+        <strong>回答依据</strong>
+        <p>${esc(policy.message || "没有找到可引用证据，系统会要求用户补充信息或拒答。")}</p>
+        ${query ? `<div class="row-meta"><span>问题：${esc(query)}</span></div>` : ""}
+      </div>
+    `;
+  }
   return `
-    <div class="notice-card">${badge(`可引用 ${results.length}`, results.length ? "ok" : "warn")} ${badge(`已拦截 ${dropped.length}`, dropped.length ? "warn" : "")}</div>
-    ${results.map((item) => `<article class="knowledge-card"><div class="knowledge-card-head"><strong>${esc(item.source || item.record_id || "证据")}</strong>${badge("可引用", "ok")}</div><p>${esc(item.text || item.memory_text || item.content || "")}</p></article>`).join("")}
-    ${dropped.map((item) => `<article class="knowledge-card blocked"><div class="knowledge-card-head"><strong>${esc(item.source || item.record_id || "被拦截证据")}</strong>${badge("已拦截", "warn")}</div><p>${esc(item.text || item.reason || "")}</p></article>`).join("")}
+    <div class="knowledge-search-head">
+      <div>
+        <strong>回答依据</strong>
+        <p>${query ? `问题：${esc(query)}` : "系统会把这些证据挂到回答气泡里。"}</p>
+      </div>
+      <div class="row-meta">
+        <span>${badge(`可引用 ${results.length}`, results.length ? "ok" : "warn")}</span>
+        <span>${badge(`已拦截 ${dropped.length}`, dropped.length ? "warn" : "")}</span>
+        ${rag.backend ? `<span>后端 ${esc(rag.backend)}</span>` : ""}
+      </div>
+    </div>
+    <div class="knowledge-search-evidence">
+      ${results.map((item) => `
+        <article class="knowledge-card">
+          <div class="knowledge-card-head">
+            <div>
+              <span class="knowledge-kind">${knowledgeEsc(item.category || "evidence")}</span>
+              <strong class="knowledge-readable-title">${knowledgeEsc(knowledgeRecordTitle(item))}</strong>
+            </div>
+            ${badge("可引用", "ok")}
+          </div>
+          <p>${knowledgeEsc(knowledgeRecordText(item))}</p>
+          <div class="row-meta">
+            <span>来源文件 ${knowledgeEsc(item.source || item.record_id || "-")}</span>
+            <span>状态 ${knowledgeEsc(item.lifecycle_label || item.lifecycle_state || "-")}</span>
+            <span>版本 ${esc(item.evidence_version || "-")}</span>
+            <span>分数 ${esc(item.score ?? "-")}</span>
+          </div>
+        </article>
+      `).join("")}
+      ${dropped.map((item) => `
+        <article class="knowledge-card blocked">
+          <div class="knowledge-card-head">
+            <strong>${knowledgeEsc(item.source || item.record_id || "被拦截证据")}</strong>
+            ${badge("已拦截", "warn")}
+          </div>
+          <p>${knowledgeEsc(item.text || item.reason || "")}</p>
+        </article>
+      `).join("")}
+    </div>
   `;
 }
 
@@ -1709,6 +3191,7 @@ async function renderCapabilities() {
   const [
     center,
     capabilityPackagePayload,
+    blueprintPayload,
     auditPayload,
     agentPayload,
     generatedPayload,
@@ -1717,6 +3200,7 @@ async function renderCapabilities() {
   ] = await Promise.all([
     getJson(ENDPOINTS.capabilityCenter, {}),
     getJson(ENDPOINTS.capabilityPackages, { capability_packages: [], scenario_packages: [], summary: {} }),
+    getJson(ENDPOINTS.blueprints, { items: [], summary: {} }),
     getJson(`${ENDPOINTS.skillAudit}?limit=8`, { records: [] }),
     getJson(ENDPOINTS.agentProfiles, { profiles: [] }),
     getJson(ENDPOINTS.generatedSkills, { records: [], summary: {} }),
@@ -1740,6 +3224,9 @@ async function renderCapabilities() {
     : [];
   const packageSummary = capabilityPackagePayload.summary || {};
   const releaseSummary = capabilityPackagePayload.release_summary || {};
+  const runtimeBlueprints = capabilityPackagePayload.runtime_blueprints
+    || center.runtime_blueprints
+    || runtimeBlueprintsFromCatalog(blueprintPayload);
   const growth = center.online_growth || {};
   const audit = Array.isArray(auditPayload.records) ? auditPayload.records : [];
   const profiles = Array.isArray(agentPayload.profiles) ? agentPayload.profiles : [];
@@ -1811,6 +3298,7 @@ async function renderCapabilities() {
         <div class="metric"><b>${esc((releaseSummary.blocked_count ?? 0) + (releaseSummary.manual_acceptance_required_count ?? 0))}</b><span>阻断/待复核</span></div>
       </div>
       <p class="muted-line">发布声明规则：${esc(releaseSummary.claim_policy || "生产上线声明必须有现场验收和人工接管审批。")}</p>
+      ${renderRuntimeBlueprints(runtimeBlueprints)}
       <div class="grid two">
         <div>
           <h3>能力包</h3>
@@ -2002,6 +3490,104 @@ function renderScenarioPackageItem(item = {}) {
         ${badge(item.coverage_status || "scenario")}
       </div>
     </div>
+  `;
+}
+
+function renderRuntimeBlueprints(payload = {}) {
+  const summary = payload.summary || {};
+  const items = Array.isArray(payload.items)
+    ? payload.items.filter((item) => item && item.customer_visible).slice(0, 6)
+    : [];
+  return `
+    <div class="runtime-blueprints-panel">
+      <div class="section-title-row compact">
+        <div>
+          <h3>运行方案和交付状态</h3>
+          <p>能力包必须落到具体运行蓝图里：语音、感知、现场事件、运行交接和机器人控制边界都要先过配置和现场验证。</p>
+        </div>
+        ${badge(`${esc(summary.ready_for_validation_count ?? 0)} 个可进现场验证`, (summary.missing_configuration_count ?? 0) ? "warn" : "ok")}
+      </div>
+      <div class="runtime-blueprint-grid">
+        ${items.map(renderRuntimeBlueprintItem).join("") || `<div class="mini-list-empty">暂无客户可见运行蓝图。</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function runtimeBlueprintsFromCatalog(payload = {}) {
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const normalized = items
+    .filter((item) => item && typeof item === "object")
+    .map((item) => {
+      const readiness = item.readiness && typeof item.readiness === "object" ? item.readiness : {};
+      const pack = item.delivery_package && typeof item.delivery_package === "object" ? item.delivery_package : {};
+      const status = pack.status || readiness.status || "unknown";
+      const missingConfig = Array.isArray(readiness.missing_config) ? readiness.missing_config : [];
+      return {
+        name: item.name || "",
+        title: item.title || "",
+        product_stage: item.product_stage || "",
+        customer_visible: Boolean(item.customer_visible),
+        status,
+        package_id: pack.package_id || "",
+        primary_loop: item.primary_loop || "",
+        deployment_targets: Array.isArray(item.deployment_targets) ? item.deployment_targets : [],
+        capabilities: Array.isArray(item.capabilities) ? item.capabilities : [],
+        scenarios: Array.isArray(item.scenarios) ? item.scenarios : [],
+        missing_config: missingConfig,
+        customer_next_step: runtimeBlueprintNextStep(status, missingConfig),
+      };
+    });
+  return {
+    summary: {
+      blueprint_count: normalized.length,
+      customer_visible_count: normalized.filter((item) => item.customer_visible).length,
+      ready_for_validation_count: normalized.filter((item) => item.status === "ready_for_site_validation").length,
+      missing_configuration_count: normalized.filter((item) => ["configuration_incomplete", "missing_configuration"].includes(item.status)).length,
+    },
+    items: normalized,
+    policy: {
+      runtime_blueprints_are_delivery_profiles: true,
+      capability_packages_still_require_runtime_blueprint: true,
+      site_validation_required_before_customer_claim: true,
+    },
+  };
+}
+
+function runtimeBlueprintNextStep(status, missingConfig = []) {
+  if (status === "ready_for_site_validation") {
+    return "可进入现场验证，仍不能声明无人值守生产上线。";
+  }
+  if (missingConfig.length) {
+    return `补齐运行配置：${missingConfig.join("、")}`;
+  }
+  return "复核运行蓝图状态，再决定是否进入客户试点。";
+}
+
+function renderRuntimeBlueprintItem(item = {}) {
+  const scenarios = Array.isArray(item.scenarios) ? item.scenarios.slice(0, 3) : [];
+  const missing = Array.isArray(item.missing_config) ? item.missing_config : [];
+  const status = item.status || "unknown";
+  return `
+    <article class="runtime-blueprint-card ${missing.length ? "warn" : ""}">
+      <div class="runtime-blueprint-head">
+        <div>
+          <strong>${esc(item.title || item.name || "运行蓝图")}</strong>
+          <span>${esc(item.package_id || item.name || "-")}</span>
+        </div>
+        ${badge(status, statusClass(status) || "warn")}
+      </div>
+      <p>${esc(item.customer_next_step || "先完成站点验证，再对客户声明可用范围。")}</p>
+      <div class="runtime-blueprint-facts">
+        <span>阶段 ${esc(item.product_stage || "-")}</span>
+        <span>主循环 ${esc(item.primary_loop || "-")}</span>
+        <span>目标 ${esc((item.deployment_targets || []).join(" / ") || "-")}</span>
+      </div>
+      <div class="runtime-blueprint-scenarios">
+        ${scenarios.map((text) => `<span>${esc(text)}</span>`).join("") || `<span>待补充客户场景</span>`}
+      </div>
+      ${missing.length ? `<div class="runtime-blueprint-missing">缺配置：${esc(missing.join("、"))}</div>` : ""}
+    </article>
   `;
 }
 
@@ -2570,47 +4156,125 @@ function renderCapabilitySkill(skill = {}) {
   `;
 }
 
-function renderBlueprintReadiness(payload = {}) {
+function renderBlueprintReadiness(payload = {}, selectedPayload = {}) {
   const items = Array.isArray(payload.items) ? payload.items : [];
-  const visible = items.filter((item) => item.customer_visible).slice(0, 6);
   const summary = payload.summary || {};
+  const selected = selectedPayload?.blueprint || items.find((item) => item.name === "edge_robot") || items.find((item) => item.customer_visible) || {};
+  const visible = items
+    .filter((item) => item.customer_visible && item.name !== selected.name)
+    .slice(0, 4);
   return `
-    <section class="card">
+    <section class="card blueprint-delivery product-delivery-blueprints">
       <div class="section-title-row">
         <div>
-          <h2>\u4ea7\u54c1\u5305\u4ea4\u4ed8\u95e8\u7981</h2>
-          <p>\u6309\u6267\u884c\u84dd\u56fe\u68c0\u67e5\u6a21\u5757\u7ec4\u5408\u3001\u5fc5\u9700\u914d\u7f6e\u3001\u5916\u90e8\u670d\u52a1\u548c\u9a8c\u6536\u547d\u4ee4\uff0c\u907f\u514d\u628a\u672a\u914d\u7f6e\u7684\u80fd\u529b\u8bf4\u6210\u53ef\u4ea4\u4ed8\u3002</p>
+          <h2>产品运行包和验收边界</h2>
+          <p>客户要知道这个版本能演示哪些场景、还缺哪些配置、怎么启动、以及哪些能力必须经过现场验证后才能承诺。</p>
         </div>
-        ${badge(`${summary.ready_for_validation_count ?? 0} ready / ${summary.blueprint_count ?? items.length} packages`, (summary.configuration_incomplete_count ?? 0) ? "warn" : "ok")}
+        ${badge(`${summary.ready_for_validation_count ?? 0} 个可验证 / ${summary.customer_visible_count ?? visible.length + 1} 个客户可见`, (summary.configuration_incomplete_count ?? 0) ? "warn" : "ok")}
       </div>
-      <div class="capability-list">
-        ${visible.map(renderBlueprintReadinessItem).join("") || `<div class="mini-list-empty">\u6682\u65e0\u5ba2\u6237\u53ef\u89c1\u4ea7\u54c1\u5305\u3002</div>`}
+      ${renderSelectedBlueprintPackage(selected)}
+      <div class="blueprint-delivery-list">
+        ${visible.map(renderBlueprintReadinessItemClean).join("") || `<div class="mini-list-empty">暂无其他客户可见产品包。</div>`}
       </div>
     </section>
   `;
 }
 
-function renderBlueprintReadinessItem(item = {}) {
+function renderSelectedBlueprintPackage(item = {}) {
+  if (!item || !item.name) {
+    return `<div class="mini-list-empty">还没有可展示的园区运行包。</div>`;
+  }
   const readiness = item.readiness || {};
+  const delivery = item.delivery_package || {};
+  const deliverables = delivery.deliverables || {};
+  const scenarios = Array.isArray(deliverables.scenario_acceptance)
+    ? deliverables.scenario_acceptance
+    : (Array.isArray(item.scenarios) ? item.scenarios.map((scenario) => ({ customer_scenario: scenario })) : []);
+  const configItems = Array.isArray(deliverables.configuration_checklist) ? deliverables.configuration_checklist : [];
+  const missingConfig = configItems.filter((entry) => entry.status !== "ready");
+  const safety = Array.isArray(deliverables.safety_boundaries) ? deliverables.safety_boundaries : [];
+  const status = readiness.status || delivery.status || "unknown";
+  return `
+    <article class="blueprint-card selected-blueprint ${status === "ready_for_validation" ? "ready" : "warn"}">
+      <div class="blueprint-card-head">
+        <div>
+          <span class="eyebrow">推荐园区运行包</span>
+          <strong>${esc(item.title || item.name || "园区巡检机器人运行时")}</strong>
+          <p>${esc(item.description || "")}</p>
+        </div>
+        <div class="capability-badges">
+          ${badge(status === "ready_for_validation" ? "可进入现场验证" : "配置未补齐", status === "ready_for_validation" ? "ok" : "warn")}
+          ${badge(readiness.production_ready ? "可声明生产上线" : "不能声明无人值守上线", readiness.production_ready ? "ok" : "warn")}
+        </div>
+      </div>
+      <div class="blueprint-facts">
+        <div><b>${esc(item.product_stage || "-")}</b><span>交付阶段</span></div>
+        <div><b>${esc(scenarios.length)}</b><span>验收场景</span></div>
+        <div><b>${esc(missingConfig.length)}</b><span>待补配置</span></div>
+        <div><b>${esc(item.startup_command || "-")}</b><span>启动命令</span></div>
+      </div>
+      <div class="blueprint-claim">
+        <b>对客户可承诺</b>
+        <p>${esc(readiness.customer_claim || delivery.customer_claim || "只能承诺演示或试点能力，不能跳过现场验证。")}</p>
+      </div>
+      <div class="blueprint-card-grid">
+        <div>
+          <b>首批可验收场景</b>
+          <ul>
+            ${scenarios.slice(0, 6).map((scenario) => `<li>${esc(scenario.customer_scenario || scenario)}</li>`).join("") || "<li>暂无验收场景</li>"}
+          </ul>
+        </div>
+        <div>
+          <b>交付停止条件</b>
+          <ul>
+            ${(delivery.stop_conditions || []).slice(0, 4).map((value) => `<li>${esc(value)}</li>`).join("") || "<li>缺少配置、缺少证据或绕过安全预检时停止交付。</li>"}
+          </ul>
+        </div>
+      </div>
+      ${missingConfig.length ? `
+        <div class="skill-validation">
+          ${missingConfig.slice(0, 6).map((entry) => `<span class="warn">待补配置：${esc(entry.requirement || "-")}</span>`).join("")}
+        </div>
+      ` : ""}
+      <div class="row-meta blueprint-runbook">
+        <span>运行包：${esc(delivery.package_id || `blueprint.${item.name || "-"}`)}</span>
+        <span>启动：${esc(item.startup_command || "-")}</span>
+      </div>
+      ${safety.length ? `
+        <div class="blueprint-safety-strip">
+          ${safety.slice(0, 3).map((value) => `<span>${esc(value)}</span>`).join("")}
+        </div>
+      ` : ""}
+    </article>
+  `;
+}
+
+function renderBlueprintReadinessItemClean(item = {}) {
+  const readiness = item.readiness || {};
+  const delivery = item.delivery_package || {};
+  const scenarios = Array.isArray(item.scenarios) ? item.scenarios : [];
   const missing = Array.isArray(readiness.missing_config) ? readiness.missing_config : [];
-  const gates = Array.isArray(readiness.gates) ? readiness.gates : [];
   const status = readiness.status || "unknown";
   return `
-    <div class="capability-item">
-      <div>
-        <strong>${esc(item.title || item.name || "-")}</strong>
-        <p>${esc(readiness.customer_claim || item.description || "")}</p>
-        <div class="row-meta">
-          <span>${esc(item.name || "-")}</span>
-          <span>${esc(item.product_stage || "-")}</span>
-          <span>${esc((item.modules || []).length)} modules</span>
+    <div class="blueprint-card ${status === "ready_for_validation" ? "ready" : "warn"}">
+      <div class="blueprint-card-head">
+        <div>
+          <strong>${esc(item.title || item.name || "-")}</strong>
+          <p>${esc(item.description || readiness.customer_claim || "")}</p>
         </div>
-        ${missing.length ? `<div class="skill-validation">${missing.slice(0, 6).map((value) => `<span class="warn">${esc(value)}</span>`).join("")}</div>` : ""}
+        <div class="capability-badges">
+          ${badge(status === "ready_for_validation" ? "可验证" : "配置未齐", status === "ready_for_validation" ? "ok" : "warn")}
+        </div>
       </div>
-      <div class="capability-badges">
-        ${badge(status, status === "ready_for_validation" ? "ok" : "warn")}
-        ${badge(`${gates.length} gates`)}
-        ${badge(readiness.production_ready ? "\u751f\u4ea7\u53ef\u7528" : "\u9700\u73b0\u573a\u9a8c\u8bc1", readiness.production_ready ? "ok" : "warn")}
+      <div class="blueprint-facts">
+        <div><b>${esc(item.product_stage || "-")}</b><span>阶段</span></div>
+        <div><b>${esc((item.modules || []).length)}</b><span>运行模块</span></div>
+        <div><b>${esc(scenarios.length)}</b><span>场景</span></div>
+        <div><b>${esc(missing.length)}</b><span>缺口</span></div>
+      </div>
+      <div class="row-meta blueprint-runbook">
+        <span>启动：${esc(item.startup_command || "-")}</span>
+        <span>包：${esc(delivery.package_id || `blueprint.${item.name || "-"}`)}</span>
       </div>
     </div>
   `;
@@ -2626,8 +4290,10 @@ async function renderDelivery() {
   const [
     readiness,
     devices,
+    deviceOnboarding,
     runtime,
     blueprints,
+    parkBlueprint,
     siteProfiles,
     customerProjects,
     projectTemplates,
@@ -2640,8 +4306,10 @@ async function renderDelivery() {
   ] = await Promise.all([
     getJson("/api/field/readiness", {}),
     getJson("/api/field/devices", {}),
+    getJson("/api/field/device-onboarding", { devices: [], summary: {}, next_actions: [] }),
     getJson("/api/runtime/context", {}),
     getJson(ENDPOINTS.blueprints, { items: [], summary: {} }),
+    getJson(ENDPOINTS.parkBlueprint, { ok: false, blueprint: null }),
     getJson(`${ENDPOINTS.fieldSiteProfiles}?check_env=true`, { sites: [], summary: {} }),
     getJson(`${ENDPOINTS.fieldCustomerProjects}?check_env=true`, { projects: [], customers: [], summary: {} }),
     getJson(ENDPOINTS.fieldCustomerProjectTemplates, { templates: [], summary: {} }),
@@ -2658,7 +4326,7 @@ async function renderDelivery() {
   }
   app.innerHTML = `
     ${renderProductLaunchReadiness(productLaunchReadiness)}
-    ${renderBlueprintReadiness(blueprints)}
+    ${renderBlueprintReadiness(blueprints, parkBlueprint)}
     ${renderSolutionDeliveryReadiness(solutionDeliveryReadiness)}
     ${renderIndustryTemplateCatalog(projectTemplates)}
     ${renderCustomerProjectCatalog(customerProjects)}
@@ -2678,6 +4346,7 @@ async function renderDelivery() {
         <div class="metric"><b>未注册事件</b><span>${esc(devices.summary?.unregistered_observed ?? 0)}</span></div>
       </div>
     </section>
+    ${renderDeviceOnboarding(deviceOnboarding)}
     <section class="card">
       <h2>运行闭环</h2>
       <div class="metric"><b>运行档位</b><span>${esc(runtime.current_profile || runtime.profile || "fake")}</span></div>
@@ -2717,12 +4386,65 @@ async function renderDelivery() {
   wireCustomerProjectTemplateFilterControls();
 }
 
+function renderDeviceOnboarding(payload = {}) {
+  const summary = payload.summary || {};
+  const devices = Array.isArray(payload.devices) ? payload.devices : [];
+  const actions = Array.isArray(payload.next_actions) ? payload.next_actions : [];
+  const rows = devices.slice(0, 6).map((device) => {
+    const gate = device.onboarding_gate || {};
+    const candidates = Array.isArray(device.managed_object_candidates)
+      ? device.managed_object_candidates
+      : [];
+    return `
+      <div class="device-onboarding-row ${statusClass(gate.status)}">
+        <div>
+          <strong>${esc(device.device_id || "未命名设备")}</strong>
+          <p>${esc(gate.customer_message || device.status || "等待设备回传")}</p>
+        </div>
+        <div class="row-meta">
+          <span>${esc(device.source || (device.allowed_sources || []).join("/") || "source -")}</span>
+          <span>${esc(device.status || "-")}</span>
+          <span>${device.signature_required ? "签名必需" : "签名可选"}</span>
+          <span>${device.secret_configured ? "密钥已配置" : "密钥待配置"}</span>
+          <span>${esc(candidates[0]?.display_name || candidates[0]?.object_id || "未绑定现场对象")}</span>
+        </div>
+        ${gate.required_action ? `<small>${esc(gate.required_action)}</small>` : ""}
+      </div>
+    `;
+  }).join("") || `<div class="mini-list-empty">暂无设备注册信息</div>`;
+  return `
+    <section class="card device-onboarding-card">
+      <div class="section-title-row">
+        <div>
+          <h2>设备接入验收</h2>
+          <p>${esc(payload.customer_message || "确认真实设备是否已登记、已签名、已回传，并绑定到客户现场对象。")}</p>
+        </div>
+        ${badge(payload.status || "manual_check", statusClass(payload.status))}
+      </div>
+      <div class="device-onboarding-metrics">
+        <div><b>${esc(summary.registered ?? 0)}</b><span>已注册</span></div>
+        <div><b>${esc(summary.online ?? 0)}</b><span>在线</span></div>
+        <div><b>${esc(summary.ready ?? 0)}</b><span>可验收</span></div>
+        <div><b>${esc(summary.manual_check ?? 0)}</b><span>待复核</span></div>
+        <div><b>${esc(summary.blocked ?? 0)}</b><span>阻断</span></div>
+      </div>
+      <div class="device-onboarding-list">${rows}</div>
+      ${actions.length ? `
+        <div class="device-onboarding-actions">
+          ${actions.slice(0, 4).map((item) => `<span>${esc(item)}</span>`).join("")}
+        </div>
+      ` : ""}
+    </section>
+  `;
+}
+
 async function renderProjects() {
   const projectQuery = customerProjectFilterQuery();
   const templateQuery = customerProjectTemplateFilterQuery();
   const [
     projectWorkbench,
     solutionDeliveryReadiness,
+    productLaunchReadiness,
     customerProjects,
     managedObjectDirectory,
     projectTemplates,
@@ -2734,6 +4456,7 @@ async function renderProjects() {
   ] = await Promise.all([
     getJson(`${ENDPOINTS.fieldCustomerProjectWorkbench}?${projectQuery}`, { delivery_surfaces: [], overall_status: "unknown" }),
     getJson(`${ENDPOINTS.fieldSolutionDeliveryReadiness}?check_env=true`, { gates: [], summary: {} }),
+    getJson(`${ENDPOINTS.fieldProductLaunchReadiness}?check_env=true&${projectQuery}`, { gates: [], summary: {} }),
     getJson(`${ENDPOINTS.fieldCustomerProjects}?${projectQuery}`, { projects: [], customers: [], summary: {} }),
     getJson(`${ENDPOINTS.fieldCustomerProjectManagedObjectDirectory}?${projectQuery}`, { objects: [], summary: {} }),
     getJson(`${ENDPOINTS.fieldCustomerProjectTemplates}?${templateQuery}`, { templates: [], summary: {} }),
@@ -2759,6 +4482,7 @@ async function renderProjects() {
       </div>
     </section>
     <nav class="project-page-nav" aria-label="客户项目功能导航">
+      <a href="#project-section-acceptance-summary">验收摘要</a>
       <a href="#project-section-readiness">交付门禁</a>
       <a href="#project-section-projects">项目目录</a>
       <a href="#project-section-templates">模板市场</a>
@@ -2770,6 +4494,7 @@ async function renderProjects() {
       <a href="#project-section-events">事件归属</a>
       <a href="#project-section-sites">多现场</a>
     </nav>
+    ${renderProjectAcceptanceSnapshot(projectWorkbench, productLaunchReadiness)}
     ${renderProjectGoldenPathWorkbench(projectWorkbench)}
     ${renderSolutionDeliveryReadiness(solutionDeliveryReadiness)}
     <div class="project-console-grid">
@@ -2797,6 +4522,83 @@ async function renderProjects() {
     resourceCatalog,
   });
   wireProjectConsoleControls();
+}
+
+function renderProjectAcceptanceSnapshot(workbench = {}, launch = {}) {
+  const snapshot = launch.customer_acceptance_snapshot || {};
+  const binding = workbench.runtime_blueprint_binding || {};
+  const bindingSummary = binding.summary || {};
+  const snapshotMetrics = snapshot.metrics || {};
+  const snapshotRuntime = snapshot.runtime_blueprint || {};
+  const launchSummary = launch.summary || {};
+  const gates = Array.isArray(launch.gates) ? launch.gates : [];
+  const sources = Array.isArray(snapshot.evidence_sources)
+    ? snapshot.evidence_sources
+    : Array.isArray(launch.evidence_sources)
+      ? launch.evidence_sources
+      : [];
+  const projectBindings = Array.isArray(binding.project_bindings) ? binding.project_bindings : [];
+  const firstBinding = projectBindings[0] || {};
+  const selected = firstBinding.selected_blueprint || {};
+  const dashboardGate = gates.find((gate) => gate.gate_id === "dashboard_pages") || {};
+  const status = snapshot.overall_status || launch.overall_status || workbench.overall_status || "unknown";
+  const blockers = Array.isArray(launch.blockers) ? launch.blockers : [];
+  const manualChecks = Array.isArray(launch.manual_checks) ? launch.manual_checks : [];
+  const primaryGap = snapshot.primary_gap || blockers[0] || manualChecks[0] || launch.next_step || workbench.next_step || "继续补齐现场证据并安排客户验收。";
+  const selectedBlueprintName = snapshotRuntime.selected_blueprint || selected.name || "-";
+  const customerClaim = snapshotRuntime.customer_claim || selected.customer_claim || firstBinding.customer_claim || "先完成项目、对象、资源和蓝图绑定后再形成客户验收口径。";
+  return `
+    <section id="project-section-acceptance-summary" class="project-acceptance-snapshot ${acceptanceGateClass(status)}" data-project-acceptance-snapshot>
+      <div class="project-acceptance-head">
+        <div>
+          <p class="page-kicker">客户验收摘要</p>
+          <h2>${esc(snapshot.customer_status || launch.customer_status || workbench.customer_status || "正在汇总客户项目验收状态")}</h2>
+          <p>${esc(snapshot.release_claim || launch.release_claim || workbench.release_claim || "上线声明必须同时具备身份、现场、交付包、页面和蓝图证据。")}</p>
+        </div>
+        <div>
+          ${badge(status, acceptanceGateClass(status))}
+          <strong>${esc(snapshot.launch_stage || launch.launch_stage || "待评估")}</strong>
+          <span>${esc(snapshot.production_ready || launch.production_ready ? "可进入客户上线验收" : "不能声明无人值守生产上线")}</span>
+        </div>
+      </div>
+      <div class="project-acceptance-grid">
+        <div>
+          <b>${esc(snapshotMetrics.ready_gate_count ?? launchSummary.ready_count ?? 0)}/${esc(snapshotMetrics.gate_count ?? launchSummary.gate_count ?? gates.length)}</b>
+          <span>上线门禁通过</span>
+        </div>
+        <div>
+          <b>${esc(snapshotMetrics.runtime_blueprint_ready_project_count ?? bindingSummary.ready_project_count ?? 0)}/${esc(snapshotMetrics.project_count ?? bindingSummary.project_count ?? 0)}</b>
+          <span>项目蓝图就绪</span>
+        </div>
+        <div>
+          <b>${esc(snapshotMetrics.dashboard_endpoint_missing_count ?? launchSummary.dashboard_endpoint_missing_count ?? 0)}</b>
+          <span>页面缺失接口</span>
+        </div>
+        <div>
+          <b>${esc(selectedBlueprintName)}</b>
+          <span>当前运行方案</span>
+        </div>
+      </div>
+      <div class="project-acceptance-proof">
+        <div>
+          <strong>验收依据</strong>
+          <p>${esc(customerClaim)}</p>
+          <div class="project-acceptance-chips">
+            ${sources.map((item) => `<span>${esc(item.source_id || "-")}：${esc(item.status || "-")}</span>`).join("")}
+          </div>
+        </div>
+        <div>
+          <strong>下一步缺口</strong>
+          <p>${esc(primaryGap)}</p>
+          <div class="project-acceptance-chips">
+            <span>蓝图：${esc(binding.overall_status || "unknown")}</span>
+            <span>页面：${esc(dashboardGate.status || "unknown")}</span>
+            <span>阻断：${esc(launchSummary.blocked_count ?? 0)}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
 }
 
 function renderProjectGoldenPathWorkbench(workbench = {}) {
@@ -2831,8 +4633,89 @@ function renderProjectGoldenPathWorkbench(workbench = {}) {
           </div>
         `).join("")}
       </div>
+      ${renderProjectDeliveryChain(workbench.delivery_chain)}
+      ${renderProjectRuntimeBlueprintBinding(workbench.runtime_blueprint_binding)}
       <p class="muted-line">下一步：${esc(workbench.next_step || "选择一个客户项目，补齐对象绑定、现场证据和交付包准入。")}</p>
     </section>
+  `;
+}
+
+function renderProjectDeliveryChain(chain = {}) {
+  const steps = Array.isArray(chain.steps) ? chain.steps : [];
+  if (!steps.length) return "";
+  const summary = chain.summary || {};
+  const status = chain.overall_status || summary.overall_status || "unknown";
+  return `
+    <div class="project-delivery-chain ${acceptanceGateClass(status)}" data-project-delivery-chain>
+      <div class="project-delivery-head">
+        <div>
+          <strong>客户项目交付链路 ${badge(status, acceptanceGateClass(status))}</strong>
+          <span>从客户范围、行业模板、对象目录、能力资源、运行蓝图到验收包，逐步确认交付断点。</span>
+        </div>
+        <span>${esc(summary.ready_count ?? 0)}/${esc(chain.step_count ?? steps.length)} ready</span>
+      </div>
+      <div class="project-delivery-chain-steps">
+        ${steps.map((step, index) => `
+          <article class="${acceptanceGateClass(step.status)}">
+            <div>
+              <b>${esc(index + 1)}. ${esc(step.label || step.step_id)}</b>
+              ${badge(step.status || "unknown", acceptanceGateClass(step.status))}
+            </div>
+            <p>${esc(step.customer_question || "")}</p>
+            <small>${esc(step.evidence || "-")}</small>
+            <small>${esc(step.next_step || "-")}</small>
+          </article>
+        `).join("")}
+      </div>
+      <p class="muted-line">${esc(summary.first_gap || chain.next_step || "继续补齐未通过的交付节点。")}</p>
+    </div>
+  `;
+}
+
+function renderProjectRuntimeBlueprintBinding(binding = {}) {
+  const projectBindings = Array.isArray(binding.project_bindings) ? binding.project_bindings.slice(0, 4) : [];
+  const summary = binding.summary || {};
+  if (!projectBindings.length && !summary.project_count) return "";
+  return `
+    <div class="project-runtime-binding">
+      <div class="project-delivery-head">
+        <div>
+          <strong>客户项目运行蓝图</strong>
+          <span>把客户项目、对象目录、能力包和验收用例绑定到可启动的机器人运行方案。</span>
+        </div>
+        ${badge(binding.overall_status || "unknown", acceptanceGateClass(binding.overall_status))}
+      </div>
+      <div class="project-runtime-binding-metrics">
+        <div><b>${esc(summary.project_count ?? 0)}</b><span>项目</span></div>
+        <div><b>${esc(summary.available_customer_blueprint_count ?? 0)}</b><span>客户可见蓝图</span></div>
+        <div><b>${esc(summary.ready_project_count ?? 0)}</b><span>已绑定</span></div>
+        <div><b>${esc(summary.blocked_project_count ?? 0)}</b><span>阻断</span></div>
+      </div>
+      <div class="project-runtime-binding-list">
+        ${projectBindings.map((item) => {
+          const selected = item.selected_blueprint || {};
+          const missing = Array.isArray(item.missing_binding_types) ? item.missing_binding_types : [];
+          const validationCommands = Array.isArray(selected.validation_commands) ? selected.validation_commands : [];
+          const safetyBoundaries = Array.isArray(selected.safety_boundaries) ? selected.safety_boundaries : [];
+          const externalServices = Array.isArray(selected.external_services) ? selected.external_services : [];
+          return `
+            <article class="${acceptanceGateClass(item.status)}">
+              <div>
+                <strong>${esc(item.project_id || item.customer_name || "未命名项目")}</strong>
+                ${badge(item.status || "unknown", acceptanceGateClass(item.status))}
+              </div>
+              <p>${esc(selected.title || selected.name || "未选择运行蓝图")}</p>
+              <small>${esc(item.match_reason || "")}</small>
+              <small>验证：${esc(validationCommands[0] || "待配置验收命令")}</small>
+              <small>边界：${esc(safetyBoundaries[0] || selected.release_boundary || "待确认运行边界")}</small>
+              <small>外部服务：${esc(externalServices.slice(0, 3).join("、") || "无")}</small>
+              ${missing.length ? `<small class="risk">待补齐：${esc(missing.join("、"))}</small>` : ""}
+            </article>
+          `;
+        }).join("")}
+      </div>
+      <p class="muted-line">下一步：${esc(binding.next_step || "先选择客户可见运行蓝图，再补齐对象资源和验收用例。")}</p>
+    </div>
   `;
 }
 
@@ -4268,6 +6151,7 @@ function renderIndustryTemplateCatalog(payload = {}) {
         <div class="metric"><b>${esc(summary.industry_count ?? 0)}</b><span>行业</span></div>
         <div class="metric"><b>${esc(summary.delivery_namespace_count ?? 0)}</b><span>交付空间</span></div>
         <div class="metric"><b>${esc(summary.managed_object_type_count ?? 0)}</b><span>默认对象</span></div>
+        <div class="metric"><b>${esc(summary.runtime_blueprint_bound_count ?? 0)}</b><span>运行蓝图</span></div>
       </div>
       ${renderCustomerProjectTemplateFilterControls(payload)}
       <div class="template-grid">
@@ -4313,6 +6197,7 @@ function renderProjectTemplateCreateReadiness(template = {}) {
   const summary = template.managed_objects_summary || {};
   const delivery = template.delivery_summary || {};
   const templatePackage = template.template_package || {};
+  const runtimeBinding = template.runtime_blueprint_binding || {};
   const objects = Array.isArray(delivery.default_objects)
     ? delivery.default_objects
     : Array.isArray(summary.objects)
@@ -4364,6 +6249,7 @@ function renderProjectTemplateCreateReadiness(template = {}) {
           <span>${esc(outOfScope.slice(0, 3).join("；") || "不承诺无人值守生产上线，需现场验收。")}</span>
         </div>
       </div>
+      ${renderTemplateRuntimeBlueprintBinding(runtimeBinding)}
     </div>
   `;
 }
@@ -4380,6 +6266,7 @@ function renderIndustryTemplateItem(item = {}) {
   const skillPackages = Array.isArray(delivery.skill_packages) ? delivery.skill_packages : [];
   const deviceSources = Array.isArray(delivery.device_sources) ? delivery.device_sources : [];
   const acceptanceTests = Array.isArray(delivery.acceptance_tests) ? delivery.acceptance_tests : [];
+  const runtimeBinding = item.runtime_blueprint_binding || {};
   const applicability = item.applicability_scope || delivery.applicability_scope || {};
   const prerequisites = Array.isArray(item.customer_prerequisites) ? item.customer_prerequisites : [];
   const criteria = Array.isArray(item.scenario_acceptance_criteria) ? item.scenario_acceptance_criteria : [];
@@ -4410,6 +6297,7 @@ function renderIndustryTemplateItem(item = {}) {
         <span>设备 ${esc(deviceSources.join(", ") || "-")}</span>
       </div>
       ${renderTemplatePackageReadiness(templatePackage)}
+      ${renderTemplateRuntimeBlueprintBinding(runtimeBinding)}
       ${renderTemplateApplicabilityScope(applicability)}
       ${renderTemplateObjectPreview(defaultObjects)}
       <div class="template-capability-strip">
@@ -4465,6 +6353,48 @@ function renderTemplatePackageReadiness(payload = {}) {
         <span>acceptance ${esc(deps.acceptance_test_count ?? 0)}</span>
       </div>
       ${(blockers.length || manualChecks.length) ? `<div class="skill-validation">${[...blockers, ...manualChecks].slice(0, 5).map((item) => `<span class="${blockers.includes(item) ? "err" : "warn"}">${esc(item)}</span>`).join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderTemplateRuntimeBlueprintBinding(binding = {}) {
+  if (!binding || !binding.binding_type) return "";
+  const selected = binding.selected_blueprint || {};
+  const requirements = binding.template_runtime_requirements || {};
+  const status = binding.status || "manual_check";
+  const missing = Array.isArray(binding.missing_template_fields)
+    ? binding.missing_template_fields
+    : [];
+  const capabilities = Array.isArray(selected.capabilities) ? selected.capabilities : [];
+  const scenarios = Array.isArray(selected.scenarios) ? selected.scenarios : [];
+  return `
+    <div class="template-runtime-binding ${acceptanceGateClass(status)}">
+      <div class="template-runtime-binding-head">
+        <div>
+          <strong>运行蓝图绑定 ${badge(status, acceptanceGateClass(status))}</strong>
+          <span>${esc(selected.title || selected.name || "未绑定运行蓝图")}</span>
+        </div>
+        <small>${esc(binding.match_reason || "runtime binding")}</small>
+      </div>
+      <p>${esc(binding.customer_claim || binding.next_step || "")}</p>
+      <div class="template-runtime-binding-meta">
+        <span>blueprint ${esc(selected.name || "-")}</span>
+        <span>package ${esc(selected.package_id || "-")}</span>
+        <span>stage ${esc(selected.product_stage || "-")}</span>
+        <span>status ${esc(selected.status || "-")}</span>
+        <span>scenario ${esc(requirements.scenario_count ?? 0)}</span>
+        <span>skill ${esc(requirements.skill_package_count ?? 0)}</span>
+        <span>device ${esc(requirements.device_source_count ?? 0)}</span>
+        <span>acceptance ${esc(requirements.acceptance_test_count ?? 0)}</span>
+      </div>
+      ${(capabilities.length || scenarios.length) ? `
+        <div class="template-runtime-binding-meta soft">
+          ${capabilities.slice(0, 5).map((item) => `<span>${esc(item)}</span>`).join("")}
+          ${scenarios.slice(0, 3).map((item) => `<span>${esc(item)}</span>`).join("")}
+        </div>
+      ` : ""}
+      ${missing.length ? `<div class="skill-validation">${missing.map((item) => `<span class="err">${esc(item)}</span>`).join("")}</div>` : ""}
+      <small>${esc(binding.next_step || "")}</small>
     </div>
   `;
 }
@@ -5673,7 +7603,7 @@ function onsiteReceiptEvidenceRef(receipt = {}) {
 }
 
 function onsiteReceiptEvidenceLabel(receipt = {}) {
-  const type = receipt.evidence_type || "evidence";
+  const type = receipt.evidence_type || "现场证据";
   const status = receipt.status || "manual_check";
   const label = receipt.label || receipt.summary || receipt.path || receipt.receipt_id || "现场证据";
   return `${type} / ${status} / ${label}`;
@@ -6768,7 +8698,7 @@ function renderOnsiteReceiptMeta(receipt = {}) {
   return `
     <div class="row-meta onsite-receipt-meta">
       <span>${esc(onsiteReceiptSourceLabel(receipt))}</span>
-      <span>${esc(receipt.evidence_type || "evidence")}</span>
+      <span>${esc(receipt.evidence_type || "现场证据")}</span>
       <span>sha ${esc(sha)}</span>
       <span>${esc(ref)}</span>
     </div>
@@ -6822,6 +8752,79 @@ function renderSiteAcceptanceChecklist(checklist = {}) {
   `;
 }
 
+function projectAcceptanceGateById(gates = [], gateId = "") {
+  if (!Array.isArray(gates)) return {};
+  return gates.find((gate) => gate && gate.gate_id === gateId) || {};
+}
+
+function compactDeviceOnboardingSummary(payload = {}) {
+  const readiness = payload.field_readiness || {};
+  const onboarding = readiness.device_onboarding || payload.device_onboarding || {};
+  const summary = onboarding.summary || onboarding || {};
+  const registered = summary.registered ?? summary.registered_device_count ?? summary.registered_count ?? 0;
+  const observed = summary.observed ?? summary.observed_device_count ?? summary.online ?? 0;
+  const ready = summary.ready ?? summary.ready_device_count ?? 0;
+  const manualCheck = summary.manual_check ?? summary.manual_check_device_count ?? 0;
+  const blocked = summary.blocked ?? summary.blocked_device_count ?? 0;
+  const total = summary.total_device_count ?? summary.total ?? Math.max(registered, observed, ready + manualCheck + blocked);
+  return {
+    available: summary.available ?? onboarding.available ?? null,
+    status: summary.status || onboarding.status || "",
+    registered,
+    observed,
+    ready,
+    manual_check: manualCheck,
+    blocked,
+    total_device_count: total,
+    all_ready: summary.all_ready === true || onboarding.all_ready === true,
+  };
+}
+
+function deviceOnboardingAcceptanceStatus(summary = {}, gate = {}) {
+  if (gate.status) return gate.status;
+  if (summary.status) return summary.status;
+  if (summary.all_ready) return "ready";
+  if ((summary.blocked ?? 0) > 0 || summary.available === false) return "blocked";
+  return "manual_check";
+}
+
+function renderProjectDeviceOnboardingAcceptance(payload = {}) {
+  const gates = Array.isArray(payload.gates) ? payload.gates : [];
+  const gate = projectAcceptanceGateById(gates, "field_device_onboarding");
+  const summary = compactDeviceOnboardingSummary(payload);
+  const hasEvidence = Boolean(gate.gate_id) || summary.available !== null || (summary.total_device_count ?? 0) > 0;
+  if (!hasEvidence) return "";
+  const status = deviceOnboardingAcceptanceStatus(summary, gate);
+  const statusClass = acceptanceGateClass(status);
+  const evidence = gate.evidence
+    || (summary.available === false
+      ? "\u5c1a\u672a\u751f\u6210\u8bbe\u5907\u63a5\u5165\u62a5\u544a\u3002"
+      : "\u68c0\u67e5\u771f\u5b9e\u76f8\u673a\u3001\u4f20\u611f\u5668\u548c\u673a\u5668\u4eba\u662f\u5426\u5df2\u767b\u8bb0\u3001\u7b7e\u540d\u3001\u56de\u4f20\u5e76\u7ed1\u5b9a\u5230\u5ba2\u6237\u73b0\u573a\u5bf9\u8c61\u3002");
+  const nextStep = gate.next_step
+    || (summary.all_ready
+      ? "\u8bbe\u5907\u63a5\u5165\u5df2\u53ef\u8fdb\u5165\u5ba2\u6237\u9a8c\u6536\u3002"
+      : "\u5148\u5b8c\u6210\u8bbe\u5907\u767b\u8bb0\u3001\u5bc6\u94a5\u3001\u7b7e\u540d\u56de\u4f20\u548c\u5ba2\u6237\u5bf9\u8c61\u7ed1\u5b9a\uff0c\u518d\u63d0\u4ea4\u9a8c\u6536\u3002");
+  return `
+    <div class="project-device-onboarding ${statusClass}" data-project-device-onboarding>
+      <div class="project-delivery-head">
+        <div>
+          <strong>\u771f\u5b9e\u8bbe\u5907\u63a5\u5165 ${badge(status || "manual_check", statusClass)}</strong>
+          <span>\u751f\u4ea7\u9a8c\u6536\u4e0d\u80fd\u53ea\u770b\u7cfb\u7edf\u6d41\u7a0b\uff0c\u5fc5\u987b\u786e\u8ba4\u771f\u5b9e\u8bbe\u5907\u5df2\u7ecf\u63a5\u5165\u5e76\u80fd\u56de\u4f20\u8bc1\u636e\u3002</span>
+        </div>
+        <span>${esc(gate.gate_id || "field_device_onboarding")}</span>
+      </div>
+      <div class="project-device-onboarding-metrics">
+        <div><b>${esc(summary.registered ?? 0)}</b><span>\u5df2\u767b\u8bb0</span></div>
+        <div><b>${esc(summary.ready ?? 0)}</b><span>\u53ef\u9a8c\u6536</span></div>
+        <div><b>${esc(summary.manual_check ?? 0)}</b><span>\u5f85\u590d\u6838</span></div>
+        <div><b>${esc(summary.blocked ?? 0)}</b><span>\u963b\u585e</span></div>
+      </div>
+      <p>${esc(evidence)}</p>
+      <small>${esc(nextStep)}</small>
+    </div>
+  `;
+}
+
 function renderCustomerProjectAcceptanceReport(payload = {}) {
   if (!payload.found) {
     return `<div class="project-import-card warn"><strong>验收报告不可用 ${badge("blocked", "err")}</strong><p>${esc(payload.reason || payload.error || "unknown")}</p></div>`;
@@ -6846,6 +8849,7 @@ function renderCustomerProjectAcceptanceReport(payload = {}) {
       </div>
       ${renderProjectDeliveryWorkflow(payload.delivery_workflow)}
       ${renderSiteAcceptanceChecklist(payload.site_acceptance_checklist)}
+      ${renderProjectDeviceOnboardingAcceptance(payload)}
       ${renderCustomerProjectOnsiteEvidence({ found: true, onsite_acceptance_evidence: onsiteEvidence }, true)}
       <div class="capability-list compact-list">
         ${gates.map((gate) => `
@@ -6870,7 +8874,7 @@ function renderCustomerProjectAcceptanceReport(payload = {}) {
         <div class="capability-list compact-list">
           ${onsiteReceipts.slice(0, 6).map((receipt) => `
             <div class="row-item">
-              <strong>${esc(receipt.label || receipt.evidence_type || "onsite evidence")} ${badge(receipt.status || "manual_check", acceptanceGateClass(receipt.status))}</strong>
+              <strong>${esc(receipt.label || receipt.evidence_type || "现场证据")} ${badge(receipt.status || "manual_check", acceptanceGateClass(receipt.status))}</strong>
               <span>${esc(receipt.summary || receipt.path || "-")}</span>
               ${renderOnsiteReceiptMeta(receipt)}
             </div>
@@ -6903,7 +8907,7 @@ function renderCustomerProjectOnsiteEvidence(payload = {}, compact = false) {
         <div class="capability-list compact-list">
           ${receipts.slice(0, 8).map((receipt) => `
             <div class="row-item">
-              <strong>${esc(receipt.label || receipt.evidence_type || "receipt")} ${badge(receipt.status || "manual_check", acceptanceGateClass(receipt.status))}</strong>
+              <strong>${esc(receipt.label || receipt.evidence_type || "现场凭证")} ${badge(receipt.status || "manual_check", acceptanceGateClass(receipt.status))}</strong>
               <p>${esc(receipt.summary || "-")}</p>
               ${renderOnsiteReceiptMeta(receipt)}
             </div>
@@ -6911,30 +8915,6 @@ function renderCustomerProjectOnsiteEvidence(payload = {}, compact = false) {
         </div>
       `}
       <p class="muted-line">${esc(summary.next_step || "请绑定设备上报、语音播报、外部通知和执行回传证据。")}</p>
-    </div>
-  `;
-  return `
-    <div class="project-import-card ${summary.overall_status === "ready" ? "ok" : summary.overall_status === "blocked" ? "warn" : "manual_check"}">
-      <strong>${compact ? "现场证据" : "现场验收证据"} ${badge(summary.overall_status || "manual_check", acceptanceGateClass(summary.overall_status))}</strong>
-      <p>${esc(summary.customer_status || "需要补齐真实现场证据后才能提交验收。")}</p>
-      <div class="row-meta">
-        <span>必需证据 ${esc(summary.passed_required_count ?? 0)}/${esc(summary.required_count ?? 4)}</span>
-        <span>凭证 ${esc(summary.receipt_count ?? receipts.length)}</span>
-        <span>失败 ${esc(summary.failed_count ?? 0)}</span>
-        <span>missing ${esc((summary.missing_required_types || []).join(", ") || "-")}</span>
-      </div>
-      ${compact ? "" : `
-        <div class="capability-list compact-list">
-          ${receipts.slice(0, 8).map((receipt) => `
-            <div class="row-item">
-              <strong>${esc(receipt.label || receipt.evidence_type || "receipt")} ${badge(receipt.status || "manual_check", acceptanceGateClass(receipt.status))}</strong>
-              <p>${esc(receipt.summary || "-")}</p>
-              ${renderOnsiteReceiptMeta(receipt)}
-            </div>
-          `).join("") || `<div class="mini-list-empty">还没有登记现场验收证据。</div>`}
-        </div>
-      `}
-      <p class="muted-line">${esc(summary.next_step || "补齐设备上报、语音播报、外部通知和任务回调证据。")}</p>
     </div>
   `;
 }
@@ -7440,7 +9420,7 @@ function renderSiteProfileCatalogItem(site = {}) {
     <div class="capability-item">
       <div>
         <strong>${esc(site.site_name || site.site_id || "未命名现场")}</strong>
-        <p>${esc(site.customer_status || "Site profile status unknown.")}</p>
+        <p>${esc(site.customer_status || "现场档案状态待同步。")}</p>
         <div class="row-meta">
           <span>${esc(site.site_id || "-")}</span>
           <span>区域 ${esc(summary.zone_count ?? 0)}</span>
@@ -7577,7 +9557,7 @@ function renderAuditProductSummary(payload = {}) {
       <div class="${Number(product.high_or_critical_count || 0) ? "warn" : "ok"}"><b>${esc(product.high_or_critical_count ?? 0)}</b><span>高风险/关键</span></div>
       <div><b>${esc(integrity.signed_record_count ?? 0)}</b><span>签名记录</span></div>
       <div><b>${esc(integrity.hash_chained_record_count ?? 0)}</b><span>哈希链记录</span></div>
-      <div class="${status === "needs_review" ? "warn" : "ok"}"><b>${esc(status)}</b><span>${esc(product.customer_status || "audit status")}</span></div>
+      <div class="${status === "needs_review" ? "warn" : "ok"}"><b>${esc(status)}</b><span>${esc(product.customer_status || "审计状态待复核")}</span></div>
     </div>
     ${reviewQueue.length ? renderAuditReviewQueue(reviewQueue) : ""}
   `;
@@ -8100,6 +10080,7 @@ async function render() {
   if (page.key === "overview") await renderOverview();
   if (page.key === "conversation") renderConversation();
   if (page.key === "projects") await renderProjects();
+  if (page.key === "scenarios") await renderScenarios();
   if (page.key === "field") await renderField();
   if (page.key === "space") await renderSpace();
   if (page.key === "knowledge") renderKnowledge();
@@ -8116,4 +10097,10 @@ setInterval(() => {
   refreshGlobalStatus();
   if (currentPage().key === "conversation") pollLive();
 }, 5000);
-render();
+
+async function bootDashboard() {
+  await loadDashboardPageRegistry();
+  await render();
+}
+
+bootDashboard();

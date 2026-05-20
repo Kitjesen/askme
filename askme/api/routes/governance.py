@@ -5,8 +5,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+
+from askme.api.schemas.governance import (
+    AuthorizationDecisionResponse,
+    CurrentOperatorResponse,
+    IdentityGatewayReadinessResponse,
+    OperatorDirectoryResponse,
+)
+from askme.api.services.http_helpers import require_json_object
 
 GovernancePayload = Callable[[], dict[str, Any]]
 IdentityReadinessPayload = Callable[[], dict[str, Any]]
@@ -28,33 +36,79 @@ def register_governance_routes(
 ) -> None:
     """Register product-facing governance status routes."""
 
-    @app.get("/api/governance/operator-directory", tags=["Governance"])
-    async def operator_directory() -> JSONResponse:
-        return mission_json(governance_payload())
+    app.include_router(
+        create_governance_router(
+            governance_payload=governance_payload,
+            identity_readiness_payload=identity_readiness_payload,
+            current_operator_payload=current_operator_payload,
+            authorization_payload=authorization_payload,
+            mission_json=mission_json,
+            cors_options_response=cors_options_response,
+        )
+    )
 
-    @app.options("/api/governance/operator-directory", include_in_schema=False)
+
+def create_governance_router(
+    *,
+    governance_payload: GovernancePayload,
+    identity_readiness_payload: IdentityReadinessPayload,
+    current_operator_payload: CurrentOperatorPayload,
+    authorization_payload: AuthorizationPayload,
+    mission_json: MissionJsonWithStatus,
+    cors_options_response: CorsOptions,
+) -> APIRouter:
+    """Create the governance router without binding it to an app factory."""
+
+    router = APIRouter(tags=["Governance"])
+
+    @router.get(
+        "/api/governance/operator-directory",
+        response_model=OperatorDirectoryResponse,
+    )
+    async def operator_directory() -> JSONResponse:
+        payload = governance_payload()
+        OperatorDirectoryResponse.model_validate(payload)
+        return mission_json(payload)
+
+    @router.options("/api/governance/operator-directory", include_in_schema=False)
     async def operator_directory_cors() -> Response:
         return cors_options_response("GET, OPTIONS")
 
-    @app.get("/api/governance/identity-readiness", tags=["Governance"])
+    @router.get(
+        "/api/governance/identity-readiness",
+        response_model=IdentityGatewayReadinessResponse,
+    )
     async def identity_readiness() -> JSONResponse:
-        return mission_json(identity_readiness_payload())
+        payload = identity_readiness_payload()
+        IdentityGatewayReadinessResponse.model_validate(payload)
+        return mission_json(payload)
 
-    @app.options("/api/governance/identity-readiness", include_in_schema=False)
+    @router.options("/api/governance/identity-readiness", include_in_schema=False)
     async def identity_readiness_cors() -> Response:
         return cors_options_response("GET, OPTIONS")
 
-    @app.get("/api/governance/current-operator", tags=["Governance"])
+    @router.get(
+        "/api/governance/current-operator",
+        response_model=CurrentOperatorResponse,
+    )
     async def current_operator(request: Request, operator_id: str | None = None) -> JSONResponse:
-        return mission_json(current_operator_payload(operator_id, request.headers))
+        payload = current_operator_payload(operator_id, request.headers)
+        CurrentOperatorResponse.model_validate(payload)
+        return mission_json(payload)
 
-    @app.options("/api/governance/current-operator", include_in_schema=False)
+    @router.options("/api/governance/current-operator", include_in_schema=False)
     async def current_operator_cors() -> Response:
         return cors_options_response("GET, OPTIONS")
 
-    @app.post("/api/governance/authorize", tags=["Governance"])
+    @router.post(
+        "/api/governance/authorize",
+        response_model=AuthorizationDecisionResponse,
+    )
     async def authorize_operator(request: Request) -> JSONResponse:
-        body = await request.json()
+        try:
+            body = require_json_object(await request.json())
+        except ValueError as exc:
+            return mission_json({"error": str(exc)}, status_code=400)
         permission = str(body.get("permission") or "").strip()
         if not permission:
             return mission_json({"error": "permission is required"}, status_code=400)
@@ -64,9 +118,12 @@ def register_governance_routes(
             or request.headers.get("x-operator-id")
         )
         decision = authorization_payload(operator_id, permission, request.headers, body)
+        AuthorizationDecisionResponse.model_validate(decision)
         status_code = 200 if decision.get("allowed") else 403
         return mission_json(decision, status_code=status_code)
 
-    @app.options("/api/governance/authorize", include_in_schema=False)
+    @router.options("/api/governance/authorize", include_in_schema=False)
     async def authorize_operator_cors() -> Response:
         return cors_options_response("POST, OPTIONS")
+
+    return router

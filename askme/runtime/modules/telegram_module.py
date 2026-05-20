@@ -29,8 +29,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from askme.pipeline.brain_pipeline import BrainPipeline
-from askme.runtime.module import In, Module, ModuleRegistry
+from askme.pipeline.core.brain_pipeline import BrainPipeline
+from askme.runtime.core.module import In, Module, ModuleRegistry
 
 logger = logging.getLogger(__name__)
 

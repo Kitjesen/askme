@@ -8,6 +8,29 @@ from unittest.mock import MagicMock
 import pytest
 
 
+def _pytest_marker_names_for_path(path: Path) -> set[str]:
+    """Return automatically assigned pytest markers for known slow shards."""
+    normalized = path.as_posix()
+    markers: set[str] = set()
+
+    if "/scenario_tests/" in f"/{normalized}":
+        markers.update({"scenario", "slow"})
+
+    filename = path.name
+    if "e2e" in filename:
+        markers.update({"e2e", "slow"})
+    if "benchmark" in filename or filename.startswith("test_perf_"):
+        markers.update({"benchmark", "slow"})
+
+    return markers
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    for item in items:
+        for marker_name in sorted(_pytest_marker_names_for_path(Path(str(item.fspath)))):
+            item.add_marker(getattr(pytest.mark, marker_name))
+
+
 @pytest.fixture(autouse=True)
 def _set_test_env(monkeypatch):
     """Set minimal environment variables so config.py doesn't fail."""

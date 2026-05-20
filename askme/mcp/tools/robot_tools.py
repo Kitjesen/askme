@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 
 from mcp.server.fastmcp import Context
 
 from askme.errors import ROBOT_NOT_CONNECTED, error_response
-from askme.mcp.server import AppContext, mcp
+from askme.mcp.context import AppContext
+from askme.mcp.registration import mcp
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,18 @@ def _get_app(ctx: Context) -> AppContext:
 
 def _no_robot() -> str:
     return error_response(ROBOT_NOT_CONNECTED, "Robot arm not connected or not enabled")
+
+
+async def _execute_arm(app: AppContext, action: str, params: dict[str, float] | None = None):
+    execute = app.arm_controller.execute
+    args = (action,) if params is None else (action, params)
+    if inspect.iscoroutinefunction(execute):
+        result = await execute(*args)
+    else:
+        result = await asyncio.to_thread(execute, *args)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 @mcp.tool()
@@ -36,9 +50,7 @@ async def robot_move(x: float, y: float, z: float, ctx: Context) -> str:
         return _no_robot()
 
     await ctx.info(f"Moving arm to ({x}, {y}, {z}) mm")
-    result = await asyncio.to_thread(
-        app.arm_controller.execute, "move", {"x": x, "y": y, "z": z}
-    )
+    result = await _execute_arm(app, "move", {"x": x, "y": y, "z": z})
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
@@ -54,7 +66,7 @@ async def robot_pick(target: str, ctx: Context) -> str:
         return _no_robot()
 
     await ctx.info(f"Picking up: {target}")
-    result = await asyncio.to_thread(app.arm_controller.execute, "grab")
+    result = await _execute_arm(app, "grab")
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
@@ -70,7 +82,7 @@ async def robot_place(location: str, ctx: Context) -> str:
         return _no_robot()
 
     await ctx.info(f"Placing at: {location}")
-    result = await asyncio.to_thread(app.arm_controller.execute, "release")
+    result = await _execute_arm(app, "release")
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
@@ -81,7 +93,7 @@ async def robot_home(ctx: Context) -> str:
     if not app.arm_controller:
         return _no_robot()
 
-    result = await asyncio.to_thread(app.arm_controller.execute, "home")
+    result = await _execute_arm(app, "home")
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
@@ -92,7 +104,7 @@ async def robot_wave(ctx: Context) -> str:
     if not app.arm_controller:
         return _no_robot()
 
-    result = await asyncio.to_thread(app.arm_controller.execute, "wave")
+    result = await _execute_arm(app, "wave")
     return json.dumps(result, ensure_ascii=False, default=str)
 
 

@@ -24,7 +24,7 @@ brain:
   # Lightweight model for real-time voice turns (lower TTFT)
   voice_model: MiniMax-M2.7-highspeed
   persona:
-    robot_name: Thunder
+    robot_name: 现场机器人
     product_name: 现场任务平台
     customer_name: 梵木创艺园
     operator_audience: 园区运营人员、安保和交付工程师
@@ -62,28 +62,33 @@ brain:
     unapproved: "相关知识还没有审批发布，不能用于回答。请先完成审批。"
   # Max characters to speak in voice mode (0 = unlimited, text mode always unlimited)
   max_response_chars: 200
-  # ThunderAgentShell: model for agentic task loops (default: claude-haiku-4-5-20251001)
+  # Agent shell: model for agentic task loops (default: claude-haiku-4-5-20251001)
   # agent_model: claude-sonnet-4-5-20250929
-  # ThunderAgentShell: max seconds for a single agent_task (default: 120)
+  # Agent shell: max seconds for a single agent_task (default: 120)
   agent_timeout: 120
 
 # ----------------------------------------------------------
 # Memory: MemU / Embedding
 # ----------------------------------------------------------
 memory:
-  # L4 vector memory uses local sentence-transformers (no external server needed).
-  # Set true to enable; requires sentence-transformers package (pip install askme[embed]).
-  # Gracefully degrades to no-op when sentence-transformers is not installed.
+  # Product default:
+  # - customer knowledge RAG uses a locally inspectable backend first.
+  # - robot long-term behavior memory is a separate RobotMem lane.
+  # Do not mix customer evidence with robot behavior memory.
   enabled: true
-  # Backend: "mem0" (default), "robotmem", "mempalace", or "vector"
-  #   mem0     鈥?Mem0 + Qdrant (pip install mem0ai)
-  #   robotmem 鈥?robotmem SDK, SQLite + hybrid search (pip install robotmem jieba)
-  #   vector   鈥?local VectorStore with sentence-transformers (no server)
-  backend: auto
-  auto_backend_order: [robotmem, vector, mem0, mempalace]
+  # Customer knowledge backend: "vector" or "mempalace".
+  # Default to MemPalace for customer knowledge when installed; keep vector as local fallback.
+  backend: mempalace
+  customer_knowledge_backend: mempalace
+  # RobotMem is reserved for robot long-term behavior memory, not customer RAG evidence.
+  robot_behavior_memory_backend: robotmem
+  robot_behavior_memory_enabled: false
+  auto_backend_order: [mempalace, vector, robotmem, mem0]
   robotmem_fallback_backend: vector
   mempalace_fallback_backend: vector
   embed_model: paraphrase-multilingual-MiniLM-L12-v2
+  # Local vector evidence must pass this similarity before entering the prompt.
+  vector_min_similarity: 0.5
   # Timeout (seconds) for embedding server reachability check
   health_check_timeout: 1
   # Timeout (seconds) for retrieval calls
@@ -143,7 +148,7 @@ voice:
   # Input transport: auto uses sounddevice when ALSA is healthy and falls back to
   # MCP01 direct USB capture on Sunrise when the custom kernel exposes no ALSA card.
   input_transport: auto
-  # HK-MIC native rate is 48kHz 2ch 鈥?MicInput resamples to 16kHz mono
+  # HK-MIC native rate is 48kHz 2ch; MicInput resamples to 16kHz mono.
   # On Windows Realtek: typically 44100Hz. Set to match your mic's native rate.
   mic_native_rate: 48000
   mic_channels: 2
@@ -159,7 +164,7 @@ voice:
     num_threads: 2
     # Endpoint detection silence thresholds (seconds)
     # rule1: long silence after short utterance, rule2: normal speech
-    # Lowered from 1.6 to 0.6 鈥?industrial commands are short, 1.6s delay is unacceptable
+    # Lowered from 1.6 to 0.6; industrial commands are short, so 1.6s delay is unacceptable.
     rule1_min_trailing_silence: 0.6
     rule2_min_trailing_silence: 0.4
     # Timeout (seconds) for ASR after wake word detection
@@ -212,8 +217,8 @@ voice:
     feed_silence: false
 
   # Address detection: filter out bystander chat (not talking to robot).
-  # When enabled, casual speech like "璧拌蛋璧板悆楗幓" is silently ignored.
-  # Safe default: uncertain 鈫?respond (never miss a real command).
+  # When enabled, casual speech like "走走，去吃饭" is silently ignored.
+  # Safe default: uncertain -> respond, so real commands are not missed.
   address_detection:
     enabled: true
 
@@ -260,29 +265,29 @@ voice:
 
   tts:
     # Backend: "local" | "edge" | "minimax"
-    # "local"   = sherpa-onnx, 浣庡欢杩燂紝绂荤嚎锛屽０闊冲浐瀹?
-    # "edge"    = Microsoft Edge TTS, 闇€瑕佺綉缁滐紝澹伴煶涓板瘜
-    # "minimax" = MiniMax SSE娴佸紡, 浣庡欢杩? 鏀寔璇煶鍏嬮殕/鎯呯华璋冭妭
+    # "local"   = sherpa-onnx, low latency, offline, fixed voice.
+    # "edge"    = Microsoft Edge TTS, requires network, richer voices.
+    # "minimax" = MiniMax streaming TTS, low latency, supports voice clones and emotion tuning.
     backend: minimax
     # Local backend settings (MeloTTS: 44100Hz, natural Chinese)
     model_dir: models/tts/vits-melo-tts-zh_en
     num_threads: 4
     speed: 1.0
     sid: 0   # speaker ID (this model has 1 speaker only)
-    # Edge backend settings 鈥?鍒囨崲 backend: edge 鍚庣敓鏁?
-    # 涓枃鐢峰０: zh-CN-YunxiNeural (娲绘臣), zh-CN-YunjianNeural (娌夌ǔ)
-    # 涓枃濂冲０: zh-CN-XiaoxiaoNeural (娓╂煍), zh-CN-XiaoyiNeural (娲诲姏)
-    # 鑻辨枃鐢峰０: en-US-GuyNeural, en-US-AndrewNeural
-    # 瀹屾暣鍒楄〃: edge-tts --list-voices
+    # Edge backend settings, active when backend: edge.
+    # Chinese male voices: zh-CN-YunxiNeural (lively), zh-CN-YunjianNeural (steady).
+    # Chinese female voices: zh-CN-XiaoxiaoNeural (warm), zh-CN-XiaoyiNeural (bright).
+    # English male voices: en-US-GuyNeural, en-US-AndrewNeural.
+    # Full list: edge-tts --list-voices
     voice: zh-CN-YunjianNeural
     rate: "+0%"
-    # MiniMax backend settings 鈥?鍒囨崲 backend: minimax 鍚庣敓鏁?
+    # MiniMax backend settings, active when backend: minimax.
     # MiniMax streaming transport: "sse" | "websocket".
     # WebSocket uses the Speech 2.8 T2A task_start/task_continue/task_finish flow.
     minimax_api_key: ${MINIMAX_API_KEY}
     minimax_tts_url: https://api.minimax.chat/v1
     minimax_tts_transport: websocket
-    # 涓浗璐﹀彿/key 浣跨敤 minimaxi.com锛汫lobal 璐﹀彿鍙敼涓?api.minimax.io銆?
+    # China account/key uses minimaxi.com; global accounts can use api.minimax.io.
     minimax_tts_ws_url: wss://api.minimaxi.com/ws/v1/t2a_v2
     minimax_tts_model: speech-2.8-turbo
     minimax_voice_id: male-qn-qingse
@@ -302,41 +307,41 @@ voice:
     voice_profile_state_path: data/voice/active_voice_profile.json
     voice_profiles:
       patrol_default:
-        label: 宸℃鎾姤
+        label: 巡检播报
         voice_id: male-qn-qingse
         speed: 1.0
         volume: 1.0
         pitch: 0
         emotion: ""
       visitor_friendly:
-        label: 娓稿鏈嶅姟
+        label: 游客服务
         voice_id: male-qn-qingse
         speed: 0.96
         volume: 0.95
         pitch: 1
         emotion: happy
       security_clear:
-        label: 瀹夐槻鎻愰啋
+        label: 安防提醒
         voice_id: male-qn-qingse
         speed: 1.0
         volume: 1.0
         pitch: -1
         emotion: calm
       emergency_short:
-        label: 绱ф€ュ憡璀?
+        label: 紧急告警
         voice_id: male-qn-qingse
         speed: 1.08
         volume: 1.0
         pitch: 0
         emotion: fearful
       night_quiet:
-        label: 澶滈棿浣庢壈
+        label: 夜间低扰
         voice_id: male-qn-qingse
         speed: 0.9
         volume: 0.72
         pitch: -2
         emotion: calm
-    # Preserve enough leading context that short first tokens ("1"/"涓€") are not
+    # Preserve enough leading context that short first tokens ("1"/"一") are not
     # thinned out before the USB speaker wake-up protection runs.
     minimax_leading_silence_preserve_seconds: 0.16
     minimax_onset_threshold: 0.0005
@@ -420,7 +425,7 @@ robot:
   action_dim: 16
   serial_port: COM3
   serial_baudrate: 115200
-  # simulate: true 鈫?no real hardware, for testing
+  # simulate: true -> no real hardware, for testing.
   simulate: true
 
 # ----------------------------------------------------------
@@ -462,15 +467,15 @@ tools:
   confirmation_bypass_tools:
     - robot_emergency_stop
   confirmation_phrases:
-    - "纭鎵ц"
-    - "缁х画鎵ц"
-    - "鎵瑰噯鎵ц"
+    - "确认执行"
+    - "继续执行"
+    - "批准执行"
     - "approve"
     - "confirm"
   rejection_phrases:
-    - "鍙栨秷"
-    - "鍙栨秷鎵ц"
-    - "鏀惧純"
+    - "取消"
+    - "取消执行"
+    - "放弃"
     - "cancel"
     - "deny"
 
@@ -502,9 +507,9 @@ proactive:
       info: ["voice", "log"]
       warning: ["voice", "webhook", "log"]
       error: ["voice", "dingtalk", "webhook", "log"]
-  #   - name: "鐜鎾姤"
+  #   - name: "环境播报"
   #     interval: 300
-  #     prompt: "鐢ㄤ竴鍙ヨ瘽鎻忚堪褰撳墠鐜鐘跺喌"
+  #     prompt: "用一句话描述当前环境状态"
 
 # ----------------------------------------------------------
 # Platforms: Multi-platform support (future)
@@ -517,11 +522,11 @@ platforms:
   web:
     enabled: false
   telegram:
-    enabled: false              # 璁句负 true 骞跺～鍐?TELEGRAM_BOT_TOKEN 鍚庡惎鐢?
+    enabled: false              # Set true and provide TELEGRAM_BOT_TOKEN to enable.
     token_env: TELEGRAM_BOT_TOKEN
-    allowed_users: []           # 绌哄垪琛?涓嶉檺鍒讹紱濉?Telegram user_id 鏁存暟寮€鐧藉悕鍗?
-    voice_transcribe: true      # 鏄惁杞啓璇煶娑堟伅锛堥渶瑕?ffmpeg + sherpa-onnx锛?
-    lingtu_url: ""              # 鐣欑┖鍒欒 NAV_GATEWAY_URL 鐜鍙橀噺
+    allowed_users: []           # Empty list allows all users; fill Telegram user_id integers for allowlist.
+    voice_transcribe: true      # Transcribe voice messages; requires ffmpeg + sherpa-onnx.
+    lingtu_url: ""              # Empty value reads NAV_GATEWAY_URL from environment.
 
 # ----------------------------------------------------------
 # Scheduler: Timed tasks (future)
@@ -574,8 +579,8 @@ field_operations:
   # devices, responder groups, and scenario thresholds from this file first;
   # explicit values below still override it.
   site_profile_path: deploy/site-profiles/park-demo.yaml
-  robot_id: thunder-1
-  robot_name: Thunder
+  robot_id: robot-1
+  robot_name: 现场机器人
   # Enable only for low-risk visitor/facility service wording. P0 alerts still
   # use fixed, audited templates.
   llm_narrative_enabled: false
@@ -728,18 +733,18 @@ field_operations:
   site_map:
     zones:
       main-road-1:
-        name: B鍖轰富閫氶亾
-        location: B鍖轰富閫氶亾
+        name: B区主通道
+        location: B区主通道
         type: main_channel
         parking_allowed: false
       guide-01:
-        name: 娓稿涓績璺紩鐐?
-        location: 娓稿涓績闂ㄥ彛
+        name: 游客中心路引点
+        location: 游客中心门口
         type: help_point
         help_point_id: guide-01
       north-window-01:
-        name: 鍖椾晶涓€灞傜獥鎴?
-        location: 鍖椾晶涓€灞傜獥鎴?
+        name: 北侧一层窗户
+        location: 北侧一层窗户
         type: window
 
 # ----------------------------------------------------------
@@ -958,7 +963,7 @@ runtime:
     operator_id: askme
 
   dog_safety:
-    # dog-safety-service E-STOP notification (Thunder runtime integration)
+    # dog-safety-service E-STOP notification (robot runtime integration)
     # Set DOG_SAFETY_SERVICE_URL env var to enable, e.g. http://localhost:5070
     base_url: ${DOG_SAFETY_SERVICE_URL}
     bearer_token: ${RUNTIME_BEARER_TOKEN}

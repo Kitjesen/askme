@@ -1,13 +1,13 @@
 import asyncio
 
-import pytest
-
 import askme.pipeline.voice_loop as voice_loop_module
-from askme.llm.intent_router import Intent, IntentType
-from askme.pipeline.proactive.base import ProactiveResult
+import pytest
 from askme.pipeline.trace import PipelineTracer
 from askme.pipeline.voice_loop import VoiceLoop
 from askme.voice.interaction_gate import InteractionGate
+
+from askme.pipeline.proactive.base import ProactiveResult
+from askme.robot_interaction import Intent, IntentType
 
 
 class _Router:
@@ -22,6 +22,7 @@ class _Pipeline:
 
     def __init__(self) -> None:
         self.process_calls: list[str] = []
+        self.process_conversation_session_ids: list[str | None] = []
         self.skill_calls: list[tuple[str, str]] = []
         self.pending_calls: list[str] = []
         self.pending_reply_map: dict[str, str] = {}
@@ -40,8 +41,15 @@ class _Pipeline:
         self.pending_calls.append(user_text)
         return self.pending_reply_map.get(user_text)
 
-    async def process(self, user_text: str, *, memory_task=None):
+    async def process(
+        self,
+        user_text: str,
+        *,
+        memory_task=None,
+        conversation_session_id: str | None = None,
+    ):
         self.process_calls.append(user_text)
+        self.process_conversation_session_ids.append(conversation_session_id)
         return "fallback"
 
     async def execute_skill(self, skill_name: str, user_text: str):
@@ -55,8 +63,15 @@ class _SpeakingPipeline(_Pipeline):
         self.audio = audio
         self.memory_results: list[str] = []
 
-    async def process(self, user_text: str, *, memory_task=None):
+    async def process(
+        self,
+        user_text: str,
+        *,
+        memory_task=None,
+        conversation_session_id: str | None = None,
+    ):
         self.process_calls.append(user_text)
+        self.process_conversation_session_ids.append(conversation_session_id)
         if memory_task is not None:
             self.memory_results.append(await memory_task)
         reply = f"pipeline reply: {user_text}"
@@ -151,6 +166,15 @@ class _ExplodingBridge:
         raise RuntimeError("runtime bridge offline")
 
 
+class _UnavailableBridge:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def handle_voice_text(self, text: str):
+        self.calls.append(text)
+        return None
+
+
 class _SkillBridge:
     def __init__(self, skill_name: str) -> None:
         self.skill_name = skill_name
@@ -185,7 +209,14 @@ class _Dispatcher:
     async def dispatch(self, skill_name: str, user_text: str, *, source: str = "") -> None:
         self.dispatch_calls.append((skill_name, user_text, source))
 
-    async def handle_general(self, user_text: str, *, source: str = "", memory_task=None) -> None:
+    async def handle_general(
+        self,
+        user_text: str,
+        *,
+        source: str = "",
+        memory_task=None,
+        conversation_session_id: str | None = None,
+    ) -> None:
         self.general_calls.append((user_text, source))
 
     def cancel_active_agent_task(self) -> bool:
@@ -203,6 +234,34 @@ class _Proactive:
         return self.result
 
 
+def test_voice_loop_default_gate_fallbacks_do_not_construct_robot_interaction(
+    monkeypatch,
+) -> None:
+    from askme.robot_interaction.address_detector import AddressDetector
+    from askme.robot_interaction.interaction_gate import InteractionGate as RobotInteractionGate
+
+    def fail_init(*args, **kwargs) -> None:
+        raise AssertionError("VoiceLoop default must not construct this class")
+
+    monkeypatch.setattr(AddressDetector, "__init__", fail_init)
+    monkeypatch.setattr(RobotInteractionGate, "__init__", fail_init)
+
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        audio=_Audio(),
+    )
+
+    assert loop._address_detector.is_addressed("inspect zone") is True
+    decision = loop._interaction_gate.evaluate(
+        "inspect zone",
+        addressed=False,
+        perception=None,
+    )
+    assert decision.action.value == "respond"
+    assert decision.reason == "gate_disabled"
+
+
 @pytest.mark.asyncio
 async def test_voice_loop_prefers_runtime_bridge_before_llm() -> None:
     pipeline = _Pipeline()
@@ -218,6 +277,156 @@ async def test_voice_loop_prefers_runtime_bridge_before_llm() -> None:
 
     assert pipeline.process_calls == []
     assert audio.spoken[-1] == "runtime handled"
+
+
+@pytest.mark.asyncio
+async def test_voice_loop_passes_conversation_session_to_runtime_bridge() -> None:
+    from askme.voice_gateway import VoiceGatewayService
+
+    class Bridge:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def handle_voice_text(self, text: str, **kwargs):
+            self.calls.append({"text": text, **kwargs})
+            return {
+                "handled": True,
+                "turn": {
+                    "action_type": "mission",
+                    "spoken_reply": "runtime handled",
+                },
+            }
+
+    bridge = Bridge()
+    gateway = VoiceGatewayService(bridge)
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        audio=_Audio(),
+        voice_runtime_bridge=gateway,
+    )
+
+    await loop.run()
+
+    assert bridge.calls[0]["session_id"]
+    assert bridge.calls[0]["session_id"] == bridge.calls[0]["conversation_session_id"]
+    assert bridge.calls[0]["channel"] == "voice"
+
+
+@pytest.mark.asyncio
+async def test_voice_loop_replaces_closed_cached_runtime_session() -> None:
+    from askme.voice_gateway import VoiceGatewayService
+
+    class Bridge:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def handle_voice_text(self, text: str, **kwargs):
+            self.calls.append({"text": text, **kwargs})
+            return {
+                "handled": True,
+                "turn": {
+                    "action_type": "mission",
+                    "spoken_reply": "runtime handled",
+                },
+            }
+
+    bridge = Bridge()
+    gateway = VoiceGatewayService(bridge)
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        audio=_Audio(),
+        voice_runtime_bridge=gateway,
+    )
+
+    assert await loop._maybe_handle_runtime_bridge("status one") is True
+    first_session_id = str(bridge.calls[0]["session_id"])
+    gateway.session_manager.close_session(first_session_id)
+
+    assert await loop._maybe_handle_runtime_bridge("status two") is True
+
+    assert bridge.calls[1]["session_id"] != first_session_id
+    assert bridge.calls[1]["channel"] == "voice"
+
+
+@pytest.mark.asyncio
+async def test_voice_loop_replaces_missing_cached_runtime_session() -> None:
+    from askme.voice_gateway import VoiceGatewayService
+
+    class Bridge:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def handle_voice_text(self, text: str, **kwargs):
+            self.calls.append({"text": text, **kwargs})
+            return {
+                "handled": True,
+                "turn": {
+                    "action_type": "mission",
+                    "spoken_reply": "runtime handled",
+                },
+            }
+
+    bridge = Bridge()
+    gateway = VoiceGatewayService(bridge)
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        audio=_Audio(),
+        voice_runtime_bridge=gateway,
+    )
+
+    assert await loop._maybe_handle_runtime_bridge("status one") is True
+    first_session_id = str(bridge.calls[0]["session_id"])
+    assert gateway.session_manager.store.delete(first_session_id) is True
+
+    assert await loop._maybe_handle_runtime_bridge("status two") is True
+
+    assert bridge.calls[1]["session_id"] != first_session_id
+    assert bridge.calls[1]["session_id"] == bridge.calls[1]["conversation_session_id"]
+    assert bridge.calls[1]["channel"] == "voice"
+
+
+@pytest.mark.asyncio
+async def test_voice_loop_uses_degraded_session_when_manager_unavailable() -> None:
+    class BrokenManager:
+        def get_or_create(self, **kwargs):
+            raise RuntimeError("session store offline")
+
+    class Bridge:
+        session_manager = BrokenManager()
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def handle_voice_text(self, text: str, **kwargs):
+            self.calls.append({"text": text, **kwargs})
+            return {
+                "handled": True,
+                "turn": {
+                    "action_type": "mission",
+                    "spoken_reply": "runtime handled",
+                },
+            }
+
+    bridge = Bridge()
+    audio = _Audio()
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        audio=audio,
+        voice_runtime_bridge=bridge,
+    )
+
+    assert await loop._maybe_handle_runtime_bridge("status") is True
+
+    assert len(bridge.calls) == 1
+    call = bridge.calls[0]
+    assert call["text"] == "status"
+    assert str(call["session_id"]).startswith("voice-degraded-")
+    assert call["session_id"] == call["conversation_session_id"]
+    assert audio.spoken == ["runtime handled"]
 
 
 @pytest.mark.asyncio
@@ -239,10 +448,10 @@ async def test_voice_loop_handles_pending_tool_confirmation_before_llm() -> None
 
 
 @pytest.mark.asyncio
-async def test_voice_loop_falls_back_to_local_pipeline_when_runtime_bridge_fails() -> None:
+async def test_voice_loop_falls_back_to_local_pipeline_when_runtime_bridge_unhandled() -> None:
     pipeline = _Pipeline()
     audio = _Audio()
-    bridge = _ExplodingBridge()
+    bridge = _UnavailableBridge()
     loop = VoiceLoop(
         router=_Router(),
         pipeline=pipeline,
@@ -254,6 +463,36 @@ async def test_voice_loop_falls_back_to_local_pipeline_when_runtime_bridge_fails
 
     assert bridge.calls == ["inspect zone"]
     assert pipeline.process_calls == ["inspect zone"]
+    assert pipeline.process_conversation_session_ids == [None]
+
+
+@pytest.mark.asyncio
+async def test_voice_loop_records_local_fallback_turn_in_gateway_session() -> None:
+    from askme.voice_gateway import VoiceGatewayService
+
+    class Bridge:
+        def handle_voice_text(self, text: str, **kwargs):
+            return None
+
+    pipeline = _Pipeline()
+    audio = _Audio()
+    gateway = VoiceGatewayService(Bridge())
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        audio=audio,
+        voice_runtime_bridge=gateway,
+    )
+
+    await loop.run()
+
+    session_id = pipeline.process_conversation_session_ids[0]
+    assert session_id is not None
+    snapshot = gateway.conversation_snapshot(session_id)
+    assert snapshot is not None
+    assert snapshot.turns[0].user_text == "inspect zone"
+    assert snapshot.turns[0].assistant_text == "fallback"
+    assert snapshot.turns[0].metadata["local_fallback"] is True
 
 
 @pytest.mark.asyncio

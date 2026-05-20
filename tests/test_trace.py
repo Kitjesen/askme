@@ -4,7 +4,6 @@ import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from askme.pipeline.trace import PipelineTracer, Span, Trace, get_tracer
 
 

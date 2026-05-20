@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from askme.pipeline.skill_gate import SkillGate
 from askme.skills.audit import SkillAuditLog
 from askme.skills.capability_center import build_capability_center

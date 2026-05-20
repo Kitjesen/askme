@@ -30,7 +30,7 @@ from askme.schemas.messages import DetectionFrame
 from askme.schemas.observation import Detection, Observation
 
 if TYPE_CHECKING:
-    from askme.robot.pubsub import PubSubBase
+    from askme.interfaces.bus import BusBackend as PubSubBase
 
 logger = logging.getLogger(__name__)
 

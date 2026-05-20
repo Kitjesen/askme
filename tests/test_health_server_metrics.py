@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import askme.health_server as health_server
 from askme.health_server import (
     _append_metric,
     _escape_label_value,
@@ -11,6 +12,28 @@ from askme.health_server import (
 )
 
 # ── _format_metric_value ──────────────────────────────────────────────────────
+
+def test_health_server_facade_exports_compatibility_contract():
+    expected_exports = {
+        "AskmeHealthHTTPServer",
+        "AskmeHealthServer",
+        "HealthServer",
+        "_append_metric",
+        "_escape_label_value",
+        "_format_labels",
+        "_format_metric_value",
+        "build_health_app",
+        "build_health_snapshot",
+        "create_health_app",
+        "render_prometheus_metrics",
+        "sign_field_runtime_callback_payload",
+    }
+
+    assert expected_exports <= set(health_server.__all__)
+    assert health_server.build_health_app is health_server.create_health_app
+    assert health_server.HealthServer is health_server.AskmeHealthServer
+    assert health_server.AskmeHealthHTTPServer is health_server.AskmeHealthServer
+
 
 class TestFormatMetricValue:
     def test_none_returns_nan(self):

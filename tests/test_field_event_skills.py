@@ -67,6 +67,7 @@ def test_field_scenario_skills_are_installed_and_customer_visible(tmp_path: Path
     for skill_name in [
         "report_fall_unrecoverable",
         "report_stuck",
+        "report_malicious_blocking",
         "report_motor_fault",
         "detect_night_intruder",
         "detect_illegal_parking",
@@ -88,6 +89,7 @@ def test_field_scenario_skills_are_installed_and_customer_visible(tmp_path: Path
         for skill in group["skills"]
     }
     assert by_skill["report_fall_unrecoverable"]["installed"] is True
+    assert by_skill["report_malicious_blocking"]["installed"] is True
     assert by_skill["detect_illegal_parking"]["installed"] is True
     assert by_skill["detect_crowd_gathering"]["installed"] is True
     assert by_skill["escort_visitor"]["requires_approval"] is True

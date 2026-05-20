@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from askme.llm.intent_router import IntentRouter, IntentType
+from askme.robot_interaction import IntentRouter, IntentType
 from askme.pipeline.voice_loop import VoiceLoop
 from askme.skills.skill_manager import SkillManager
 

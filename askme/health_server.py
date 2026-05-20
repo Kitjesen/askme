@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
-import ipaddress
 import json
 import logging
-import math
 import os
-import re
 import secrets
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
-from inspect import Parameter, isawaitable, signature
 from pathlib import Path
 from typing import Any
 
@@ -22,31 +17,43 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from askme.api.routes.audit import register_audit_routes
-from askme.api.routes.capabilities import register_capability_routes
-from askme.api.routes.cognition import register_cognition_routes
-from askme.api.routes.conversation import register_conversation_routes
-from askme.api.routes.dashboard import register_dashboard_routes
-from askme.api.routes.field import register_field_routes
-from askme.api.routes.governance import register_governance_routes
-from askme.api.routes.memory import register_memory_routes
-from askme.api.routes.monitor import register_monitor_routes
-from askme.api.routes.runtime import register_runtime_routes
-from askme.api.routes.space import register_space_routes
-from askme.api.routes.system import register_system_routes
-from askme.api.routes.voice import register_voice_routes
+from askme.api.composition import ApiRouteDependencies, register_api_routes
+from askme.api.services import field_runtime_callback_security as _callback_security
+from askme.api.services import prometheus_metrics as _prometheus_metrics
 from askme.api.services.conversation_service import ConversationService
+from askme.api.services.field_route_roots import (
+    field_operations_path_roots as _resolve_field_operations_path_roots,
+)
+from askme.api.services.field_runtime_callback_security import (
+    field_runtime_callback_delivery_body as _field_runtime_callback_delivery_body,
+)
+from askme.api.services.field_runtime_callback_security import (
+    field_runtime_callback_trust as _field_runtime_callback_trust,
+)
+from askme.api.services.field_runtime_plan import (
+    build_field_runtime_plan_from_event as _field_runtime_plan_from_event,
+)
+from askme.api.services.field_runtime_plan import (
+    field_runtime_delivery_status as _field_runtime_delivery_status,
+)
+from askme.api.services.http_helpers import accepted_keyword_args as _accepted_keyword_args
+from askme.api.services.http_helpers import clean_secret as _clean_secret
+from askme.api.services.http_helpers import is_remote_bind_host as _is_remote_bind_host
+from askme.api.services.http_helpers import json_snapshot_response as _json_snapshot_response
+from askme.api.services.http_helpers import maybe_await as _maybe_await
+from askme.api.services.http_helpers import public_error_payload as _public_error_payload
+from askme.api.services.http_helpers import snapshot_payload as _snapshot_payload
+from askme.api.services.http_runtime_config import (
+    api_documentation_urls as _api_documentation_urls,
+)
+from askme.api.services.http_runtime_config import (
+    conversation_runtime_settings as _conversation_runtime_settings,
+)
 from askme.api.services.monitor_service import MonitorService
+from askme.api.services.prometheus_metrics import render_prometheus_metrics
 from askme.config import get_config, project_root
 from askme.governance import OperatorDirectory
-from askme.robot.runtime_health import RuntimeHealthSnapshot, merge_voice_pipeline_status
-from askme.runtime.field_callbacks import (
-    derive_field_runtime_callback_id,
-    unsigned_field_runtime_callback_payload,
-)
-from askme.runtime.field_callbacks import (
-    sign_field_runtime_callback_payload as _sign_runtime_callback_payload,
-)
+from askme.robot.dog.runtime_health import RuntimeHealthSnapshot, merge_voice_pipeline_status
 
 logger = logging.getLogger(__name__)
 
@@ -56,26 +63,12 @@ _UTC = timezone.utc  # noqa: UP017 - Sunrise runs Python 3.10, where datetime.UT
 _PUBLIC_HTTP_PATHS = frozenset(("/health", "/healthz", "/metrics", "/metrics/prometheus"))
 _PROTECTED_HTTP_PREFIXES = ("/api/",)
 _PROTECTED_HTTP_PATHS = frozenset(("/dashboard", "/trace"))
-_REMOTE_BIND_HOSTS = frozenset(("", "0.0.0.0", "::", "[::]"))
 _FIELD_EVIDENCE_ROOT_NAMES = ("artifacts", "output", "data")
-_FIELD_RUNTIME_CALLBACK_SIGNATURE_ALG = "hmac-sha256"
-_FIELD_RUNTIME_CALLBACK_SIGNATURE_FIELDS = {
-    "runtime_signature",
-    "signature",
-    "x_signature",
-    "runtime_signature_alg",
-    "signature_alg",
-}
-_FIELD_RUNTIME_CALLBACK_TIMESTAMP_FIELDS = (
-    "runtime_signature_timestamp",
-    "signature_timestamp",
-)
-_FIELD_RUNTIME_CALLBACK_ID_FIELDS = (
-    "runtime_callback_id",
-    "callback_id",
-    "delivery_id",
-    "message_id",
-)
+_append_metric = _prometheus_metrics.append_metric
+_escape_label_value = _prometheus_metrics.escape_label_value
+_format_labels = _prometheus_metrics.format_labels
+_format_metric_value = _prometheus_metrics.format_metric_value
+sign_field_runtime_callback_payload = _callback_security.sign_field_runtime_callback_payload
 
 HealthProvider = Callable[[], dict[str, Any]]
 MetricsProvider = Callable[[], dict[str, Any]]
@@ -87,6 +80,10 @@ MemoryHandler = Any
 FieldOperationsHandler = Any
 VoiceHandler = Any
 SpaceHandler = Any
+
+
+def _field_operations_path_roots(app_config: dict[str, Any]) -> dict[str, Path]:
+    return _resolve_field_operations_path_roots(app_config, project_root=project_root())
 
 
 class _MutableHandlerProxy:
@@ -142,308 +139,6 @@ def _skill_growth_candidate_prompt(candidate: dict[str, Any]) -> str:
         "用户输入：{{user_input}}\n\n"
         "请用一句到三句话回复，先说明能否处理，再说明下一步。"
     )
-
-
-def _agent_profile_known_tools() -> set[str]:
-    """Return tool names that a project Agent Profile is allowed to reference."""
-
-    names = {"spawn_agent", "dispatch_skill", "create_skill", "create_agent_profile"}
-    try:
-        from askme.tools.builtin_tools import SpeakProgressTool, register_builtin_tools
-        from askme.tools.move_tool import register_move_tools
-        from askme.tools.robot_api_tool import RobotApiTool
-        from askme.tools.scan_tool import register_scan_tools
-        from askme.tools.temporal_query_tool import register_temporal_tools
-        from askme.tools.tool_registry import ToolRegistry
-
-        registry = ToolRegistry(config={"default_timeout": 1.0})
-        register_builtin_tools(registry, production_mode=True)
-        registry.register(SpeakProgressTool())
-        registry.register(RobotApiTool())
-        register_move_tools(registry)
-        register_scan_tools(registry)
-        register_temporal_tools(registry)
-        names.update(registry.get_agent_allowed_names())
-    except Exception as exc:
-        logger.warning("Failed to build Agent Profile tool allowlist: %s", exc)
-    return {name for name in names if name}
-
-
-def _field_runtime_plan_from_event(
-    event: dict[str, Any],
-    *,
-    operator_id: str,
-) -> dict[str, Any]:
-    """Build a runtime-handoff plan from an accepted field incident."""
-
-    event_id = str(event.get("event_id") or "")
-    scenario_id = str(event.get("scenario_id") or "field_event")
-    playbook = event.get("playbook") if isinstance(event.get("playbook"), dict) else {}
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    policy = str(playbook.get("robot_motion_policy") or "observe_then_continue")
-    location = str(
-        event.get("location")
-        or payload.get("location")
-        or payload.get("target_location")
-        or "-"
-    )
-    area_id = _field_runtime_area_id(event, payload)
-    task_type = _field_runtime_task_type(scenario_id, policy)
-    risk_tier = _field_runtime_risk_tier(event)
-    goal = (
-        f"Handle field event {scenario_id} at {location}. "
-        f"Apply robot policy {policy} and keep operator in control."
-    )
-    return {
-        "plan_id": f"field-{event_id or scenario_id}",
-        "planning_session_id": f"field-session-{event_id or scenario_id}",
-        "intent": task_type,
-        "goal": goal,
-        "handoff_ready": True,
-        "operator_id": operator_id,
-        "operator_roles": ["operator"],
-        "safety_constraints": [
-            "Do not bypass field safety policy.",
-            "Do not execute low-level motor commands from LLM output.",
-            "Keep hardware dispatch disabled unless the runtime profile explicitly enables it.",
-        ],
-        "missing_inputs": [],
-        "reference": {
-            "resolved": {
-                "area_id": area_id,
-                "label": location,
-                "field_event_id": event_id,
-                "scenario_id": scenario_id,
-            }
-        },
-        "mission": {
-            "mission": {
-                "mission_type": task_type,
-                "goal": goal,
-                "risk_tier": risk_tier,
-                "operator_id": operator_id,
-                "operator_roles": ["operator"],
-                "steps": [{"target": area_id, "policy": policy}],
-                "safety_notes": [
-                    f"field_event_id={event_id}",
-                    f"robot_motion_policy={policy}",
-                    f"priority={event.get('priority') or ''}",
-                    "field event runtime handoff is high-level only",
-                ],
-                "field_event": {
-                    "event_id": event_id,
-                    "scenario_id": scenario_id,
-                    "priority": event.get("priority"),
-                    "severity": event.get("severity"),
-                    "location": location,
-                    "notification_group": event.get("notification_group"),
-                    "robot_motion_policy": policy,
-                },
-            }
-        },
-    }
-
-
-def _field_runtime_area_id(event: dict[str, Any], payload: dict[str, Any]) -> str:
-    for value in (
-        payload.get("zone_id"),
-        payload.get("map_zone_id"),
-        payload.get("help_point_id"),
-        event.get("location"),
-        payload.get("location"),
-        payload.get("target_location"),
-    ):
-        text = str(value or "").strip()
-        if not text:
-            continue
-        lowered = text.lower()
-        if lowered.startswith(("area-", "zone-", "checkpoint-", "route-")):
-            return lowered
-        slug = re.sub(r"[^a-z0-9_-]+", "-", lowered).strip("-")
-        if slug:
-            return f"zone-{slug[:48]}"
-    return "zone-field-event"
-
-
-def _field_runtime_task_type(scenario_id: str, policy: str) -> str:
-    normalized = f"{scenario_id} {policy}".strip()
-    if normalized:
-        return "field_incident_response"
-    return "status_report"
-
-
-def _field_runtime_risk_tier(event: dict[str, Any]) -> str:
-    priority = str(event.get("priority") or "").upper()
-    severity = str(event.get("severity") or "").lower()
-    if priority == "P0" or severity == "error":
-        return "high"
-    if priority in {"P1", "P2"}:
-        return "medium"
-    return "low"
-
-
-def _field_runtime_delivery_status(
-    runtime_result: dict[str, Any],
-    run: dict[str, Any],
-) -> str:
-    if runtime_result.get("accepted") is False:
-        return "rejected"
-    state = str(run.get("current_state") or runtime_result.get("state") or "").strip()
-    if state:
-        return state
-    return "submitted"
-
-
-def sign_field_runtime_callback_payload(body: dict[str, Any], *, secret: str) -> str:
-    """Return the HMAC signature expected on field runtime-delivery callbacks."""
-
-    return _sign_runtime_callback_payload(body, secret=secret)
-
-
-def _unsigned_field_runtime_callback_payload(body: dict[str, Any]) -> dict[str, Any]:
-    return unsigned_field_runtime_callback_payload(body)
-
-
-def _field_runtime_callback_signature_value(body: dict[str, Any]) -> str:
-    for key in ("runtime_signature", "signature", "x_signature"):
-        value = body.get(key)
-        if value:
-            return str(value).strip()
-    return ""
-
-
-def _field_runtime_callback_timestamp(body: dict[str, Any]) -> float | None:
-    for key in _FIELD_RUNTIME_CALLBACK_TIMESTAMP_FIELDS:
-        parsed = _parse_field_runtime_timestamp(body.get(key))
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _field_runtime_callback_id(body: dict[str, Any]) -> str:
-    for key in _FIELD_RUNTIME_CALLBACK_ID_FIELDS:
-        value = body.get(key)
-        if value:
-            return str(value).strip()
-    return derive_field_runtime_callback_id(body)
-
-
-def _parse_field_runtime_timestamp(value: Any) -> float | None:
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        pass
-    text = str(value).strip()
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_UTC)
-    return parsed.timestamp()
-
-
-def _field_runtime_callback_trust(
-    body: dict[str, Any],
-    *,
-    secret: str,
-    max_age_s: float,
-    now: float | None = None,
-) -> dict[str, Any]:
-    base = {
-        "signature_alg": _FIELD_RUNTIME_CALLBACK_SIGNATURE_ALG,
-        "secret_configured": bool(secret),
-        "signature_verified": False,
-        "timestamp_verified": False,
-    }
-    if not secret:
-        return {
-            **base,
-            "trusted": True,
-            "status": "unsigned",
-            "reason": "runtime_callback_secret_not_configured",
-        }
-    signature_alg = str(
-        body.get("runtime_signature_alg")
-        or body.get("signature_alg")
-        or _FIELD_RUNTIME_CALLBACK_SIGNATURE_ALG
-    )
-    if signature_alg != _FIELD_RUNTIME_CALLBACK_SIGNATURE_ALG:
-        return {
-            **base,
-            "trusted": False,
-            "status": "blocked",
-            "reason": "unsupported_runtime_signature_alg",
-        }
-    actual_signature = _field_runtime_callback_signature_value(body)
-    if not actual_signature:
-        return {
-            **base,
-            "trusted": False,
-            "status": "blocked",
-            "reason": "missing_runtime_signature",
-        }
-    expected_signature = sign_field_runtime_callback_payload(body, secret=secret)
-    if not hmac.compare_digest(actual_signature, expected_signature):
-        return {
-            **base,
-            "trusted": False,
-            "status": "blocked",
-            "reason": "runtime_signature_mismatch",
-        }
-    timestamp = _field_runtime_callback_timestamp(body)
-    if timestamp is None:
-        return {
-            **base,
-            "signature_verified": True,
-            "trusted": False,
-            "status": "blocked",
-            "reason": "missing_runtime_signature_timestamp",
-        }
-    current = time.time() if now is None else now
-    age_s = current - timestamp
-    if age_s < -5.0:
-        return {
-            **base,
-            "signature_verified": True,
-            "trusted": False,
-            "status": "blocked",
-            "reason": "runtime_signature_from_future",
-            "signature_age_s": round(age_s, 3),
-        }
-    if age_s > max_age_s:
-        return {
-            **base,
-            "signature_verified": True,
-            "trusted": False,
-            "status": "blocked",
-            "reason": "runtime_signature_expired",
-            "signature_age_s": round(age_s, 3),
-        }
-    return {
-        **base,
-        "trusted": True,
-        "status": "trusted",
-        "reason": "signature_verified",
-        "signature_verified": True,
-        "timestamp_verified": True,
-        "signature_age_s": round(age_s, 3),
-    }
-
-
-def _field_runtime_callback_delivery_body(
-    body: dict[str, Any],
-    *,
-    trust: dict[str, Any],
-) -> dict[str, Any]:
-    delivery = _unsigned_field_runtime_callback_payload(body)
-    delivery.setdefault("runtime_callback_id", _field_runtime_callback_id(body))
-    delivery["runtime_callback_trust"] = trust
-    return delivery
 
 
 class HealthSnapshotProvider(RuntimeHealthSnapshot):
@@ -563,7 +258,7 @@ def build_health_snapshot(
 
     # Runtime service connectivity (nav-gateway, dog-control, dog-safety)
     try:
-        from askme.robot.runtime_health import get_service_summary
+        from askme.robot.dog.runtime_health import get_service_summary
         snapshot["services"] = get_service_summary()
     except Exception:
         pass
@@ -621,31 +316,10 @@ def create_health_app(
     )
     resolved_runtime_callback_max_age_s = max(1.0, float(field_runtime_callback_max_age_s))
     app_config = get_config()
-    conversation_cfg = app_config.get("conversation", {}) if isinstance(app_config, dict) else {}
-    if not isinstance(conversation_cfg, dict):
-        conversation_cfg = {}
-    chat_timeout_s = _optional_positive_float_config(
-        conversation_cfg.get("chat_timeout_s", 30.0),
-        default=30.0,
-    )
-    chat_max_concurrency = _positive_int_config(
-        conversation_cfg.get("chat_max_concurrency", 8),
-        default=8,
-    )
-    chat_slow_threshold_ms = _optional_positive_float_config(
-        conversation_cfg.get("chat_slow_threshold_ms", 2000.0),
-        default=2000.0,
-    )
-    chat_diagnostics_history_limit = _positive_int_config(
-        conversation_cfg.get("chat_diagnostics_history_limit", 20),
-        default=20,
-    )
-    runtime_voice_turn_timeout_s = _optional_positive_float_config(
-        conversation_cfg.get("runtime_voice_turn_timeout_s", 30.0),
-        default=30.0,
-    )
+    field_path_roots = _field_operations_path_roots(app_config)
+    conversation_settings = _conversation_runtime_settings(app_config)
     if field_operations_handler is None:
-        from askme.pipeline.field_operations import FieldOperationsService
+        from askme.pipeline.field.field_operations import FieldOperationsService
 
         field_operations_handler = FieldOperationsService.from_env()
     if space_handler is None:
@@ -653,11 +327,12 @@ def create_health_app(
 
         space_handler = ParkSpaceService.from_config(app_config)
 
+    api_documentation_urls = _api_documentation_urls(app_config)
     app = FastAPI(
         title="askme-health",
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
+        docs_url=api_documentation_urls["docs_url"],
+        redoc_url=api_documentation_urls["redoc_url"],
+        openapi_url=api_documentation_urls["openapi_url"],
     )
     _CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
     _MISSION_JSON_HEADERS = {"Cache-Control": "no-store", **_CORS_HEADERS}
@@ -668,7 +343,11 @@ def create_health_app(
     _operator_directory = OperatorDirectory(app_config)
 
     def _json_error(message: str, *, status_code: int) -> JSONResponse:
-        return JSONResponse({"error": message}, status_code=status_code, headers=_CORS_HEADERS)
+        return JSONResponse(
+            _public_error_payload(message, message=message),
+            status_code=status_code,
+            headers=_CORS_HEADERS,
+        )
 
     def _mission_json(payload: dict[str, Any], *, status_code: int = 200) -> JSONResponse:
         return JSONResponse(payload, status_code=status_code, headers=_MISSION_JSON_HEADERS)
@@ -714,7 +393,11 @@ def create_health_app(
     async def _control_api_auth(request: Request, call_next: Callable[[Request], Any]) -> Any:
         if _request_requires_control_auth(request) and not _request_has_control_auth(request):
             return JSONResponse(
-                {"error": "control API authentication required"},
+                _public_error_payload(
+                    "control API authentication required",
+                    message="Control API authentication is required.",
+                    next_action="Send a Bearer token or X-Askme-Api-Key header.",
+                ),
                 status_code=401,
                 headers={
                     "Cache-Control": "no-store",
@@ -834,9 +517,12 @@ def create_health_app(
             return None
         return _mission_json(
             {
+                "ok": False,
                 "error": "operator not authorized",
                 "reason": decision.get("reason") or "operator_missing_permission",
                 "operator_auth": decision,
+                "message": "The current operator is not allowed to perform this action.",
+                "next_action": "Switch to an operator with the required permission or request approval.",
             },
             status_code=403,
         )
@@ -1105,10 +791,12 @@ def create_health_app(
         chat_handler=chat_handler,
         memory_handler=memory_handler,
         logger=logger,
-        chat_timeout_s=chat_timeout_s,
-        chat_max_concurrency=chat_max_concurrency,
-        chat_slow_threshold_ms=chat_slow_threshold_ms,
-        chat_diagnostics_history_limit=chat_diagnostics_history_limit,
+        chat_timeout_s=conversation_settings.chat_timeout_s,
+        chat_max_concurrency=conversation_settings.chat_max_concurrency,
+        chat_slow_threshold_ms=conversation_settings.chat_slow_threshold_ms,
+        chat_diagnostics_history_limit=conversation_settings.chat_diagnostics_history_limit,
+        capabilities_provider=capabilities_provider,
+        space_dispatch=lambda method_name, body: _dispatch_space(method_name, body),
     )
     monitor_service = MonitorService(
         config_provider=get_config,
@@ -1125,869 +813,64 @@ def create_health_app(
         payload["conversation_runtime"] = conversation_service.metrics_snapshot()["chat"]
         return payload
 
-    register_system_routes(
+    register_api_routes(
         app,
-        health_provider=resolved_health_provider,
-        metrics_provider=_metrics_provider_with_conversation,
-        render_prometheus_metrics=render_prometheus_metrics,
-        json_snapshot_response=_json_snapshot_response,
-        snapshot_payload=_snapshot_payload,
-        prometheus_content_type=_PROMETHEUS_CONTENT_TYPE,
+        ApiRouteDependencies(
+            health_provider=resolved_health_provider,
+            metrics_provider=_metrics_provider_with_conversation,
+            render_prometheus_metrics=render_prometheus_metrics,
+            json_snapshot_response=_json_snapshot_response,
+            snapshot_payload=_snapshot_payload,
+            prometheus_content_type=_PROMETHEUS_CONTENT_TYPE,
+            governance_payload=_operator_directory_payload,
+            identity_readiness_payload=_identity_readiness_payload,
+            current_operator_payload=_current_operator_payload,
+            authorization_payload=_operator_authorization_payload,
+            mission_json=_mission_json,
+            cors_options_response=_cors_options_response,
+            dispatch_memory=lambda method_name, body: _dispatch_memory(method_name, body),
+            logger=logger,
+            authorize=_require_permission,
+            dispatch_cognition=_dispatch_cognition,
+            json_error=_json_error,
+            cors_headers=_CORS_HEADERS,
+            dispatch_runtime=_dispatch_runtime,
+            optional_json_body=_optional_json_body,
+            operator_action_kwargs=_operator_action_kwargs,
+            dispatch_voice=_dispatch_voice,
+            dispatch_space=lambda method_name, body: _dispatch_space(method_name, body),
+            dispatch_field_operations=_dispatch_field_operations,
+            field_manual_trigger_body=_field_manual_trigger_body,
+            looks_like_device_ingest_without_scenario=_looks_like_device_ingest_without_scenario,
+            dispatch_field_voice_directive=_dispatch_field_voice_directive,
+            dispatch_field_runtime_policy=_dispatch_field_runtime_policy,
+            runtime_callback_trust=_field_runtime_callback_trust,
+            runtime_callback_delivery_body=_field_runtime_callback_delivery_body,
+            runtime_callback_secret=resolved_runtime_callback_secret,
+            runtime_callback_max_age_s=resolved_runtime_callback_max_age_s,
+            field_path_roots=field_path_roots,
+            config_provider=get_config,
+            dashboard_html=_DASHBOARD_HTML,
+            dashboard_asset_dir=_DASHBOARD_ASSET_DIR,
+            dashboard_pages=_DASHBOARD_PAGES,
+            capabilities_provider=capabilities_provider,
+            blueprints_provider=_blueprint_catalog_payload,
+            operator_id_from_request=_operator_id_from_request,
+            conversation_service=conversation_service,
+            runtime_available=runtime_handler is not None,
+            runtime_voice_turn_timeout_s=conversation_settings.runtime_voice_turn_timeout_s,
+            monitor_service=monitor_service,
+            dispatch_mission=_dispatch_mission,
+            request_has_control_auth=_request_has_control_auth,
+            skill_growth_candidate_prompt=_skill_growth_candidate_prompt,
+            vision_snapshot_handler=vision_snapshot_handler,
+            vision_analyze_handler=vision_analyze_handler,
+            archive_snapshot_handler=archive_snapshot_handler,
+            archive_list_handler=archive_list_handler,
+            archive_get_handler=archive_get_handler,
+            archive_delete_handler=archive_delete_handler,
+        ),
     )
-    register_governance_routes(
-        app,
-        governance_payload=_operator_directory_payload,
-        identity_readiness_payload=_identity_readiness_payload,
-        current_operator_payload=_current_operator_payload,
-        authorization_payload=_operator_authorization_payload,
-        mission_json=_mission_json,
-        cors_options_response=_cors_options_response,
-    )
-    register_memory_routes(
-        app,
-        dispatch_memory=lambda method_name, body: _dispatch_memory(method_name, body),
-        mission_json=_mission_json,
-        cors_options_response=_cors_options_response,
-        logger=logger,
-        authorize=_require_permission,
-    )
-    register_cognition_routes(
-        app,
-        dispatch_cognition=_dispatch_cognition,
-        json_error=_json_error,
-        cors_options_response=_cors_options_response,
-        cors_headers=_CORS_HEADERS,
-    )
-    register_runtime_routes(
-        app,
-        dispatch_runtime=_dispatch_runtime,
-        json_error=_json_error,
-        cors_options_response=_cors_options_response,
-        optional_json_body=_optional_json_body,
-        operator_action_kwargs=_operator_action_kwargs,
-        authorize=_require_permission,
-        cors_headers=_CORS_HEADERS,
-    )
-    register_voice_routes(
-        app,
-        dispatch_voice=_dispatch_voice,
-        mission_json=_mission_json,
-        optional_json_body=_optional_json_body,
-        cors_options_response=_cors_options_response,
-        authorize=_require_permission,
-    )
-    register_space_routes(
-        app,
-        dispatch_space=lambda method_name, body: _dispatch_space(method_name, body),
-        mission_json=_mission_json,
-        optional_json_body=_optional_json_body,
-        cors_options_response=_cors_options_response,
-        logger=logger,
-        authorize=_require_permission,
-    )
-    register_field_routes(
-        app,
-        dispatch_field_operations=_dispatch_field_operations,
-        mission_json=_mission_json,
-        optional_json_body=_optional_json_body,
-        cors_options_response=_cors_options_response,
-        logger=logger,
-        authorize=_require_permission,
-        field_manual_trigger_body=_field_manual_trigger_body,
-        looks_like_device_ingest_without_scenario=_looks_like_device_ingest_without_scenario,
-        dispatch_field_voice_directive=_dispatch_field_voice_directive,
-        dispatch_field_runtime_policy=_dispatch_field_runtime_policy,
-        runtime_callback_trust=_field_runtime_callback_trust,
-        runtime_callback_delivery_body=_field_runtime_callback_delivery_body,
-        runtime_callback_secret=resolved_runtime_callback_secret,
-        runtime_callback_max_age_s=resolved_runtime_callback_max_age_s,
-        cors_headers=_CORS_HEADERS,
-        identity_readiness_payload=_identity_readiness_payload,
-        site_profile_root=Path("deploy/site-profiles"),
-        config_provider=get_config,
-    )
-    register_dashboard_routes(
-        app,
-        dashboard_html=_DASHBOARD_HTML,
-        dashboard_asset_dir=_DASHBOARD_ASSET_DIR,
-        dashboard_pages=_DASHBOARD_PAGES,
-        json_error=_json_error,
-    )
-    register_capability_routes(
-        app,
-        capabilities_provider=capabilities_provider,
-        blueprints_provider=_blueprint_catalog_payload,
-        logger=logger,
-    )
-    register_audit_routes(
-        app,
-        config_provider=get_config,
-        optional_json_body=_optional_json_body,
-        authorize=_require_permission,
-        operator_id_from_request=_operator_id_from_request,
-        logger=logger,
-    )
-    register_conversation_routes(
-        app,
-        conversation_service=conversation_service,
-        runtime_available=runtime_handler is not None,
-        dispatch_runtime=_dispatch_runtime,
-        cors_options_response=_cors_options_response,
-        logger=logger,
-        runtime_voice_turn_timeout_s=runtime_voice_turn_timeout_s,
-    )
-    register_monitor_routes(
-        app,
-        monitor_service=monitor_service,
-        logger=logger,
-    )
-
-
-    @app.get("/api/skill-growth/backlog", tags=["System"])
-    async def skill_growth_backlog(min_occurrences: int = 2, limit: int = 20) -> JSONResponse:
-        """Return reviewable online-growth candidates from skill audit evidence."""
-        try:
-            from askme.skills.growth_backlog import SkillGrowthBacklog
-
-            backlog = SkillGrowthBacklog()
-            return JSONResponse(
-                backlog.payload(min_occurrences=min_occurrences, limit=limit),
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Skill growth backlog endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/skill-growth/backlog/{candidate_id}", tags=["System"])
-    async def mark_skill_growth_candidate(candidate_id: str, request: Request) -> JSONResponse:
-        """Mark a skill-growth candidate as promoted, dismissed, or reopened."""
-        try:
-            from askme.skills.growth_backlog import SkillGrowthBacklog
-
-            body = await _optional_json_body(request)
-            denied = _require_permission(request, body, "skill:review")
-            if denied is not None:
-                return denied
-            backlog = SkillGrowthBacklog()
-            result = backlog.mark(
-                candidate_id,
-                action=str(body.get("action") or "observe"),
-                operator_id=_operator_id_from_request(request, body),
-                note=str(body.get("note") or ""),
-            )
-            return JSONResponse(
-                result,
-                status_code=200 if result.get("ok") else 400,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Skill growth backlog update endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/skill-growth/backlog/{candidate_id}/draft", tags=["System"])
-    async def draft_skill_from_growth_candidate(candidate_id: str, request: Request) -> JSONResponse:
-        """Create a generated SKILL.md draft from a reviewed growth candidate."""
-        try:
-            from askme.skills.growth_backlog import SkillGrowthBacklog
-            from askme.skills.skill_manager import SkillManager
-
-            body = await _optional_json_body(request)
-            denied = _require_permission(request, body, "skill:review")
-            if denied is not None:
-                return denied
-            operator_id = _operator_id_from_request(request, body)
-            backlog = SkillGrowthBacklog()
-            candidate = backlog.get_candidate(
-                candidate_id,
-                min_occurrences=int(body.get("min_occurrences") or 1),
-            )
-            if candidate is None:
-                return JSONResponse(
-                    {"ok": False, "error": "skill growth candidate not found", "candidate_id": candidate_id},
-                    status_code=404,
-                    headers={"Access-Control-Allow-Origin": "*"},
-                )
-            candidate_payload = candidate.to_dict()
-            prompt = str(body.get("prompt") or _skill_growth_candidate_prompt(candidate_payload))
-            manager = SkillManager()
-            draft = manager.create_generated_skill_draft(
-                name=str(body.get("skill_name") or candidate.suggested_skill_name),
-                description=str(
-                    body.get("description")
-                    or f"Handle repeated site request: {candidate.summary}"
-                ),
-                prompt=prompt,
-                voice_trigger=str(body.get("voice_trigger") or candidate.suggested_voice_trigger),
-                tools_section=str(body.get("tools_section") or ""),
-                tags=body.get("tags") or ["generated", "growth", "candidate"],
-                safety_level=str(body.get("safety_level") or candidate.risk_level),
-                confirm_before_execute=bool(
-                    body.get("confirm_before_execute", candidate.risk_level != "normal")
-                ),
-                operator_id=operator_id,
-                source="skill_growth_backlog",
-                overwrite=bool(body.get("overwrite", False)),
-            )
-            if not draft.get("ok"):
-                return JSONResponse(
-                    {"ok": False, "candidate": candidate_payload, "draft": draft, "error": draft.get("error")},
-                    status_code=400,
-                    headers={"Access-Control-Allow-Origin": "*"},
-                )
-            marked = backlog.mark(
-                candidate_id,
-                action="promote",
-                operator_id=operator_id,
-                note=f"drafted generated skill {draft.get('skill_name')}",
-            )
-            return JSONResponse(
-                {
-                    "ok": True,
-                    "candidate": candidate_payload,
-                    "draft": draft,
-                    "backlog": marked.get("backlog", {}),
-                },
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Skill growth draft endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/skills/generated", tags=["System"])
-    async def generated_skills() -> JSONResponse:
-        """Return generated-skill review queue."""
-        try:
-            from askme.skills.skill_manager import SkillManager
-
-            manager = SkillManager()
-            manager.load()
-            return JSONResponse(
-                manager.get_generated_skill_governance(),
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Generated skills endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/skill-packages", tags=["System"])
-    async def skill_packages() -> JSONResponse:
-        """Return customer/site ability packages for approved generated skills."""
-        try:
-            from askme.skills.skill_manager import SkillManager
-
-            manager = SkillManager()
-            manager.load()
-            return JSONResponse(
-                manager.get_skill_packages(),
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Skill packages endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/skill-packages", tags=["System"])
-    async def upsert_skill_package(request: Request) -> JSONResponse:
-        """Create or update a customer/site ability package."""
-        try:
-            from askme.skills.skill_manager import SkillManager
-
-            body = await _optional_json_body(request)
-            denied = _require_permission(request, body, "skill:review")
-            if denied is not None:
-                return denied
-            manager = SkillManager()
-            result = manager.upsert_skill_package(
-                package_id=str(body.get("package_id") or "default-demo"),
-                display_name=str(body.get("display_name") or ""),
-                site_id=str(body.get("site_id") or "demo"),
-                customer_name=str(body.get("customer_name") or ""),
-                description=str(body.get("description") or ""),
-                enabled=bool(body.get("enabled", True)),
-                release_channel=str(body.get("release_channel") or ""),
-                rollout_percent=(
-                    int(body["rollout_percent"])
-                    if body.get("rollout_percent") not in (None, "")
-                    else None
-                ),
-                operator_id=_operator_id_from_request(request, body),
-            )
-            return JSONResponse(
-                result,
-                status_code=200 if result.get("ok") else 400,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Skill package upsert endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/skill-packages/{package_id}/skills/{skill_name}", tags=["System"])
-    async def update_skill_package(package_id: str, skill_name: str, request: Request) -> JSONResponse:
-        """Assign or remove a generated skill from a customer/site ability package."""
-        try:
-            from askme.skills.skill_manager import SkillManager
-
-            body = await _optional_json_body(request)
-            denied = _require_permission(request, body, "skill:review")
-            if denied is not None:
-                return denied
-            manager = SkillManager()
-            result = manager.update_skill_package(
-                skill_name=skill_name,
-                package_id=package_id,
-                action=str(body.get("action") or "assign"),
-                operator_id=_operator_id_from_request(request, body),
-            )
-            return JSONResponse(
-                result,
-                status_code=200 if result.get("ok") else 400,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Skill package update endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/skill-packages/{package_id}/history", tags=["System"])
-    async def skill_package_history(package_id: str, limit: int = 20) -> JSONResponse:
-        """Return version snapshots for one customer/site ability package."""
-        try:
-            from askme.skills.skill_manager import SkillManager
-
-            manager = SkillManager()
-            return JSONResponse(
-                manager.get_skill_package_history(
-                    package_id=package_id,
-                    limit=max(1, min(int(limit), 100)),
-                ),
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Skill package history endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/skill-packages/{package_id}/release", tags=["System"])
-    async def release_skill_package(package_id: str, request: Request) -> JSONResponse:
-        """Publish or gray-release a customer/site ability package."""
-        try:
-            from askme.skills.skill_manager import SkillManager
-
-            body = await _optional_json_body(request)
-            denied = _require_permission(request, body, "skill:review")
-            if denied is not None:
-                return denied
-            manager = SkillManager()
-            result = manager.release_skill_package(
-                package_id=package_id,
-                release_channel=str(body.get("release_channel") or "pilot"),
-                rollout_percent=int(body.get("rollout_percent", 100)),
-                operator_id=_operator_id_from_request(request, body),
-                note=str(body.get("note") or ""),
-            )
-            return JSONResponse(
-                result,
-                status_code=200 if result.get("ok") else 400,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Skill package release endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/skill-packages/{package_id}/rollback", tags=["System"])
-    async def rollback_skill_package(package_id: str, request: Request) -> JSONResponse:
-        """Rollback a customer/site ability package to a previous snapshot."""
-        try:
-            from askme.skills.skill_manager import SkillManager
-
-            body = await _optional_json_body(request)
-            denied = _require_permission(request, body, "skill:review")
-            if denied is not None:
-                return denied
-            raw_version = body.get("target_version")
-            manager = SkillManager()
-            result = manager.rollback_skill_package(
-                package_id=package_id,
-                target_version=(
-                    int(raw_version)
-                    if raw_version not in (None, "")
-                    else None
-                ),
-                operator_id=_operator_id_from_request(request, body),
-                note=str(body.get("note") or ""),
-            )
-            return JSONResponse(
-                result,
-                status_code=200 if result.get("ok") else 400,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Skill package rollback endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/skills/generated/{skill_name}/validation", tags=["System"])
-    async def generated_skill_validation(skill_name: str) -> JSONResponse:
-        """Return preflight validation for one generated skill."""
-        try:
-            from askme.skills.skill_manager import SkillManager
-            from askme.skills.validation import validate_generated_skill
-
-            manager = SkillManager()
-            manager.load()
-            skill = manager.get(skill_name)
-            if skill is None or skill.source != "generated":
-                return JSONResponse(
-                    {"ok": False, "error": "generated skill not found", "skill_name": skill_name},
-                    status_code=404,
-                    headers={"Access-Control-Allow-Origin": "*"},
-                )
-            result = validate_generated_skill(skill, all_skills=manager.get_all())
-            result["skill_name"] = skill_name
-            return JSONResponse(
-                result,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Generated skill validation endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/skills/generated/{skill_name}/preview", tags=["System"])
-    async def generated_skill_preview(skill_name: str) -> JSONResponse:
-        """Return the reviewable SKILL.md body and parsed policy for one generated skill."""
-        try:
-            from askme.skills.skill_manager import SkillManager
-            from askme.skills.validation import validate_generated_skill
-
-            manager = SkillManager()
-            manager.load()
-            skill = manager.get(skill_name)
-            if skill is None or skill.source != "generated":
-                return JSONResponse(
-                    {"ok": False, "error": "generated skill not found", "skill_name": skill_name},
-                    status_code=404,
-                    headers={"Access-Control-Allow-Origin": "*"},
-                )
-            raw_body = ""
-            try:
-                raw_body = Path(skill.path).read_text(encoding="utf-8")
-            except OSError:
-                raw_body = ""
-            return JSONResponse(
-                {
-                    "ok": True,
-                    "skill_name": skill.name,
-                    "description": skill.description,
-                    "voice_trigger": skill.voice_trigger or "",
-                    "safety_level": skill.safety_level,
-                    "execution": skill.execution,
-                    "enabled": skill.enabled,
-                    "tags": list(skill.tags),
-                    "path": skill.path,
-                    "prompt": skill.prompt_template,
-                    "tools": skill.tools_section,
-                    "raw_body": raw_body,
-                    "validation": validate_generated_skill(skill, all_skills=manager.get_all()),
-                },
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Generated skill preview endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/skills/generated/{skill_name}/review", tags=["System"])
-    async def review_generated_skill(skill_name: str, request: Request) -> JSONResponse:
-        """Approve, reject, disable, or return a generated skill to review."""
-        try:
-            from askme.skills.skill_manager import SkillManager
-
-            body = await _optional_json_body(request)
-            denied = _require_permission(request, body, "skill:review")
-            if denied is not None:
-                return denied
-            operator_id = _operator_id_from_request(request, body)
-            manager = SkillManager()
-            result = manager.review_generated_skill(
-                skill_name,
-                action=str(body.get("action") or "request_review"),
-                operator_id=str(operator_id),
-                note=str(body.get("note") or ""),
-            )
-            status_code = 200 if result.get("ok") else 400
-            return JSONResponse(
-                result,
-                status_code=status_code,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Generated skill review endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/agent-profiles", tags=["System"])
-    async def agent_profiles() -> JSONResponse:
-        """Return product-reviewable agent profile catalog."""
-        try:
-            from askme.agent_shell.agent_profile import AgentProfileRegistry
-
-            catalog = AgentProfileRegistry().catalog()
-            return JSONResponse(
-                catalog,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Agent profile endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/agent-profiles", tags=["System"])
-    async def upsert_agent_profile(request: Request) -> JSONResponse:
-        """Create or update a project-level agent profile Markdown file."""
-        try:
-            from askme.agent_shell.agent_profile import AgentProfileRegistry
-
-            body = await _optional_json_body(request)
-            denied = _require_permission(request, body, "skill:review")
-            if denied is not None:
-                return denied
-            registry = AgentProfileRegistry()
-            known_tools = _agent_profile_known_tools()
-            result = registry.write_project_profile(
-                name=str(body.get("name") or ""),
-                display_name=str(body.get("display_name") or ""),
-                description=str(body.get("description") or ""),
-                instructions=str(body.get("instructions") or ""),
-                tools=body.get("tools"),
-                disallowed_tools=body.get("disallowed_tools", body.get("disallowedTools")),
-                spawnable_profiles=body.get("spawnable_profiles", body.get("spawnableProfiles")),
-                skills=body.get("skills"),
-                mcp_servers=body.get("mcp_servers", body.get("mcpServers")),
-                hooks=body.get("hooks") if isinstance(body.get("hooks"), dict) else None,
-                model=str(body.get("model") or "inherit"),
-                permission_mode=str(body.get("permission_mode") or body.get("permissionMode") or "default"),
-                risk_level=str(body.get("risk_level") or body.get("riskLevel") or "medium"),
-                customer_visible=bool(body.get("customer_visible", body.get("customerVisible", True))),
-                memory_scope=str(body.get("memory") or body.get("memory_scope") or ""),
-                max_iterations=(
-                    int(body.get("max_iterations", body.get("maxTurns")))
-                    if body.get("max_iterations", body.get("maxTurns")) not in (None, "")
-                    else None
-                ),
-                timeout_seconds=(
-                    float(body.get("timeout_seconds", body.get("timeoutSeconds")))
-                    if body.get("timeout_seconds", body.get("timeoutSeconds")) not in (None, "")
-                    else None
-                ),
-                operator_id=_operator_id_from_request(request, body),
-                known_tools=known_tools,
-                overwrite=bool(body.get("overwrite", True)),
-            )
-            return JSONResponse(
-                result,
-                status_code=200 if result.get("ok") else 400,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Agent profile upsert endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.get("/api/agent-profiles/{profile_name}/preview", tags=["System"])
-    async def agent_profile_preview(profile_name: str) -> JSONResponse:
-        """Return parsed profile policy plus raw Markdown when available."""
-        try:
-            from askme.agent_shell.agent_profile import AgentProfileRegistry
-
-            payload = AgentProfileRegistry().preview(profile_name)
-            return JSONResponse(
-                payload,
-                status_code=200 if payload.get("ok") else 404,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
-            )
-        except Exception as exc:
-            logger.error("Agent profile preview endpoint failed: %s", exc)
-            return JSONResponse(
-                {"error": str(exc)},
-                status_code=500,
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-
-    @app.post("/api/missions/draft", tags=["Mission"])
-    async def mission_draft(request: Request) -> JSONResponse:
-        """Draft a high-level mission without dispatching hardware."""
-        try:
-            body = await request.json()
-            if not isinstance(body, dict):
-                return _json_error("JSON object body required", status_code=400)
-            payload = await _dispatch_mission("draft_from_payload", body)
-            return _mission_json(payload)
-        except ValueError as exc:
-            return _json_error(str(exc), status_code=400)
-        except RuntimeError as exc:
-            return _json_error(str(exc), status_code=503)
-        except Exception as exc:
-            logger.error("Mission draft failed: %s", exc)
-            return _json_error(str(exc), status_code=500)
-
-    @app.post("/api/missions", tags=["Mission"])
-    async def mission_submit(request: Request) -> JSONResponse:
-        """Dry-run or submit a mission through the configured runtime arbiter."""
-        try:
-            body = await request.json()
-            if not isinstance(body, dict):
-                return _json_error("JSON object body required", status_code=400)
-            payload = await _dispatch_mission(
-                "submit_from_payload",
-                body,
-                trusted_confirmation=_request_has_control_auth(request),
-            )
-            return _mission_json(payload)
-        except ValueError as exc:
-            return _json_error(str(exc), status_code=400)
-        except RuntimeError as exc:
-            return _json_error(str(exc), status_code=503)
-        except Exception as exc:
-            logger.error("Mission submit failed: %s", exc)
-            return _json_error(str(exc), status_code=500)
-
-    @app.get("/api/missions", tags=["Mission"])
-    async def mission_list() -> JSONResponse:
-        """Return locally drafted/submitted mission records."""
-        try:
-            payload = await _dispatch_mission("list_payload")
-            return _mission_json(payload)
-        except RuntimeError as exc:
-            return _json_error(str(exc), status_code=503)
-        except Exception as exc:
-            logger.error("Mission list failed: %s", exc)
-            return _json_error(str(exc), status_code=500)
-
-    @app.get("/api/missions/{mission_id}", tags=["Mission"])
-    async def mission_get(mission_id: str) -> JSONResponse:
-        """Return a single mission plan and its latest submission state."""
-        try:
-            payload = await _dispatch_mission("get_payload", mission_id)
-            status_code = 404 if payload.get("error") else 200
-            return _mission_json(payload, status_code=status_code)
-        except RuntimeError as exc:
-            return _json_error(str(exc), status_code=503)
-        except Exception as exc:
-            logger.error("Mission get failed: %s", exc)
-            return _json_error(str(exc), status_code=500)
-
-    @app.get("/api/missions/{mission_id}/report", tags=["Mission"])
-    async def mission_report(mission_id: str) -> JSONResponse:
-        """Build an inspection report shell from mission evidence."""
-        try:
-            payload = await _dispatch_mission("report_payload", mission_id)
-            status_code = 404 if payload.get("error") else 200
-            return _mission_json(payload, status_code=status_code)
-        except RuntimeError as exc:
-            return _json_error(str(exc), status_code=503)
-        except Exception as exc:
-            logger.error("Mission report failed: %s", exc)
-            return _json_error(str(exc), status_code=500)
-
-    @app.options("/api/missions", include_in_schema=False)
-    @app.options("/api/missions/draft", include_in_schema=False)
-    async def mission_collection_cors() -> Response:
-        return _cors_options_response("GET, POST, OPTIONS")
-
-    @app.options("/api/missions/{mission_id}", include_in_schema=False)
-    @app.options("/api/missions/{mission_id}/report", include_in_schema=False)
-    async def mission_item_cors(mission_id: str) -> Response:
-        return _cors_options_response("GET, OPTIONS")
-
-    # ---- Vision endpoints ----
-
-    @app.get("/api/vision/snapshot", tags=["Vision"])
-    async def vision_snapshot() -> JSONResponse:
-        """Capture a frame from the robot camera and return it as base64 JPEG."""
-        if vision_snapshot_handler is None:
-            return JSONResponse({"error": "vision not configured"}, status_code=503,
-                                headers=_CORS_HEADERS)
-        try:
-            result = await vision_snapshot_handler()
-            if result is None:
-                return JSONResponse({"error": "camera not available"}, status_code=503,
-                                    headers=_CORS_HEADERS)
-            # Auto-archive if handler available
-            if archive_snapshot_handler is not None:
-                try:
-                    import base64 as _b64
-                    image_bytes = _b64.b64decode(result.get("image_base64", ""))
-                    if image_bytes:
-                        meta = await archive_snapshot_handler(
-                            image_bytes,
-                            "manual",
-                            "",
-                            result.get("width", 0),
-                            result.get("height", 0),
-                        )
-                        result = dict(result)
-                        result["capture_id"] = meta.get("id")
-                except Exception as _arc_exc:
-                    logger.warning("[Vision] Auto-archive failed: %s", _arc_exc)
-            return JSONResponse(result, headers=_CORS_HEADERS)
-        except Exception as exc:
-            logger.error("Vision snapshot failed: %s", exc)
-            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
-
-    @app.options("/api/vision/snapshot", include_in_schema=False)
-    async def vision_snapshot_cors() -> Response:
-        return Response(status_code=204, headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-            "Access-Control-Allow-Headers": _CORS_ALLOW_HEADERS,
-        })
-
-    @app.post("/api/vision/analyze", tags=["Vision"])
-    async def vision_analyze(request: Request) -> JSONResponse:
-        """Analyze an image (base64 JPEG) with the VLM and return a description."""
-        if vision_analyze_handler is None:
-            return JSONResponse({"error": "vision not configured"}, status_code=503,
-                                headers=_CORS_HEADERS)
-        try:
-            body = await request.json()
-            image_b64: str = body.get("image_base64", "")
-            if not image_b64:
-                return JSONResponse({"error": "image_base64 required"}, status_code=400,
-                                    headers=_CORS_HEADERS)
-            description = await vision_analyze_handler(image_b64)
-            return JSONResponse({"description": description}, headers=_CORS_HEADERS)
-        except Exception as exc:
-            logger.error("Vision analyze failed: %s", exc)
-            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
-
-    @app.options("/api/vision/analyze", include_in_schema=False)
-    async def vision_analyze_cors() -> Response:
-        return Response(status_code=204, headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": _CORS_ALLOW_HEADERS,
-        })
-
-    # ---- Image archive endpoints ----
-
-    @app.get("/api/vision/captures", tags=["Vision"])
-    async def vision_captures_list(limit: int = 50, label: str | None = None) -> JSONResponse:
-        """List archived captures (metadata only, no image_base64)."""
-        if archive_list_handler is None:
-            return JSONResponse({"error": "image archive not configured"}, status_code=503,
-                                headers=_CORS_HEADERS)
-        try:
-            captures = await archive_list_handler()
-            # Apply optional label filter and limit in handler or here
-            if label is not None:
-                captures = [c for c in captures if c.get("label") == label]
-            captures = captures[:limit]
-            return JSONResponse({"captures": captures, "count": len(captures)},
-                                headers={"Cache-Control": "no-store", **_CORS_HEADERS})
-        except Exception as exc:
-            logger.error("Captures list failed: %s", exc)
-            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
-
-    @app.options("/api/vision/captures", include_in_schema=False)
-    async def vision_captures_list_cors() -> Response:
-        return Response(status_code=204, headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-            "Access-Control-Allow-Headers": _CORS_ALLOW_HEADERS,
-        })
-
-    @app.get("/api/vision/captures/{capture_id}", tags=["Vision"])
-    async def vision_captures_get(capture_id: str) -> JSONResponse:
-        """Return full metadata + image_base64 for a capture."""
-        if archive_get_handler is None:
-            return JSONResponse({"error": "image archive not configured"}, status_code=503,
-                                headers=_CORS_HEADERS)
-        try:
-            data = await archive_get_handler(capture_id)
-            if data is None:
-                return JSONResponse({"error": "capture not found"}, status_code=404,
-                                    headers=_CORS_HEADERS)
-            return JSONResponse(data, headers={"Cache-Control": "no-store", **_CORS_HEADERS})
-        except Exception as exc:
-            logger.error("Captures get failed: %s", exc)
-            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
-
-    @app.options("/api/vision/captures/{capture_id}", include_in_schema=False)
-    async def vision_captures_item_cors(capture_id: str) -> Response:
-        return Response(status_code=204, headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": _CORS_ALLOW_HEADERS,
-        })
-
-    @app.delete("/api/vision/captures/{capture_id}", tags=["Vision"])
-    async def vision_captures_delete(capture_id: str) -> JSONResponse:
-        """Delete a capture (JPEG + JSON sidecar)."""
-        if archive_delete_handler is None:
-            return JSONResponse({"error": "image archive not configured"}, status_code=503,
-                                headers=_CORS_HEADERS)
-        try:
-            deleted = await archive_delete_handler(capture_id)
-            if not deleted:
-                return JSONResponse({"error": "capture not found"}, status_code=404,
-                                    headers=_CORS_HEADERS)
-            return JSONResponse({"deleted": True, "capture_id": capture_id},
-                                headers=_CORS_HEADERS)
-        except Exception as exc:
-            logger.error("Captures delete failed: %s", exc)
-            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     return app
 
@@ -2049,7 +932,7 @@ class AskmeHealthServer:
         self._runtime_handler: RuntimeHandler | None = None
         self._memory_handler: MemoryHandler | None = None
         self._voice_handler: VoiceHandler | None = None
-        from askme.pipeline.field_operations import FieldOperationsService
+        from askme.pipeline.field.field_operations import FieldOperationsService
 
         self._field_operations_proxy = _MutableHandlerProxy(
             FieldOperationsService.from_env(),
@@ -2093,20 +976,28 @@ class AskmeHealthServer:
             return []
         return self._conversation_provider()
 
-    async def _dispatch_chat(self, text: str, *, speak: bool = False) -> Any:
+    async def _dispatch_chat(
+        self,
+        text: str,
+        *,
+        speak: bool = False,
+        conversation_session_id: str | None = None,
+        planning_session_id: str | None = None,
+        runtime_policy: str = "disabled",
+    ) -> Any:
         if self._chat_handler is None:
             return "[chat handler not configured]"
-        try:
-            params = signature(self._chat_handler).parameters
-            accepts_speak = (
-                "speak" in params
-                or any(param.kind == Parameter.VAR_KEYWORD for param in params.values())
-            )
-        except (TypeError, ValueError):
-            accepts_speak = True
-        if accepts_speak:
-            return await _maybe_await(self._chat_handler(text, speak=speak))
-        return await _maybe_await(self._chat_handler(text))
+        kwargs = _accepted_keyword_args(
+            self._chat_handler,
+            {
+                "speak": speak,
+                "conversation_session_id": conversation_session_id,
+                "planning_session_id": planning_session_id,
+                "runtime_policy": runtime_policy,
+                "runtime_bridge_mode": runtime_policy,
+            },
+        )
+        return await _maybe_await(self._chat_handler(text, **kwargs))
 
     def set_chat_handler(self, handler: ChatHandler) -> None:
         """Wire the chat handler after construction (avoids circular deps)."""
@@ -2184,6 +1075,9 @@ class AskmeHealthServer:
 
     async def search_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._dispatch_memory_handler("search_payload", payload)
+
+    async def health_payload(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self._dispatch_memory_handler("health_payload", payload or {})
 
     async def preview_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._dispatch_memory_handler("preview_payload", payload)
@@ -2434,44 +1328,18 @@ class AskmeHealthServer:
         vb = self._vision_bridge
         if vb is None:
             return None
-        import asyncio
-        import base64
-        frame = await asyncio.to_thread(vb._capture_frame)
-        if frame is None:
-            return None
-        try:
-            import cv2  # type: ignore[import-untyped]
-            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            b64 = base64.b64encode(buf).decode()
-            h, w = frame.shape[:2]
-            return {
-                "image_base64": b64,
-                "width": w,
-                "height": h,
-                "timestamp": datetime.now(_UTC).isoformat(),
-            }
-        except Exception as exc:
-            logger.warning("[Vision] Encode error: %s", exc)
-            return None
+        from askme.providers import capture_snapshot_payload
+
+        return await capture_snapshot_payload(vb)
 
     async def _dispatch_analyze(self, image_b64: str) -> str:
         """Run VLM on a base64 image and return a Chinese description."""
         vb = self._vision_bridge
         if vb is None:
             return "视觉模块未配置"
-        try:
-            import base64
+        from askme.providers import analyze_image_base64
 
-            import cv2  # type: ignore[import-untyped]
-            import numpy as np  # type: ignore[import-untyped]
-            img_bytes = base64.b64decode(image_b64)
-            arr = np.frombuffer(img_bytes, dtype=np.uint8)
-            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            description = await vb._describe_scene_vlm(frame)
-            return description
-        except Exception as exc:
-            logger.warning("[Vision] Analyze error: %s", exc)
-            return f"分析失败: {exc}"
+        return await analyze_image_base64(vb, image_b64)
 
     @property
     def url(self) -> str:
@@ -2589,433 +1457,6 @@ class AskmeHealthServer:
         return self.port
 
 
-def render_prometheus_metrics(snapshot: dict[str, Any]) -> str:
-    """Render the runtime snapshot as Prometheus text exposition."""
-    voice_status = snapshot.get("voice_pipeline_status", {})
-    voice_input = voice_status.get("input", {}) if isinstance(voice_status, dict) else {}
-    active_skills = snapshot.get("active_skills", [])
-    ota_status = snapshot.get("ota_bridge_status") or snapshot.get("ota_bridge") or {}
-
-    lines: list[str] = []
-    _append_metric(lines, "askme_up", "Whether the askme process is running", "gauge", 1)
-    _append_metric(
-        lines,
-        "askme_service_info",
-        "Static askme service metadata",
-        "gauge",
-        1,
-        labels={
-            "service": snapshot.get("service") or snapshot.get("service_name", "askme"),
-            "version": snapshot.get("version") or snapshot.get("service_version", "unknown"),
-        },
-    )
-    _append_metric(
-        lines,
-        "askme_model_info",
-        "Configured primary LLM model",
-        "gauge",
-        1,
-        labels={"model_name": snapshot.get("model_name", "unknown")},
-    )
-    _append_metric(
-        lines,
-        "askme_health_status",
-        "Overall askme health status (1=ok, 0=degraded)",
-        "gauge",
-        snapshot.get("status") == "ok",
-    )
-    _append_metric(
-        lines,
-        "askme_uptime_seconds",
-        "Process uptime in seconds",
-        "gauge",
-        snapshot.get("uptime_seconds"),
-    )
-    _append_metric(
-        lines,
-        "askme_conversations_total",
-        "Total conversation turns recorded",
-        "counter",
-        snapshot.get("total_conversations"),
-    )
-    _append_metric(
-        lines,
-        "askme_last_llm_latency_ms",
-        "Latency of the most recent LLM call in milliseconds",
-        "gauge",
-        snapshot.get("last_llm_latency_ms"),
-    )
-    llm_snap = snapshot.get("llm", {})
-    _append_metric(
-        lines,
-        "askme_llm_latency_p50_ms",
-        "LLM call latency p50 over last 100 calls (ms)",
-        "gauge",
-        llm_snap.get("p50_latency_ms"),
-    )
-    _append_metric(
-        lines,
-        "askme_llm_latency_p95_ms",
-        "LLM call latency p95 over last 100 calls (ms)",
-        "gauge",
-        llm_snap.get("p95_latency_ms"),
-    )
-    _append_metric(
-        lines,
-        "askme_llm_latency_p99_ms",
-        "LLM call latency p99 over last 100 calls (ms)",
-        "gauge",
-        llm_snap.get("p99_latency_ms"),
-    )
-    conversation_runtime = snapshot.get("conversation_runtime", {})
-    if isinstance(conversation_runtime, dict):
-        _append_metric(
-            lines,
-            "askme_chat_in_flight",
-            "Current in-flight HTTP chat requests",
-            "gauge",
-            conversation_runtime.get("in_flight"),
-        )
-        _append_metric(
-            lines,
-            "askme_chat_turns_total",
-            "Total HTTP chat turns handled by this process",
-            "counter",
-            conversation_runtime.get("total_turns"),
-        )
-        _append_metric(
-            lines,
-            "askme_chat_failures_total",
-            "Total HTTP chat turns that ended in an error or timeout",
-            "counter",
-            conversation_runtime.get("failures"),
-        )
-        _append_metric(
-            lines,
-            "askme_chat_timeouts_total",
-            "Total HTTP chat turns that exceeded the configured timeout",
-            "counter",
-            conversation_runtime.get("timeouts"),
-        )
-        _append_metric(
-            lines,
-            "askme_chat_overloads_total",
-            "Total HTTP chat turns rejected by the concurrency limiter",
-            "counter",
-            conversation_runtime.get("overloads"),
-        )
-        _append_metric(
-            lines,
-            "askme_chat_slow_turns_total",
-            "Total HTTP chat turns above the configured slow threshold",
-            "counter",
-            conversation_runtime.get("slow_turns_total"),
-        )
-        _append_metric(
-            lines,
-            "askme_chat_last_turn_latency_ms",
-            "Total latency of the most recent HTTP chat turn in milliseconds",
-            "gauge",
-            conversation_runtime.get("last_turn_latency_ms"),
-        )
-        _append_metric(
-            lines,
-            "askme_chat_last_handler_ms",
-            "Handler latency of the most recent HTTP chat turn in milliseconds",
-            "gauge",
-            conversation_runtime.get("last_handler_ms"),
-        )
-    _append_metric(
-        lines,
-        "askme_active_skills",
-        "Number of currently enabled skills",
-        "gauge",
-        snapshot.get("active_skill_count", len(active_skills) if isinstance(active_skills, list) else 0),
-    )
-
-    for skill_name in active_skills if isinstance(active_skills, list) else []:
-        _append_metric(
-            lines,
-            "askme_active_skill_info",
-            "Enabled skill metadata",
-            "gauge",
-            1,
-            labels={"skill": skill_name},
-        )
-
-    _append_metric(
-        lines,
-        "askme_voice_pipeline_ok",
-        "Whether the voice pipeline is currently healthy",
-        "gauge",
-        voice_status.get("pipeline_ok"),
-    )
-    _append_metric(
-        lines,
-        "askme_voice_mode_enabled",
-        "Whether askme is running in voice mode",
-        "gauge",
-        voice_status.get("mode") == "voice",
-    )
-    _append_metric(
-        lines,
-        "askme_voice_input_ready",
-        "Whether ASR and VAD are available for voice input",
-        "gauge",
-        voice_status.get("input_ready"),
-    )
-    _append_metric(
-        lines,
-        "askme_voice_output_ready",
-        "Whether TTS output is available",
-        "gauge",
-        voice_status.get("output_ready"),
-    )
-    _append_metric(
-        lines,
-        "askme_voice_asr_available",
-        "Whether the ASR engine is available",
-        "gauge",
-        voice_status.get("asr_available"),
-    )
-    _append_metric(
-        lines,
-        "askme_voice_vad_available",
-        "Whether the VAD engine is available",
-        "gauge",
-        voice_status.get("vad_available"),
-    )
-    _append_metric(
-        lines,
-        "askme_voice_kws_available",
-        "Whether the wake-word detector is available",
-        "gauge",
-        voice_status.get("kws_available"),
-    )
-    _append_metric(
-        lines,
-        "askme_voice_tts_busy",
-        "Whether TTS is currently playing or queued",
-        "gauge",
-        voice_status.get("tts_busy"),
-    )
-    _append_metric(
-        lines,
-        "askme_voice_last_input_chars",
-        "Character length of the most recent recognized voice input",
-        "gauge",
-        voice_status.get("last_input_chars"),
-    )
-    _append_metric(
-        lines,
-        "askme_voice_input_last_peak",
-        "Most recent observed microphone peak amplitude",
-        "gauge",
-        voice_input.get("last_peak") if isinstance(voice_input, dict) else None,
-    )
-    _append_metric(
-        lines,
-        "askme_voice_input_peak_max_10s",
-        "Maximum observed microphone peak amplitude over the recent window",
-        "gauge",
-        voice_input.get("peak_max_10s") if isinstance(voice_input, dict) else None,
-    )
-    _append_metric(
-        lines,
-        "askme_voice_input_peak_p95_10s",
-        "P95 observed microphone peak amplitude over the recent window",
-        "gauge",
-        voice_input.get("peak_p95_10s") if isinstance(voice_input, dict) else None,
-    )
-    _append_metric(
-        lines,
-        "askme_voice_input_last_rms",
-        "Most recent observed microphone RMS amplitude",
-        "gauge",
-        voice_input.get("last_rms") if isinstance(voice_input, dict) else None,
-    )
-    _append_metric(
-        lines,
-        "askme_voice_input_rms_p95_10s",
-        "P95 observed microphone RMS amplitude over the recent window",
-        "gauge",
-        voice_input.get("rms_p95_10s") if isinstance(voice_input, dict) else None,
-    )
-    _append_metric(
-        lines,
-        "askme_voice_input_asr_timeouts",
-        "Count of ASR listen timeouts observed by the audio agent",
-        "counter",
-        voice_input.get("asr_timeouts") if isinstance(voice_input, dict) else None,
-    )
-    _append_metric(
-        lines,
-        "askme_voice_input_sample_count_10s",
-        "Number of microphone frames in the recent input diagnostics window",
-        "gauge",
-        voice_input.get("sample_count_10s") if isinstance(voice_input, dict) else None,
-    )
-
-    _append_metric(
-        lines,
-        "askme_ota_bridge_enabled",
-        "Whether OTA bridge reporting is enabled",
-        "gauge",
-        ota_status.get("enabled"),
-    )
-    _append_metric(
-        lines,
-        "askme_ota_bridge_registered",
-        "Whether the OTA bridge currently has valid registration",
-        "gauge",
-        ota_status.get("registered"),
-    )
-    _append_metric(
-        lines,
-        "askme_ota_bridge_info",
-        "Static OTA bridge metadata",
-        "gauge",
-        1,
-        labels={
-            "channel": ota_status.get("channel", ""),
-            "device_id": ota_status.get("device_id", ""),
-            "product": ota_status.get("product", ""),
-            "state": ota_status.get("state", ""),
-        },
-    )
-
-    return "".join(lines)
-
-
-def _json_snapshot_response(provider: HealthProvider, endpoint_name: str) -> JSONResponse:
-    payload = _snapshot_payload(provider, endpoint_name)
-    if isinstance(payload, JSONResponse):
-        return payload
-    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
-
-
-def _snapshot_payload(
-    provider: Callable[[], dict[str, Any]],
-    endpoint_name: str,
-) -> dict[str, Any] | JSONResponse:
-    try:
-        return provider()
-    except Exception as exc:
-        logger.error("Askme %s endpoint failed: %s", endpoint_name, exc, exc_info=True)
-        return JSONResponse(
-            {"status": "error", "error": str(exc)},
-            status_code=500,
-            headers={"Cache-Control": "no-store"},
-        )
-
-
-async def _maybe_await(value: Any) -> Any:
-    if isawaitable(value):
-        return await value
-    return value
-
-
-def _accepted_keyword_args(func: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
-    if not kwargs:
-        return {}
-    try:
-        parameters = signature(func).parameters
-    except (TypeError, ValueError):
-        return kwargs
-    if any(param.kind == Parameter.VAR_KEYWORD for param in parameters.values()):
-        return kwargs
-    return {key: value for key, value in kwargs.items() if key in parameters}
-
-
-def _clean_secret(value: Any) -> str | None:
-    text = "" if value is None else str(value).strip()
-    return text or None
-
-
-def _optional_positive_float_config(value: Any, *, default: float) -> float | None:
-    if value in (None, ""):
-        return default
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    if parsed <= 0:
-        return None
-    return parsed
-
-
-def _positive_int_config(value: Any, *, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(1, parsed)
-
-
-def _is_remote_bind_host(host: str) -> bool:
-    cleaned = host.strip().lower()
-    if cleaned in _REMOTE_BIND_HOSTS:
-        return True
-    if cleaned in {"localhost", "127.0.0.1", "::1", "[::1]"}:
-        return False
-    try:
-        address = ipaddress.ip_address(cleaned.strip("[]"))
-    except ValueError:
-        return True
-    return not address.is_loopback
-
-
-def _append_metric(
-    lines: list[str],
-    name: str,
-    help_text: str,
-    metric_type: str,
-    value: Any,
-    *,
-    labels: dict[str, Any] | None = None,
-) -> None:
-    lines.append(f"# HELP {name} {help_text}\n")
-    lines.append(f"# TYPE {name} {metric_type}\n")
-    lines.append(f"{name}{_format_labels(labels)} {_format_metric_value(value)}\n")
-
-
-def _format_labels(labels: dict[str, Any] | None) -> str:
-    if not labels:
-        return ""
-
-    parts = [
-        f'{key}="{_escape_label_value(value)}"'
-        for key, value in sorted(labels.items())
-    ]
-    return "{" + ",".join(parts) + "}"
-
-
-def _escape_label_value(value: Any) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
-
-
-def _format_metric_value(value: Any) -> str:
-    if value is None:
-        return "NaN"
-    if isinstance(value, bool):
-        return "1" if value else "0"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            return "NaN"
-        return f"{value:.6f}".rstrip("0").rstrip(".")
-
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return "NaN"
-    if not math.isfinite(numeric):
-        return "NaN"
-    return f"{numeric:.6f}".rstrip("0").rstrip(".")
-
-
 def _disabled_ota_status() -> dict[str, Any]:
     return {
         "enabled": False,
@@ -3027,23 +1468,46 @@ def _disabled_ota_status() -> dict[str, Any]:
     }
 
 
+from askme.api.services.dashboard_pages import dashboard_page_slugs
+
 _DASHBOARD_STATIC_DIR = Path(__file__).parent / "static"
 _DASHBOARD_ASSET_DIR = _DASHBOARD_STATIC_DIR / "dashboard"
-_DASHBOARD_PAGES = frozenset(
-    {
-        "conversation",
-        "projects",
-        "field",
-        "space",
-        "knowledge",
-        "capabilities",
-        "voice",
-        "delivery",
-        "audit",
-    }
-)
+_DASHBOARD_PAGES = frozenset(dashboard_page_slugs())
 _DASHBOARD_HTML = (_DASHBOARD_STATIC_DIR / "dashboard.html").read_text(encoding="utf-8")
 
 build_health_app = create_health_app
 HealthServer = AskmeHealthServer
 AskmeHealthHTTPServer = AskmeHealthServer
+
+__all__ = [
+    "ArchiveDeleteHandler",
+    "ArchiveGetHandler",
+    "ArchiveListHandler",
+    "ArchiveSnapshotHandler",
+    "AskmeHealthHTTPServer",
+    "AskmeHealthServer",
+    "CapabilitiesProvider",
+    "ChatHandler",
+    "CognitionHandler",
+    "FieldOperationsHandler",
+    "HealthProvider",
+    "HealthServer",
+    "HealthSnapshotProvider",
+    "MemoryHandler",
+    "MetricsProvider",
+    "MissionHandler",
+    "RuntimeHandler",
+    "SpaceHandler",
+    "VisionAnalyzeHandler",
+    "VisionSnapshotHandler",
+    "VoiceHandler",
+    "_append_metric",
+    "_escape_label_value",
+    "_format_labels",
+    "_format_metric_value",
+    "build_health_app",
+    "build_health_snapshot",
+    "create_health_app",
+    "render_prometheus_metrics",
+    "sign_field_runtime_callback_payload",
+]

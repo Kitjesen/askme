@@ -13,8 +13,9 @@ from askme.cognition import (
     CognitivePlanner,
     WorkingMemory,
     WorldStateService,
+    normalize_scene_snapshot,
 )
-from askme.runtime.module import Module, ModuleRegistry, Out
+from askme.runtime.core.module import Module, ModuleRegistry, Out
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class CognitionModule(Module):
 
         mission_mod = registry.get("mission")
         mission_service = getattr(mission_mod, "mission_service", None) if mission_mod else None
+        self._mission_service = mission_service
         self._planner = CognitivePlanner(
             world_state=self._world_state,
             working_memory=self._working_memory,
@@ -148,15 +150,16 @@ class CognitionModule(Module):
             logger.debug("CognitionModule: perception refresh failed: %s", exc)
             return {"refreshed": False, "reason": str(exc)}
         if isinstance(summary, dict):
-            objects = [
-                item
-                for item in summary.get("objects", [])
-                if isinstance(item, dict)
-            ]
+            scene_payload = normalize_scene_snapshot(summary)
+            if not scene_payload["valid"]:
+                return {"refreshed": False, "reason": scene_payload["reason"]}
+            objects = scene_payload["objects"]
+            observed_at = scene_payload["observed_at"]
             self._world_state.update_scene(
                 summary=str(summary.get("summary", "")),
                 objects=objects,
                 source=str(summary.get("source") or "vision_bridge"),
+                observed_at=observed_at,
                 stale_after_s=self._scene_stale_after_s,
             )
             return {
@@ -164,6 +167,7 @@ class CognitionModule(Module):
                 "summary": str(summary.get("summary", "")),
                 "object_count": len(objects),
                 "source": str(summary.get("source") or "vision_bridge"),
+                "observed_at": observed_at,
             }
         self._world_state.update_fact(
             "scene.summary",
@@ -193,9 +197,11 @@ class CognitionModule(Module):
         if bool(payload.get("refresh_perception", False)):
             await self.refresh_perception()
         text = str(payload.get("text") or payload.get("message") or payload.get("goal") or "")
-        planning_session_id = _clean_optional(
-            payload.get("planning_session_id") or payload.get("session_id")
-        )
+        planning_session_id = _clean_optional(payload.get("planning_session_id"))
+        conversation_session_id = _clean_optional(payload.get("conversation_session_id"))
+        metadata = _metadata(payload)
+        if conversation_session_id:
+            metadata["conversation_session_id"] = conversation_session_id
 
         def _plan_once(session_id: str | None = planning_session_id) -> Any:
             return self._planner.plan_from_text(
@@ -204,8 +210,9 @@ class CognitionModule(Module):
                 robot_id=_clean_optional(payload.get("robot_id")),
                 site_id=_clean_optional(payload.get("site_id")),
                 channel=str(payload.get("channel", "http-cognition")).strip() or "http-cognition",
-                metadata=_metadata(payload),
+                metadata=metadata,
                 planning_session_id=session_id,
+                conversation_session_id=conversation_session_id,
                 reply_to_plan_id=_clean_optional(payload.get("reply_to_plan_id")),
                 operator_confirmation=payload.get("operator_confirmation", payload.get("confirm")),
                 cancel=bool(payload.get("cancel", False)) or str(payload.get("action", "")).lower() == "cancel",
@@ -246,12 +253,12 @@ class CognitionModule(Module):
         return {
             "world_state": True,
             "working_memory": True,
-            "pulse_context_sync": True,
+            "pulse_context_sync": self._pulse_bus is not None,
             "change_event_sync": True,
-            "perception_world_state_sync": True,
+            "perception_world_state_sync": self._perception_world_state is not None,
             "planning_sessions": True,
-            "mission_draft_planning": True,
-            "active_perception_refresh": True,
+            "mission_draft_planning": self._mission_service is not None,
+            "active_perception_refresh": self._vision_bridge is not None,
             "hardware_dispatch": False,
             "http_paths": [
                 "GET /api/cognition/context",

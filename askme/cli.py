@@ -108,7 +108,9 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_blueprints.add_argument(
         "--delivery-package",
         action="store_true",
-        help="Include product delivery package, handoff, and acceptance checklist details",
+        help=(
+            "Include delivery package details; with --name, emit that single customer handoff package"
+        ),
     )
     runtime_blueprints.add_argument(
         "--output",
@@ -1307,7 +1309,7 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
         return
 
     if args.runtime_command == "audio-devices":
-        from askme.voice.audio_devices import (
+        from askme.voice.diagnostics.audio_devices import (
             print_audio_devices_summary,
             query_audio_devices,
         )
@@ -1322,7 +1324,7 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
         return
 
     if args.runtime_command == "audio-loopback":
-        from askme.voice.audio_devices import (
+        from askme.voice.diagnostics.audio_devices import (
             print_audio_loopback_summary,
             run_audio_loopback,
         )
@@ -1348,7 +1350,7 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
         return
 
     if args.runtime_command == "audio-route-scan":
-        from askme.voice.audio_devices import (
+        from askme.voice.diagnostics.audio_devices import (
             print_audio_route_scan_summary,
             run_audio_route_scan,
         )
@@ -1374,7 +1376,7 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
         return
 
     if args.runtime_command == "voice-online-smoke":
-        from askme.voice.online_smoke import (
+        from askme.voice.diagnostics.online_smoke import (
             print_voice_online_smoke_summary,
             run_voice_online_smoke_sync,
         )
@@ -1399,7 +1401,7 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
             min_signal_peak=args.min_signal_peak,
         )
         if args.json_out:
-            from askme.voice.mic_calibration import write_mic_calibration_json
+            from askme.voice.diagnostics.mic_calibration import write_mic_calibration_json
 
             write_mic_calibration_json(payload, args.json_out)
         if args.json:
@@ -1979,7 +1981,7 @@ def _handle_memory_command(args: argparse.Namespace) -> None:
         raise SystemExit("Missing memory command. Use: askme memory import|search")
 
     if args.memory_command == "import":
-        from askme.memory.importer import import_knowledge_file
+        from askme.memory.retrieval.importer import import_knowledge_file
 
         payload = asyncio.run(
             import_knowledge_file(
@@ -2002,7 +2004,7 @@ def _handle_memory_command(args: argparse.Namespace) -> None:
         return
 
     if args.memory_command == "search":
-        from askme.memory.bridge import MemoryBridge
+        from askme.memory.retrieval.bridge import MemoryBridge
 
         query = " ".join(args.query)
         bridge = MemoryBridge()
@@ -2041,7 +2043,7 @@ def _handle_mcp_command(args: argparse.Namespace) -> None:
 
 
 def _load_skill_manager():
-    from askme.skills.skill_manager import SkillManager
+    from askme.skills.core.skill_manager import SkillManager
 
     manager = SkillManager()
     manager.load()
@@ -2120,16 +2122,13 @@ def _runtime_blueprints_payload(
 
     if name:
         spec = get_blueprint_spec(name)
+        if delivery_package:
+            return blueprint_delivery_package(spec.name, config=config)
         items = [
             {
                 **spec.to_dict(),
                 "inspection": inspect_blueprint(spec.name),
                 "readiness": blueprint_readiness(spec.name, config=config),
-                **(
-                    {"delivery_package": blueprint_delivery_package(spec.name, config=config)}
-                    if delivery_package
-                    else {}
-                ),
             }
         ]
     else:
@@ -2176,6 +2175,25 @@ def _runtime_blueprints_payload(
 
 
 def _emit_runtime_blueprints_summary(payload: dict[str, Any]) -> None:
+    if payload.get("package_id") and payload.get("blueprint"):
+        print(  # noqa: T201
+            "delivery-package: {package_id} status={status} claim={claim}".format(
+                package_id=payload.get("package_id"),
+                status=payload.get("status"),
+                claim=payload.get("customer_claim"),
+            )
+        )
+        print(  # noqa: T201
+            "blueprint={blueprint} run={run}".format(
+                blueprint=payload.get("blueprint"),
+                run=payload.get("startup_command"),
+            )
+        )
+        stop_conditions = payload.get("stop_conditions")
+        if isinstance(stop_conditions, list) and stop_conditions:
+            print(f"stop: {stop_conditions[0]}")  # noqa: T201
+        return
+
     summary = payload.get("summary", {})
     print(  # noqa: T201
         "blueprints={blueprint_count} customer_visible={customer_visible_count} valid={valid_count}".format(
@@ -2210,13 +2228,13 @@ def _emit_runtime_blueprints_summary(payload: dict[str, Any]) -> None:
 
 
 def _run_voice_health_check(*, live: bool) -> dict[str, Any]:
-    from askme.voice.health_check import run_voice_health
+    from askme.voice.diagnostics.health_check import run_voice_health
 
     return run_voice_health(live=live)
 
 
 def _emit_voice_health_payload(payload: dict[str, Any]) -> None:
-    from askme.voice.health_check import print_voice_health_summary
+    from askme.voice.diagnostics.health_check import print_voice_health_summary
 
     print_voice_health_summary(payload)
 
@@ -2228,7 +2246,7 @@ def _run_mic_calibration(
     interval_s: float,
     min_signal_peak: int,
 ) -> dict[str, Any]:
-    from askme.voice.mic_calibration import collect_runtime_mic_calibration
+    from askme.voice.diagnostics.mic_calibration import collect_runtime_mic_calibration
 
     return collect_runtime_mic_calibration(
         server=server,
@@ -2239,7 +2257,7 @@ def _run_mic_calibration(
 
 
 def _emit_mic_calibration_payload(payload: dict[str, Any]) -> None:
-    from askme.voice.mic_calibration import print_mic_calibration_summary
+    from askme.voice.diagnostics.mic_calibration import print_mic_calibration_summary
 
     print_mic_calibration_summary(payload)
 
@@ -2250,7 +2268,7 @@ def _run_sunrise_audio_doctor(
     include_output_probe: bool,
     guard_min_seconds: float,
 ) -> dict[str, Any]:
-    from askme.voice.sunrise_audio_doctor import run_sunrise_audio_doctor
+    from askme.voice.diagnostics.sunrise_audio_doctor import run_sunrise_audio_doctor
 
     return run_sunrise_audio_doctor(
         include_command_probes=include_command_probes,
@@ -2260,7 +2278,7 @@ def _run_sunrise_audio_doctor(
 
 
 def _emit_sunrise_audio_doctor_payload(payload: dict[str, Any]) -> None:
-    from askme.voice.sunrise_audio_doctor import print_sunrise_audio_doctor_summary
+    from askme.voice.diagnostics.sunrise_audio_doctor import print_sunrise_audio_doctor_summary
 
     print_sunrise_audio_doctor_summary(payload)
 
@@ -2276,7 +2294,7 @@ def _run_sunrise_voice_readiness(
     room_loop_asr: str,
     require_cloud_asr: bool,
 ) -> dict[str, Any]:
-    from askme.voice.sunrise_readiness import (
+    from askme.voice.diagnostics.sunrise_readiness import (
         DEFAULT_ROOM_LOOP_EXPECT_PREFIX,
         DEFAULT_ROOM_LOOP_TEXT,
         run_sunrise_voice_readiness,
@@ -2295,7 +2313,7 @@ def _run_sunrise_voice_readiness(
 
 
 def _emit_sunrise_voice_readiness_payload(payload: dict[str, Any]) -> None:
-    from askme.voice.sunrise_readiness import print_sunrise_voice_readiness_summary
+    from askme.voice.diagnostics.sunrise_readiness import print_sunrise_voice_readiness_summary
 
     print_sunrise_voice_readiness_summary(payload)
 
@@ -2318,8 +2336,8 @@ def _run_s100p_readiness_bundle(
     skip_service_log: bool,
     command_timeout: float,
 ) -> dict[str, Any]:
-    from askme.voice.s100p_readiness_bundle import collect_s100p_readiness_bundle
-    from askme.voice.sunrise_readiness import (
+    from askme.voice.diagnostics.s100p_readiness_bundle import collect_s100p_readiness_bundle
+    from askme.voice.diagnostics.sunrise_readiness import (
         DEFAULT_ROOM_LOOP_EXPECT_PREFIX,
         DEFAULT_ROOM_LOOP_TEXT,
     )
@@ -2344,7 +2362,7 @@ def _run_s100p_readiness_bundle(
 
 
 def _emit_s100p_readiness_bundle_payload(payload: dict[str, Any]) -> None:
-    from askme.voice.s100p_readiness_bundle import print_s100p_readiness_bundle_summary
+    from askme.voice.diagnostics.s100p_readiness_bundle import print_s100p_readiness_bundle_summary
 
     print_s100p_readiness_bundle_summary(payload)
 
@@ -2408,8 +2426,8 @@ def _run_field_ingest_file(
     limit: int,
     device_secrets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    from askme.pipeline.field_ingest_adapters import normalize_field_ingest_payload
-    from askme.pipeline.field_ingest_bridge import sign_field_ingest_payload
+    from askme.pipeline.field.field_ingest_adapters import normalize_field_ingest_payload
+    from askme.pipeline.field.field_ingest_bridge import sign_field_ingest_payload
 
     events = _load_field_ingest_events(Path(source))
     if limit > 0:
@@ -2487,7 +2505,7 @@ def _run_field_ingest_bridge(
     timeout_s: float,
     device_secrets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    from askme.pipeline.field_ingest_bridge import run_field_ingest_bridge_once
+    from askme.pipeline.field.field_ingest_bridge import run_field_ingest_bridge_once
 
     return run_field_ingest_bridge_once(
         source=source,
@@ -2511,7 +2529,7 @@ def _watch_field_ingest_bridge(
     timeout_s: float,
     device_secrets: dict[str, str] | None = None,
 ) -> None:
-    from askme.pipeline.field_ingest_bridge import watch_field_ingest_bridge
+    from askme.pipeline.field.field_ingest_bridge import watch_field_ingest_bridge
 
     watch_field_ingest_bridge(
         source=source,
@@ -2553,7 +2571,7 @@ def _device_secrets_from_site_profile(site_profile: str) -> dict[str, str]:
     profile_path = str(site_profile or "").strip()
     if not profile_path:
         return {}
-    from askme.pipeline.field_site_profile import load_field_site_profile
+    from askme.pipeline.field.customer_project_template_support import load_field_site_profile
 
     profile = load_field_site_profile(Path(profile_path))
     devices = profile.get("devices") if isinstance(profile.get("devices"), dict) else {}
@@ -2613,7 +2631,7 @@ def _run_field_sign_device_payload(
     secret_env: str,
     timestamp: float,
 ) -> dict[str, Any]:
-    from askme.pipeline.field_operations import sign_field_device_payload
+    from askme.pipeline.field.field_device_signature import sign_field_device_payload
 
     resolved_secret = _resolve_field_device_signing_secret(secret=secret, secret_env=secret_env)
     if not resolved_secret:
@@ -2774,7 +2792,11 @@ def _run_field_ingest_smoke(
             timeout_s=8.0,
             device_secrets=device_secrets,
         )
-        events_payload = _get_json(f"{_normalise_server_url(base_url)}/api/field/events?limit=20")
+        read_headers = {"X-Askme-Operator-Id": "supervisor-1"}
+        events_payload = _get_json(
+            f"{_normalise_server_url(base_url)}/api/field/events?limit=20",
+            headers=read_headers,
+        )
         events = events_payload.get("events") if isinstance(events_payload, dict) else []
         first_event = next((item for item in events if isinstance(item, dict) and item.get("event_id")), None)
         if first_event:
@@ -2785,7 +2807,10 @@ def _run_field_ingest_smoke(
                     "note": "field-smoke-suite acknowledges first incident for audit evidence",
                 },
             )
-            events_payload = _get_json(f"{_normalise_server_url(base_url)}/api/field/events?limit=20")
+            events_payload = _get_json(
+                f"{_normalise_server_url(base_url)}/api/field/events?limit=20",
+                headers=read_headers,
+            )
     finally:
         if local_server:
             local_server["server"].should_exit = True
@@ -3057,7 +3082,7 @@ def _run_field_notification_preflight(
         return _get_json(f"{_normalise_server_url(server)}/api/field/notification-preflight")
 
     from askme.config import get_config
-    from askme.pipeline.field_operations import FieldOperationsService
+    from askme.pipeline.field.field_operations import FieldOperationsService
 
     cfg = get_config()
     field_cfg = dict(cfg.get("field_operations", {}) if isinstance(cfg.get("field_operations"), dict) else {})
@@ -3515,11 +3540,9 @@ def _build_field_voice_smoke_handler(*, live_tts: bool) -> Any:
     if not live_tts:
         return _RecordingVoiceHandler()
     from askme.config import get_config
-    from askme.voice.tts import TTSEngine
+    from askme.providers import build_tts_provider
 
-    cfg = get_config()
-    voice_cfg = dict(cfg.get("voice", {}) if isinstance(cfg.get("voice"), dict) else {})
-    return TTSEngine(voice_cfg)
+    return build_tts_provider(get_config())
 
 
 def _field_smoke_run_id() -> str:
@@ -3591,7 +3614,7 @@ def _run_field_readiness(
 ) -> dict[str, Any]:
     if server:
         return _get_json(f"{_normalise_server_url(server)}/api/field/readiness")
-    from askme.pipeline.field_operations import FieldOperationsService
+    from askme.pipeline.field.field_operations import FieldOperationsService
 
     action_audit_path = Path(archive_path).with_name("field-action-audit.jsonl")
     service = FieldOperationsService(
@@ -3614,10 +3637,8 @@ def _run_field_readiness(
 
 
 def _run_field_device_trust(*, site_profile: str) -> dict[str, Any]:
-    from askme.pipeline.field_site_profile import (
-        build_site_profile_report,
-        load_field_site_profile,
-    )
+    from askme.pipeline.field.customer_project_template_support import load_field_site_profile
+    from askme.pipeline.field.customer_projects import build_site_profile_report
 
     path = Path(site_profile)
     try:
@@ -3687,10 +3708,14 @@ def _run_field_device_trust(*, site_profile: str) -> dict[str, Any]:
 
 
 def _run_field_site_env_template(*, site_profile: str, output: str = "") -> dict[str, Any]:
-    from askme.pipeline.field_site_profile import (
+    from askme.pipeline.field.customer_project_profiles import (
         load_field_site_profile,
-        render_site_profile_env_template,
+    )
+    from askme.pipeline.field.customer_project_template_support import (
         site_profile_env_references,
+    )
+    from askme.pipeline.field.field_site_runtime_config import render_site_profile_env_template
+    from askme.pipeline.field.field_site_validation import (
         validate_field_site_profile,
     )
 
@@ -3926,7 +3951,7 @@ def _run_field_audit_integrity(
 ) -> dict[str, Any]:
     if server:
         return _get_json(f"{_normalise_server_url(server)}/api/field/audit/integrity")
-    from askme.pipeline.field_operations import FieldOperationsService
+    from askme.pipeline.field.field_operations import FieldOperationsService
 
     resolved_hmac_secret = _resolve_field_action_audit_hmac_secret(hmac_secret)
     action_audit: dict[str, Any] = {
@@ -4604,7 +4629,7 @@ def _start_field_smoke_server(
     import uvicorn
 
     from askme.health_server import build_health_snapshot, create_health_app
-    from askme.pipeline.field_operations import FieldOperationsService
+    from askme.pipeline.field.field_operations import FieldOperationsService
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -4716,7 +4741,7 @@ async def _load_local_capabilities_async(
 ) -> dict[str, Any]:
     from askme.config import get_config
     from askme.main import _select_blueprint
-    from askme.runtime.profiles import legacy_profile_for
+    from askme.runtime.core.profiles import legacy_profile_for
 
     cfg = get_config()
     blueprint = _select_blueprint(voice_mode=voice_mode, robot_mode=robot_mode)
@@ -4797,7 +4822,7 @@ async def _run_local_agent_turn(
 ) -> dict[str, Any]:
     from askme.config import get_config
     from askme.main import _select_blueprint
-    from askme.runtime.profiles import legacy_profile_for
+    from askme.runtime.core.profiles import legacy_profile_for
 
     cfg = get_config()
     blueprint = _select_blueprint(voice_mode=False, robot_mode=robot_mode)
@@ -4861,9 +4886,9 @@ def _speak_agent_payload(payload: dict[str, Any], *, enabled: bool) -> None:
 def _speak_agent_reply(reply: str) -> None:
     """Play a one-shot agent reply using the local configured TTS output."""
     from askme.config import get_config
-    from askme.voice.audio_agent import AudioAgent
+    from askme.providers import build_audio_frontend
 
-    audio = AudioAgent(get_config(), voice_mode=False)
+    audio = build_audio_frontend(get_config(), voice_mode=False).audio
     audio.speak(reply)
     audio.start_playback()
     try:
@@ -4872,6 +4897,7 @@ def _speak_agent_reply(reply: str) -> None:
             raise TimeoutError("TTS playback did not finish within timeout")
     finally:
         audio.stop_playback()
+        audio.shutdown()
 
 
 def _report_speak_error(exc: Exception) -> None:
@@ -4989,7 +5015,7 @@ def _mission_context_payload(
 
 def _load_local_mission_service():
     from askme.config import get_config
-    from askme.runtime.mission import MissionService
+    from askme.runtime.task.mission import MissionService
 
     return MissionService(get_config())
 
@@ -5043,11 +5069,13 @@ def _post_json_with_retries(url: str, payload: dict[str, Any], *, attempts: int)
     }
 
 
-def _get_json(url: str) -> dict[str, Any]:
+def _get_json(url: str, *, headers: dict[str, str] | None = None) -> dict[str, Any]:
     kwargs: dict[str, Any] = {"timeout": 5}
-    headers = _server_auth_headers()
+    request_headers = _server_auth_headers() or {}
     if headers:
-        kwargs["headers"] = headers
+        request_headers.update(headers)
+    if request_headers:
+        kwargs["headers"] = request_headers
     response = requests.get(url, **kwargs)
     response.raise_for_status()
     return response.json()
@@ -5126,12 +5154,35 @@ def _emit_payload(payload: dict[str, Any], *, json_output: bool) -> None:
 
 
 def _json(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, indent=2, ensure_ascii=not _stdout_supports_unicode())
+    text = json.dumps(payload, indent=2, ensure_ascii=False)
+    if _stdout_should_emit_human_text(text):
+        return text
+    return json.dumps(payload, indent=2, ensure_ascii=True)
 
 
 def _stdout_supports_unicode() -> bool:
     encoding = (getattr(sys.stdout, "encoding", None) or "").lower().replace("_", "-")
     return encoding in {"utf-8", "utf8"} or "65001" in encoding
+
+
+def _stdout_can_encode(text: str) -> bool:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return False
+    return True
+
+
+def _stdout_should_emit_human_text(text: str) -> bool:
+    if not _stdout_can_encode(text):
+        return False
+    if _stdout_supports_unicode():
+        return True
+    isatty = getattr(sys.stdout, "isatty", None)
+    if not callable(isatty):
+        return False
+    return bool(isatty())
 
 
 if __name__ == "__main__":

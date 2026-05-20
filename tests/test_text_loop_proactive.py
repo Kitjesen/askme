@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from askme.llm.intent_router import Intent, IntentType
 from askme.pipeline.proactive.base import ProactiveResult
 from askme.pipeline.text_loop import TextLoop, _TextClarificationAudio
+from askme.robot_interaction import Intent, IntentType
 
 # ---------------------------------------------------------------------------
 # Helper: build a TextLoop with controlled mocks

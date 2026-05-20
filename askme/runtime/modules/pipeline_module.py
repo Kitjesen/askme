@@ -1,4 +1,4 @@
-"""PipelineModule 鈥?wraps BrainPipeline as a declarative module.
+"""PipelineModule - wraps BrainPipeline as a declarative module.
 
 Canonical wiring::
 
@@ -17,16 +17,14 @@ from pathlib import Path
 from typing import Any
 
 # LLMClient imported lazily to avoid circular imports at module scan time
-from askme.llm.client import LLMClient
-from askme.perception.vision_bridge import VisionBridge
-from askme.pipeline.brain_pipeline import BrainPipeline
-from askme.pipeline.persona import persona_from_brain_config
-from askme.robot.control_client import DogControlClient
-from askme.robot.safety_client import DogSafetyClient
-from askme.runtime.module import In, Module, ModuleRegistry, Out
+from askme.llm.core.client import LLMClient
+from askme.ports import RobotControlPort, SafetyPort, VisionPort
+from askme.pipeline.core.brain_pipeline import BrainPipeline
+from askme.pipeline.core.persona import persona_from_brain_config
+from askme.runtime.core.module import In, Module, ModuleRegistry, Out
 from askme.schemas.messages import MemoryContext
-from askme.tools.tool_registry import ToolRegistry
-from askme.voice.stream_splitter import StreamSplitter
+from askme.tools.core.tool_registry import ToolRegistry
+from askme.voice.core.stream_splitter import StreamSplitter
 
 logger = logging.getLogger(__name__)
 
@@ -66,13 +64,13 @@ class PipelineModule(Module):
 
     pipeline: Out[BrainPipeline]
 
-    # In ports 鈥?auto-wired by runtime before build() is called
+    # In ports - auto-wired by runtime before build() is called
     llm_in: In[LLMClient]
     tool_registry_in: In[ToolRegistry]
     memory_context: In[MemoryContext]
-    safety_client: In[DogSafetyClient]
-    vision: In[VisionBridge]
-    control_in: In[DogControlClient]
+    safety_client: In[SafetyPort]
+    vision: In[VisionPort]
+    control_in: In[RobotControlPort]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         # Helper: safely extract a named attribute from a wired In-port module.

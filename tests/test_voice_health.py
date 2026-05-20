@@ -83,6 +83,16 @@ def test_websocket_client_check_rejects_legacy_websocket_package(monkeypatch) ->
     assert health_check._websocket_client_available() is False
 
 
+def test_voice_health_help_uses_public_module_path(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        health_check.main(["--help"])
+
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert "python -m askme.voice.health_check" in output
+    assert "legacy-alias" not in output
+
+
 def test_cli_runtime_voice_health_json(monkeypatch, capsys) -> None:
     seen: dict[str, bool] = {}
 

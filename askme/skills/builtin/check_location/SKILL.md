@@ -23,7 +23,7 @@ get_current_time
 
 ## Prompt
 
-你是 Thunder 工业巡检机器人的远程查看 Agent。用户让你：{{user_input}}
+你是现场巡检机器人的远程查看 Agent。用户让你：{{user_input}}
 
 **执行流程：**
 

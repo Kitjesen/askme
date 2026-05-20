@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from askme.memory.importer import (
     import_knowledge_file,
     parse_knowledge_file,
@@ -60,12 +59,64 @@ def test_parse_knowledge_text_json_preview() -> None:
     assert "where" in records[0].text
 
 
+def test_parse_knowledge_text_preserves_product_governance_fields() -> None:
+    records = parse_knowledge_text(
+        (
+            '[{"text":"Fanmu coffee is on floor one","category":"merchant",'
+            '"quality_status":"public","visibility":"external",'
+            '"customer_id":"fanmu","project_id":"fanmu-phase-1",'
+            '"product_area":"space","workstream":"wayfinding",'
+            '"linked_object_type":"park_point","linked_object_id":"poi-fanmu-coffee"}]'
+        ),
+        filename="site.json",
+    )
+
+    metadata = records[0].to_metadata()
+    assert metadata["quality_status"] == "public"
+    assert metadata["visibility"] == "external"
+    assert metadata["customer_id"] == "fanmu"
+    assert metadata["project_id"] == "fanmu-phase-1"
+    assert metadata["product_area"] == "space"
+    assert metadata["workstream"] == "wayfinding"
+    assert metadata["linked_object_type"] == "park_point"
+    assert metadata["linked_object_id"] == "poi-fanmu-coffee"
+
+
 def test_parse_knowledge_text_markdown_preview() -> None:
     records = parse_knowledge_text("# floor 1\n- restroom east", filename="site.md", category="faq")
 
     assert len(records) == 1
     assert records[0].category == "faq"
     assert records[0].text == "floor 1: restroom east"
+
+
+def test_parse_knowledge_text_uses_product_taxonomy() -> None:
+    records = parse_knowledge_text(
+        "- 梵木咖啡在 2 号楼一层，靠近西门",
+        filename="merchant.md",
+        category="merchant",
+    )
+
+    assert len(records) == 1
+    assert records[0].normalized_category() == "merchant"
+    metadata = records[0].to_metadata()
+    assert metadata["category"] == "merchant"
+    assert metadata["category_label"] == "商户与服务"
+    assert metadata["category_group"] == "visitor"
+
+
+def test_parse_knowledge_text_maps_legacy_note_to_inspection() -> None:
+    records = parse_knowledge_text("- 巡检时先拍摄设备铭牌", filename="sop.md", category="note")
+
+    assert records[0].normalized_category() == "inspection"
+    assert records[0].to_memory_text().startswith("[inspection]")
+
+
+def test_parse_knowledge_text_unknown_category_becomes_general() -> None:
+    records = parse_knowledge_text("- 交付现场补充说明", filename="misc.md", category="random")
+
+    assert records[0].normalized_category() == "general"
+    assert records[0].to_metadata()["category_label"] == "其他资料"
 
 
 @pytest.mark.asyncio

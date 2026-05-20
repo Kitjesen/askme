@@ -70,6 +70,87 @@ def test_product_launch_readiness_allows_production_when_all_gates_ready() -> No
     assert payload["launch_stage"] == "production_acceptance_ready"
     assert payload["production_ready"] is True
     assert payload["summary"]["blocked_count"] == 0
+    snapshot = payload["customer_acceptance_snapshot"]
+    assert snapshot["snapshot_type"] == "askme.customer_project_acceptance_snapshot.v1"
+    assert snapshot["overall_status"] == "ready"
+    assert snapshot["production_ready"] is True
+    assert snapshot["metrics"]["gate_count"] == 4
+    assert snapshot["metrics"]["ready_gate_count"] == 4
+    assert snapshot["metrics"]["project_count"] == 1
+    assert snapshot["primary_gap"]
+    assert "identity_gateway" in {source["source_id"] for source in snapshot["evidence_sources"]}
+    assert snapshot["customer_can_verify"]
+    assert snapshot["not_claimed"]
+
+
+def test_product_launch_readiness_includes_dashboard_page_gate_when_available() -> None:
+    payload = build_product_launch_readiness(
+        identity_readiness=_ready_identity(),
+        field_readiness=_ready_field(),
+        solution_delivery_readiness=_ready_solution(),
+        customer_project_workbench=_ready_workbench(),
+        dashboard_pages={
+            "summary": {
+                "page_count": 11,
+                "internal_page_count": 0,
+                "primary_endpoint_missing_count": 0,
+                "primary_endpoint_internal_count": 0,
+                "primary_endpoint_unclassified_count": 0,
+            },
+            "policy": {
+                "internal_runtime_is_not_a_customer_page": True,
+                "dashboard_shell_uses_registered_pages": True,
+                "new_pages_must_have_audience_section_and_primary_endpoint": True,
+                "primary_endpoints_must_exist_in_route_inventory": True,
+                "customer_pages_must_not_point_to_internal_or_unclassified_routes": True,
+            },
+        },
+    )
+
+    assert payload["overall_status"] == "ready"
+    assert "dashboard_pages" in {gate["gate_id"] for gate in payload["gates"]}
+    assert payload["summary"]["gate_count"] == 5
+    assert payload["summary"]["dashboard_page_count"] == 11
+    assert payload["summary"]["dashboard_endpoint_missing_count"] == 0
+    assert "/api/dashboard/pages" in {source["endpoint"] for source in payload["evidence_sources"]}
+    snapshot = payload["customer_acceptance_snapshot"]
+    assert snapshot["metrics"]["gate_count"] == 5
+    assert snapshot["metrics"]["dashboard_endpoint_missing_count"] == 0
+    assert "dashboard_pages" in {source["source_id"] for source in snapshot["evidence_sources"]}
+
+
+def test_product_launch_readiness_blocks_when_customer_page_endpoint_is_missing() -> None:
+    payload = build_product_launch_readiness(
+        identity_readiness=_ready_identity(),
+        field_readiness=_ready_field(),
+        solution_delivery_readiness=_ready_solution(),
+        customer_project_workbench=_ready_workbench(),
+        dashboard_pages={
+            "summary": {
+                "page_count": 11,
+                "internal_page_count": 0,
+                "primary_endpoint_missing_count": 1,
+                "primary_endpoint_internal_count": 0,
+                "primary_endpoint_unclassified_count": 0,
+            },
+            "policy": {
+                "internal_runtime_is_not_a_customer_page": True,
+                "dashboard_shell_uses_registered_pages": True,
+                "new_pages_must_have_audience_section_and_primary_endpoint": True,
+                "primary_endpoints_must_exist_in_route_inventory": False,
+                "customer_pages_must_not_point_to_internal_or_unclassified_routes": True,
+            },
+        },
+    )
+
+    dashboard_gate = next(gate for gate in payload["gates"] if gate["gate_id"] == "dashboard_pages")
+    assert payload["overall_status"] == "blocked"
+    assert payload["production_ready"] is False
+    assert dashboard_gate["status"] == "blocked"
+    assert "Dashboard" in dashboard_gate["next_step"]
+    assert payload["summary"]["dashboard_endpoint_missing_count"] == 1
+    assert payload["customer_acceptance_snapshot"]["metrics"]["dashboard_endpoint_missing_count"] == 1
+    assert payload["customer_acceptance_snapshot"]["primary_gap"] == dashboard_gate["next_step"]
 
 
 def test_product_launch_readiness_demo_identity_blocks_only_production_claim() -> None:

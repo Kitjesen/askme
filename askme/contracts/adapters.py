@@ -15,8 +15,11 @@ from askme.contracts.io import (
     RobotActionType,
     VisionInput,
 )
-from askme.voice.interaction_gate import InteractionAction, InteractionDecision
-from askme.voice.perception_context import InteractionPerceptionSnapshot
+from askme.robot_interaction import (
+    InteractionAction,
+    InteractionDecision,
+    InteractionPerceptionSnapshot,
+)
 
 _ACTION_MAP: dict[InteractionAction, RobotActionType] = {
     InteractionAction.IGNORE: RobotActionType.IGNORE,

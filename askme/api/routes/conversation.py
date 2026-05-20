@@ -8,9 +8,14 @@ import secrets
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from askme.api.schemas.conversation import (
+    ChatResponse,
+    ConversationDiagnosticsResponse,
+    RuntimeVoiceTurnResponse,
+)
 from askme.api.services.conversation_service import (
     ChatOverloaded,
     ChatTimeout,
@@ -18,6 +23,7 @@ from askme.api.services.conversation_service import (
     ConversationService,
     EmptyChatText,
 )
+from askme.api.services.http_helpers import require_json_object
 
 DispatchRuntime = Callable[..., Awaitable[dict[str, Any]]]
 CorsOptions = Callable[[str], Response]
@@ -38,20 +44,45 @@ def register_conversation_routes(
 ) -> None:
     """Register chat and voice-turn routes."""
 
-    @app.post("/api/chat", tags=["Monitor"])
+    app.include_router(
+        create_conversation_router(
+            conversation_service=conversation_service,
+            runtime_available=runtime_available,
+            dispatch_runtime=dispatch_runtime,
+            cors_options_response=cors_options_response,
+            logger=logger,
+            runtime_voice_turn_timeout_s=runtime_voice_turn_timeout_s,
+        )
+    )
+
+
+def create_conversation_router(
+    *,
+    conversation_service: ConversationService,
+    runtime_available: bool,
+    dispatch_runtime: DispatchRuntime,
+    cors_options_response: CorsOptions,
+    logger: logging.Logger,
+    runtime_voice_turn_timeout_s: float | None = 30.0,
+) -> APIRouter:
+    """Create the conversation router without binding it to an app factory."""
+
+    router = APIRouter()
+
+    @router.post(
+        "/api/chat",
+        tags=["Monitor"],
+        response_model=ChatResponse,
+        response_model_exclude_none=True,
+    )
     async def chat(request: Request) -> JSONResponse:
         """Send text to the brain pipeline and return the response."""
         trace_id = _request_trace_id(request)
         trace_headers = _with_trace(_CORS_HEADERS, trace_id)
-        if not conversation_service.chat_available:
-            return JSONResponse(
-                {"error": "chat not available"},
-                status_code=503,
-                headers=trace_headers,
-            )
         try:
-            body = await request.json()
+            body = require_json_object(await request.json())
             payload = await conversation_service.chat_payload_from_body(body, trace_id=trace_id)
+            ChatResponse.model_validate(payload)
             return JSONResponse(payload, headers=_with_trace(_NO_STORE_HEADERS, trace_id))
         except EmptyChatText:
             return JSONResponse(
@@ -71,18 +102,32 @@ def register_conversation_routes(
                 status_code=504,
                 headers=trace_headers,
             )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400, headers=trace_headers)
         except ChatUnavailable as exc:
             return JSONResponse({"error": str(exc)}, status_code=503, headers=trace_headers)
         except Exception as exc:
             logger.error("Chat endpoint failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=trace_headers)
 
-    @app.get("/api/conversation/diagnostics", tags=["Monitor"])
+    @router.get(
+        "/api/conversation/diagnostics",
+        tags=["Monitor"],
+        response_model=ConversationDiagnosticsResponse,
+        response_model_exclude_none=True,
+    )
     async def conversation_diagnostics() -> JSONResponse:
         """Return non-sensitive chat execution diagnostics."""
-        return JSONResponse(conversation_service.diagnostics_snapshot(), headers=_NO_STORE_HEADERS)
+        payload = conversation_service.diagnostics_snapshot()
+        ConversationDiagnosticsResponse.model_validate(payload)
+        return JSONResponse(payload, headers=_NO_STORE_HEADERS)
 
-    @app.post("/api/runtime/voice-turn", tags=["Runtime"])
+    @router.post(
+        "/api/runtime/voice-turn",
+        tags=["Runtime"],
+        response_model=RuntimeVoiceTurnResponse,
+        response_model_exclude_none=True,
+    )
     async def runtime_voice_turn(request: Request) -> JSONResponse:
         """Route a final voice transcript to runtime controls only."""
         if not runtime_available:
@@ -92,7 +137,7 @@ def register_conversation_routes(
                 headers=_CORS_HEADERS,
             )
         try:
-            body = await request.json()
+            body = require_json_object(await request.json())
             raw_text = body.get("text") or body.get("message") or body.get("transcript") or ""
             text = str(raw_text).strip()
             if not text:
@@ -116,11 +161,18 @@ def register_conversation_routes(
                 confidence=body.get("asr_confidence", body.get("confidence")),
                 is_final=bool(body.get("is_final", True)),
                 channel=str(body.get("channel") or "voice"),
+                conversation_session_id=_clean_optional_text(
+                    body.get("conversation_session_id")
+                    or body.get("conversation_id")
+                    or body.get("chat_session_id")
+                ),
+                planning_session_id=_clean_optional_text(body.get("planning_session_id")),
             )
             if runtime_voice_turn_timeout_s is not None and runtime_voice_turn_timeout_s > 0:
                 payload = await asyncio.wait_for(dispatch, timeout=runtime_voice_turn_timeout_s)
             else:
                 payload = await dispatch
+            RuntimeVoiceTurnResponse.model_validate(payload)
             return JSONResponse(payload, headers=_NO_STORE_HEADERS)
         except TimeoutError:
             return JSONResponse(
@@ -131,17 +183,21 @@ def register_conversation_routes(
                 status_code=504,
                 headers=_CORS_HEADERS,
             )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400, headers=_CORS_HEADERS)
         except Exception as exc:
             logger.error("Runtime voice-turn endpoint failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-    @app.options("/api/chat", include_in_schema=False)
+    @router.options("/api/chat", include_in_schema=False)
     async def chat_cors() -> Response:
         return cors_options_response("POST, OPTIONS")
 
-    @app.options("/api/runtime/voice-turn", include_in_schema=False)
+    @router.options("/api/runtime/voice-turn", include_in_schema=False)
     async def runtime_voice_turn_cors() -> Response:
         return cors_options_response("POST, OPTIONS")
+
+    return router
 
 
 def _request_trace_id(request: Request) -> str:
@@ -154,3 +210,8 @@ def _request_trace_id(request: Request) -> str:
 
 def _with_trace(headers: dict[str, str], trace_id: str) -> dict[str, str]:
     return {**headers, "X-Askme-Trace-Id": trace_id}
+
+
+def _clean_optional_text(value: Any) -> str | None:
+    text = "" if value is None else str(value).strip()
+    return text or None

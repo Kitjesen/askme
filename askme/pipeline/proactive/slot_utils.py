@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from askme.skills.skill_model import SkillDefinition
+    from askme.skills.core.skill_model import SkillDefinition
 
 
 def slot_present(

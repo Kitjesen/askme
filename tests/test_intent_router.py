@@ -1,7 +1,6 @@
-"""Tests for askme.brain.intent_router module."""
+"""Tests for robot interaction intent routing."""
 
-from askme.interaction import RoutingPolicy, intent_route_payload
-from askme.llm.intent_router import IntentRouter, IntentType
+from askme.robot_interaction import IntentRouter, IntentType, RoutingPolicy, intent_route_payload
 
 
 class FakeSafety:

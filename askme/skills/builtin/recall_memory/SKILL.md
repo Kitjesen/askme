@@ -20,7 +20,7 @@ get_current_time
 
 ## Prompt
 
-你是 Thunder 工业巡检机器人的记忆查询 Agent。用户问：{{user_input}}
+你是现场巡检机器人的记忆查询 Agent。用户问：{{user_input}}
 
 **你能查询的记忆来源（按优先级）：**
 

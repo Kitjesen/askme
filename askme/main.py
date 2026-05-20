@@ -12,14 +12,12 @@ logger = logging.getLogger(__name__)
 
 def _select_blueprint(*, voice_mode: bool, robot_mode: bool):
     """Select the appropriate blueprint based on mode flags."""
-    if voice_mode and robot_mode:
-        from askme.blueprints.edge_robot import edge_robot
-        return edge_robot
-    if voice_mode:
-        from askme.blueprints.voice import voice
-        return voice
-    from askme.blueprints.text import text
-    return text
+    from askme.blueprints import load_runtime_blueprint_for_modes
+
+    return load_runtime_blueprint_for_modes(
+        voice_mode=voice_mode,
+        robot_mode=robot_mode,
+    )
 
 
 def _setup_logging(cfg: dict) -> None:

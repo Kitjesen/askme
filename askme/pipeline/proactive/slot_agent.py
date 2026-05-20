@@ -15,7 +15,7 @@ from .base import ProactiveAgent, ProactiveContext, ProactiveResult, ask_and_lis
 from .slot_utils import slot_present
 
 if TYPE_CHECKING:
-    from askme.skills.skill_model import SkillDefinition
+    from askme.skills.core.skill_model import SkillDefinition
 
 logger = logging.getLogger(__name__)
 

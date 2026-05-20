@@ -2,12 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
 from pathlib import Path
 
 import pytest
+from askme.api.schemas.field_events import (
+    FieldActionAuditIntegrityResponse,
+    FieldDeviceOnboardingResponse,
+    FieldDeviceStatusResponse,
+    FieldEventActionResponse,
+    FieldEventDetailApiResponse,
+    FieldEventListApiResponse,
+    FieldEventReportResponse,
+    FieldEventTriggerResponse,
+    FieldIngestHelpResponse,
+    FieldNotificationPreflightResponse,
+    FieldNotificationTestResponse,
+    FieldReadinessResponse,
+    FieldScenarioAcceptanceResponse,
+    FieldScenarioCatalogResponse,
+)
+from askme.pipeline.field_operations import FieldOperationsService, sign_field_device_payload
+from askme.runtime.field_callbacks import build_field_runtime_callback_sequence
+from askme.runtime.handoff import RuntimeHandoffService
 from fastapi.testclient import TestClient
 
 import askme.health_server as health_server
@@ -17,9 +37,7 @@ from askme.health_server import (
     create_health_app,
     sign_field_runtime_callback_payload,
 )
-from askme.pipeline.field_operations import FieldOperationsService, sign_field_device_payload
-from askme.runtime.field_callbacks import build_field_runtime_callback_sequence
-from askme.runtime.handoff import RuntimeHandoffService
+from askme.pipeline.field.field_action_audit import FieldActionAuditIntegrityError
 
 
 class _FakeDispatcher:
@@ -567,10 +585,12 @@ async def test_field_event_action_requires_explicit_operator_id(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_field_event_action_audit_failure_blocks_state_change(tmp_path: Path):
+async def test_field_event_action_audit_failure_blocks_state_change_even_when_swallow_configured(
+    tmp_path: Path,
+):
     service = _service(
         tmp_path,
-        action_audit={"enabled": True, "path": str(tmp_path), "swallow_errors": False},
+        action_audit={"enabled": True, "path": str(tmp_path), "swallow_errors": True},
     )
     created = await service.trigger_payload(
         {
@@ -590,6 +610,115 @@ async def test_field_event_action_audit_failure_blocks_state_change(tmp_path: Pa
     assert event["event_id"] == event_id
     assert event["status"] != "acknowledged"
     assert event["action_audit"] == []
+
+
+@pytest.mark.asyncio
+async def test_field_event_action_audit_strict_append_blocks_corrupt_chain(tmp_path: Path):
+    audit_path = tmp_path / "field-action-audit.jsonl"
+    service = _service(
+        tmp_path,
+        action_audit={"enabled": True, "path": str(audit_path), "swallow_errors": False},
+    )
+    created = await service.trigger_payload(
+        {
+            "scenario_id": "illegal_parking",
+            "location": "main road",
+            "zone_name": "main road",
+            "plate_number": "A12345",
+            "image_path": "artifacts/evidence/car.jpg",
+        }
+    )
+    event_id = created["event"]["event_id"]
+    acknowledged = service.acknowledge_payload(
+        event_id,
+        {"operator_id": "security-1", "note": "seen"},
+    )
+    assert acknowledged["acknowledged"] is True
+
+    original_lines = audit_path.read_text(encoding="utf-8").splitlines()
+    audit_path.write_text("\n".join([*original_lines, "{not-json"]) + "\n", encoding="utf-8")
+
+    with pytest.raises(FieldActionAuditIntegrityError, match="invalid_json"):
+        service.resend_notification_payload(
+            event_id,
+            {"operator_id": "security-1", "note": "retry"},
+        )
+
+    assert audit_path.read_text(encoding="utf-8").splitlines() == [*original_lines, "{not-json"]
+    event = service.detail_payload(event_id)["event"]
+    assert [item["action"] for item in event["action_audit"]] == ["acknowledge"]
+
+
+@pytest.mark.parametrize(
+    ("corruption_kind", "expected_reason"),
+    [
+        ("invalid_json", "invalid_json"),
+        ("record_hash_mismatch", "record_hash_mismatch"),
+        ("record_signature_mismatch", "record_signature_mismatch"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_field_event_action_audit_integrity_failure_cannot_be_config_bypassed(
+    tmp_path: Path,
+    corruption_kind: str,
+    expected_reason: str,
+):
+    audit_path = tmp_path / "field-action-audit.jsonl"
+    audit_config = {
+        "enabled": True,
+        "path": str(audit_path),
+        "strict_append": False,
+        "swallow_errors": True,
+    }
+    if corruption_kind == "record_signature_mismatch":
+        audit_config["hmac_secret"] = "secret"
+
+    service = _service(tmp_path, action_audit=audit_config)
+    created = await service.trigger_payload(
+        {
+            "scenario_id": "illegal_parking",
+            "location": "main road",
+            "zone_name": "main road",
+            "plate_number": "A12345",
+            "image_path": "artifacts/evidence/car.jpg",
+        }
+    )
+    event_id = created["event"]["event_id"]
+    acknowledged = service.acknowledge_payload(
+        event_id,
+        {"operator_id": "security-1", "note": "seen"},
+    )
+    assert acknowledged["acknowledged"] is True
+    assert [item["action"] for item in service.detail_payload(event_id)["event"]["action_audit"]] == [
+        "acknowledge"
+    ]
+
+    original_lines = audit_path.read_text(encoding="utf-8").splitlines()
+    dispatcher_call_count = len(_FakeDispatcher.calls)
+    if corruption_kind == "invalid_json":
+        corrupted_lines = [*original_lines, "{not-json"]
+    else:
+        records = [json.loads(line) for line in original_lines]
+        if corruption_kind == "record_hash_mismatch":
+            records[0]["status"] = "tampered"
+        else:
+            records[0]["record_signature"] = "bad-signature"
+        corrupted_lines = [
+            json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            for record in records
+        ]
+    audit_path.write_text("\n".join(corrupted_lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(FieldActionAuditIntegrityError, match=expected_reason):
+        service.resend_notification_payload(
+            event_id,
+            {"operator_id": "security-1", "note": "retry"},
+        )
+
+    assert audit_path.read_text(encoding="utf-8").splitlines() == corrupted_lines
+    assert len(_FakeDispatcher.calls) == dispatcher_call_count
+    event = service.detail_payload(event_id)["event"]
+    assert [item["action"] for item in event["action_audit"]] == ["acknowledge"]
 
 
 @pytest.mark.asyncio
@@ -731,7 +860,12 @@ async def test_p0_event_missing_evidence_is_not_dispatched(tmp_path: Path):
     assert result["status"] == "needs_evidence"
     assert "image_path" in result["missing_evidence"]
     assert _FakeDispatcher.calls == []
-    assert service.list_payload()["events"][0]["status"] == "needs_evidence"
+    event_view = service.list_payload()["events"][0]
+    assert event_view["status"] == "needs_evidence"
+    decision = event_view["admission_decision"]
+    assert decision["blocked"] is True
+    assert "missing_evidence" in decision["technical_reasons"]
+    assert decision["title"] == "未通知处置群：缺少必需证据"
 
 
 @pytest.mark.asyncio
@@ -1015,6 +1149,17 @@ async def test_ingest_infers_managed_object_with_matching_project_scope(tmp_path
     assert result["event"]["managed_object_id"] == "vehicles-a"
     assert result["event"]["project_scope"]["project_id"] == "project-a"
     assert result["event"]["resource_execution_context"]["managed_object_id"] == "vehicles-a"
+    scope_contract = result["ingest_scope_contract"]
+    assert scope_contract["contract_type"] == "askme.field.ingest_scope_contract.v1"
+    assert scope_contract["customer_project"]["scope_source"] == "server_customer_project"
+    assert scope_contract["customer_project"]["project_id"] == "project-a"
+    assert scope_contract["managed_object"]["bound"] is True
+    assert scope_contract["managed_object"]["object_id"] == "vehicles-a"
+    assert scope_contract["managed_object"]["binding_status"] == "bound_ready"
+    assert scope_contract["production_gate"]["ready"] is True
+    event_view = service.list_payload()["events"][0]
+    assert event_view["ingest_scope_contract"]["managed_object"]["binding_status"] == "bound_ready"
+    assert event_view["ingest_scope_contract"]["production_gate"]["ready"] is True
 
 
 @pytest.mark.asyncio
@@ -1056,6 +1201,23 @@ async def test_ingest_does_not_bind_managed_object_when_project_scope_mismatches
     assert result["event"]["managed_object_id"] == ""
     assert result["event"]["resource_execution_context"]["reason"] == "no_managed_object_matched"
     assert result["event"]["project_scope"]["project_id"] == "project-b"
+    scope_contract = result["ingest_scope_contract"]
+    assert scope_contract["customer_project"]["project_id"] == "project-b"
+    assert scope_contract["managed_object"]["bound"] is False
+    assert scope_contract["managed_object"]["binding_status"] == "unbound_managed_object"
+    assert scope_contract["production_gate"]["ready"] is False
+    assert scope_contract["production_gate"]["reason"] == "managed_object_binding_required"
+    event_view = service.list_payload()["events"][0]
+    assert (
+        event_view["ingest_scope_contract"]["managed_object"]["binding_status"]
+        == "unbound_managed_object"
+    )
+    decision = event_view["admission_decision"]
+    assert "unbound_managed_object" in decision["technical_reasons"]
+    assert {"label": "resource_binding", "value": "no_managed_object_matched", "status": "manual_check"} in decision["evidence_facts"]
+    assert decision["next_step"] == (
+        "当前事件可继续处置；交付验收前需要将设备、视觉模型、传感器协议和验收用例绑定到客户现场对象。"
+    )
 
 
 @pytest.mark.asyncio
@@ -1269,6 +1431,114 @@ async def test_device_status_payload_reports_online_and_never_seen_devices(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_device_onboarding_payload_reports_object_binding_and_next_actions(tmp_path: Path):
+    service = _service(
+        tmp_path,
+        require_trusted_devices=True,
+        device_offline_after_s=600,
+        device_registry={
+            "smoke-01": {
+                "allowed_sources": ["sensor"],
+                "hmac_secret": "device-secret",
+                "require_signature": True,
+            },
+            "camera-01": {
+                "allowed_sources": ["camera"],
+                "hmac_secret": "camera-secret",
+                "require_signature": True,
+            },
+        },
+        managed_objects={
+            "fire-sensors": {
+                "display_name": "Fire and smoke sensors",
+                "category": "safety",
+                "scenario_ids": ["fire_or_smoke"],
+                "device_sources": ["sensor"],
+                "bindings": {
+                    "vision_models": ["smoke-camera-review"],
+                    "sensor_protocols": ["mqtt-smoke-temperature"],
+                    "skill_packages": ["capability.fire_or_smoke"],
+                    "acceptance_tests": ["tests/scenario_tests/test_field_operations_evaluation.py::fire_or_smoke"],
+                },
+            }
+        },
+    )
+    body = {
+        "source": "sensor",
+        "device_id": "smoke-01",
+        "observed_at": time.time(),
+        "device_signature_timestamp": time.time(),
+        "sensor": {"temperature_c": 72, "smoke_level": 0.9},
+        "location": "Power Room",
+        "image_path": "artifacts/evidence/smoke.jpg",
+    }
+    body["device_signature"] = sign_field_device_payload(body, secret="device-secret")
+
+    await service.ingest_payload(body)
+    payload = service.device_onboarding_payload()
+
+    devices = {item["device_id"]: item for item in payload["devices"]}
+    assert payload["report_type"] == "askme.field.device_onboarding_report.v1"
+    assert payload["summary"]["ready"] == 1
+    assert payload["summary"]["manual_check"] == 1
+    assert devices["smoke-01"]["onboarding_gate"]["status"] == "ready"
+    assert devices["smoke-01"]["managed_object_candidates"][0]["object_id"] == "fire-sensors"
+    assert devices["camera-01"]["onboarding_gate"]["status"] == "manual_check"
+    assert "Send one real or lab-signed payload" in " ".join(payload["next_actions"])
+
+
+@pytest.mark.asyncio
+async def test_readiness_payload_includes_device_onboarding_gates(tmp_path: Path):
+    service = _service(
+        tmp_path,
+        require_trusted_devices=True,
+        device_offline_after_s=600,
+        device_registry={
+            "smoke-01": {
+                "allowed_sources": ["sensor"],
+                "hmac_secret": "device-secret",
+                "require_signature": True,
+            }
+        },
+        managed_objects={
+            "fire-sensors": {
+                "display_name": "Fire and smoke sensors",
+                "category": "safety",
+                "scenario_ids": ["fire_or_smoke"],
+                "device_sources": ["sensor"],
+                "bindings": {
+                    "vision_models": ["smoke-camera-review"],
+                    "sensor_protocols": ["mqtt-smoke-temperature"],
+                    "skill_packages": ["capability.fire_or_smoke"],
+                    "acceptance_tests": ["tests/scenario_tests/test_field_operations_evaluation.py::fire_or_smoke"],
+                },
+            }
+        },
+    )
+    body = {
+        "source": "sensor",
+        "device_id": "smoke-01",
+        "observed_at": time.time(),
+        "device_signature_timestamp": time.time(),
+        "sensor": {"temperature_c": 72, "smoke_level": 0.9},
+        "location": "Power Room",
+        "image_path": "artifacts/evidence/smoke.jpg",
+    }
+    body["device_signature"] = sign_field_device_payload(body, secret="device-secret")
+
+    await service.ingest_payload(body)
+    payload = service.readiness_payload()
+
+    assert payload["device_onboarding"]["available"] is True
+    assert payload["device_onboarding"]["ready"] == 1
+    assert payload["device_onboarding"]["all_ready"] is True
+    assert payload["gates"]["device_onboarding_report_available"] is True
+    assert payload["gates"]["device_onboarding_has_ready_device"] is True
+    assert payload["gates"]["device_onboarding_no_blockers"] is True
+    assert payload["gates"]["device_onboarding_all_ready"] is True
+
+
+@pytest.mark.asyncio
 async def test_trusted_device_ingest_rejects_missing_signature(tmp_path: Path):
     service = _service(
         tmp_path,
@@ -1297,6 +1567,9 @@ async def test_trusted_device_ingest_rejects_missing_signature(tmp_path: Path):
     assert result["accepted"] is False
     assert result["reason"] == "device_not_trusted"
     assert result["normalized"]["device_trust"]["reason"] == "missing_device_signature"
+    assert result["ingest_scope_contract"]["device"]["trusted"] is False
+    assert result["ingest_scope_contract"]["managed_object"]["binding_status"] == "blocked_device_trust"
+    assert result["ingest_scope_contract"]["production_gate"]["status"] == "blocked"
 
 
 @pytest.mark.asyncio
@@ -1448,6 +1721,11 @@ async def test_stale_sensor_ingest_is_archived_without_dispatch(tmp_path: Path):
     assert result["event"]["status"] == "needs_review"
     assert result["event"]["freshness_status"] == "stale"
     assert "freshness 不合格" in result["event"]["operator_action"]
+    event_view = service.list_payload()["events"][0]
+    decision = event_view["admission_decision"]
+    assert decision["blocked"] is True
+    assert "stale" in decision["technical_reasons"]
+    assert decision["title"] == "未升级告警：需要人工复核"
     assert _FakeDispatcher.calls == []
 
 
@@ -1482,6 +1760,11 @@ async def test_low_confidence_camera_ingest_requires_review(tmp_path: Path):
     assert result["event"]["status"] == "needs_review"
     assert result["event"]["confidence"] == 0.52
     assert "检测置信度" in result["event"]["operator_action"]
+    event_view = service.list_payload()["events"][0]
+    decision = event_view["admission_decision"]
+    assert decision["blocked"] is True
+    assert "low_confidence" in decision["technical_reasons"]
+    assert decision["next_step"] == "人工确认或补充更高置信度识别证据。"
     assert _FakeDispatcher.calls == []
 
 
@@ -1516,6 +1799,10 @@ async def test_duplicate_ingest_does_not_notify_twice(tmp_path: Path):
     assert second["accepted"] is True
     assert second["status"] == "duplicate"
     assert second["duplicate_of"] == first["event"]["event_id"]
+    event_view = service.list_payload()["events"][0]
+    decision = event_view["admission_decision"]
+    assert decision["customer_status"] == "deduped"
+    assert "duplicate" in decision["technical_reasons"]
     assert len(_FakeDispatcher.calls) == 1
 
 
@@ -1555,6 +1842,98 @@ async def test_device_ingest_ignores_client_supplied_project_scope(tmp_path: Pat
     assert result["event"]["payload"]["customer_id"] == "demo-customer"
     assert result["event"]["payload"]["project_id"] == "demo-field-ops"
     assert result["event"]["payload"]["site_id"] == "inovx-demo-park"
+    scope_contract = result["ingest_scope_contract"]
+    assert scope_contract["customer_project"]["scope_source"] == "server_customer_project"
+    assert scope_contract["customer_project"]["client_scope_ignored"] is True
+    assert scope_contract["customer_project"]["project_id"] == "demo-field-ops"
+
+
+@pytest.mark.asyncio
+async def test_field_events_list_payload_filters_tenant_namespace_scope(tmp_path: Path):
+    service = _service(tmp_path)
+    for tenant_id, customer_id in (
+        ("tenant-a", "customer-a"),
+        ("tenant-b", "customer-b"),
+    ):
+        await service.trigger_payload(
+            {
+                "scenario_id": "robot_abnormal_incident",
+                "tenant_id": tenant_id,
+                "delivery_namespace": "pilot",
+                "customer_id": customer_id,
+                "project_id": f"project-{customer_id[-1]}",
+                "site_id": f"site-{customer_id[-1]}",
+                "location": "Gate A",
+                "fault_type": "immobilized",
+            }
+        )
+
+    payload = service.list_payload(
+        project_scope={
+            "tenant_ids": ["tenant-a"],
+            "delivery_namespaces": ["pilot"],
+            "customer_ids": [],
+            "project_ids": [],
+            "site_ids": [],
+        }
+    )
+
+    assert payload["total"] == 1
+    assert payload["filtered_total"] == 1
+    assert payload["summary"]["total"] == 1
+    assert [event["customer_id"] for event in payload["events"]] == ["customer-a"]
+
+
+def test_field_events_route_applies_tenant_namespace_scope(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        health_server,
+        "get_config",
+        lambda: {
+            "field_operations": {
+                "operator_directory": {
+                    "mode": "demo_config",
+                    "permissions": {"operator": ["field:project:read"]},
+                },
+                "operators": {
+                    "tenant-reader": {
+                        "roles": ["operator"],
+                        "project_scope": {
+                            "tenant_ids": ["tenant-a"],
+                            "delivery_namespaces": ["pilot"],
+                        },
+                    },
+                },
+            }
+        },
+    )
+    service = _service(tmp_path)
+    for tenant_id, customer_id in (
+        ("tenant-a", "customer-a"),
+        ("tenant-b", "customer-b"),
+    ):
+        asyncio.run(
+            service.trigger_payload(
+                {
+                    "scenario_id": "robot_abnormal_incident",
+                    "tenant_id": tenant_id,
+                    "delivery_namespace": "pilot",
+                    "customer_id": customer_id,
+                    "project_id": f"project-{customer_id[-1]}",
+                    "site_id": f"site-{customer_id[-1]}",
+                    "location": "Gate A",
+                    "fault_type": "immobilized",
+                }
+            )
+        )
+    client = TestClient(create_health_app(lambda: _health_snapshot(), field_operations_handler=service))
+
+    response = client.get("/api/field/events", headers={"X-Askme-Operator-Id": "tenant-reader"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["filtered_total"] == 1
+    assert [event["customer_id"] for event in payload["events"]] == ["customer-a"]
 
 
 def test_field_event_write_endpoints_enforce_project_scope(tmp_path: Path, monkeypatch):
@@ -1669,6 +2048,29 @@ def test_field_operations_http_endpoints(tmp_path: Path):
     scenarios = client.get("/api/field/scenarios")
     assert scenarios.status_code == 200
     assert len(scenarios.json()["scenarios"]) >= 9
+    acceptance = client.get("/api/field/scenario-acceptance")
+    assert acceptance.status_code == 200
+    acceptance_payload = acceptance.json()
+    assert acceptance_payload["matrix_type"] == "askme.field_scenario_acceptance_matrix"
+    assert acceptance_payload["summary"]["scenario_count"] >= 9
+    assert acceptance_payload["summary"]["production_ready"] is False
+    assert acceptance_payload["policy"]["does_not_dispatch_hardware"] is True
+    acceptance_by_id = {
+        item["scenario_id"]: item for item in acceptance_payload["rows"]
+    }
+    assert acceptance_by_id["wayfinding_help_point"]["natural_language_routes"]
+    assert acceptance_by_id["wayfinding_help_point"]["notification_group"] == "none"
+    assert acceptance_by_id["wayfinding_help_point"]["archive_required"] is False
+    assert acceptance_by_id["visitor_escort"]["requires_operator_approval"] is False
+    assert acceptance_by_id["urgent_patrol_dispatch"]["requires_operator_approval"] is True
+    assert acceptance_by_id["urgent_patrol_dispatch"]["natural_language_routes"][0][
+        "skill_name"
+    ] == "patrol_scan"
+    assert acceptance_by_id["fire_or_smoke"]["device_entrypoints"]
+    assert "smoke/temperature sensor" in acceptance_by_id["fire_or_smoke"]["onsite_dependencies"]
+    assert "scripts/eval/check_dashboard_visual.py::field_scenario_matrix" in acceptance_by_id[
+        "illegal_parking"
+    ]["verification_artifacts"]
     help_payload = client.get("/api/field/ingest")
     assert help_payload.status_code == 200
     assert "field-ingest-bridge" in help_payload.json()["bridge_contract"]["dry_run"]
@@ -1715,6 +2117,12 @@ def test_field_operations_http_endpoints(tmp_path: Path):
     assert ingest.json()["event"]["playbook"]["tts_profile"] == "robot_fault"
     assert ingest.json()["event"]["voice_directive"]["resolved_profile"] == "fault_urgent"
     assert ingest.json()["event"]["voice_directive"]["interrupt_current_speech"] is True
+    assert ingest.json()["ingest_scope_contract"]["endpoint"] == "/api/field/ingest"
+    assert ingest.json()["ingest_scope_contract"]["device"]["source"] == "robot"
+    assert (
+        ingest.json()["ingest_scope_contract"]["production_gate"]["reason"]
+        == "managed_object_binding_required"
+    )
 
     rejected_device_trigger = client.post(
         "/api/field/events",
@@ -1727,15 +2135,29 @@ def test_field_operations_http_endpoints(tmp_path: Path):
     assert rejected_device_trigger.status_code == 422
     assert rejected_device_trigger.json()["reason"] == "device_payload_must_use_field_ingest"
 
-    events = client.get("/api/field/events")
+    for path in (
+        "/api/field/events",
+        "/api/field/ingest",
+        f"/api/field/events/{event_id}/acknowledge",
+        f"/api/field/events/{event_id}/resend-notification",
+        f"/api/field/events/{event_id}/request-close",
+        f"/api/field/events/{event_id}/close",
+        f"/api/field/events/{event_id}/runtime-delivery",
+    ):
+        bad_body = client.post(path, json=["not-an-object"])
+        assert bad_body.status_code == 400
+        assert bad_body.json()["error"] == "JSON object body required"
+
+    read_headers = {"X-Askme-Operator-Id": "supervisor-1"}
+    events = client.get("/api/field/events", headers=read_headers)
     assert events.status_code == 200
     assert events.json()["total"] == 2
     assert events.json()["summary"]["needs_attention"] >= 1
-    security_events = client.get("/api/field/events?notification_group=security")
+    security_events = client.get("/api/field/events?notification_group=security", headers=read_headers)
     assert security_events.status_code == 200
     assert security_events.json()["filter"]["notification_group"] == "security"
     assert security_events.json()["filtered_total"] >= 1
-    attention_events = client.get("/api/field/events?needs_attention=true")
+    attention_events = client.get("/api/field/events?needs_attention=true", headers=read_headers)
     assert attention_events.status_code == 200
     assert attention_events.json()["filter"]["needs_attention"] is True
 
@@ -1856,6 +2278,97 @@ def test_field_operations_http_endpoints(tmp_path: Path):
     assert invalid.status_code == 422
 
 
+def test_field_operation_routes_expose_and_validate_product_response_schemas(tmp_path: Path):
+    app = create_health_app(
+        lambda: _health_snapshot(),
+        field_operations_handler=_service(tmp_path),
+    )
+    client = TestClient(app)
+    paths = app.openapi()["paths"]
+    expected_refs = {
+        ("/api/field/scenarios", "get"): "FieldScenarioCatalogResponse",
+        ("/api/field/scenario-acceptance", "get"): "FieldScenarioAcceptanceResponse",
+        ("/api/field/events", "get"): "FieldEventListApiResponse",
+        ("/api/field/events", "post"): "FieldEventTriggerResponse",
+        ("/api/field/events/{event_id}", "get"): "FieldEventDetailApiResponse",
+        ("/api/field/events/{event_id}/acknowledge", "post"): "FieldEventActionResponse",
+        ("/api/field/events/{event_id}/request-close", "post"): "FieldEventActionResponse",
+        ("/api/field/events/{event_id}/close", "post"): "FieldEventActionResponse",
+        ("/api/field/events/{event_id}/resend-notification", "post"): "FieldEventActionResponse",
+        ("/api/field/events/{event_id}/report", "get"): "FieldEventReportResponse",
+        ("/api/field/events/{event_id}/runtime-delivery", "post"): "FieldRuntimeDeliveryResponse",
+        ("/api/field/ingest", "get"): "FieldIngestHelpResponse",
+        ("/api/field/ingest", "post"): "FieldEventTriggerResponse",
+        ("/api/field/devices", "get"): "FieldDeviceStatusResponse",
+        ("/api/field/device-onboarding", "get"): "FieldDeviceOnboardingResponse",
+        ("/api/field/notification-test", "post"): "FieldNotificationTestResponse",
+        ("/api/field/notification-preflight", "get"): "FieldNotificationPreflightResponse",
+        ("/api/field/readiness", "get"): "FieldReadinessResponse",
+        ("/api/field/audit/integrity", "get"): "FieldActionAuditIntegrityResponse",
+    }
+    for (path, method), schema_name in expected_refs.items():
+        schema = paths[path][method]["responses"]["200"]["content"]["application/json"][
+            "schema"
+        ]
+        assert schema["$ref"].endswith(f"/{schema_name}")
+
+    FieldScenarioCatalogResponse.model_validate(client.get("/api/field/scenarios").json())
+    FieldScenarioAcceptanceResponse.model_validate(
+        client.get("/api/field/scenario-acceptance").json()
+    )
+    FieldIngestHelpResponse.model_validate(client.get("/api/field/ingest").json())
+    FieldReadinessResponse.model_validate(client.get("/api/field/readiness").json())
+    FieldNotificationPreflightResponse.model_validate(
+        client.get("/api/field/notification-preflight?status_as_200=true").json()
+    )
+    FieldDeviceStatusResponse.model_validate(client.get("/api/field/devices").json())
+    FieldDeviceOnboardingResponse.model_validate(
+        client.get("/api/field/device-onboarding").json()
+    )
+
+    trigger = client.post(
+        "/api/field/events",
+        json={
+            "scenario_id": "illegal_parking",
+            "location": "main road",
+            "zone_name": "main road",
+            "plate_number": "A12345",
+            "image_path": "artifacts/evidence/car.jpg",
+        },
+    )
+    assert trigger.status_code == 200
+    FieldEventTriggerResponse.model_validate(trigger.json())
+    event_id = trigger.json()["event"]["event_id"]
+
+    read_headers = {"X-Askme-Operator-Id": "supervisor-1"}
+    FieldEventListApiResponse.model_validate(
+        client.get("/api/field/events", headers=read_headers).json()
+    )
+    FieldEventDetailApiResponse.model_validate(
+        client.get(f"/api/field/events/{event_id}", headers=read_headers).json()
+    )
+    action = client.post(
+        f"/api/field/events/{event_id}/acknowledge",
+        json={"operator_id": "security-1", "note": "checked"},
+    )
+    assert action.status_code == 200
+    FieldEventActionResponse.model_validate(action.json())
+    FieldEventReportResponse.model_validate(
+        client.get(f"/api/field/events/{event_id}/report", headers=read_headers).json()
+    )
+    FieldActionAuditIntegrityResponse.model_validate(
+        client.get("/api/field/audit/integrity").json()
+    )
+
+    notification = client.post(
+        "/api/field/notification-test",
+        json={"notification_group": "security", "message": "test"},
+        headers=read_headers,
+    )
+    assert notification.status_code == 200
+    FieldNotificationTestResponse.model_validate(notification.json())
+
+
 def test_field_evidence_endpoint_serves_only_approved_roots():
     artifact = Path("artifacts/evidence/unit-test-evidence.txt")
     artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -1863,20 +2376,100 @@ def test_field_evidence_endpoint_serves_only_approved_roots():
     client = TestClient(create_health_app(lambda: _health_snapshot()))
 
     try:
-        ok = client.get("/api/field/evidence", params={"path": str(artifact).replace("\\", "/")})
+        ok = client.get(
+            "/api/field/evidence",
+            params={"path": str(artifact).replace("\\", "/")},
+            headers={"X-Askme-Operator-Id": "supervisor-1"},
+        )
         assert ok.status_code == 200
         assert ok.text == "field-evidence"
 
-        denied = client.get("/api/field/evidence", params={"path": "askme/health_server.py"})
+        denied = client.get(
+            "/api/field/evidence",
+            params={"path": "askme/health_server.py"},
+            headers={"X-Askme-Operator-Id": "supervisor-1"},
+        )
         assert denied.status_code == 404
 
         traversal = client.get(
             "/api/field/evidence",
             params={"path": "artifacts/../askme/health_server.py"},
+            headers={"X-Askme-Operator-Id": "supervisor-1"},
         )
         assert traversal.status_code == 404
     finally:
         artifact.unlink(missing_ok=True)
+
+
+def test_field_evidence_endpoint_respects_event_project_scope(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        health_server,
+        "get_config",
+        lambda: {
+            "field_operations": {
+                "operator_directory": {
+                    "mode": "demo_config",
+                    "permissions": {"operator": ["field:project:read"]},
+                },
+                "operators": {
+                    "tenant-reader": {
+                        "roles": ["operator"],
+                        "project_scope": {
+                            "tenant_ids": ["tenant-a"],
+                            "delivery_namespaces": ["pilot"],
+                        },
+                    },
+                },
+            }
+        },
+    )
+    evidence_root = Path("artifacts/evidence")
+    allowed_artifact = evidence_root / "tenant-a-scope-evidence.txt"
+    denied_artifact = evidence_root / "tenant-b-scope-evidence.txt"
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    allowed_artifact.write_text("tenant-a-evidence", encoding="utf-8")
+    denied_artifact.write_text("tenant-b-evidence", encoding="utf-8")
+    service = _service(tmp_path)
+    for tenant_id, customer_id, artifact in (
+        ("tenant-a", "customer-a", allowed_artifact),
+        ("tenant-b", "customer-b", denied_artifact),
+    ):
+        asyncio.run(
+            service.trigger_payload(
+                {
+                    "scenario_id": "illegal_parking",
+                    "tenant_id": tenant_id,
+                    "delivery_namespace": "pilot",
+                    "customer_id": customer_id,
+                    "project_id": f"project-{customer_id[-1]}",
+                    "site_id": f"site-{customer_id[-1]}",
+                    "location": "Main Road",
+                    "zone_name": "Main Road",
+                    "image_path": str(artifact).replace("\\", "/"),
+                }
+            )
+        )
+    client = TestClient(create_health_app(lambda: _health_snapshot(), field_operations_handler=service))
+
+    try:
+        allowed = client.get(
+            "/api/field/evidence",
+            params={"path": str(allowed_artifact).replace("\\", "/")},
+            headers={"X-Askme-Operator-Id": "tenant-reader"},
+        )
+        denied = client.get(
+            "/api/field/evidence",
+            params={"path": str(denied_artifact).replace("\\", "/")},
+            headers={"X-Askme-Operator-Id": "tenant-reader"},
+        )
+
+        assert allowed.status_code == 200
+        assert allowed.text == "tenant-a-evidence"
+        assert denied.status_code == 403
+        assert denied.json()["reason"] == "project_scope_not_allowed"
+    finally:
+        allowed_artifact.unlink(missing_ok=True)
+        denied_artifact.unlink(missing_ok=True)
 
 
 def test_field_event_endpoint_dispatches_voice_directive(tmp_path: Path):

@@ -2,13 +2,20 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+from askme.skills.audit import SkillAuditLog
 from fastapi.testclient import TestClient
 
 import askme.health_server as health_server
 from askme.audit import AuditExportService, AuditQueryService, AuditReviewService
 from askme.audit.query import AuditPaths, _jsonl_record_count, _read_jsonl
+from askme.api.schemas.audit import AuditEventsResponse
+from askme.api.schemas.audit import AuditExportResponse
+from askme.api.schemas.audit import AuditExportRetryResponse
+from askme.api.schemas.audit import AuditExportRetryStatusResponse
+from askme.api.schemas.audit import AuditExportsResponse
+from askme.api.schemas.audit import AuditReviewSubmitResponse
+from askme.api.schemas.audit import AuditReviewsResponse
 from askme.health_server import create_health_app
-from askme.skills.audit import SkillAuditLog
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -21,6 +28,25 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
 
 def _runtime_snapshot() -> dict:
     return {"status": "ok", "components": {}}
+
+
+def test_audit_routes_expose_product_response_schemas() -> None:
+    app = create_health_app(lambda: _runtime_snapshot())
+    paths = app.openapi()["paths"]
+
+    expected = {
+        ("/api/audit/events", "get"): "AuditEventsResponse",
+        ("/api/audit/reviews", "get"): "AuditReviewsResponse",
+        ("/api/audit/reviews", "post"): "AuditReviewSubmitResponse",
+        ("/api/audit/export", "post"): "AuditExportResponse",
+        ("/api/audit/exports", "get"): "AuditExportsResponse",
+        ("/api/audit/export/retry", "get"): "AuditExportRetryStatusResponse",
+        ("/api/audit/export/retry", "post"): "AuditExportRetryResponse",
+    }
+    for (path, method), schema_name in expected.items():
+        schema = paths[path][method]["responses"]["200"]["content"]["application/json"]["schema"]
+
+        assert schema["$ref"].endswith(f"/{schema_name}")
 
 
 def test_audit_query_unifies_skill_field_and_runtime_records(tmp_path: Path) -> None:
@@ -266,20 +292,17 @@ def test_audit_query_adds_customer_review_integrity_and_evidence_fields(tmp_path
         "delivery_owner": "现场主管",
         "next_step": "先完成待复核记录，再重新生成审计包。",
     }
-    assert payload["delivery_dossier"]["title"] == "Customer Delivery Audit Dossier"
+    assert payload["delivery_dossier"]["title"] == "客户交付审计档案"
     assert payload["delivery_dossier"]["decision"] == "blocked"
-    assert payload["delivery_dossier"]["decision_label"] == "Blocked before acceptance"
-    assert payload["delivery_dossier"]["customer_claim"] == (
-        "This audit scope still has blocking items and cannot be used as customer "
-        "acceptance evidence yet."
-    )
+    assert payload["delivery_dossier"]["decision_label"] == "验收前存在阻断项"
+    assert payload["delivery_dossier"]["customer_claim"] == "当前审计范围仍有阻断项，暂不能作为客户验收证据。"
     assert payload["delivery_dossier"]["allowed_uses"] == [
-        "internal review package",
-        "issue diagnosis package",
-        "evidence gap list",
+        "内部复核材料",
+        "问题诊断材料",
+        "证据缺口清单",
     ]
-    assert "unattended production launch claim" in payload["delivery_dossier"]["blocked_uses"]
-    assert payload["delivery_dossier"]["handoff_owner"] == "site supervisor"
+    assert "无人值守生产上线声明" in payload["delivery_dossier"]["blocked_uses"]
+    assert payload["delivery_dossier"]["handoff_owner"] == "现场主管"
     assert payload["delivery_dossier"]["record_scope"] == {
         "record_count": 1,
         "source_counts": {"field": 1},
@@ -721,7 +744,8 @@ def test_audit_events_endpoint_requires_and_uses_rbac(tmp_path: Path, monkeypatc
 
     assert denied.status_code == 403
     assert allowed.status_code == 200
-    assert allowed.json()["records"][0]["source"] == "skill"
+    allowed_payload = AuditEventsResponse.model_validate(allowed.json())
+    assert allowed_payload.records[0]["source"] == "skill"
 
 
 def test_audit_events_endpoint_applies_operator_project_scope(tmp_path: Path, monkeypatch) -> None:
@@ -895,8 +919,8 @@ def test_audit_review_endpoint_requires_permission_and_clears_record(
                 "mode": "demo_config",
                 "identity_provider": "local_config",
                 "permissions": {
-                    "operator": ["audit:read"],
-                    "supervisor": ["audit:read", "audit:review"],
+                    "operator": ["audit:read", "field:project:read"],
+                    "supervisor": ["audit:read", "audit:review", "field:project:read"],
                 },
             },
             "operators": {
@@ -943,6 +967,8 @@ def test_audit_review_endpoint_requires_permission_and_clears_record(
     assert missing.status_code == 404
     assert missing.json()["reason"] == "audit_record_not_found"
     assert allowed.status_code == 200
+    allowed_payload = AuditReviewSubmitResponse.model_validate(allowed.json())
+    assert allowed_payload.ok is True
     assert allowed.json()["record"]["clears_review"] is True
     assert resolved["product_summary"]["requires_review_count"] == 0
     assert resolved["records"][0]["review_status"] == "cleared"
@@ -967,8 +993,8 @@ def test_audit_reviews_endpoint_lists_history_with_integrity(
                 "mode": "demo_config",
                 "identity_provider": "local_config",
                 "permissions": {
-                    "operator": ["audit:read"],
-                    "supervisor": ["audit:read", "audit:review"],
+                    "operator": ["audit:read", "field:project:read"],
+                    "supervisor": ["audit:read", "audit:review", "field:project:read"],
                 },
             },
             "operators": {
@@ -986,6 +1012,8 @@ def test_audit_reviews_endpoint_lists_history_with_integrity(
     assert denied.status_code == 403
     assert allowed.status_code == 200
     payload = allowed.json()
+    schema_payload = AuditReviewsResponse.model_validate(payload)
+    assert schema_payload.count == 1
     assert payload["records"][0]["record_id"] == "field:1"
     assert payload["records"][0]["decision"] == "accepted"
     assert payload["integrity"]["valid"] is True
@@ -1030,8 +1058,8 @@ def test_unified_audit_endpoint_surfaces_field_archive_evidence_and_review_flow(
                 "mode": "demo_config",
                 "identity_provider": "local_config",
                 "permissions": {
-                    "operator": ["audit:read"],
-                    "supervisor": ["audit:read", "audit:review"],
+                    "operator": ["audit:read", "field:project:read"],
+                    "supervisor": ["audit:read", "audit:review", "field:project:read"],
                 },
             },
             "operators": {
@@ -1107,22 +1135,21 @@ def test_audit_export_writes_signed_manifest_and_jsonl(tmp_path: Path) -> None:
     assert export["customer_report"]["status_label"] == "可交付"
     assert export["audit_readiness"]["status"] == "ready"
     assert export["delivery_dossier"]["decision"] == "ready"
-    assert export["delivery_dossier"]["decision_label"] == "Ready for acceptance"
+    assert export["delivery_dossier"]["decision_label"] == "可进入客户验收"
     assert export["delivery_dossier"]["customer_claim"] == (
-        "The audited operations, evidence, and review records are ready for customer "
-        "acceptance, incident review, and accountability tracing."
+        "已审计的操作、证据和复核记录可用于客户验收、事件复盘和责任追溯。"
     )
     assert export["customer_package"]["package_name"] == "AskMe 客户验收审计包"
     assert export["customer_package"]["acceptance_label"] == "可提交客户验收"
     assert export["customer_package"]["delivery_mode"] == "local_archive"
     assert export["customer_package"]["delivery_contract"]["allowed_uses"] == [
-        "customer acceptance package",
-        "pilot review package",
-        "incident closure package",
-        "accountability trace package",
+        "客户验收材料",
+        "试点复盘材料",
+        "事件闭环材料",
+        "责任追溯材料",
     ]
     assert (
-        "replacement for onsite acceptance result"
+        "替代现场验收结果"
         in export["customer_package"]["delivery_contract"]["blocked_uses"]
     )
     assert export["customer_package"]["acceptance_summary"]["status"] == "ready"
@@ -1465,6 +1492,8 @@ def test_audit_export_endpoint_requires_export_permission(tmp_path: Path, monkey
 
     assert denied.status_code == 403
     assert allowed.status_code == 200
+    allowed_payload = AuditExportResponse.model_validate(allowed.json())
+    assert allowed_payload.ok is True
     assert Path(allowed.json()["export"]["manifest_path"]).exists()
 
 
@@ -1503,6 +1532,8 @@ def test_audit_exports_endpoint_lists_recent_manifests_with_permission(
     assert denied.status_code == 403
     assert allowed.status_code == 200
     history = allowed.json()
+    schema_history = AuditExportsResponse.model_validate(history)
+    assert schema_history.count == 1
     assert history["count"] == 1
     assert history["exports"][0]["export_id"] == created.json()["export"]["export_id"]
     assert Path(history["exports"][0]["manifest_path"]).exists()
@@ -1587,7 +1618,11 @@ def test_audit_export_retry_endpoint_requires_export_permission(tmp_path: Path, 
 
     assert denied_get.status_code == 403
     assert allowed_get.status_code == 200
+    allowed_get_payload = AuditExportRetryStatusResponse.model_validate(allowed_get.json())
+    assert allowed_get_payload.status == "empty"
     assert allowed_get.json()["status"] == "empty"
     assert denied_post.status_code == 403
     assert allowed_post.status_code == 200
+    allowed_post_payload = AuditExportRetryResponse.model_validate(allowed_post.json())
+    assert allowed_post_payload.status == "empty"
     assert allowed_post.json()["status"] == "empty"

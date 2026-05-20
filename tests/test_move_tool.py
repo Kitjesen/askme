@@ -6,6 +6,27 @@ from unittest.mock import MagicMock, patch
 
 from askme.tools.move_tool import MoveRobotTool, _call_runtime_api, register_move_tools
 
+
+class _FakeRobotControl:
+    def __init__(self, result=None):
+        self.result = result or {"status": "accepted"}
+        self.calls = []
+
+    def dispatch_capability(self, capability, params=None):
+        self.calls.append((capability, params))
+        return self.result
+
+
+class _FakeNavigationClient:
+    def __init__(self, result=None):
+        self.result = result or {"session": {"mission_id": "nav-injected", "state": "submitted"}}
+        self.calls = []
+
+    def dispatch_navigation(self, capability, params=None, **kwargs):
+        self.calls.append((capability, params, kwargs))
+        return self.result
+
+
 # ── _call_runtime_api ─────────────────────────────────────────────────────────
 
 class TestCallRuntimeApi:
@@ -112,12 +133,35 @@ class TestGoTo:
             result = self.tool._go_to("大厅")
         assert "xyz789" in result
 
+    def test_go_to_uses_injected_navigation_client(self):
+        client = _FakeNavigationClient()
+        self.tool.set_navigation_client(client)
+
+        with patch("askme.tools.move_tool._call_runtime_api") as mock:
+            result = self.tool._go_to("仓库")
+
+        mock.assert_not_called()
+        assert "nav-injected" in result
+        assert client.calls[0][0] == "nav.semantic.execute"
+        assert client.calls[0][1] == {"semantic_target": "仓库"}
+
 
 # ── _dispatch_control ─────────────────────────────────────────────────────────
 
 class TestDispatchControl:
     def setup_method(self):
         self.tool = MoveRobotTool()
+
+    def test_dispatch_uses_injected_robot_control_client(self):
+        client = _FakeRobotControl()
+        self.tool.set_robot_control_client(client)
+
+        with patch("askme.tools.move_tool._call_runtime_api") as mock:
+            result = self.tool._dispatch_control("rotate", {"angle_deg": 90})
+
+        mock.assert_not_called()
+        assert client.calls == [("rotate", {"angle_deg": 90})]
+        assert "rotate" in result
 
     def test_service_unavailable_returns_friendly_message(self):
         with patch("askme.tools.move_tool._call_runtime_api",
@@ -172,3 +216,17 @@ class TestRegisterMoveTools:
         registry.register.assert_called_once()
         registered = registry.register.call_args[0][0]
         assert isinstance(registered, MoveRobotTool)
+
+    def test_registers_tool_with_robot_control_client(self):
+        registry = MagicMock()
+        client = _FakeRobotControl()
+        register_move_tools(registry, robot_control_client=client)
+        registered = registry.register.call_args[0][0]
+        assert registered._robot_control_client is client
+
+    def test_registers_tool_with_navigation_client(self):
+        registry = MagicMock()
+        client = _FakeNavigationClient()
+        register_move_tools(registry, navigation_client=client)
+        registered = registry.register.call_args[0][0]
+        assert registered._navigation_client is client

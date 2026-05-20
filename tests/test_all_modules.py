@@ -524,8 +524,8 @@ class TestCompositions:
         assert names.index("executor") < names.index("voice")
         assert len(voice._module_classes) == 12
 
-    def test_voice_perception_extends_voice(self):
-        """voice_perception = voice + 4 perception modules."""
+    def test_voice_perception_runtime_builds(self):
+        """voice_perception declares its own complete module list."""
         from askme.blueprints.voice_perception import voice_perception
         names = [mc.name for mc in voice_perception._module_classes]
         assert "cognition" in names
@@ -547,8 +547,8 @@ class TestCompositions:
         assert names.index("executor") < names.index("text")
         assert len(text._module_classes) == 11
 
-    def test_edge_robot_adds_plugins(self):
-        """edge_robot = voice_perception + 6 external plugins."""
+    def test_edge_robot_runtime_builds(self):
+        """edge_robot declares its own complete module list."""
         from askme.blueprints.edge_robot import edge_robot
         names = [mc.name for mc in edge_robot._module_classes]
         assert "control" in names
@@ -578,6 +578,7 @@ class TestCompositions:
     def test_without_on_composition(self):
         """Removing a module from blueprint should work."""
         from askme.blueprints.voice import voice
+
         from askme.runtime.modules.text_module import TextModule
 
         smaller = voice.without(TextModule)

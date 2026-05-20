@@ -215,3 +215,179 @@
 3. 机器人故障接入：底盘卡住、摔倒无法恢复、关节电机故障进入 P0，但真实硬件动作仍由 runtime/safety 接管。
 4. 地图区域持久化：把 `site_map.zones` 从配置样例升级为可维护的园区地图数据源。
 5. Dashboard 显示“未触发原因”：stale、low confidence、duplicate、missing evidence 都要给客户看懂。
+
+## 2026-05-18 产品化推进记录：场景验收矩阵接口和页面
+
+本次把“客户场景是否能验收”从脚本验证推进到产品接口和 Dashboard 页面：
+
+- 新增 `/api/field/scenario-acceptance`，返回 9 个客户场景的验收矩阵：场景状态、自然语言入口、设备/传感器入口、通知对象、归档要求、现场依赖、验收标准和客户下一步。
+- Dashboard `/dashboard/scenarios` 已接入该接口，页面明确展示“当前证明的是演示与集成验收，不等于无人值守生产上线”。
+- 每张场景卡片增加“真实接入还缺什么”，让客户和交付团队看到 smoke/temperature sensor、camera/VMS、runtime arbiter、robot navigation gateway 等现场依赖。
+- 场景页面仍保留一句话触发预览，预览只判断场景、技能、风险和依据，不会直接派发机器人任务。
+
+验证证据：
+
+- `python -m py_compile askme\pipeline\field\field_operations.py askme\api\routes\field_events.py` -> passed。
+- `node --check askme\static\dashboard\app.js` -> passed。
+- `python -m pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls tests\test_field_event_routes.py tests\test_field_operations.py::test_field_operations_http_endpoints -q` -> 3 passed。
+- `python -m pytest tests\test_field_scenarios.py tests\scenario_tests\test_field_operations_evaluation.py tests\test_field_event_skills.py tests\test_capability_scenario_intent_routes.py -q` -> 15 passed。
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed；新增 `scenario_acceptance_page` 视觉门禁，桌面和移动无横向溢出，9 个场景全部覆盖，无 console/page/response errors。
+
+仍然不能对客户宣称的内容：
+
+- 不能宣称无人值守生产上线。
+- 不能宣称已经接入真实摄像头、烟感、机器人底盘或钉钉生产 webhook。
+- 不能把视觉冒烟脚本等同于现场验收；现场仍需要真实设备、生产凭证、运行回调和客户签收证据。
+
+## 2026-05-18 Product checkpoint: admission decision evidence
+
+Goal: make the product explain why a field event was triggered, blocked, deduplicated, or kept for human review.
+
+Implemented:
+
+- Field event views now include `admission_decision` with `blocked`, `customer_status`, `technical_reasons`, `evidence_facts`, and `next_step`.
+- Dashboard field-event detail now renders an admission card before evidence, delivery, workflow, and audit sections.
+- The card covers stale sensor input, low-confidence detections, duplicate events, and missing required evidence.
+- The same card now exposes resource-binding gaps such as `no_managed_object_matched`; triggered events may continue handling, but production acceptance must bind devices, vision models, sensor protocols, skill packages, and acceptance tests to customer managed objects.
+- Browser smoke now seeds a blocked customer-visible event and verifies the Dashboard shows the blocking reason, evidence fact, next step, and event context.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field\field_operations.py scripts\eval\check_dashboard_visual.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `python -m pytest tests\test_field_operations.py::test_ingest_does_not_bind_managed_object_when_project_scope_mismatches tests\test_field_operations.py::test_p0_event_missing_evidence_is_not_dispatched tests\test_field_operations.py::test_stale_sensor_ingest_is_archived_without_dispatch tests\test_field_operations.py::test_low_confidence_camera_ingest_requires_review tests\test_field_operations.py::test_duplicate_ingest_does_not_notify_twice tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 6 passed.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed. New interaction gate: `field_admission_decision`.
+
+Remaining delivery risk:
+
+- Rejected device-ingest events are customer-visible only when the field service has a customer project scope or the device payload binds to a managed object/project. Browser smoke now validates the scoped demo case. Production still needs explicit device/project binding instead of relying on demo defaults.
+
+## 2026-05-18 Product checkpoint: device ingest scope contract
+
+Goal: make every real camera, sensor, or robot ingest response explain which customer project and managed object it belongs to, and whether the event can be used as site-validation evidence.
+
+Implemented:
+
+- `/api/field/ingest` responses now include `ingest_scope_contract`.
+- The contract records device trust, server-side customer project scope, managed-object binding, resource execution readiness, production gate, and audit facts.
+- Client-supplied `customer_id`, `project_id`, `site_id`, and `managed_object_id` are not accepted as proof for ingested device events. The contract uses the server-side project scope and the event's managed-object binding result.
+- Field event list/detail views now derive the same `ingest_scope_contract` for archived ingested events, so the evidence remains visible after the original HTTP response is gone.
+- The production gate distinguishes `bound_ready`, `unbound_managed_object`, `blocked_device_trust`, `no_matching_scenario`, and resource-binding review states.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field\field_operations.py` -> passed.
+- `python -m pytest tests\test_field_operations.py -q` -> 61 passed.
+
+Remaining delivery risk:
+
+- This proves server-side scope and object-binding evidence in software. It still needs real device payloads from the customer site, registered device identities, and acceptance-test artifacts before production signoff.
+
+## 2026-05-18 Product checkpoint: Dashboard ingest binding evidence
+
+Goal: make the customer-facing field event detail page show the same device/project/object binding evidence that `/api/field/ingest` returns.
+
+Implemented:
+
+- Field event detail now renders a device-ingest scope card directly under the admission decision card.
+- The card shows device trust, server-side customer project scope, managed-object binding, selected capability or skill package, production gate, evidence count, freshness, and confidence.
+- Visual smoke verifies the card, the four binding fact blocks, and the production gate copy on a blocked/stale device-ingest event.
+
+Validation:
+
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `python -m py_compile scripts\eval\check_dashboard_visual.py` -> passed.
+- `python -m pytest tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls tests\test_field_operations.py::test_ingest_infers_managed_object_with_matching_project_scope tests\test_field_operations.py::test_ingest_does_not_bind_managed_object_when_project_scope_mismatches tests\test_field_operations.py::test_field_operations_http_endpoints -q` -> 4 passed.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed; `field_admission_decision` now includes `has_ingest_scope_card`, `has_ingest_scope_grid`, and `has_ingest_scope_gate`.
+
+## 2026-05-18 Product checkpoint: device onboarding readiness
+
+Goal: give delivery and customer teams a direct report for whether real field devices are registered, trusted, seen recently, and bound to customer managed objects before site validation.
+
+Implemented:
+
+- Added `/api/field/device-onboarding`.
+- The report derives from registered and observed device status, then adds managed-object candidates and an onboarding gate per device.
+- Each device now reports whether it is ready, blocked, or still needs manual review for registration, live callback, signature, source policy, and customer-object binding.
+- Dashboard delivery view now renders a device-onboarding card with readiness metrics, device rows, binding evidence, and concrete next actions.
+- Static Dashboard checks now assert the endpoint, renderer, and CSS contract.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field\field_operations.py askme\api\routes\field_internal.py` -> passed.
+- `node --check askme\static\dashboard\app.js` -> passed.
+- `python -m pytest tests\test_field_operations.py::test_device_onboarding_payload_reports_object_binding_and_next_actions tests\test_health.py::TestHealthServer::test_field_device_onboarding_endpoint_returns_delivery_report tests\test_health.py::TestHealthServer::test_dashboard_contains_cognition_planning_controls -q` -> 3 passed.
+- `python -m pytest tests\test_field_operations.py -q` -> 62 passed.
+- `python scripts\eval\check_dashboard_visual.py --output-dir output\playwright` -> passed.
+
+Remaining delivery risk:
+
+- This is still a software-side readiness report. Production signoff requires real camera/sensor/robot payloads, configured HMAC secrets, confirmed allowed sources, and customer-site managed-object bindings.
+
+## 2026-05-18 Product checkpoint: device onboarding API surface contract
+
+Goal: prevent real-device onboarding from being treated as ordinary customer copy or unmanaged Dashboard glue.
+
+Implemented:
+
+- `askme.api.composition.API_SURFACES` now declares `device onboarding evidence` under the `internal` surface.
+- The internal surface manifest explicitly includes `askme.api.routes.field_internal`.
+- `/api/surfaces` route inventory now verifies `/api/field/device-onboarding` remains classified as `internal`.
+- Migration tests verify `register_field_routes` still delegates internal machine/device routes to `register_field_internal_routes`.
+
+Validation:
+
+- `python -m py_compile askme\api\composition.py askme\api\routes\field_internal.py` -> passed.
+- `python -m pytest tests\test_package_migration_compat.py::test_api_surface_manifest_is_product_boundary_contract tests\test_package_migration_compat.py::test_field_route_registration_delegates_to_split_route_modules -q` -> 2 passed.
+- `python -m pytest tests\test_health.py::TestHealthServer::test_api_surfaces_endpoint_returns_customer_boundary_map -q` -> 1 passed.
+
+## 2026-05-18 Product checkpoint: device onboarding gates field readiness
+
+Goal: make real-device onboarding evidence affect deployment readiness, not only appear as a separate report.
+
+Implemented:
+
+- `build_field_deployment_readiness()` now accepts a `device_onboarding` report and exposes dedicated gates:
+  `device_onboarding_report_available`, `device_onboarding_no_blockers`,
+  `device_onboarding_has_ready_device`, and `device_onboarding_all_ready`.
+- `FieldOperationsService.readiness_payload()` now passes the live device-onboarding report into field readiness.
+- Production readiness now requires registered devices to be observed, trusted, unblocked, fresh, and bound to customer managed objects.
+- Delivery brief safety/ops checklist now includes the device-onboarding readiness gate.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field\field_deployment_readiness.py askme\pipeline\field\field_operations.py` -> passed.
+- `python -m pytest tests\test_field_operations.py::test_readiness_payload_includes_device_onboarding_gates tests\test_field_operations.py::test_device_onboarding_payload_reports_object_binding_and_next_actions -q` -> 2 passed.
+- `python -m pytest tests\test_field_deployment_readiness.py::test_field_deployment_readiness_uses_device_onboarding_report tests\test_field_deployment_readiness.py::test_field_deployment_readiness_can_be_production_ready -q` -> 2 passed.
+- `python -m pytest tests\test_field_deployment_readiness.py -q` -> 12 passed.
+- `python -m pytest tests\test_field_operations.py -q` -> 63 passed.
+
+Remaining delivery risk:
+
+- This still verifies the readiness contract in software. Site signoff still requires real customer-site camera, sensor, and robot payloads, real HMAC secrets, and acceptance artifacts archived from the deployed environment.
+
+## 2026-05-18 Product checkpoint: device onboarding enters customer acceptance
+
+Goal: make customer project acceptance and launch reports reflect whether real devices are onboarded, not only whether software smoke tests passed.
+
+Implemented:
+
+- Customer project field readiness now preserves the device-onboarding gates from Field readiness:
+  `device_onboarding_report_available`, `device_onboarding_no_blockers`,
+  `device_onboarding_has_ready_device`, and `device_onboarding_all_ready`.
+- Customer acceptance gates now include `field_device_onboarding`, so trial reports show whether device readiness is complete, partial, or still manual.
+- Launch readiness now has a separate `field_device_onboarding` gate. Production launch is not ready until all registered camera, sensor, and robot devices are observed, unblocked, fresh, and bound to customer managed objects.
+- Auto-created onsite `device_ingest` evidence now requires a ready onboarded device, not only a generic trusted event archive.
+- The real-link acceptance tests now seed signed demo device secrets and a fresh trusted camera event, then assert the report shows `ready=1`, `manual=3`, `blocked=0`, and keeps launch readiness at site-trial/manual until every registered device is onboarded.
+
+Validation:
+
+- `python -m py_compile askme\pipeline\field\customer_project_acceptance.py tests\test_field_site_profile.py` -> passed.
+- `python -m pytest tests\test_field_site_profile.py::test_customer_project_acceptance_report_summarizes_delivery_gates tests\test_field_site_profile.py::test_acceptance_report_auto_backfills_required_onsite_evidence_from_real_link_reports tests\test_field_site_profile.py::test_acceptance_report_auto_backfill_is_read_only_and_idempotent -q` -> 3 passed.
+- `python -m pytest tests\test_field_site_profile.py -q` -> 58 passed.
+- `python -m pytest tests\test_field_deployment_readiness.py tests\test_field_operations.py -q` -> 75 passed.
+- `python -m pytest tests\test_health.py::TestHealthServer::test_field_customer_project_templates_and_export_endpoints tests\test_field_customer_project_acceptance_routes.py -q` -> 8 passed.
+
+Remaining delivery risk:
+
+- This makes reports honest about device onboarding. It still does not replace real customer-site payload collection, production HMAC secret configuration, or a customer-signed acceptance dossier.

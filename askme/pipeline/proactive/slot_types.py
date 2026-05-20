@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from askme.skills.skill_model import SlotSpec
+    from askme.skills.core.skill_model import SlotSpec
 
 
 @dataclass

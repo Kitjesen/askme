@@ -1,14 +1,14 @@
-"""ThunderAgentShell — Claude Agent SDK wrapper for agentic task execution.
+"""Agent shell — Claude Agent SDK wrapper for agentic task execution.
 
-Gives Thunder the same "write code, execute, debug, iterate" capability
-that Claude Code has.  Unlike skills (fixed prompt + max 5 LLM turns),
-ThunderAgentShell lets Claude autonomously decide the tool sequence and
-iterate until the task is done.
+Gives the field robot the same "write code, execute, debug, iterate"
+capability that Claude Code has. Unlike skills (fixed prompt + max 5 LLM
+turns), the agent shell lets Claude autonomously decide the tool sequence
+and iterate until the task is done.
 
 Architecture:
     VoiceLoop/TextLoop
         → SkillDispatcher.handle_general("agent_task")
-            → ThunderAgentShell.run_task(user_text)
+            → AgentShell.run_task(user_text)
                 → Agentic loop: LLM ↔ tools until stop_reason="end_turn"
                     → BrainPipeline._audio.speak() for progress
 """
@@ -30,9 +30,9 @@ from askme.agent_shell.agent_hooks import AgentHookRunner
 from askme.agent_shell.agent_profile import AgentProfile, AgentProfileRegistry
 
 if TYPE_CHECKING:
-    from askme.llm.client import LLMClient
-    from askme.tools.tool_registry import ToolRegistry
-    from askme.voice.audio_agent import AudioAgent
+    from askme.llm.core.client import LLMClient
+    from askme.ports import AudioFrontendPort
+    from askme.tools.core.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ def _build_agent_system_prompt(workspace: Path, profile: AgentProfile | None = N
         )
     return (
         profile_block +
-        "你是 Thunder 机器人上运行的自主 Agent，拥有真实的执行能力。\n"
+        "你是现场机器人上运行的自主执行 Agent，拥有真实的执行能力。\n"
         "你可以运行 shell 命令、读写文件、搜索网络、调用机器人 API、发送 HTTP 请求。\n\n"
         f"工作区：{workspace}（所有文件操作默认在此目录内）\n\n"
         "【工具使用指南】\n"
@@ -110,7 +110,7 @@ def _build_agent_system_prompt(workspace: Path, profile: AgentProfile | None = N
         "  web_search   — 搜索网络获取摘要和链接；技术查询建议加版本号（如 'asyncio Python 3.10'）\n"
         "  web_fetch    — 抓取指定网页完整内容；web_search 找到 URL 后用此工具深读\n"
         "  http_request — 调用 REST API（机器人写操作请用 safety-gated robot_api/move_robot）\n"
-        "  robot_api    — Thunder runtime 快捷接口：\n"
+        "  robot_api    — 机器人运行时快捷接口：\n"
         "                 service=telemetry  GET /api/v1/health → 电量/温度/IMU\n"
         "                 service=safety     GET /api/v1/safety/modes/estop → 急停状态\n"
         "                 service=control    POST /api/v1/control/commands {cmd,params} → 运动指令\n"
@@ -134,7 +134,7 @@ def _build_agent_system_prompt(workspace: Path, profile: AgentProfile | None = N
 
 
 class ThunderAgentShell:
-    """Agentic execution shell for Thunder robot.
+    """Agentic execution shell for a field robot.
 
     Wraps the LLM client in an autonomous tool-use loop that continues
     until the model emits stop_reason='end_turn' (task complete) or
@@ -145,7 +145,7 @@ class ThunderAgentShell:
         self,
         llm_client: LLMClient,
         tool_registry: ToolRegistry,
-        audio: AudioAgent | None,
+        audio: AudioFrontendPort | None,
         *,
         model: str | None = None,
         workspace: Path | None = None,
@@ -491,7 +491,7 @@ class ThunderAgentShell:
                                 # Skip if we're inside a <think> block
                                 in_think = response_text.count("<think>") > response_text.count("</think>")
                                 if not in_think:
-                                    from askme.pipeline.brain_pipeline import strip_think_blocks
+                                    from askme.pipeline.core.utils import strip_think_blocks
                                     clean = strip_think_blocks(response_text).strip()
                                     if clean and clean != self._streamed_tts_text:
                                         new_part = clean[len(self._streamed_tts_text):]
@@ -716,7 +716,7 @@ class ThunderAgentShell:
             logger.warning("[AgentShell] Failed to persist run summary: %s", exc)
 
     async def _spawn_child_agent(self, args_json: str) -> str:
-        """Spawn a child ThunderAgentShell to handle a focused sub-task."""
+        """Spawn a child agent shell to handle a focused sub-task."""
         if self._depth >= _MAX_DEPTH:
             return f"[Error] 已达最大子 Agent 嵌套深度（{_MAX_DEPTH}层），无法再 spawn。"
         if not hasattr(self, "_allowed_tools"):

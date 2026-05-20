@@ -1,4 +1,4 @@
-"""ProactiveModule — wraps ProactiveAgent as a declarative module.
+"""ProactiveModule -wraps ProactiveAgent as a declarative module.
 
 Canonical wiring::
 
@@ -16,17 +16,12 @@ import asyncio
 import logging
 from typing import Any
 
-from askme.llm.client import LLMClient
-from askme.perception.vision_bridge import VisionBridge
-from askme.pipeline.brain_pipeline import BrainPipeline
-from askme.pipeline.proactive_agent import ProactiveAgent
-from askme.runtime.module import In, Module, ModuleRegistry
+from askme.llm.core.client import LLMClient
+from askme.pipeline.core.brain_pipeline import BrainPipeline
+from askme.pipeline.reactions.proactive_agent import ProactiveAgent
+from askme.ports import AudioFrontendPort, VisionPort
+from askme.runtime.core.module import In, Module, ModuleRegistry
 from askme.schemas.messages import MemoryContext
-
-try:
-    from askme.voice.audio_agent import AudioAgent
-except ModuleNotFoundError:
-    AudioAgent = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +35,8 @@ class ProactiveModule(Module):
 
     llm_in: In[LLMClient]
     memory_in: In[MemoryContext]
-    perception_in: In[VisionBridge]
-    voice_in: In[AudioAgent]
+    perception_in: In[VisionPort]
+    voice_in: In[AudioFrontendPort]
     pipeline_in: In[BrainPipeline]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:

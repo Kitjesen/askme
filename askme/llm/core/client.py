@@ -14,11 +14,11 @@ from askme.llm.core.config import LLMConfig
 from askme.llm.core.factory import create_llm_provider
 from askme.llm.core.gateway import LLMGateway
 from askme.llm.streaming.retry import default_backoff as _backoff
-from askme.robot.ota_bridge import OTABridgeMetrics
+from askme.telemetry.ota_bridge import OTABridgeMetrics
 
 
 class LLMClient(LLMGateway):
-    """Compatibility wrapper around :class:`askme.llm.gateway.LLMGateway`.
+    """Compatibility wrapper around :class:`askme.llm.core.gateway.LLMGateway`.
 
     Preferred construction:
 

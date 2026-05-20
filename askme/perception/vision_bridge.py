@@ -335,6 +335,10 @@ class VisionBridge:
             return True
         return False
 
+    def auto_capture_enabled(self) -> bool:
+        """Whether conversation turns should capture a scene automatically."""
+        return bool(self._vision_cfg.get("auto_capture", False))
+
     async def describe_scene(self, frame: Any = None) -> str:
         """Detect objects in *frame* and return a natural language description.
 

@@ -1,9 +1,8 @@
-"""LEDModule — wraps StateLedBridge + LedController as a declarative module.
+"""LEDModule - wraps the configured status LED provider as a runtime module.
 
 Canonical wiring::
 
-    led_controller = HttpLedController(led_base_url) if led_base_url else NullLedController()
-    led_bridge = StateLedBridge(audio=audio, dispatcher=dispatcher, safety=..., led=led_controller)
+    led_controller, led_bridge = build_status_led(...)
 """
 
 from __future__ import annotations
@@ -12,41 +11,27 @@ import asyncio
 import logging
 from typing import Any
 
-from askme.pipeline.skill_dispatcher import SkillDispatcher
-from askme.robot.safety_client import DogSafetyClient
-from askme.runtime.module import In, Module, ModuleRegistry
-
-try:
-    from askme.voice.audio_agent import AudioAgent
-except ModuleNotFoundError:
-    AudioAgent = None  # type: ignore[assignment,misc]
+from askme.pipeline.skills.skill_dispatcher import SkillDispatcher
+from askme.ports import AudioFrontendPort, SafetyPort
+from askme.providers import build_status_led
+from askme.runtime.core.module import In, Module, ModuleRegistry
 
 logger = logging.getLogger(__name__)
 
 
 class LEDModule(Module):
-    """Provides StateLedBridge and LedController to the runtime."""
+    """Provides status LED bridge and controller to the runtime."""
 
     name = "led"
     depends_on = ("voice", "skill", "safety")
     provides = ("indicators",)
 
-    voice_in: In[AudioAgent]
+    voice_in: In[AudioFrontendPort]
     skill_in: In[SkillDispatcher]
-    safety_in: In[DogSafetyClient]
+    safety_in: In[SafetyPort]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        from askme.robot.led_controller import HttpLedController, NullLedController
-        from askme.robot.state_led_bridge import StateLedBridge
-
         led_cfg = cfg.get("led", {})
-        led_base_url = led_cfg.get("base_url", "").strip()
-
-        self.led_controller = (
-            HttpLedController(led_base_url)
-            if led_base_url
-            else NullLedController()
-        )
 
         voice_mod = self.voice_in
         audio = getattr(voice_mod, "audio", None) if voice_mod else None
@@ -57,16 +42,16 @@ class LEDModule(Module):
         safety_mod = self.safety_in
         dog_safety = getattr(safety_mod, "client", None) if safety_mod else None
 
-        self.led_bridge = StateLedBridge(
+        self.led_controller, self.led_bridge = build_status_led(
+            led_cfg,
             audio=audio,
             dispatcher=dispatcher,
             safety=dog_safety,
-            led=self.led_controller,
         )
 
         logger.info(
             "LEDModule: built (controller=%s)",
-            f"http({led_base_url})" if led_base_url else "null",
+            type(self.led_controller).__name__,
         )
 
     async def start(self) -> None:

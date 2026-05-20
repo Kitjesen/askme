@@ -18,6 +18,9 @@ models/
 
 # Data
 data/
+!/askme/data/
+/askme/data/*
+!/askme/data/README.md
 
 # IDE
 .vscode/

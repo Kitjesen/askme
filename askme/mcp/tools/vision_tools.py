@@ -1,41 +1,49 @@
-"""MCP vision tools — expose look_around, find_target, scan via MCP."""
+"""MCP vision and text tools."""
 
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from mcp.server.fastmcp import Context
 
-from askme.mcp.server import AppContext, mcp
+from askme.mcp.context import AppContext
+from askme.mcp.registration import mcp
 
 
 def _get_app(ctx: Context) -> AppContext:
     return ctx.request_context.lifespan_context
 
 
+def _no_vision() -> str:
+    return json.dumps({"error": "vision not available"})
+
+
 @mcp.tool()
 async def look_around(question: str = "", ctx: Context = None) -> str:
-    """观察周围环境。可选 question 参数让视觉模型重点关注特定物体。"""
+    """Describe the current scene, optionally focused by a question."""
     app = _get_app(ctx)
-    if not hasattr(app, "vision") or app.vision is None:
-        return json.dumps({"error": "vision not available"})
+    vision = app.vision_bridge
+    if vision is None:
+        return _no_vision()
 
     if question:
-        result = await app.vision.describe_scene_with_question(question)
+        result = await vision.describe_scene_with_question(question)
     else:
-        result = await app.vision.describe_scene()
+        result = await vision.describe_scene()
 
     return json.dumps({"scene": result or "无检测结果"}, ensure_ascii=False)
 
 
 @mcp.tool()
 async def find_target(target: str, ctx: Context = None) -> str:
-    """在当前视野中搜索指定物体（英文 YOLO 类别名）。"""
+    """Search for a named object in the current field of view."""
     app = _get_app(ctx)
-    if not hasattr(app, "vision") or app.vision is None:
-        return json.dumps({"error": "vision not available"})
+    vision = app.vision_bridge
+    if vision is None:
+        return _no_vision()
 
-    result = await app.vision.find_object(target)
+    result = await vision.find_object(target)
     if result is None:
         return json.dumps({"found": False, "target": target}, ensure_ascii=False)
 
@@ -50,10 +58,21 @@ async def find_target(target: str, ctx: Context = None) -> str:
 
 @mcp.tool()
 async def chat(text: str, ctx: Context = None) -> str:
-    """发送文本消息给机器人并获取回复。"""
+    """Send a text turn through the stable MCP context LLM surface."""
     app = _get_app(ctx)
-    if not hasattr(app, "text_loop") or app.text_loop is None:
-        return json.dumps({"error": "text loop not available"})
+    if app.llm_client is None:
+        return json.dumps({"error": "llm client not available"})
 
-    reply = await app.text_loop.process_turn(text)
+    messages: list[dict[str, Any]]
+    if app.conversation is not None:
+        app.conversation.add_user_message(text)
+        messages = app.conversation.get_messages(
+            system_prompt="You are Askme, a helpful robot assistant."
+        )
+    else:
+        messages = [{"role": "user", "content": text}]
+
+    reply = await app.llm_client.chat(messages)
+    if app.conversation is not None:
+        app.conversation.add_assistant_message(reply)
     return json.dumps({"reply": reply, "text": text}, ensure_ascii=False)

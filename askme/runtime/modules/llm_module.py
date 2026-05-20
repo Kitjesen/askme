@@ -8,8 +8,8 @@ from typing import Any
 
 from askme.llm.core.client import LLMClient
 from askme.llm.core.config import LLMConfig
-from askme.robot.ota_bridge import OTABridgeMetrics
-from askme.runtime.module import Module, ModuleRegistry, Out
+from askme.runtime.core.module import Module, ModuleRegistry, Out
+from askme.telemetry.ota_bridge import OTABridgeMetrics
 
 logger = logging.getLogger(__name__)
 

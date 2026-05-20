@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from askme.agent_shell.agent_profile import AgentProfileRegistry
+from askme.api.services.agent_profile_tools import agent_profile_known_tools
 
 
 def test_agent_profile_registry_exposes_product_roles() -> None:
@@ -28,6 +29,10 @@ def test_agent_profile_resolves_tool_boundaries() -> None:
     assert "move_robot" not in field_tools
     assert "spawn_agent" in field_tools
     assert growth_tools == {"create_skill", "web_search"}
+
+
+def test_agent_profile_known_tools_include_runtime_vision_tools() -> None:
+    assert {"find_target", "look_around"} <= agent_profile_known_tools()
 
 
 def test_agent_profile_registry_loads_project_markdown_profiles(tmp_path: Path) -> None:

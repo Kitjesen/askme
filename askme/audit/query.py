@@ -12,7 +12,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from askme.skills.audit import default_skill_audit_path
+from askme.skills.governance.audit import default_skill_audit_path
 
 from .review import AuditReviewService, decision_clears_review
 
@@ -979,30 +979,30 @@ def _delivery_dossier(
         if str(item or "").strip()
     ]
     return {
-        "title": "Customer Delivery Audit Dossier",
+        "title": "客户交付审计档案",
         "decision": "ready" if ready else "blocked",
-        "decision_label": "Ready for acceptance" if ready else "Blocked before acceptance",
+        "decision_label": "可进入客户验收" if ready else "验收前存在阻断项",
         "customer_claim": (
-            "The audited operations, evidence, and review records are ready for customer acceptance, incident review, and accountability tracing."
+            "已审计的操作、证据和复核记录可用于客户验收、事件复盘和责任追溯。"
             if ready
-            else "This audit scope still has blocking items and cannot be used as customer acceptance evidence yet."
+            else "当前审计范围仍有阻断项，暂不能作为客户验收证据。"
         ),
         "allowed_uses": (
             [
-                "customer acceptance package",
-                "pilot review package",
-                "incident closure package",
-                "accountability trace package",
+                "客户验收材料",
+                "试点复盘材料",
+                "事件闭环材料",
+                "责任追溯材料",
             ]
             if ready
-            else ["internal review package", "issue diagnosis package", "evidence gap list"]
+            else ["内部复核材料", "问题诊断材料", "证据缺口清单"]
         ),
         "blocked_uses": [
-            "unattended production launch claim",
-            "replacement for onsite acceptance result",
-            "replacement for safety supervisor or customer owner sign-off",
+            "无人值守生产上线声明",
+            "替代现场验收结果",
+            "替代安全主管或客户负责人签字",
         ],
-        "handoff_owner": "delivery owner" if ready else _dossier_blocking_owner(blocker_labels),
+        "handoff_owner": "交付负责人" if ready else _dossier_blocking_owner(blocker_labels),
         "must_fix": blocker_labels,
         "watch_items": warning_labels,
         "record_scope": {
@@ -1018,9 +1018,9 @@ def _delivery_dossier(
         },
         "acceptance_gate": customer_report.get("acceptance_summary") or {},
         "next_step": (
-            "Generate the audit package and archive it with the customer acceptance materials."
+            "生成审计包，并随客户验收材料归档。"
             if ready
-            else "Resolve blocking items, complete supervisor review, then regenerate the audit package."
+            else "先处理阻断项，完成主管复核后重新生成审计包。"
         ),
     }
 
@@ -1028,10 +1028,10 @@ def _delivery_dossier(
 def _dossier_blocking_owner(blocker_labels: list[str]) -> str:
     joined = " ".join(blocker_labels)
     if "复核" in joined:
-        return "site supervisor"
+        return "现场主管"
     if "完整性" in joined or "格式" in joined:
-        return "engineering or delivery engineer"
-    return "delivery owner"
+        return "研发或交付工程师"
+    return "交付负责人"
 
 
 def _customer_report_summary_sentence(

@@ -21,7 +21,7 @@ class TestInit:
         d = _make_dispatcher()
         assert d._voice is None
         assert d._webhook_url is None
-        assert d._robot_name == "Thunder"
+        assert d._robot_name == "现场机器人"
 
     def test_custom_robot_name(self):
         d = _make_dispatcher(robot_name="Spot")

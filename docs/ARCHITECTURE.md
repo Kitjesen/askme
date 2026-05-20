@@ -21,6 +21,40 @@ User speech/text
 
 核心原则：LLM 只负责理解、规划、解释和交互；硬件动作必须由 runtime、安全服务和机器人控制系统负责。
 
+## 包的主从关系
+
+`askme.blueprints` 是产品运行时的组合根。它决定一个产品入口要装配哪些能力，例如 `voice`、
+`voice_perception`、`edge_robot`。它是主入口，但不是所有代码的父目录。
+
+顶层同级包按所有权拆分：
+
+- `blueprints/`: 产品组合根，声明可启动、可检查、可交付的 Runtime 蓝图。
+- `runtime/`: Runtime 引擎和模块生命周期，只负责 build/start/stop/health。
+- `voice/`, `voice_gateway/`: 语音输入、ASR/TTS、播放、打断、语音中台能力。
+- `robot/`, `robot_interaction/`, `ports/`, `providers/`: 机器人交互、控制端口和具体 provider 适配。
+- `cognition/`, `memory/`, `skills/`, `tools/`: 认知、知识、技能和工具能力。
+- `api/`, `static/`, `pipeline/`: 对外 API、Dashboard 和交付/现场工作流。
+
+依赖方向是：
+
+```text
+blueprints
+  -> runtime
+  -> domain modules
+  -> ports
+  -> providers / hardware / external services
+```
+
+底层能力包不能反向依赖 `blueprints`。例如 `voice`、`robot`、`runtime` 不能 import
+`askme.blueprints`；否则底层能力会被某个产品入口绑死。`api`、`cli`、Dashboard 和交付工具可以读取
+blueprint catalog，因为它们是产品表面，不是底层能力。
+
+更细一点，`providers` 是最底层的具体适配层。它可以依赖 `ports` 和外部 SDK/HTTP/硬件客户端，但不能
+依赖 `runtime`、`pipeline`、`blueprints`、`api`、`voice_gateway` 或 `robot_interaction`。`ports`
+只定义接口，不能 import provider 或硬件实现。
+
+所以目录“同级”只是 Python package 的物理布局；架构上 `blueprints` 是组合根，其他包是被组合的能力库。
+
 ## 运行时模块
 
 askme 使用 declarative runtime module 组合。主要模块：

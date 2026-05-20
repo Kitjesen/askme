@@ -7,8 +7,19 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel
+
+from askme.api.schemas.runtime import (
+    RuntimeContextResponse,
+    RuntimeHandoffSubmitResponse,
+    RuntimeProfilesResponse,
+    RuntimeRunActionResponse,
+    RuntimeRunDetailResponse,
+    RuntimeRunListResponse,
+    RuntimeRunReportResponse,
+)
 
 Dispatch = Callable[..., Awaitable[dict[str, Any]]]
 JsonError = Callable[..., JSONResponse]
@@ -31,17 +42,48 @@ def register_runtime_routes(
 ) -> None:
     """Register runtime handoff and TaskRun control routes."""
 
-    @app.get("/api/runtime/context", tags=["Runtime"])
+    app.include_router(
+        create_runtime_router(
+            dispatch_runtime=dispatch_runtime,
+            json_error=json_error,
+            cors_options_response=cors_options_response,
+            optional_json_body=optional_json_body,
+            operator_action_kwargs=operator_action_kwargs,
+            authorize=authorize,
+            cors_headers=cors_headers,
+        )
+    )
+
+
+def create_runtime_router(
+    *,
+    dispatch_runtime: Dispatch,
+    json_error: JsonError,
+    cors_options_response: CorsOptions,
+    optional_json_body: OptionalJsonBody,
+    operator_action_kwargs: OperatorActionKwargs,
+    authorize: Authorize,
+    cors_headers: dict[str, str],
+) -> APIRouter:
+    """Create the runtime router without binding it to an app factory."""
+
+    router = APIRouter(tags=["Runtime"])
+
+    @router.get(
+        "/api/runtime/context",
+        response_model=RuntimeContextResponse,
+        response_model_exclude_none=True,
+    )
     async def runtime_context() -> JSONResponse:
         try:
             payload = await dispatch_runtime("runtime_context_payload")
-            return JSONResponse(payload, headers={"Cache-Control": "no-store", **cors_headers})
+            return _runtime_json(payload, RuntimeContextResponse, cors_headers=cors_headers)
         except RuntimeError as exc:
             return json_error(str(exc), status_code=503)
         except Exception as exc:
             return json_error(str(exc), status_code=500)
 
-    @app.get("/api/runtime/events", tags=["Runtime"], response_model=None)
+    @router.get("/api/runtime/events", response_model=None)
     async def runtime_events(request: Request) -> Response:
         once = _truthy_query(request.query_params.get("once"))
         after = _float_query(request.query_params.get("after"))
@@ -72,15 +114,39 @@ def register_runtime_routes(
         except Exception as exc:
             return json_error(str(exc), status_code=500)
 
-    @app.get("/api/runtime/profiles", tags=["Runtime"])
+    @router.get(
+        "/api/runtime/profiles",
+        response_model=RuntimeProfilesResponse,
+        response_model_exclude_none=True,
+    )
     async def runtime_profiles() -> JSONResponse:
-        return await _runtime_get(dispatch_runtime, json_error, cors_headers, "runtime_profiles_payload")
+        return await _runtime_get(
+            dispatch_runtime,
+            json_error,
+            cors_headers,
+            "runtime_profiles_payload",
+            schema=RuntimeProfilesResponse,
+        )
 
-    @app.get("/api/runtime/runs", tags=["Runtime"])
+    @router.get(
+        "/api/runtime/runs",
+        response_model=RuntimeRunListResponse,
+        response_model_exclude_none=True,
+    )
     async def runtime_runs() -> JSONResponse:
-        return await _runtime_get(dispatch_runtime, json_error, cors_headers, "runtime_list_payload")
+        return await _runtime_get(
+            dispatch_runtime,
+            json_error,
+            cors_headers,
+            "runtime_list_payload",
+            schema=RuntimeRunListResponse,
+        )
 
-    @app.post("/api/runtime/handoff", tags=["Runtime"])
+    @router.post(
+        "/api/runtime/handoff",
+        response_model=RuntimeHandoffSubmitResponse,
+        response_model_exclude_none=True,
+    )
     async def runtime_handoff_submit(request: Request) -> JSONResponse:
         try:
             body = await optional_json_body(request)
@@ -95,21 +161,54 @@ def register_runtime_routes(
                 )
             payload = await dispatch_runtime("submit_plan_payload", plan)
             status_code = 200 if payload.get("accepted", True) else 422
-            return JSONResponse(payload, status_code=status_code, headers={"Cache-Control": "no-store", **cors_headers})
+            return _runtime_json(
+                payload,
+                RuntimeHandoffSubmitResponse,
+                status_code=status_code,
+                cors_headers=cors_headers,
+            )
+        except ValueError as exc:
+            return json_error(str(exc), status_code=400)
         except RuntimeError as exc:
             return json_error(str(exc), status_code=503)
         except Exception as exc:
             return json_error(str(exc), status_code=500)
 
-    @app.get("/api/runtime/runs/{run_id}", tags=["Runtime"])
+    @router.get(
+        "/api/runtime/runs/{run_id}",
+        response_model=RuntimeRunDetailResponse,
+        response_model_exclude_none=True,
+    )
     async def runtime_run_get(run_id: str) -> JSONResponse:
-        return await _runtime_get(dispatch_runtime, json_error, cors_headers, "runtime_get_payload", run_id)
+        return await _runtime_get(
+            dispatch_runtime,
+            json_error,
+            cors_headers,
+            "runtime_get_payload",
+            run_id,
+            schema=RuntimeRunDetailResponse,
+        )
 
-    @app.get("/api/runtime/runs/{run_id}/report", tags=["Runtime"])
+    @router.get(
+        "/api/runtime/runs/{run_id}/report",
+        response_model=RuntimeRunReportResponse,
+        response_model_exclude_none=True,
+    )
     async def runtime_run_report(run_id: str) -> JSONResponse:
-        return await _runtime_get(dispatch_runtime, json_error, cors_headers, "runtime_report_payload", run_id)
+        return await _runtime_get(
+            dispatch_runtime,
+            json_error,
+            cors_headers,
+            "runtime_report_payload",
+            run_id,
+            schema=RuntimeRunReportResponse,
+        )
 
-    @app.post("/api/runtime/runs/{run_id}/pause", tags=["Runtime"])
+    @router.post(
+        "/api/runtime/runs/{run_id}/pause",
+        response_model=RuntimeRunActionResponse,
+        response_model_exclude_none=True,
+    )
     async def runtime_run_pause(run_id: str, request: Request) -> JSONResponse:
         return await _runtime_action(
             request,
@@ -122,9 +221,14 @@ def register_runtime_routes(
             operator_action_kwargs=operator_action_kwargs,
             authorize=authorize,
             cors_headers=cors_headers,
+            schema=RuntimeRunActionResponse,
         )
 
-    @app.post("/api/runtime/runs/{run_id}/resume", tags=["Runtime"])
+    @router.post(
+        "/api/runtime/runs/{run_id}/resume",
+        response_model=RuntimeRunActionResponse,
+        response_model_exclude_none=True,
+    )
     async def runtime_run_resume(run_id: str, request: Request) -> JSONResponse:
         return await _runtime_action(
             request,
@@ -137,9 +241,14 @@ def register_runtime_routes(
             operator_action_kwargs=operator_action_kwargs,
             authorize=authorize,
             cors_headers=cors_headers,
+            schema=RuntimeRunActionResponse,
         )
 
-    @app.post("/api/runtime/runs/{run_id}/cancel", tags=["Runtime"])
+    @router.post(
+        "/api/runtime/runs/{run_id}/cancel",
+        response_model=RuntimeRunActionResponse,
+        response_model_exclude_none=True,
+    )
     async def runtime_run_cancel(run_id: str, request: Request) -> JSONResponse:
         return await _runtime_action(
             request,
@@ -152,9 +261,14 @@ def register_runtime_routes(
             operator_action_kwargs=operator_action_kwargs,
             authorize=authorize,
             cors_headers=cors_headers,
+            schema=RuntimeRunActionResponse,
         )
 
-    @app.post("/api/runtime/runs/{run_id}/advance", tags=["Runtime"])
+    @router.post(
+        "/api/runtime/runs/{run_id}/advance",
+        response_model=RuntimeRunActionResponse,
+        response_model_exclude_none=True,
+    )
     async def runtime_run_advance(run_id: str, request: Request) -> JSONResponse:
         return await _runtime_action(
             request,
@@ -167,28 +281,31 @@ def register_runtime_routes(
             operator_action_kwargs=operator_action_kwargs,
             authorize=authorize,
             cors_headers=cors_headers,
+            schema=RuntimeRunActionResponse,
         )
 
-    @app.options("/api/runtime/context", include_in_schema=False)
-    @app.options("/api/runtime/events", include_in_schema=False)
-    @app.options("/api/runtime/profiles", include_in_schema=False)
-    @app.options("/api/runtime/runs", include_in_schema=False)
+    @router.options("/api/runtime/context", include_in_schema=False)
+    @router.options("/api/runtime/events", include_in_schema=False)
+    @router.options("/api/runtime/profiles", include_in_schema=False)
+    @router.options("/api/runtime/runs", include_in_schema=False)
     async def runtime_collection_cors() -> Response:
         return cors_options_response("GET, OPTIONS")
 
-    @app.options("/api/runtime/handoff", include_in_schema=False)
+    @router.options("/api/runtime/handoff", include_in_schema=False)
     async def runtime_handoff_submit_cors() -> Response:
         return cors_options_response("POST, OPTIONS")
 
-    @app.options("/api/runtime/runs/{run_id}", include_in_schema=False)
-    @app.options("/api/runtime/runs/{run_id}/report", include_in_schema=False)
-    @app.options("/api/runtime/runs/{run_id}/pause", include_in_schema=False)
-    @app.options("/api/runtime/runs/{run_id}/resume", include_in_schema=False)
-    @app.options("/api/runtime/runs/{run_id}/cancel", include_in_schema=False)
-    @app.options("/api/runtime/runs/{run_id}/advance", include_in_schema=False)
+    @router.options("/api/runtime/runs/{run_id}", include_in_schema=False)
+    @router.options("/api/runtime/runs/{run_id}/report", include_in_schema=False)
+    @router.options("/api/runtime/runs/{run_id}/pause", include_in_schema=False)
+    @router.options("/api/runtime/runs/{run_id}/resume", include_in_schema=False)
+    @router.options("/api/runtime/runs/{run_id}/cancel", include_in_schema=False)
+    @router.options("/api/runtime/runs/{run_id}/advance", include_in_schema=False)
     async def runtime_item_cors(run_id: str) -> Response:
         _ = run_id
         return cors_options_response("GET, POST, OPTIONS")
+
+    return router
 
 
 async def _runtime_get(
@@ -197,11 +314,17 @@ async def _runtime_get(
     cors_headers: dict[str, str],
     method_name: str,
     *args: Any,
+    schema: type[BaseModel],
 ) -> JSONResponse:
     try:
         payload = await dispatch_runtime(method_name, *args)
         status_code = 404 if payload.get("error") else 200
-        return JSONResponse(payload, status_code=status_code, headers={"Cache-Control": "no-store", **cors_headers})
+        return _runtime_json(
+            payload,
+            schema,
+            status_code=status_code,
+            cors_headers=cors_headers,
+        )
     except RuntimeError as exc:
         return json_error(str(exc), status_code=503)
     except Exception as exc:
@@ -220,6 +343,7 @@ async def _runtime_action(
     operator_action_kwargs: OperatorActionKwargs,
     authorize: Authorize,
     cors_headers: dict[str, str],
+    schema: type[BaseModel],
 ) -> JSONResponse:
     try:
         body = await optional_json_body(request)
@@ -228,7 +352,12 @@ async def _runtime_action(
             return failure
         payload = await dispatch_runtime(method_name, run_id, **operator_action_kwargs(body))
         status_code = 404 if payload.get("error") else 200
-        return JSONResponse(payload, status_code=status_code, headers={"Cache-Control": "no-store", **cors_headers})
+        return _runtime_json(
+            payload,
+            schema,
+            status_code=status_code,
+            cors_headers=cors_headers,
+        )
     except ValueError as exc:
         return json_error(str(exc), status_code=400)
     except RuntimeError as exc:
@@ -239,6 +368,21 @@ async def _runtime_action(
 
 def _sse_packet(event_name: str, payload: dict[str, Any]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+def _runtime_json(
+    payload: dict[str, Any],
+    schema: type[BaseModel],
+    *,
+    status_code: int = 200,
+    cors_headers: dict[str, str],
+) -> JSONResponse:
+    validated = schema.model_validate(payload).model_dump(mode="python")
+    return JSONResponse(
+        validated,
+        status_code=status_code,
+        headers={"Cache-Control": "no-store", **cors_headers},
+    )
 
 
 def _handoff_plan_from_body(body: dict[str, Any]) -> dict[str, Any] | None:

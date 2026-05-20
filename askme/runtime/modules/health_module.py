@@ -1,4 +1,4 @@
-"""HealthModule — wraps AskmeHealthServer as a declarative module.
+"""HealthModule -wraps AskmeHealthServer as a declarative module.
 
 Canonical wiring::
 
@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from askme.config import project_root
-from askme.runtime.module import Module, ModuleRegistry
+from askme.runtime.core.module import Module, ModuleRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +145,9 @@ class HealthModule(Module):
                 text: str,
                 *,
                 speak: bool = False,
+                conversation_session_id: str | None = None,
+                planning_session_id: str | None = None,
+                runtime_policy: str = "disabled",
             ) -> dict[str, Any] | str:
                 runtime_control = await self._maybe_handle_runtime_control(
                     runtime_handler,
@@ -154,7 +157,23 @@ class HealthModule(Module):
                     return runtime_control
 
                 if accepts_speak:
-                    reply = await process_turn(text, speak=speak)
+                    kwargs: dict[str, Any] = {"speak": speak}
+                    if self._call_accepts_keyword(
+                        process_turn,
+                        "conversation_session_id",
+                    ):
+                        kwargs["conversation_session_id"] = conversation_session_id
+                    if self._call_accepts_keyword(
+                        process_turn,
+                        "planning_session_id",
+                    ):
+                        kwargs["planning_session_id"] = planning_session_id
+                    if self._call_accepts_keyword(
+                        process_turn,
+                        "runtime_policy",
+                    ):
+                        kwargs["runtime_policy"] = runtime_policy
+                    reply = await process_turn(text, **kwargs)
                     rag_payload = self._rag_evidence_payload(registry)
                     self._attach_rag_to_last_assistant(registry, rag_payload)
                     cognition_result = self._last_cognition_result(text_loop)
@@ -226,13 +245,13 @@ class HealthModule(Module):
         return getattr(audio, "tts", None) if audio is not None else None
 
     def _field_operations_handler(self, cfg: dict[str, Any]) -> Any:
-        from askme.pipeline.field_operations import FieldOperationsService
+        from askme.pipeline.field.field_operations import FieldOperationsService
 
         field_cfg = dict(cfg.get("field_operations", {}) or {})
         llm_client = None
         if field_cfg.get("llm_narrative_enabled"):
             try:
-                from askme.llm.client import LLMClient
+                from askme.llm.core.client import LLMClient
 
                 llm_client = LLMClient()
             except Exception as exc:
@@ -866,7 +885,7 @@ class HealthModule(Module):
         }
 
     def _runtime_profile(self, registry: ModuleRegistry) -> Any:
-        from askme.runtime.profiles import MCP_PROFILE, legacy_profile_for
+        from askme.runtime.core.profiles import MCP_PROFILE, legacy_profile_for
 
         has_voice = "voice" in registry
         has_text = "text" in registry

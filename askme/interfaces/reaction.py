@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from askme.runtime.registry import BackendRegistry
+from askme.interfaces.core.registry import BackendRegistry
 from askme.schemas.reaction import ReactionDecision, SceneContext
 
 

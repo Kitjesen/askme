@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from askme.runtime.registry import BackendRegistry
+from askme.interfaces.core.registry import BackendRegistry
 
 
 class DetectorBackend(ABC):

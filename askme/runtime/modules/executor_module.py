@@ -1,8 +1,8 @@
-"""ExecutorModule — wraps ThunderAgentShell as a declarative module.
+"""ExecutorModule - wraps AgentShell as a declarative module.
 
 Canonical wiring::
 
-    agent_shell = ThunderAgentShell(
+    agent_shell = AgentShell(
         llm_client=llm, tool_registry=tools, audio=audio, model=...,
     )
     pipeline._agent_shell = agent_shell
@@ -13,25 +13,25 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
-from askme.llm.client import LLMClient
-from askme.pipeline.brain_pipeline import BrainPipeline
-from askme.runtime.module import In, Module, ModuleRegistry, Out
-from askme.tools.tool_registry import ToolRegistry
+from askme.agent_shell import AgentShell
+from askme.llm.core.client import LLMClient
+from askme.pipeline.core.brain_pipeline import BrainPipeline
+from askme.runtime.core.module import In, Module, ModuleRegistry, Out
+from askme.tools.core.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 
 class ExecutorModule(Module):
-    """Provides the ThunderAgentShell to the runtime."""
+    """Provides the autonomous agent shell to the runtime."""
 
     name = "executor"
     depends_on = ("llm", "tools", "pipeline")
     provides = ("executor",)
 
-    agent_shell: Out[ThunderAgentShell]
+    agent_shell: Out[AgentShell]
 
-    # In ports — auto-wired by runtime before build() is called
+    # In ports -auto-wired by runtime before build() is called
     llm_in: In[LLMClient]
     tool_registry_in: In[ToolRegistry]
     pipeline_in: In[BrainPipeline]
@@ -45,7 +45,7 @@ class ExecutorModule(Module):
 
         brain_cfg = cfg.get("brain", {})
 
-        self.shell = ThunderAgentShell(
+        self.shell = AgentShell(
             llm_client=llm,
             tool_registry=tools,
             audio=None,  # set post-build by VoiceModule
@@ -64,8 +64,8 @@ class ExecutorModule(Module):
 
     # -- typed accessors ------------------------------------------------
     @property
-    def agent_shell(self) -> ThunderAgentShell:
-        """The ThunderAgentShell instance."""
+    def agent_shell(self) -> AgentShell:
+        """The autonomous agent shell instance."""
         return self.shell
 
     def health(self) -> dict[str, Any]:

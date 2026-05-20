@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from askme.contracts.catalog import contract_catalog, contract_examples
-from askme.mcp.server import mcp
+from askme.mcp.registration import mcp
 
 
 @mcp.resource("askme://contracts/io")

@@ -1,9 +1,8 @@
-"""PerceptionModule — wraps VisionBridge + ChangeDetector as a declarative module.
+"""PerceptionModule wraps perception providers as a declarative module.
 
 Canonical wiring::
 
-    vision = VisionBridge()
-    change_detector = ChangeDetector(config=cfg, pulse=pulse)
+    perception = build_perception(cfg, pulse=pulse)
 """
 
 from __future__ import annotations
@@ -11,16 +10,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.perception.interaction_provider import FileInteractionPerceptionProvider
-from askme.perception.vision_bridge import VisionBridge
-from askme.runtime.module import In, Module, ModuleRegistry, Out
+from askme.ports import ChangeMonitorPort, InteractionPerceptionPort, VisionPort
+from askme.providers import build_perception
+from askme.runtime.core.module import In, Module, ModuleRegistry, Out
 from askme.schemas.messages import DetectionFrame
 
 logger = logging.getLogger(__name__)
 
 
 class PerceptionModule(Module):
-    """Provides VisionBridge and ChangeDetector to the runtime."""
+    """Provides vision and perception monitoring through ports."""
 
     name = "perception"
     depends_on = ("pulse",)
@@ -29,28 +28,17 @@ class PerceptionModule(Module):
     # In port: auto-wired to PulseModule (which has Out[DetectionFrame])
     detections: In[DetectionFrame]
 
-    vision: Out[VisionBridge]
+    vision: Out[VisionPort]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        self.vision_bridge = VisionBridge()
-        perception_cfg = cfg.get("perception", {}) if isinstance(cfg, dict) else {}
-        interaction_cfg = (
-            perception_cfg.get("interaction_provider", {})
-            if isinstance(perception_cfg, dict)
-            else {}
-        )
-        self.interaction_provider = FileInteractionPerceptionProvider(interaction_cfg)
-
-        self.change_detector = None
         # In[DetectionFrame] auto-wired to PulseModule by _auto_wire()
         pulse_mod = self.detections
         pulse_bus = getattr(pulse_mod, "bus", None) if pulse_mod else None
 
-        try:
-            from askme.perception.change_detector import ChangeDetector
-            self.change_detector = ChangeDetector(config=cfg, pulse=pulse_bus)
-        except Exception as exc:
-            logger.debug("ChangeDetector not available: %s", exc)
+        stack = build_perception(cfg, pulse=pulse_bus)
+        self.vision_bridge: VisionPort = stack.vision
+        self.interaction_provider: InteractionPerceptionPort = stack.interaction_provider
+        self.change_detector: ChangeMonitorPort | None = stack.change_monitor
 
         logger.info(
             "PerceptionModule: built (change_detector=%s, pulse=%s)",
@@ -60,8 +48,8 @@ class PerceptionModule(Module):
 
     # -- typed accessors ------------------------------------------------
     @property
-    def vision(self) -> VisionBridge:  # type: ignore[override]
-        """The VisionBridge instance."""
+    def vision(self) -> VisionPort:  # type: ignore[override]
+        """The configured vision port."""
         return self.vision_bridge
 
     async def start(self) -> None:

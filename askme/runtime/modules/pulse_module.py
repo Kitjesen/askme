@@ -1,8 +1,8 @@
-"""PulseModule — wraps the Pulse DDS bus as a declarative module.
+"""PulseModule wraps the configured telemetry bus as a declarative module.
 
 Canonical wiring::
 
-    pulse = Pulse(cfg.get("pulse", {}))
+    bus = build_bus(cfg.get("pulse", {}))
 """
 
 from __future__ import annotations
@@ -10,8 +10,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.robot.pulse import Pulse
-from askme.runtime.module import Module, ModuleRegistry, Out
+from askme.interfaces.bus import BusBackend
+from askme.providers import build_bus
+from askme.runtime.core.module import Module, ModuleRegistry, Out
 from askme.schemas.messages import (
     CmsState,
     DetectionFrame,
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class PulseModule(Module):
-    """Provides the Pulse DDS data bus to the runtime."""
+    """Provides the telemetry data bus to the runtime."""
 
     name = "pulse"
     provides = ("telemetry", "dds")
@@ -37,13 +38,17 @@ class PulseModule(Module):
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         pulse_cfg = cfg.get("pulse", {})
-        self._bus = Pulse(pulse_cfg)
-        logger.info("PulseModule: built (enabled=%s)", self._bus.available)
+        self._bus = build_bus(pulse_cfg)
+        logger.info(
+            "PulseModule: built (backend=%s, available=%s)",
+            pulse_cfg.get("backend", "pulse"),
+            getattr(self._bus, "available", True),
+        )
 
-    # -- typed accessors ------------------------------------------------
     @property
-    def bus(self) -> Pulse:
-        """The Pulse DDS data bus instance."""
+    def bus(self) -> BusBackend:
+        """The telemetry data bus instance."""
+
         return self._bus
 
     async def start(self) -> None:

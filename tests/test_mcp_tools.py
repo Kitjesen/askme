@@ -5,6 +5,30 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+
+def test_mcp_registration_manifest_is_explicit_tool_and_resource_boundary():
+    from askme.mcp.registration import mcp_module_manifest
+
+    modules = mcp_module_manifest()
+
+    assert len(modules) == len(set(modules))
+    assert modules == [
+        "askme.mcp.resources.contract_resources",
+        "askme.mcp.resources.health_resources",
+        "askme.mcp.resources.perception_resources",
+        "askme.mcp.resources.robot_resources",
+        "askme.mcp.resources.skill_resources",
+        "askme.mcp.tools.memory_tools",
+        "askme.mcp.tools.robot_tools",
+        "askme.mcp.tools.skill_tools",
+        "askme.mcp.tools.vision_tools",
+        "askme.mcp.tools.voice_tools",
+    ]
+    assert all(
+        module.startswith(("askme.mcp.resources.", "askme.mcp.tools."))
+        for module in modules
+    )
+
 # ── Helpers ────────────────────────────────────────────────────
 
 def _make_ctx(app_context):
@@ -115,6 +139,45 @@ class TestRobotToolsWithMock:
         assert data["status"] == "ok"
 
     @pytest.mark.asyncio
+    async def test_robot_move_offloads_sync_execute(self, robot_context, monkeypatch):
+        from askme.mcp.tools import robot_tools
+
+        calls = []
+
+        async def fake_to_thread(func, *args, **kwargs):
+            calls.append((func, args, kwargs))
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr(robot_tools.asyncio, "to_thread", fake_to_thread)
+        ctx = _make_ctx(robot_context)
+
+        result = await robot_tools.robot_move(100.0, 200.0, 50.0, ctx)
+
+        data = json.loads(result)
+        assert data["status"] == "ok"
+        assert calls == [(
+            robot_context.arm_controller.execute,
+            ("move", {"x": 100.0, "y": 200.0, "z": 50.0}),
+            {},
+        )]
+
+    @pytest.mark.asyncio
+    async def test_robot_home_supports_awaitable_execute(self, robot_context, monkeypatch):
+        from askme.mcp.tools import robot_tools
+
+        robot_context.arm_controller.execute = AsyncMock(return_value={"status": "ok"})
+        to_thread = AsyncMock()
+        monkeypatch.setattr(robot_tools.asyncio, "to_thread", to_thread)
+
+        ctx = _make_ctx(robot_context)
+        result = await robot_tools.robot_home(ctx)
+
+        data = json.loads(result)
+        assert data["status"] == "ok"
+        robot_context.arm_controller.execute.assert_awaited_once_with("home")
+        to_thread.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_robot_state_success(self, robot_context):
         from askme.mcp.tools.robot_tools import robot_state
 
@@ -182,6 +245,87 @@ class TestVoiceToolsWithMock:
         result = await voice_speak("hello world", ctx)
         assert "[Spoken]" in result
         voice_context.tts_engine.speak.assert_called_once_with("hello world")
+
+
+class TestVisionToolsStableContext:
+    """Vision/text MCP tools should use AppContext stable fields."""
+
+    @pytest.fixture
+    def vision_context(self):
+        from askme.mcp.server import AppContext
+
+        ctx = AppContext()
+        ctx.vision_bridge = AsyncMock()
+        ctx.vision_bridge.describe_scene = AsyncMock(return_value="clear hallway")
+        ctx.vision_bridge.describe_scene_with_question = AsyncMock(return_value="a red cup")
+        ctx.vision_bridge.find_object = AsyncMock(return_value={
+            "class_id": "cup",
+            "confidence": 0.876,
+            "bbox": [1, 2, 3, 4],
+            "distance_m": 1.2,
+        })
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_look_around_uses_vision_bridge(self, vision_context):
+        from askme.mcp.tools.vision_tools import look_around
+
+        ctx = _make_ctx(vision_context)
+        result = await look_around(ctx=ctx)
+        data = json.loads(result)
+        assert data["scene"] == "clear hallway"
+        vision_context.vision_bridge.describe_scene.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_find_target_uses_vision_bridge(self, vision_context):
+        from askme.mcp.tools.vision_tools import find_target
+
+        ctx = _make_ctx(vision_context)
+        result = await find_target("cup", ctx=ctx)
+        data = json.loads(result)
+        assert data["found"] is True
+        assert data["object"] == "cup"
+        assert data["confidence"] == 0.88
+        vision_context.vision_bridge.find_object.assert_awaited_once_with("cup")
+
+    @pytest.mark.asyncio
+    async def test_look_around_no_vision_bridge(self, app_context):
+        from askme.mcp.tools.vision_tools import look_around
+
+        ctx = _make_ctx(app_context)
+        result = await look_around(ctx=ctx)
+        data = json.loads(result)
+        assert data["error"] == "vision not available"
+
+
+class TestChatToolStableContext:
+    @pytest.mark.asyncio
+    async def test_chat_uses_llm_client_and_conversation(self):
+        from askme.mcp.server import AppContext
+        from askme.mcp.tools.vision_tools import chat
+
+        app = AppContext()
+        app.llm_client = AsyncMock()
+        app.llm_client.chat = AsyncMock(return_value="hello")
+        app.conversation = MagicMock()
+        app.conversation.get_messages.return_value = [{"role": "user", "content": "hi"}]
+
+        ctx = _make_ctx(app)
+        result = await chat("hi", ctx=ctx)
+        data = json.loads(result)
+        assert data == {"reply": "hello", "text": "hi"}
+        app.conversation.add_user_message.assert_called_once_with("hi")
+        app.llm_client.chat.assert_awaited_once_with([{"role": "user", "content": "hi"}])
+        app.conversation.add_assistant_message.assert_called_once_with("hello")
+
+    @pytest.mark.asyncio
+    async def test_chat_no_llm_client(self, app_context):
+        from askme.mcp.tools.vision_tools import chat
+
+        ctx = _make_ctx(app_context)
+        result = await chat("hi", ctx=ctx)
+        data = json.loads(result)
+        assert data["error"] == "llm client not available"
 
 
 # ── Skill tool tests ──────────────────────────────────────────

@@ -8,7 +8,7 @@
 
 ```powershell
 cd D:\inovxio\tools\askme
-python -m askme.blueprints.edge_robot
+python -m askme.blueprints.presets.edge_robot
 ```
 
 Dashboard 默认：
@@ -165,7 +165,7 @@ Dashboard 运营诊断会读取：
 | 项 | 约定 |
 | --- | --- |
 | systemd 源文件 | `deploy/askme.service` |
-| systemd 入口 | `python -m askme.blueprints.edge_robot` |
+| systemd 入口 | `python -m askme.blueprints.presets.edge_robot` |
 | 安装脚本 | `bash deploy/install.sh` |
 | 健康端口 | `health_server.port=8765` |
 

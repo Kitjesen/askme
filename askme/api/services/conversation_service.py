@@ -11,10 +11,21 @@ from collections.abc import Callable
 from inspect import Parameter, isawaitable, signature
 from typing import Any
 
-from askme.pipeline.rag_policy import forced_rag_reply
+from askme.api.services.scenario_intent_payloads import (
+    requested_or_runtime_skills,
+    scenario_intent_decision_payload,
+)
+from askme.api.services.space_preview import (
+    SpaceDispatch,
+    space_resolution_evidence_items,
+    space_resolution_preview,
+)
+from askme.pipeline.core.rag_policy import forced_rag_reply
+from askme.robot_interaction.scenario_intents import classify_scenario_intent
 
 ChatHandler = Callable[..., Any]
 MemoryHandler = Any
+CapabilitiesProvider = Callable[[], dict[str, Any]]
 
 
 class EmptyChatText(ValueError):
@@ -54,9 +65,13 @@ class ConversationService:
         chat_max_concurrency: int = 8,
         chat_slow_threshold_ms: float | None = 2000.0,
         chat_diagnostics_history_limit: int = 20,
+        capabilities_provider: CapabilitiesProvider | None = None,
+        space_dispatch: SpaceDispatch | None = None,
     ) -> None:
         self._chat_handler = chat_handler
         self._memory_handler = memory_handler
+        self._capabilities_provider = capabilities_provider
+        self._space_dispatch = space_dispatch
         self._logger = logger or logging.getLogger(__name__)
         self._chat_timeout_s = _optional_positive_float(chat_timeout_s)
         self._chat_max_concurrency = _positive_int(chat_max_concurrency, default=8)
@@ -100,7 +115,26 @@ class ConversationService:
         error_type = ""
         try:
             handler_started = time.perf_counter()
-            result = await self._dispatch_chat_handler_with_timeout(text, speak=speak)
+            conversation_session_id = _clean_optional_text(
+                body.get("conversation_session_id")
+                or body.get("conversation_id")
+                or body.get("chat_session_id")
+            )
+            planning_session_id = _clean_optional_text(body.get("planning_session_id"))
+            runtime_policy = _clean_runtime_policy(
+                body.get("runtime_policy") or body.get("runtime_bridge_mode")
+            )
+
+            if self._chat_handler is None:
+                result = self._offline_chat_result(text=text, speak=speak)
+            else:
+                result = await self._dispatch_chat_handler_with_timeout(
+                    text,
+                    speak=speak,
+                    conversation_session_id=conversation_session_id,
+                    planning_session_id=planning_session_id,
+                    runtime_policy=runtime_policy,
+                )
             timings["handler_ms"] = _elapsed_ms(handler_started)
 
             response_started = time.perf_counter()
@@ -115,6 +149,10 @@ class ConversationService:
             memory_started = time.perf_counter()
             payload = await self.attach_memory_chat_context(payload)
             timings["memory_context_ms"] = _elapsed_ms(memory_started)
+
+            space_started = time.perf_counter()
+            payload = await self.attach_space_chat_context(payload, body=body, text=text)
+            timings["space_context_ms"] = _elapsed_ms(space_started)
             return payload
         except TimeoutError as exc:
             status = "timeout"
@@ -137,19 +175,78 @@ class ConversationService:
                 error_type=error_type,
             )
 
-    async def dispatch_chat_handler(self, text: str, *, speak: bool) -> Any:
+    async def dispatch_chat_handler(
+        self,
+        text: str,
+        *,
+        speak: bool,
+        conversation_session_id: str | None = None,
+        planning_session_id: str | None = None,
+        runtime_policy: str = "disabled",
+    ) -> Any:
         handler = self._chat_handler
         if handler is None:
             raise ChatUnavailable("chat not available")
-        if _handler_accepts_speak(handler):
-            return await _maybe_await(handler(text, speak=speak))
-        return await _maybe_await(handler(text))
+        kwargs: dict[str, Any] = {}
+        if _handler_accepts_keyword(handler, "speak"):
+            kwargs["speak"] = speak
+        if conversation_session_id and _handler_accepts_keyword(
+            handler,
+            "conversation_session_id",
+        ):
+            kwargs["conversation_session_id"] = conversation_session_id
+        if planning_session_id and _handler_accepts_keyword(
+            handler,
+            "planning_session_id",
+        ):
+            kwargs["planning_session_id"] = planning_session_id
+        if _handler_accepts_keyword(handler, "runtime_policy"):
+            kwargs["runtime_policy"] = runtime_policy
+        elif _handler_accepts_keyword(handler, "runtime_bridge_mode"):
+            kwargs["runtime_bridge_mode"] = runtime_policy
+        return await _maybe_await(handler(text, **kwargs))
 
-    async def _dispatch_chat_handler_with_timeout(self, text: str, *, speak: bool) -> Any:
-        call = self.dispatch_chat_handler(text, speak=speak)
+    async def _dispatch_chat_handler_with_timeout(
+        self,
+        text: str,
+        *,
+        speak: bool,
+        conversation_session_id: str | None = None,
+        planning_session_id: str | None = None,
+        runtime_policy: str = "disabled",
+    ) -> Any:
+        call = self.dispatch_chat_handler(
+            text,
+            speak=speak,
+            conversation_session_id=conversation_session_id,
+            planning_session_id=planning_session_id,
+            runtime_policy=runtime_policy,
+        )
         if self._chat_timeout_s is None:
             return await call
         return await asyncio.wait_for(call, timeout=self._chat_timeout_s)
+
+    def _offline_chat_result(self, *, text: str, speak: bool) -> dict[str, Any]:
+        """Return a product-safe response when dashboard runs without a brain loop."""
+
+        return {
+            "reply": "对话大脑还没有接入当前服务。已接入的园区问路、知识证据和现场事件仍会继续检查；如果问题没有依据，系统不会编造答案。",
+            "text": text,
+            "spoken": False,
+            "evidence": [],
+            "degraded": True,
+            "reply_source": "dashboard_offline_fallback",
+            "chat_backend": {
+                "configured": False,
+                "mode": "dashboard_only",
+                "speak_requested": bool(speak),
+            },
+            "answer_policy": {
+                "state": "brain_not_connected",
+                "action": "answer_only_with_deterministic_context",
+                "reason": "chat_handler_not_configured",
+            },
+        }
 
     async def _enter_chat_turn(self) -> None:
         async with self._state_lock:
@@ -264,12 +361,83 @@ class ConversationService:
             "safety_bypass_allowed": False,
             "created_at": time.time(),
         }
+        conversation_session_id = _clean_optional_text(
+            body.get("conversation_session_id")
+            or body.get("conversation_id")
+            or body.get("chat_session_id")
+        )
+        planning_session_id = _clean_optional_text(body.get("planning_session_id"))
+        if conversation_session_id:
+            payload["conversation_session_id"] = conversation_session_id
+        if planning_session_id:
+            payload["planning_session_id"] = planning_session_id
         confidence = body.get("asr_confidence", body.get("confidence"))
         if confidence is not None:
             try:
                 payload["confidence"] = min(max(float(confidence), 0.0), 1.0)
             except (TypeError, ValueError):
                 payload["confidence"] = 0.0
+        return payload
+
+    async def attach_space_chat_context(
+        self,
+        payload: dict[str, Any],
+        *,
+        body: dict[str, Any],
+        text: str,
+    ) -> dict[str, Any]:
+        """Attach read-only park-space resolution evidence for customer Q&A."""
+
+        if self._space_dispatch is None:
+            return payload
+        try:
+            available_skills = requested_or_runtime_skills(body, self._capabilities_provider)
+            decision = classify_scenario_intent(text, available_skills=available_skills)
+            space_resolution = await space_resolution_preview(
+                text=text,
+                body=body,
+                decision=decision,
+                space_dispatch=self._space_dispatch,
+            )
+        except Exception as exc:
+            self._logger.debug("space preview unavailable for chat evidence: %s", exc)
+            return payload
+
+        if decision is None and space_resolution is None:
+            return payload
+
+        preview_payload = {
+            "matched": decision is not None,
+            "decision": scenario_intent_decision_payload(decision),
+            "space_resolution": space_resolution,
+            "policy": {
+                "preview_only": True,
+                "does_not_execute_skill": True,
+                "does_not_start_guide": True,
+                "safe_for_customer_acceptance_testing": True,
+            },
+        }
+        payload.setdefault("scenario_preview", preview_payload)
+        if space_resolution is not None:
+            payload.setdefault("space_resolution", space_resolution)
+
+        if payload.get("rag_blocked"):
+            return payload
+
+        evidence_items = space_resolution_evidence_items(space_resolution)
+        if evidence_items:
+            existing = payload.get("evidence")
+            if not isinstance(existing, list):
+                existing = []
+                payload["evidence"] = existing
+            _append_unique_evidence(existing, evidence_items)
+
+            resolution = space_resolution.get("resolution") if isinstance(space_resolution, dict) else None
+            reply = resolution.get("reply") if isinstance(resolution, dict) else ""
+            if reply:
+                payload["reply"] = reply
+                payload["reply_source"] = "space_cognition"
+                payload["space_answered"] = True
         return payload
 
     def chat_response_payload(
@@ -341,14 +509,28 @@ class ConversationService:
         return payload
 
 
-def _handler_accepts_speak(handler: ChatHandler) -> bool:
+def _handler_accepts_keyword(handler: ChatHandler, keyword: str) -> bool:
     try:
         params = signature(handler).parameters
     except (TypeError, ValueError):
         return True
-    return "speak" in params or any(
+    return keyword in params or any(
         param.kind == Parameter.VAR_KEYWORD for param in params.values()
     )
+
+
+def _clean_optional_text(value: Any) -> str | None:
+    text = "" if value is None else str(value).strip()
+    return text or None
+
+
+def _clean_runtime_policy(value: Any) -> str:
+    policy = str(value or "disabled").strip().lower().replace("-", "_")
+    if policy in {"runtime_first", "first", "bridge_first"}:
+        return "runtime_first"
+    if policy in {"control_only", "controls_only"}:
+        return "control_only"
+    return "disabled"
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -375,6 +557,29 @@ def _positive_int(value: Any, *, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(1, parsed)
+
+
+def _append_unique_evidence(
+    existing: list[Any],
+    new_items: list[dict[str, Any]],
+) -> None:
+    seen = {
+        (
+            str(item.get("source") or ""),
+            str(item.get("record_id") or item.get("source_record_id") or ""),
+        )
+        for item in existing
+        if isinstance(item, dict)
+    }
+    for item in new_items:
+        key = (
+            str(item.get("source") or ""),
+            str(item.get("record_id") or item.get("source_record_id") or ""),
+        )
+        if key in seen:
+            continue
+        existing.append(item)
+        seen.add(key)
 
 
 def _clean_trace_id(value: Any) -> str:

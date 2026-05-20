@@ -16,9 +16,9 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-from askme.llm.intent_router import IntentType
 from askme.pipeline.proactive.base import ProactiveResult
 from askme.pipeline.voice_loop import VoiceLoop
+from askme.robot_interaction import IntentType
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 

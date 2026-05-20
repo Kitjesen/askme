@@ -1,9 +1,9 @@
-﻿"""VoiceModule 鈥?wraps AudioAgent + IntentRouter + VoiceLoop + AddressDetector.
+"""VoiceModule - wires the voice gateway, interaction router, and audio ports.
 
 Canonical wiring::
 
     router = IntentRouter(...)
-    audio = AudioAgent(cfg, ...)
+    voice_stack = build_audio_frontend(cfg, ...)
     voice_loop = VoiceLoop(router=router, pipeline=pipeline, ...)
     address_detector = AddressDetector(...)
 """
@@ -14,23 +14,20 @@ import asyncio
 import logging
 from typing import Any
 
-from askme.agent_shell.thunder_agent_shell import ThunderAgentShell
-from askme.llm.client import LLMClient
-from askme.pipeline.brain_pipeline import BrainPipeline
-from askme.pipeline.skill_dispatcher import SkillDispatcher
-from askme.runtime.module import In, Module, ModuleRegistry, Out
-from askme.tools.tool_registry import ToolRegistry
-
-try:
-    from askme.voice.audio_agent import AudioAgent
-except ModuleNotFoundError:
-    AudioAgent = None  # type: ignore[assignment,misc]
+from askme.agent_shell import AgentShell
+from askme.llm.core.client import LLMClient
+from askme.pipeline.core.brain_pipeline import BrainPipeline
+from askme.pipeline.skills.skill_dispatcher import SkillDispatcher
+from askme.ports import AudioFrontendPort, AudioRouterPort
+from askme.runtime.core.module import In, Module, ModuleRegistry, Out
+from askme.runtime.modules.voice_stack import build_runtime_voice_stack
+from askme.tools.core.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 
 class VoiceModule(Module):
-    """Provides AudioAgent, IntentRouter, VoiceLoop, and AddressDetector."""
+    """Provides audio frontend, voice gateway, router, loop, and gates."""
 
     name = "voice"
     depends_on = ("llm", "tools", "skill", "pipeline")
@@ -41,22 +38,19 @@ class VoiceModule(Module):
     tool_registry_in: In[ToolRegistry]
     skill_in: In[SkillDispatcher]
     pipeline_in: In[BrainPipeline]
-    executor_in: In[ThunderAgentShell]
+    executor_in: In[AgentShell]
 
     # Out port
-    audio_out: Out[AudioAgent]
+    audio_out: Out[AudioFrontendPort]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        from askme.interaction.intent_router import IntentRouter
-        from askme.pipeline.voice_loop import VoiceLoop
-        from askme.robot.ota_bridge import OTABridgeMetrics
-        from askme.tools.builtin_tools import SpeakProgressTool
-        from askme.tools.voice_tools import register_voice_tools
-        from askme.voice.address_detector import AddressDetector
-        from askme.voice.audio_agent import AudioAgent
-        from askme.voice.audio_router import AudioRouter
-        from askme.voice.interaction_gate import InteractionGate
-        from askme.voice.runtime_bridge import VoiceRuntimeBridge
+        from askme.pipeline.channels.voice_loop import VoiceLoop
+        from askme.robot_interaction import (
+            RobotInteractionService,
+        )
+        from askme.telemetry.ota_bridge import OTABridgeMetrics
+        from askme.tools.core.builtin_tools import SpeakProgressTool
+        from askme.tools.voice.voice_tools import register_voice_tools
 
         llm_mod = self.llm_in
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else OTABridgeMetrics()
@@ -74,16 +68,19 @@ class VoiceModule(Module):
         executor_mod = self.executor_in
         agent_shell = getattr(executor_mod, "shell", None) if executor_mod else None
 
-        # AudioRouter
-        self._audio_router = AudioRouter()
-
-        # AudioAgent
-        self._audio = AudioAgent(
+        voice_stack = build_runtime_voice_stack(
             cfg,
             voice_mode=True,
             metrics=ota_metrics,
-            audio_router=self._audio_router,
+            skill_manager=skill_manager,
         )
+        self._audio = voice_stack.audio
+        self._audio_router = voice_stack.audio_router
+        self._asr_provider = voice_stack.asr_provider
+        self._tts_provider = voice_stack.tts_provider
+        self._voice_runtime_bridge = voice_stack.voice_runtime_bridge
+        self._voice_gateway = voice_stack.voice_gateway
+        self._router = voice_stack.router
 
         # Register voice tools
         if tools is not None:
@@ -100,33 +97,22 @@ class VoiceModule(Module):
         if dispatcher is not None:
             dispatcher.set_audio(self._audio)
 
-        # VoiceRuntimeBridge
-        self._voice_runtime_bridge = VoiceRuntimeBridge(
-            cfg.get("runtime", {}).get("voice_bridge", {})
-        )
-
-        # IntentRouter
-        voice_triggers = skill_manager.get_voice_triggers() if skill_manager else {}
-        self._router = IntentRouter(voice_triggers=voice_triggers)
+        self._interaction_service = RobotInteractionService(self._router)
 
         # VoiceLoop
         self._voice_loop = VoiceLoop(
             router=self._router,
             pipeline=pipeline,
             audio=self._audio,
-            voice_runtime_bridge=self._voice_runtime_bridge,
+            voice_runtime_bridge=self._voice_gateway,
             dispatcher=dispatcher,
             audio_router=self._audio_router,
         )
 
-        # AddressDetector
-        self._address_detector = AddressDetector(
-            cfg.get("voice", {}).get("address_detection", {})
-        )
+        # Runtime voice stack owns gate construction; VoiceModule injects into VoiceLoop.
+        self._address_detector = voice_stack.address_detector
         self._voice_loop.set_address_detector(self._address_detector)
-        self._interaction_gate = InteractionGate(
-            cfg.get("voice", {}).get("interaction_gate", {})
-        )
+        self._interaction_gate = voice_stack.interaction_gate
         self._voice_loop.set_interaction_gate(self._interaction_gate)
         self._interaction_perception_provider = _build_interaction_perception_provider(
             registry
@@ -158,13 +144,13 @@ class VoiceModule(Module):
 
     # -- typed accessors ------------------------------------------------
     @property
-    def audio_out(self) -> AudioAgent:
-        """The AudioAgent instance (Out port)."""
+    def audio_out(self) -> AudioFrontendPort:
+        """The audio frontend instance (Out port)."""
         return self._audio
 
     @property
-    def audio(self) -> Any:
-        """The AudioAgent instance."""
+    def audio(self) -> AudioFrontendPort:
+        """The audio frontend instance."""
         return self._audio
 
     @property
@@ -183,6 +169,16 @@ class VoiceModule(Module):
         return self._voice_runtime_bridge
 
     @property
+    def voice_gateway(self) -> Any:
+        """The VoiceGatewayService instance."""
+        return self._voice_gateway
+
+    @property
+    def interaction_service(self) -> Any:
+        """The RobotInteractionService instance."""
+        return self._interaction_service
+
+    @property
     def address_detector(self) -> Any:
         """The AddressDetector instance."""
         return self._address_detector
@@ -193,9 +189,19 @@ class VoiceModule(Module):
         return self._interaction_gate
 
     @property
-    def audio_router(self) -> Any:
-        """The AudioRouter instance."""
+    def audio_router(self) -> AudioRouterPort:
+        """The audio router instance."""
         return self._audio_router
+
+    @property
+    def asr_provider(self) -> Any:
+        """The ASR provider behind the audio frontend."""
+        return self._asr_provider
+
+    @property
+    def tts_provider(self) -> Any:
+        """The TTS provider behind the audio frontend."""
+        return self._tts_provider
 
     def health(self) -> dict[str, Any]:
         return {

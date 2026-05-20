@@ -5,6 +5,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 from askme.perception.scene_intelligence import SceneIntelligence
+from askme.ports import SceneIntelligencePort
+from askme.providers import build_scene_intelligence
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -52,6 +54,12 @@ def _make_scene(
         recent_digest=recent_digest,
     )
     return SceneIntelligence(episodic=ep, session=session)
+
+
+def test_provider_builds_scene_intelligence_port() -> None:
+    scene = build_scene_intelligence(episodic=_make_episodic(), session=MagicMock())
+
+    assert isinstance(scene, SceneIntelligencePort)
 
 
 # ── TestWhoIsAround ───────────────────────────────────────────────────────────

@@ -15,7 +15,7 @@ from .clarification_agent import parse_interrupt_payload
 from .session_state import ClarificationState
 
 if TYPE_CHECKING:
-    from askme.skills.skill_model import SkillDefinition
+    from askme.skills.core.skill_model import SkillDefinition
 
 logger = logging.getLogger(__name__)
 

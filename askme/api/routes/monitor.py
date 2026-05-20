@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.responses import JSONResponse
 
+from askme.api.schemas.conversation import ConversationHistoryResponse
+from askme.api.schemas.monitor import SystemStatusResponse
 from askme.api.services.monitor_service import MonitorService
 
 _NO_STORE_HEADERS = {"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"}
@@ -21,16 +23,43 @@ def register_monitor_routes(
 ) -> None:
     """Register dashboard monitor and conversation history routes."""
 
-    @app.get("/api/status", tags=["Monitor"])
+    app.include_router(create_monitor_router(monitor_service=monitor_service, logger=logger))
+
+
+def create_monitor_router(
+    *,
+    monitor_service: MonitorService,
+    logger: logging.Logger,
+) -> APIRouter:
+    """Create the monitor router without binding it to an app factory."""
+
+    router = APIRouter(tags=["Monitor"])
+
+    @router.get(
+        "/api/status",
+        response_model=SystemStatusResponse,
+        response_model_exclude_none=True,
+    )
     async def system_status() -> JSONResponse:
         """Unified system status - all key metrics in one endpoint."""
-        return JSONResponse(monitor_service.system_status_payload(), headers=_NO_STORE_HEADERS)
+        payload = monitor_service.system_status_payload()
+        response = SystemStatusResponse.model_validate(payload)
+        return JSONResponse(
+            response.model_dump(mode="python", exclude_unset=True),
+            headers=_NO_STORE_HEADERS,
+        )
 
-    @app.get("/api/live", tags=["Monitor"])
+    @router.get(
+        "/api/live",
+        response_model=ConversationHistoryResponse,
+        response_model_exclude_none=True,
+    )
     async def live() -> JSONResponse:
         """Return in-memory conversation history (voice + web chat combined)."""
         try:
-            return JSONResponse(monitor_service.live_payload(), headers=_NO_STORE_HEADERS)
+            payload = monitor_service.live_payload()
+            ConversationHistoryResponse.model_validate(payload)
+            return JSONResponse(payload, headers=_NO_STORE_HEADERS)
         except Exception as exc:
             return JSONResponse(
                 {"messages": [], "count": 0, "error": str(exc)},
@@ -38,12 +67,18 @@ def register_monitor_routes(
                 headers=_CORS_HEADERS,
             )
 
-    @app.get("/api/conversations", tags=["Monitor"])
+    @router.get(
+        "/api/conversations",
+        response_model=ConversationHistoryResponse,
+        response_model_exclude_none=True,
+    )
     async def conversations() -> JSONResponse:
         """Return conversation history for the monitor UI."""
         try:
+            payload = monitor_service.conversation_history_payload()
+            ConversationHistoryResponse.model_validate(payload)
             return JSONResponse(
-                monitor_service.conversation_history_payload(),
+                payload,
                 headers=_NO_STORE_HEADERS,
             )
         except Exception as exc:
@@ -53,3 +88,5 @@ def register_monitor_routes(
                 status_code=500,
                 headers=_CORS_HEADERS,
             )
+
+    return router

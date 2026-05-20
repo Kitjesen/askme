@@ -4,9 +4,10 @@ import asyncio
 import json
 from pathlib import Path
 
-from askme.audit import AuditReviewService
 from askme.pipeline.field_deployment_readiness import build_field_deployment_readiness
 from askme.pipeline.field_operations import FieldOperationsService
+
+from askme.audit import AuditReviewService
 
 
 class _FakeDispatcher:
@@ -349,6 +350,72 @@ def test_field_deployment_readiness_reports_lab_ready_with_sample_smoke(tmp_path
     assert any("closed field event report" in item for item in payload["next_actions"])
 
 
+def test_field_deployment_readiness_uses_device_onboarding_report(tmp_path: Path) -> None:
+    archive = tmp_path / "events.jsonl"
+    scenario_report = tmp_path / "scenario.json"
+    smoke_report = tmp_path / "smoke.json"
+    voice_smoke_report = tmp_path / "voice-smoke.json"
+    notification_smoke_report = tmp_path / "notification-smoke.json"
+    runtime_roundtrip_report = tmp_path / "runtime-roundtrip.json"
+    archive.write_text(
+        json.dumps({"event_id": "field-1", "scenario_id": "fire_or_smoke", "payload": {"source": "sensor"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    scenario_report.write_text(json.dumps({"status": "passed"}), encoding="utf-8")
+    smoke_report.write_text(json.dumps({"status": "passed"}), encoding="utf-8")
+    voice_smoke_report.write_text(json.dumps({"status": "passed"}), encoding="utf-8")
+    notification_smoke_report.write_text(json.dumps({"status": "passed"}), encoding="utf-8")
+    _write_runtime_roundtrip_report(runtime_roundtrip_report)
+
+    payload = build_field_deployment_readiness(
+        config={
+            "archive_path": str(archive),
+            "scenario_report_path": str(scenario_report),
+            "smoke_report_path": str(smoke_report),
+            "voice_smoke_report_path": str(voice_smoke_report),
+            "notification_smoke_report_path": str(notification_smoke_report),
+            "runtime_roundtrip_report_path": str(runtime_roundtrip_report),
+            "device_registry": {
+                "smoke-01": {
+                    "allowed_sources": ["sensor"],
+                    "hmac_secret": "device-secret",
+                    "require_signature": True,
+                }
+            },
+        },
+        archive_path=archive,
+        webhooks={"security": "http://security.local/ding"},
+        webhook_secrets={},
+        device_onboarding={
+            "report_type": "askme.field.device_onboarding_report.v1",
+            "status": "manual_check",
+            "summary": {
+                "registered": 2,
+                "observed": 1,
+                "ready": 1,
+                "blocked": 0,
+                "manual_check": 1,
+            },
+            "devices": [
+                {"device_id": "smoke-01", "onboarding_gate": {"status": "ready"}},
+                {"device_id": "camera-01", "onboarding_gate": {"status": "manual_check"}},
+            ],
+            "next_actions": ["Send one real or lab-signed payload from each registered device."],
+        },
+    )
+
+    assert payload["device_onboarding"]["available"] is True
+    assert payload["device_onboarding"]["ready"] == 1
+    assert payload["device_onboarding"]["manual_check"] == 1
+    assert payload["gates"]["device_onboarding_report_available"] is True
+    assert payload["gates"]["device_onboarding_has_ready_device"] is True
+    assert payload["gates"]["device_onboarding_no_blockers"] is True
+    assert payload["gates"]["device_onboarding_all_ready"] is False
+    assert "field device onboarding still needs manual review" in payload["warnings"]
+    assert any("device onboarding readiness" in item for item in payload["next_actions"])
+
+
 def test_field_deployment_readiness_production_mode_blocks_lab_evidence(tmp_path: Path) -> None:
     archive = tmp_path / "events.jsonl"
     scenario_report = tmp_path / "scenario.json"
@@ -464,6 +531,7 @@ def test_field_deployment_readiness_can_be_production_ready(tmp_path: Path) -> N
         "voice_smoke_report_path": str(voice_smoke_report),
         "notification_smoke_report_path": str(notification_smoke_report),
         "runtime_roundtrip_report_path": str(runtime_roundtrip_report),
+        "device_offline_after_s": 10**12,
         "action_audit": {
             "enabled": True,
             "path": str(audit_path),
@@ -485,6 +553,20 @@ def test_field_deployment_readiness_can_be_production_ready(tmp_path: Path) -> N
                 "allowed_sources": ["sensor"],
                 "hmac_secret": "device-secret",
                 "require_signature": True,
+            }
+        },
+        "managed_objects": {
+            "fire-sensors": {
+                "display_name": "Fire and smoke sensors",
+                "category": "safety",
+                "scenario_ids": ["fire_or_smoke"],
+                "device_sources": ["sensor"],
+                "bindings": {
+                    "vision_models": ["smoke-camera-review"],
+                    "sensor_protocols": ["mqtt-smoke-temperature"],
+                    "skill_packages": ["capability.fire_or_smoke"],
+                    "acceptance_tests": ["tests/scenario_tests/test_field_operations_evaluation.py::fire_or_smoke"],
+                },
             }
         },
         "runtime_callback_hmac_secret": "runtime-callback-secret",
@@ -543,6 +625,7 @@ def test_field_deployment_readiness_can_be_production_ready(tmp_path: Path) -> N
     assert payload["gates"]["action_audit_signed"] is True
     assert payload["gates"]["audit_delivery_retry_queue_empty"] is True
     assert payload["gates"]["trusted_device_events_observed"] is True
+    assert payload["gates"]["device_onboarding_all_ready"] is True
     assert payload["gates"]["runtime_callback_signature_configured"] is True
     assert payload["gates"]["runtime_roundtrip_smoke_passed"] is True
     assert payload["gates"]["runtime_roundtrip_against_existing_server"] is True

@@ -1,504 +1,275 @@
-# askme
+# Askme
 
-> 穹沛科技四足/人形机器人语音 AI 助手 — **听 → 理解 → 回答 → 说**。
-> 支持中英文混合对话、机器人控制、L0–L6 分层记忆、技能扩展、MCP 工具暴露、视觉感知、主动告警。
+## Contributor Start Here
 
-![Python](https://img.shields.io/badge/python-3.10+-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-3500+%20passing-brightgreen)
-![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20aarch64-lightgrey)
+For parallel development, start with the ownership and workflow contracts before
+editing code:
 
----
+- `docs/MODULE_OWNERSHIP.md` maps each collaboration lane to its package scope,
+  exclusions, and required verification command.
+- `docs/MULTI_AGENT_WORKFLOW.md` explains how the lead agent assigns independent
+  work, reserves shared files, and integrates worker results.
+- Boundary-sensitive changes should always run
+  `pytest tests/test_six_layer_package_boundaries.py tests/test_package_migration_compat.py -q`.
 
-## 目录
+Askme 是面向园区、厂区、仓储和景区巡检机器人的现场任务平台。它把语音、文本、知识库、技能、现场事件、运行交接和审计记录组合成一个可交付的机器人产品入口。
 
-- [askme 是什么 / 不是什么](#askme-是什么--不是什么)
-- [5 分钟上手](#5-分钟上手)
-- [6 个 Blueprint —— 选你需要的](#6-个-blueprint--选你需要的)
-- [配置：.env 与 config.yaml](#配置env-与-configyaml)
-- [典型使用场景](#典型使用场景)
-- [作为 MCP 服务给 Claude Desktop / Code 用](#作为-mcp-服务给-claude-desktop--code-用)
-- [扩展：自定义 Skill / Tool](#扩展自定义-skill--tool)
-- [测试与调试](#测试与调试)
-- [部署到 S100P 机器人](#部署到-s100p-机器人)
-- [项目结构](#项目结构)
-- [深入文档](#深入文档)
-- [常见问题](#常见问题)
+Askme 的产品边界很明确：
 
----
+- 用户可以用语音或文本发起问路、巡检、异常处置和知识问答。
+- 系统会把自然语言转成可确认、可审计、可中断的任务或回答。
+- 大模型和语音层不直接控制硬件；机器人动作必须经过 TaskHandoff、SafetyPreflight 和 runtime arbiter。
+- 客户知识必须经过上传、治理、检索和证据展示；没有依据时应要求确认或拒答。
 
-## askme 是什么 / 不是什么
+## 当前产品能力
 
-| ✅ 是 | ❌ 不是 |
-|---|---|
-| 语音 AI 助手 | 机器人操作系统 |
-| 对话流水线 + 记忆 + 技能调度 | 运动控制器（电机/CAN 由 brainstem） |
-| 通过 HTTP/gRPC 调用外部能力 | 导航/SLAM（由 LingTu） |
-| Voice / Text / MCP 多入口 | 视觉推理（由 frame_daemon） |
+| 能力 | 当前状态 | 说明 |
+| --- | --- | --- |
+| 语音任务中心 | 可用 | 麦克风输入、ASR、LLM、TTS、打断和文本兜底由 `voice` 运行时承载。 |
+| 园区巡检机器人运行时 | 可用作试点验证 | 覆盖语音、感知、现场事件、运行交接、控制适配、灯光状态和主动监测。 |
+| 客户知识库 | 已有基础闭环 | 支持上传、预览、审批、重建索引、检索证据和过期/冲突治理。 |
+| 现场事件 | 已有产品链路 | 支持摔倒无法恢复、卡住、电机故障、违停、烟火、垃圾桶、人群聚集、陌生人和问询点触发。 |
+| 空间认知 | 已有园区点位模型 | 支持点位、别名、服务点、路线说明、问路和带路任务基础能力。 |
+| 能力中心 | 已有目录和准入 | 把底层 skills 映射成客户可见能力包、场景蓝图、风险等级和审批依赖。 |
+| MCP 工具服务 | 已有入口 | 可向 MCP 客户端暴露受控工具和资源，不提供原始硬件控制权限。 |
 
-核心链路 6 步：
+## 快速启动
 
-```
-麦克风 ──▶ VAD ──▶ ASR ──▶ LLM ──▶ TTS ──▶ 扬声器
-          (silero)  (sherpa+云) (MiniMax) (MiniMax→edge)
-```
+安装依赖：
 
-记忆 7 层：`L0 运行态 / L1 工作记忆 / L2 会话 / L3 情节 / L4 向量库 / L5 语义索引 / L6 策略模板`。
-
----
-
-## 5 分钟上手
-
-### 1. 安装
-
-```bash
-git clone https://github.com/Kitjesen/askme.git
-cd askme
-pip install -e ".[dev]"          # 含 pytest, ruff
+```powershell
+cd D:\inovxio\tools\askme
+pip install -e ".[dev]"
 ```
 
-可选 extras（按需开启）：
+查看可交付运行蓝图：
 
-```bash
-pip install -e ".[dev,robot,robotmem,embed]"
-#                ^^^   ^^^^^   ^^^^^^^^   ^^^^^
-#                测试  机器人  长期记忆   句向量
+```powershell
+python -m askme.cli runtime blueprints --customer-visible
 ```
 
-### 2. 配置 API Key
+启动文本运行时：
 
-```bash
-cp .env.example .env
+```powershell
+python -m askme.blueprints.presets.text
 ```
 
-`.env` 至少填两个就能跑：
+启动语音任务中心：
 
-```env
-LLM_API_KEY=cr_xxxxxxxx               # Claude relay key (cursor.scihub.edu.kg)
-MINIMAX_API_KEY=eyJhxxx                # MiniMax LLM + TTS, https://platform.minimax.chat/
-MINIMAX_GROUP_ID=18xxxx                # MiniMax 控制台获取
+```powershell
+python -m askme.blueprints.presets.voice
 ```
 
-其余 key（导航/控制/OTA/Telegram）都是可选，缺了对应技能会回复"服务未配置"，主链路不受影响。
+启动园区巡检机器人运行时：
 
-### 3. 跑起来
-
-最小验证（纯文字，无需音频硬件、无需机器人）：
-
-```bash
-python -m askme.blueprints.text
-> 你好
-收到。我是Thunder，穹沛的巡检机器人。等待指令。
+```powershell
+python -m askme.blueprints.presets.edge_robot
 ```
 
-完整语音对话（需要麦克风+扬声器）：
+启动 Web Dashboard：
 
-```bash
-python -m askme.blueprints.voice
+```powershell
+python scripts/dev/run_dashboard_only.py --host 127.0.0.1 --port 8766
 ```
 
-成功标志：日志里看到 `MicInput started`、`VAD threshold=0.5`、`LLM warmup done`。
+然后打开：
 
----
+```text
+http://127.0.0.1:8766/dashboard
+```
 
-## 6 个 Blueprint —— 选你需要的
+## 运行蓝图
 
-Blueprint 是声明式的"功能包"组合（`Runtime.use(A) + Runtime.use(B)`）。所有入口都在 `askme/blueprints/`：
+蓝图是 Askme 的产品运行组合。代码位置：
 
-| Blueprint | 模块数 | 用途 | 启动命令 |
-|---|---|---|---|
-| `text.py` | 6 | 终端文字调试，没有音频依赖 | `python -m askme.blueprints.text` |
-| `voice.py` | 7 | 纯语音对话，听+说+记忆+技能 | `python -m askme.blueprints.voice` |
-| `voice_perception.py` | 11 | 语音 + 视觉感知 + 反应引擎 | `python -m askme.blueprints.voice_perception` |
-| `edge_robot.py` | 17 | **生产配置** — 全量含机器人控制 + LED + 主动巡检 + 健康监控 | `python -m askme.blueprints.edge_robot` |
-| `lingtu_voice.py` | 8 | LingTu 项目专用（S100P 部署，含 Telegram） | `python -m askme.blueprints.lingtu_voice` |
-| `mcp.py` | — | MCP 服务器模式，给 Claude Desktop/Code 调用 | `python -m askme.mcp.server` |
+- `askme/blueprints/catalog/`：蓝图目录、客户可见描述、readiness、交付包。
+- `askme/blueprints/presets/`：具体运行时组合。
+- `askme/blueprints/runner/`：统一启动辅助。
 
-**怎么选**：
+客户可见蓝图：
 
-- 第一次跑 → `text`（5 秒就能对话）
-- 笔记本测语音 → `voice`
-- 装在机器人上 → `edge_robot`
-- 想被 Claude Desktop 当作工具 → `mcp`
+| 蓝图 | 启动命令 | 用途 |
+| --- | --- | --- |
+| 语音任务中心 | `python -m askme.blueprints.presets.voice` | 客户演示、语音问答、语音任务确认，不直接接硬件。 |
+| 语音感知运行时 | `python -m askme.blueprints.presets.voice_perception` | 在语音基础上接入感知 freshness、交互准入和安全状态。 |
+| 园区巡检机器人运行时 | `python -m askme.blueprints.presets.edge_robot` | 面向园区/厂区试点，接入现场事件、控制适配和主动监测。 |
+| 灵途语音导航适配器 | `python -m askme.blueprints.presets.lingtu_voice` | 面向灵途导航项目的站点定制入口。 |
 
----
+内部蓝图：
 
-## 配置：`.env` 与 `config.yaml`
+| 蓝图 | 启动命令 | 用途 |
+| --- | --- | --- |
+| 文本运营控制台 | `python -m askme.blueprints.presets.text` | 研发、交付、CI 和无音频环境调试。 |
+| MCP 工具服务 | `python -m askme.mcp.server` | 向 MCP 客户端提供受控工具能力。 |
 
-### `.env`（机密，git 忽略）
+导出某个蓝图交付包：
 
-| 变量 | 必需？ | 用途 |
-|---|---|---|
-| `LLM_API_KEY` | ✅ | Claude relay key（OpenAI 兼容，cursor.scihub.edu.kg） |
-| `LLM_BASE_URL` | ✅ | relay endpoint，默认 `https://cursor.scihub.edu.kg/api/v1` |
-| `MINIMAX_API_KEY` | ✅ | MiniMax LLM + TTS |
-| `MINIMAX_GROUP_ID` | ✅ | MiniMax 账号 group |
-| `DASHSCOPE_API_KEY` | Cloud ASR 硬门时需要 | Alibaba Cloud/DashScope 实时 ASR |
-| `TTS_VOICE_ID` | 默认 `male-qn-qingse` | TTS 音色 |
-| `LOCAL_EMBED_URL` | 可选 | 本地句向量服务，加速记忆检索 |
-| `NAV_GATEWAY_URL` | 装在机器人才需要 | Thunder/nav-gateway 导航网关 |
-| `DOG_CONTROL_SERVICE_URL` | 装在机器人才需要 | 控制服务（站立/坐下/巡检） |
-| `DOG_SAFETY_SERVICE_URL` | 装在机器人才需要 | E-STOP 服务 |
-| `TELEGRAM_BOT_TOKEN` | 可选 | 启用 Telegram 入口（@BotFather 申请） |
-| `OTA_SERVER_URL` | 可选 | OTA 升级服务 |
+```powershell
+python -m askme.cli runtime blueprints --name park --delivery-package --json
+```
 
-### `config.yaml`（非机密，git 跟踪）
+## Dashboard 页面
 
-主要调整项：
+Dashboard 是客户和交付人员查看产品能力的入口。当前重点页面：
+
+- `/dashboard`：总览、对话、现场事件、运行状态。
+- `/dashboard/knowledge`：客户知识库，查看已有知识、上传、预览、审批、重建索引和证据。
+- `/dashboard/capabilities`：机器人能力中心，查看巡检、安防、访客服务、空间认知、语音、审计等能力。
+- `/dashboard/projects`：客户项目、对象目录、模板和交付包。
+- `/dashboard/voice`：语音状态、音色、播放策略和语音健康。
+
+客户演示时优先走这条顺序：
+
+1. 打开总览，确认系统在线。
+2. 打开客户知识库，确认机器人“知道什么”和“依据在哪里”。
+3. 打开能力中心，说明机器人能做哪些业务动作、哪些需要审批。
+4. 打开现场事件，演示违停、烟火、垃圾桶、机器人故障等场景。
+5. 进入对话，演示问路、巡检和知识问答。
+
+## 典型业务场景
+
+| 场景 | 产品行为 |
+| --- | --- |
+| 游客问路 | 在服务点识别停留和交互意图，解析目的地，给出语音指路；必要时转带路任务。 |
+| 游客带路 | 先确认目的地，再检查路线是否可通行，低速引导并记录服务结果。 |
+| 车辆违停 | 检测非停车区停车，拍照、附地点、通知保安并归档事件。 |
+| 烟火监测 | 接入温度、烟雾或视觉烟火证据，播报风险，通知保安并归档。 |
+| 垃圾桶满溢 | 定点检测垃圾桶状态，通知保洁并生成事件记录。 |
+| 夜间陌生人 | 识别窗边、角落等重点区域陌生人，拍照并通知保安。 |
+| 机器人异常 | 摔倒无法恢复、卡住、电机故障时播报、通知、归档并等待处理。 |
+| 突发巡检 | 管理员发起临时任务，系统中断或暂停当前巡检，交接给 runtime。 |
+
+## 知识库和记忆
+
+Askme 把两类记忆分开：
+
+- 客户知识库：园区点位、路线、SOP、设备说明、FAQ，用于回答和证据展示。
+- 机器人行为记忆：长期行为、任务偏好、历史运行经验，默认不和客户知识混在一起。
+
+配置建议：
 
 ```yaml
-brain:
-  model: MiniMax-M2.7-highspeed     # 主力 LLM
-  voice_model: MiniMax-M2.7-highspeed  # 语音模式专用（更低 TTFT）
-  max_response_chars: 200            # 语音回复上限（避免播报过长）
-  soul_file: prompts/SOUL.md         # 人格定义入口
-
 memory:
   enabled: true
-  backend: robotmem                  # mem0 / robotmem / vector 三选一
-  embed_model: paraphrase-multilingual-MiniLM-L12-v2
-
-voice:
-  input_device: null                 # 麦克风索引（null=系统默认）
-  mic_native_rate: 44100             # Windows Realtek 一般 44100，HKMIC 是 48000
-  asr:
-    model_dir: models/asr/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30
-    rule1_min_trailing_silence: 0.6  # 多久静音算句子结束
-  vad:
-    threshold: 0.5                   # silero VAD 阈值，0.5 默认
-  noise_gate_peak: 50                # 低于此 peak 跳过 VAD（噪底过滤）
-  echo_gate_peak: 800                # TTS 播报时的麦克风门限（防自激）
+  customer_knowledge_backend: vector
+  robot_behavior_memory_backend: robotmem
+  robot_behavior_memory_enabled: false
 ```
 
-完整字段见 `config.yaml`，每行都有注释。
+产品原则：
 
-### 模型文件
+- 过期、冲突、未审批知识不能直接进入回答。
+- 回答气泡应展示引用依据。
+- 没有证据时，系统应要求确认或拒答。
+- 每条知识需要责任人、来源、版本和有效期。
 
-```bash
-python scripts/dev/download_models.py    # 自动下载 sherpa-onnx ASR + silero VAD
+## 语音链路
+
+推荐国产低延迟链路：
+
+```text
+实时 ASR -> MiniMax-M2.7-highspeed -> TaskHandoff / SafetyPreflight / runtime arbiter -> MiniMax Speech 2.8 TTS
 ```
 
-或手动：
-- VAD: https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx → `models/vad/silero_vad.onnx`
-- ASR: https://github.com/k2-fsa/sherpa-onnx/releases (找 `streaming-zipformer-zh-int8-2025-06-30`) → 解压到 `models/asr/`
+语音体验需要关注：
 
----
+- 什么时候可以说话：UI 必须显示“正在听 / 正在思考 / 正在播报 / 可打断”。
+- 为什么慢：拆分 ASR、LLM、TTS、播放和打断延迟。
+- 为什么误触发：InteractionGate 需要结合服务点、声源、视觉、距离、停留和感知 freshness。
+- 为什么断断续续：需要检查 TTS 分片、播放缓冲、声卡采样率和回声门限。
 
-## 典型使用场景
+常用诊断：
 
-### 场景 1：终端文字对话（最快验证）
-
-```bash
-python -m askme.blueprints.text
+```powershell
+python -m askme.cli runtime audio-devices
+python -m askme.cli runtime voice-health --json
+python -m askme.cli runtime voice-online-smoke
+python -m askme.cli runtime sunrise-voice-readiness --json
 ```
 
-```
-> 你好
-收到。我是Thunder。等待指令。
-> 现在几点
-[运行时状态] 14:23, ESTOP=False
-现在 14:23。
-> 站起来
-执行中。已发送 stand 命令。
-```
+## 现场交付门禁
 
-### 场景 2：完整语音对话
+客户试点前至少要提供这些证据：
 
-```bash
-python -m askme.blueprints.voice
-```
+- 蓝图交付包：`runtime blueprints --delivery-package`
+- 现场 readiness：`runtime field-readiness --json`
+- 语音健康：`runtime voice-health --json`
+- 现场事件冒烟：`runtime field-smoke-suite`
+- DingTalk 通知预检：`runtime field-notification-preflight`
+- 审计完整性：`runtime field-audit-integrity`
 
-对着麦说 `你好`，系统会：
-1. VAD 检测到语音
-2. 本地 sherpa-onnx + 云端 DashScope 并行 ASR（先到先用）
-3. LLM 流式生成（首字 ~500ms）
-4. MiniMax TTS 流式播报，可被打断（barge-in）
+示例：
 
-### 场景 3：装在 NOVA Dog 机器人上
-
-```bash
-# .env 增加
-DOG_CONTROL_SERVICE_URL=http://localhost:5080
-DOG_SAFETY_SERVICE_URL=http://localhost:5070
-NAV_GATEWAY_URL=http://localhost:8088
-
-python -m askme.blueprints.edge_robot
+```powershell
+python -m askme.cli runtime field-readiness --json
+python -m askme.cli runtime field-smoke-suite --json
+python -m askme.cli runtime field-audit-integrity --json
 ```
 
-支持指令：
-- "站起来" / "坐下" → DogControlService
-- "去仓库 A" → NAV gateway → LingTu 导航
-- "停！" → tier-0 拦截（不走 LLM），直接打 E-STOP
-- "检查电池" → HealthModule 读机器人状态
+## 测试
 
-### 场景 4：把 askme 暴露给 Claude Desktop / Code
+默认 pytest 分片只跑快测；`pyproject.toml` 通过 `-m "not slow"` 排除慢测。
+`tests/conftest.py` 会自动把 `tests/scenario_tests/`、`*e2e*` 和 benchmark
+测试标为慢测分片。
 
-见下一节 [作为 MCP 服务](#作为-mcp-服务给-claude-desktop--code-用)。
-
-### 场景 5：批量打 LLM 推理性能
-
-```bash
-python scripts/bench/bench_ttft.py    # LLM 首字延迟
-python scripts/bench/benchmark_all.py # 端到端 P50/P95
+```powershell
+python -m pytest tests -q
+python -m pytest tests -m "slow" -q
+python -m pytest tests -m "scenario" -q
+python -m pytest tests -m "e2e or benchmark" -q
 ```
 
----
+常用快速回归：
 
-## 作为 MCP 服务给 Claude Desktop / Code 用
-
-askme 实现了 [Model Context Protocol](https://modelcontextprotocol.io/) 服务端。配置后，Claude Desktop / Code 可以直接调用 askme 的工具集（move、scan、vision、robot_api、bash 沙箱等）。
-
-### Claude Desktop 配置
-
-`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) 或 `%APPDATA%\Claude\claude_desktop_config.json` (Win)：
-
-```json
-{
-  "mcpServers": {
-    "askme": {
-      "command": "python",
-      "args": ["-m", "askme.mcp.server"],
-      "cwd": "D:/inovxio/tools/askme",
-      "env": {
-        "LLM_API_KEY": "cr_xxx",
-        "MINIMAX_API_KEY": "xxx"
-      }
-    }
-  }
-}
+```powershell
+python -m pytest tests/test_blueprints_catalog.py tests/test_cli.py -q
+python -m pytest tests/test_capability_center.py tests/test_memory_bridge.py -q
+python -m pytest tests/test_api_route_dependency_injection.py -q
 ```
 
-### Claude Code 配置
+本地修改蓝图、API、记忆或能力中心后，至少运行：
 
-`.mcp.json` 在项目根：
-
-```json
-{
-  "mcpServers": {
-    "askme": {
-      "command": "askme-mcp"
-    }
-  }
-}
+```powershell
+python -m pytest tests/test_package_migration_compat.py -q
 ```
-
-启动后在 Claude 里输入 `/mcp` 能看到 askme 暴露的工具。
-
----
-
-## 扩展：自定义 Skill / Tool
-
-### 加一个 Skill（用户视角的能力，"去仓库A巡检"）
-
-1. 写 `askme/skills/builtin/<name>/SKILL.md`：
-
-   ```markdown
-   ---
-   name: inspect_warehouse_a
-   trigger:
-     voice: ["去仓库A", "巡检A区"]
-     intent: "warehouse_inspect"
-   ---
-
-   去仓库 A 走一圈，记录任何异常。
-   ```
-
-2. （可选）加代码契约 `askme/skills/contracts_builtin.py`：
-
-   ```python
-   @skill_contract("inspect_warehouse_a")
-   async def _(ctx: SkillContext) -> SkillResult:
-       await ctx.move_tool.go_to("warehouse_a")
-       findings = await ctx.scan_tool.scan_objects()
-       return SkillResult.ok(summary=f"巡检完成，发现 {len(findings)} 项")
-   ```
-
-3. 跑 `python -m askme.blueprints.voice`，说 `"去仓库A"` 即可触发。
-
-### 加一个 Tool（LLM tool-calling 视角的原子操作）
-
-1. 在 `askme/tools/` 新建 `my_tool.py`，继承 `BaseTool`：
-
-   ```python
-   from askme.tools.tool_registry import BaseTool, ToolRegistry
-
-   class GetBatteryTool(BaseTool):
-       name = "get_battery"
-       description = "读取机器人电池电量百分比"
-       parameters = {"type": "object", "properties": {}}
-
-       async def execute(self, **kwargs) -> dict:
-           return {"battery_pct": 87}
-
-   def register_battery_tool(registry: ToolRegistry) -> None:
-       registry.register(GetBatteryTool())
-   ```
-
-2. 在 `askme/runtime/modules/tools_module.py` 的 `build()` 里 `import` 并调用：
-
-   ```python
-   from askme.tools.my_tool import register_battery_tool
-   register_battery_tool(tools)
-   ```
-
-   现有的工具批量注册入口是 `register_builtin_tools(tools, ...)` —— 你的新工具
-   可以单独注册或加入 `askme/tools/builtin_tools.py::register_builtin_tools`。
-
-3. LLM 接下来可以调用 `get_battery`。
-
-详细架构见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
-
----
-
-## 测试与调试
-
-```bash
-# 全量测试（~2 分钟，3500+ tests）
-python -m pytest -q
-
-# 只跑某个模块
-python -m pytest tests/test_voice_loop.py -v
-
-# 看覆盖率
-python -m pytest --cov=askme --cov-report=html
-open htmlcov/index.html
-
-# Lint
-ruff check askme/ tests/
-```
-
-### Debug 一次具体对话
-
-```bash
-# 打开 trace
-LOG_LEVEL=DEBUG python -m askme.blueprints.text
-
-# 看 spans
-ls .omc/state/sessions/*/traces/
-```
-
-### 麦克风/扬声器自检（S100P）
-
-```bash
-python -m askme runtime voice-health --json
-python -m askme runtime sunrise-voice-readiness --json
-python -m askme runtime sunrise-voice-readiness --require-cloud-asr --json
-python -m askme runtime s100p-readiness-bundle --field --room-loop-trials 3 --json
-python scripts/bench/s100p_audio_check.py
-python scripts/bench/check_output_device.py
-```
-
-`voice-health` 是纯软件门；`sunrise-voice-readiness` 会额外要求 Sunrise/S100P
-上的 MCP01 USB 音频证据。若在 Windows 开发机或未接 S100P 声卡的主机上返回
-`degraded`，应记录为硬件阻塞，不要当作本地软件链路失败。
-部署策略要求云 ASR 时，加 `--require-cloud-asr`；现场交接优先使用
-`s100p-readiness-bundle --field`，把房间回环、Cloud ASR 现场硬门、健康端点语义、
-Prometheus 健康值、systemd 日志和 change-event/OTREV 闭环证据一起纳入必过门。
-`s100p-readiness-bundle` 会把自动证据和 `manifest.json` 归档到
-`artifacts/s100p/<timestamp>-<hostname>/`，现场验收优先使用这个入口。
-
-S100P 现场验收按 [`docs/OPERATIONS.md`](docs/OPERATIONS.md) 采集证据并签核。
-
----
-
-## 部署到 S100P 机器人
-
-### 1. 复制代码
-
-```bash
-REMOTE_DIR=/home/sunrise/data/inovxio/askme
-ssh sunrise@192.168.66.190 "mkdir -p $REMOTE_DIR"
-bash scripts/dev/sync_sunrise.sh
-```
-
-### 2. 安装系统依赖（aarch64）
-
-```bash
-ssh sunrise@192.168.66.190
-sudo apt-get install libportaudio2 libsndfile1
-cd /home/sunrise/data/inovxio/askme
-pip install -e ".[dev,robot,robotmem]"
-```
-
-注意：`models/asr/`、`models/vad/` 不通过代码同步，单独传。
-
-### 3. systemd 服务
-
-```bash
-bash deploy/install.sh
-sudo systemctl start askme.service
-sudo systemctl status askme.service --no-pager
-journalctl -u askme.service -f
-```
-
-生产入口以 `deploy/askme.service` 为准，运行 `python -m askme.blueprints.edge_robot`。
-`scripts/runtime/services/askme.service` 仅保留为 legacy/manual debug 参考，不作为 S100P 上线入口。
-
-### S100P 已知坑
-
-- **声卡顺序会变**：每次启动确认 `card0/card1`，调整 `voice.input_device`
-- **HKMIC 48kHz 2ch**：MicInput 自动重采样到 16kHz mono；MCP01 麦克风硬件坏，只能当扬声器
-- **legacy askme 抢设备**：`pkill -f "askme --legacy"` 后再启动新 blueprint
-- **HuggingFace 直连超时**：用 `HF_ENDPOINT=https://hf-mirror.com` 或预下载模型
-- **numpy ABI**：`ele_planner.so` 要 numpy 1.x，需独立 venv `/tmp/venv_np1`
-
----
 
 ## 项目结构
 
-```
+```text
 askme/
-├── blueprints/          # 6 个声明式入口（voice/text/edge_robot/...）
-├── runtime/
-│   ├── module.py        # Module ABC + In/Out/Required 端口 + 拓扑装配
-│   └── modules/         # 17 个 Module：LLM/Memory/Pipeline/Skill/Voice/Text/...
-├── llm/                 # LLM 客户端 + 流式 + intent_router (ESTOP→quick→general)
-├── memory/              # L1/L2/L3/L4/L5/L6 + reflect + consolidate
-├── voice/               # MicInput / VAD / ASR (sherpa+cloud) / TTS (MiniMax+fallback)
-├── pipeline/            # BrainPipeline / VoiceLoop / TextLoop / ProactiveAgent
-├── perception/          # ChangeDetector / WorldState / VisionBridge
-├── reaction/            # 11 条规则的 ReactionEngine
-├── skills/              # SkillManager + 41 个 SKILL.md
-├── tools/               # 24 个 LLM tool-calling 实现
-├── robot/               # Pulse(DDS) / DogSafetyClient / DogControlClient / LED / OTA
-├── mcp/                 # MCP 服务器（暴露 tools/resources）
-└── schemas/             # 类型化消息 dataclass
+  api/            FastAPI 路由和产品 API 表面
+  audit/          审计查询、导出、完整性和复核
+  blueprints/     产品运行蓝图
+  cognition/      认知规划、任务理解和上下文
+  memory/         客户知识库和机器人行为记忆
+  pipeline/       现场事件、空间认知、交付 readiness
+  runtime/        Runtime 模块组合和运行服务
+  skills/         技能、能力包和技能准入
+  static/         Dashboard 前端
+  voice/          语音输入、ASR、TTS、播放和诊断
+docs/
+  PRODUCT.md      产品手册和路线图
+  ARCHITECTURE.md 架构说明
+  OPERATIONS.md   运维和交付说明
 ```
 
-更详细分层见 `docs/ARCHITECTURE.md`。
+## 交付边界
 
----
+可以对客户承诺：
 
-## 深入文档
+- 支持受控场景下的语音问路、知识问答、巡检任务和现场事件处理。
+- 支持试点项目的能力中心、知识库、现场事件和审计闭环。
+- 支持通过配置和交付包复制到不同客户项目。
 
-| 文件 | 内容 |
-|---|---|
-| [`prompts/SOUL.md`](prompts/SOUL.md) | 语音人格定义（身份/风格/边界）— 改人格只动这个文件 |
-| [`docs/PRODUCT.md`](docs/PRODUCT.md) | 产品定位、客户演示路径、已完成能力、下一步路线 |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 模块边界、语音/RAG/感知/runtime 链路、安全不变量 |
-| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | 配置、启动、S100P 验收、证据包、排障 |
+不能在没有现场证据前承诺：
 
----
+- 无人值守生产运行。
+- 任意开放域问答。
+- 大模型直接控制机器人硬件。
+- 未配置真实传感器、通知和机器人控制网关时的真实处置效果。
 
-## 常见问题
+## 进一步文档
 
-**Q: `OSError: PortAudio library not found`**
-A: `sudo apt-get install libportaudio2`（Linux）或 `brew install portaudio`（macOS）。
-
-**Q: 启动后没声音 / 麦克风不响应**
-A: 跑 `python scripts/bench/s100p_audio_check.py`，确认 `voice.input_device` 索引。Windows Realtek 一般 `null` 即可，S100P HKMIC 一般为 0。
-
-**Q: `models/vad/silero_vad.onnx failed. File doesn't exist`**
-A: 跑 `python scripts/dev/download_models.py`，或手动从 silero-vad 仓库下载。
-
-**Q: LLM 响应慢 / 超时**
-A: `config.yaml` 里调小 `brain.timeout`，或换更轻的 `voice_model` (`MiniMax-M2.5-highspeed`)。
-
-**Q: 记忆检索慢**
-A: 启用 `LOCAL_EMBED_URL`，或换 `memory.backend: robotmem`（默认就是）。
-
-**Q: TTS 没声音但 LLM 有输出**
-A: 检查 `MINIMAX_API_KEY` 余额，TTS 自动 fallback 到 sherpa→edge，但 fallback 链中断时静默失败。
-
-**Q: Windows 上 `ValueError: set_wakeup_fd only works in main thread`**
-A: askme 已处理 Windows 不兼容；如果还报错，确认在主线程入口跑（不要套到 thread pool）。
+- [产品手册](docs/PRODUCT.md)
+- [架构说明](docs/ARCHITECTURE.md)
+- [运维交付](docs/OPERATIONS.md)

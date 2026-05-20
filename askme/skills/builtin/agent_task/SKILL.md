@@ -1,6 +1,6 @@
 ---
 name: agent_task
-description: 自主完成复杂任务——研究/写脚本/分析数据/自动化/查资料（调用 ThunderAgentShell 执行）
+description: 自主完成复杂任务——研究/写脚本/分析数据/自动化/查资料（调用自主执行 Agent Shell）
 version: 2.0.0
 trigger: voice
 timeout: 120
@@ -30,7 +30,7 @@ create_skill
 
 ## Prompt
 
-此技能路由至 ThunderAgentShell.run_task()，系统提示词由 _build_agent_system_prompt() 动态生成。
+此技能路由至自主执行 Agent Shell，系统提示词由运行时根据当前项目配置动态生成。
 本 Prompt 节不直接使用，但 voice_trigger 和 safety_level 由 SkillManager 读取用于路由和确认。
 
 任务：{{user_input}}

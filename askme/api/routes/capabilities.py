@@ -3,23 +3,107 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from askme.api.schemas.blueprints import (
+    BlueprintCatalogResponse,
+    BlueprintDeliveryPackageResponse,
+    BlueprintDetailResponse,
+)
+from askme.api.schemas.capabilities import (
+    CapabilityCenterResponse,
+    CapabilityPackageCatalogResponse,
+    CapabilityPackageReadinessResponse,
+    RuntimeCapabilitiesResponse,
+    ScenarioIntentCatalogResponse,
+    ScenarioIntentPreviewResponse,
+)
+from askme.api.services.blueprint_payloads import (
+    BlueprintsProvider,
+    available_blueprint_names,
+    blueprint_item_from_payload,
+    blueprint_runtime_summary,
+    load_blueprints_payload,
+)
+from askme.api.services.capability_package_payloads import (
+    CapabilitiesProvider,
+    capability_center_from_payload,
+    capability_package_catalog,
+    default_product_capability_center,
+    inventory_from_capabilities_payload,
+    package_catalog_summary,
+    package_readiness_contract,
+    package_release_summary,
+    readiness_inventory,
+    readiness_kind,
+)
+from askme.api.services.http_helpers import require_json_object
+from askme.api.services.scenario_intent_payloads import (
+    requested_or_runtime_skills,
+    scenario_intent_decision_payload,
+    scenario_intent_rule_payload,
+)
+from askme.api.services.space_preview import SpaceDispatch, space_resolution_preview
 from askme.contracts import (
-    PackageRuntimeInventory,
     evaluate_capability_package_readiness,
     evaluate_scenario_package_readiness,
 )
-
-CapabilitiesProvider = Callable[[], dict[str, Any]]
-BlueprintsProvider = Callable[[], dict[str, Any]]
+from askme.robot_interaction.scenario_intents import (
+    SCENARIO_INTENT_RULES,
+    classify_scenario_intent,
+)
 
 _NO_STORE_HEADERS = {"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"}
 _CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
+
+
+def _safe_capabilities_payload(provider: CapabilitiesProvider | None) -> dict[str, object]:
+    """Return a capabilities payload when runtime is wired, otherwise an empty snapshot."""
+
+    if provider is None:
+        return {}
+    payload = provider()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _empty_capability_center(blueprints_provider: BlueprintsProvider | None) -> dict[str, object]:
+    """Return the product-level capability center shell for dashboard-only mode."""
+
+    return {
+        "title": "Robot Capability Center",
+        "summary": {
+            "group_count": 0,
+            "enabled_skill_count": 0,
+            "installed_skill_count": 0,
+        },
+        "groups": [],
+        "package_readiness": package_readiness_contract(),
+        "runtime_blueprints": blueprint_runtime_summary(load_blueprints_payload(blueprints_provider)),
+        "policy": {
+            "runtime_capability_snapshot_available": False,
+            "runtime_blueprints_remain_visible_without_live_robot": True,
+            "capability_packages_require_runtime_wiring_before_enablement": True,
+        },
+    }
+
+
+def _capability_center_snapshot(
+    capabilities_provider: CapabilitiesProvider | None,
+) -> tuple[dict[str, object], dict[str, object], bool]:
+    """Return runtime payload, capability center, and whether it came from live runtime."""
+
+    payload = _safe_capabilities_payload(capabilities_provider)
+    center = capability_center_from_payload(payload)
+    if center:
+        return payload, center, True
+
+    fallback = default_product_capability_center()
+    if fallback:
+        return {"skills": {"capability_center": fallback}}, fallback, False
+
+    return payload, {}, False
 
 
 def register_capability_routes(
@@ -27,11 +111,17 @@ def register_capability_routes(
     *,
     capabilities_provider: CapabilitiesProvider | None,
     blueprints_provider: BlueprintsProvider | None = None,
+    space_dispatch: SpaceDispatch | None = None,
     logger: logging.Logger,
 ) -> None:
     """Register runtime capability and customer capability-center routes."""
 
-    @app.get("/api/capabilities", tags=["System"])
+    @app.get(
+        "/api/capabilities",
+        tags=["System"],
+        response_model=RuntimeCapabilitiesResponse,
+        response_model_exclude_none=True,
+    )
     async def capabilities() -> JSONResponse:
         """Return the runtime profile, components, and generated contracts."""
         if capabilities_provider is None:
@@ -39,80 +129,92 @@ def register_capability_routes(
                 {"error": "capabilities not available"},
                 status_code=503,
                 headers=_CORS_HEADERS,
-            )
+        )
         try:
             payload = capabilities_provider()
-            return JSONResponse(payload, headers=_NO_STORE_HEADERS)
+            response = RuntimeCapabilitiesResponse.model_validate(payload)
+            return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
             logger.error("Capabilities endpoint failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-    @app.get("/api/capability-center", tags=["System"])
+    @app.get(
+        "/api/capability-center",
+        tags=["System"],
+        response_model=CapabilityCenterResponse,
+        response_model_exclude_none=True,
+    )
     async def capability_center() -> JSONResponse:
         """Return customer-facing grouped robot capabilities."""
-        if capabilities_provider is None:
-            return JSONResponse(
-                {"error": "capabilities not available"},
-                status_code=503,
-                headers=_CORS_HEADERS,
-            )
         try:
-            payload = capabilities_provider()
-            center = (
-                payload.get("skills", {}).get("capability_center")
-                if isinstance(payload, dict)
-                else None
+            _payload, center, runtime_available = _capability_center_snapshot(
+                capabilities_provider
             )
-            if not center and isinstance(payload, dict):
-                center = (
-                    payload.get("components", {})
-                    .get("skill", {})
-                    .get("capabilities", {})
-                    .get("capability_center")
-                )
-            if isinstance(center, dict):
+            if center:
                 center = {
                     **center,
-                    "package_readiness": _package_readiness_contract(),
+                    "package_readiness": package_readiness_contract(),
+                    "runtime_blueprints": blueprint_runtime_summary(
+                        load_blueprints_payload(blueprints_provider)
+                    ),
+                    "policy": {
+                        **(
+                            center.get("policy", {})
+                            if isinstance(center.get("policy"), dict)
+                            else {}
+                        ),
+                        "runtime_capability_snapshot_available": runtime_available,
+                        "default_product_catalog_used": not runtime_available,
+                        "runtime_blueprints_remain_visible_without_live_robot": True,
+                        "capability_packages_require_runtime_wiring_before_enablement": True,
+                    },
                 }
-            return JSONResponse(center or {}, headers=_NO_STORE_HEADERS)
+            response = CapabilityCenterResponse.model_validate(
+                center if center else _empty_capability_center(blueprints_provider)
+            )
+            return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
             logger.error("Capability center endpoint failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-    @app.get("/api/capability-packages", tags=["System"])
+    @app.get(
+        "/api/capability-packages",
+        tags=["System"],
+        response_model=CapabilityPackageCatalogResponse,
+        response_model_exclude_none=True,
+    )
     async def capability_packages() -> JSONResponse:
         """Return customer-visible capability and scenario package catalogs."""
-        if capabilities_provider is None:
-            return JSONResponse(
-                {"error": "capabilities not available"},
-                status_code=503,
-                headers=_CORS_HEADERS,
-            )
         try:
-            payload = capabilities_provider()
-            if not isinstance(payload, dict):
-                payload = {}
-            center = _capability_center_from_payload(payload)
-            catalog = _capability_package_catalog(center)
-            return JSONResponse(
+            payload, center, runtime_available = _capability_center_snapshot(
+                capabilities_provider
+            )
+            catalog = capability_package_catalog(center)
+            runtime_blueprints = blueprint_runtime_summary(
+                load_blueprints_payload(blueprints_provider)
+            )
+            response = CapabilityPackageCatalogResponse.model_validate(
                 {
                     "ok": True,
-                    "summary": _package_catalog_summary(catalog),
-                    "release_summary": _package_release_summary(catalog),
+                    "summary": package_catalog_summary(catalog),
+                    "release_summary": package_release_summary(catalog),
                     "capability_packages": catalog["capability_packages"],
                     "scenario_packages": catalog["scenario_packages"],
-                    "inventory": _inventory_from_capabilities_payload(payload).to_dict(),
-                    "readiness": _package_readiness_contract(),
+                    "inventory": inventory_from_capabilities_payload(payload).to_dict(),
+                    "runtime_blueprints": runtime_blueprints,
+                    "readiness": package_readiness_contract(),
                     "policy": {
                         "capability_packages_are_customer_enablement_units": True,
                         "scenario_packages_are_delivery_scope_units": True,
+                        "runtime_blueprints_are_delivery_profiles": True,
+                        "runtime_capability_snapshot_available": runtime_available,
+                        "default_product_catalog_used": not runtime_available,
                         "blocked_packages_must_not_be_enabled": True,
                         "ready_packages_still_require_site_validation": True,
                     },
-                },
-                headers=_NO_STORE_HEADERS,
+                }
             )
+            return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
             logger.error("Capability package catalog endpoint failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
@@ -141,22 +243,25 @@ def register_capability_routes(
             },
         )
 
-    @app.post("/api/capability-packages/readiness", tags=["System"])
+    @app.post(
+        "/api/capability-packages/readiness",
+        tags=["System"],
+        response_model=CapabilityPackageReadinessResponse,
+        response_model_exclude_none=True,
+    )
     async def capability_package_readiness(request: Request) -> JSONResponse:
         """Evaluate whether a capability or scenario package can be enabled."""
         try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        if not isinstance(body, dict):
+            body = require_json_object(await request.json())
+        except ValueError as exc:
             return JSONResponse(
-                {"ok": False, "reason": "json_object_required"},
-                status_code=422,
+                {"ok": False, "reason": "json_object_required", "error": str(exc)},
+                status_code=400,
                 headers=_CORS_HEADERS,
             )
         manifest = body.get("manifest") if isinstance(body.get("manifest"), dict) else body
-        inventory = _readiness_inventory(body, capabilities_provider)
-        kind = _readiness_kind(body, manifest)
+        inventory = readiness_inventory(body, capabilities_provider)
+        kind = readiness_kind(body, manifest)
         if kind == "scenario_package":
             readiness = evaluate_scenario_package_readiness(manifest, inventory=inventory)
         elif kind == "capability_package":
@@ -171,7 +276,7 @@ def register_capability_routes(
                 status_code=422,
                 headers=_CORS_HEADERS,
             )
-        return JSONResponse(
+        response = CapabilityPackageReadinessResponse.model_validate(
             {
                 "ok": True,
                 "kind": readiness["kind"],
@@ -182,346 +287,269 @@ def register_capability_routes(
                     "manual_check_requires_human_acceptance": True,
                     "ready_still_requires_site_validation_for_robot_hardware": True,
                 },
+            }
+        )
+        return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
+
+    @app.get(
+        "/api/scenario-intents",
+        tags=["System"],
+        response_model=ScenarioIntentCatalogResponse,
+        response_model_exclude_none=True,
+    )
+    async def scenario_intents() -> JSONResponse:
+        """Return auditable spoken-scene routing rules for product scenarios."""
+        try:
+            available_skills = requested_or_runtime_skills({}, capabilities_provider)
+            rules = [
+                scenario_intent_rule_payload(rule, available_skills)
+                for rule in SCENARIO_INTENT_RULES
+            ]
+            response = ScenarioIntentCatalogResponse.model_validate(
+                {
+                    "ok": True,
+                    "summary": {
+                        "rule_count": len(rules),
+                        "enabled_rule_count": sum(1 for item in rules if item["enabled"]),
+                        "available_skill_count": len(available_skills),
+                    },
+                    "rules": rules,
+                    "policy": {
+                        "deterministic_before_llm": True,
+                        "high_risk_still_requires_skill_gate_and_confirmation": True,
+                        "route_evidence_must_be_recorded": True,
+                    },
+                },
+            )
+            return JSONResponse(
+                response.model_dump(mode="python", exclude_unset=True),
+                headers=_NO_STORE_HEADERS,
+            )
+        except Exception as exc:
+            logger.error("Scenario intent catalog endpoint failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+
+    @app.post(
+        "/api/scenario-intents/preview",
+        tags=["System"],
+        response_model=ScenarioIntentPreviewResponse,
+        response_model_exclude_none=True,
+    )
+    async def scenario_intent_preview(request: Request) -> JSONResponse:
+        """Preview how a spoken or typed utterance would route before execution."""
+        try:
+            body = require_json_object(await request.json())
+        except ValueError as exc:
+            response = ScenarioIntentPreviewResponse.model_validate(
+                {"ok": False, "reason": "json_object_required", "error": str(exc)}
+            )
+            return JSONResponse(
+                response.model_dump(mode="python", exclude_unset=True),
+                status_code=400,
+                headers=_CORS_HEADERS,
+            )
+
+        text = str(body.get("text") or body.get("utterance") or "").strip()
+        if not text:
+            response = ScenarioIntentPreviewResponse.model_validate(
+                {"ok": False, "reason": "text_required"}
+            )
+            return JSONResponse(
+                response.model_dump(mode="python", exclude_unset=True),
+                status_code=422,
+                headers=_CORS_HEADERS,
+            )
+        try:
+            available_skills = requested_or_runtime_skills(body, capabilities_provider)
+            decision = classify_scenario_intent(text, available_skills=available_skills)
+            space_resolution = await space_resolution_preview(
+                text=text,
+                body=body,
+                decision=decision,
+                space_dispatch=space_dispatch,
+            )
+        except Exception as exc:
+            logger.error("Scenario intent preview endpoint failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
+        response = ScenarioIntentPreviewResponse.model_validate(
+            {
+                "ok": True,
+                "text": text,
+                "matched": decision is not None,
+                "decision": scenario_intent_decision_payload(decision),
+                "space_resolution": space_resolution,
+                "available_skill_count": len(available_skills),
+                "policy": {
+                    "preview_only": True,
+                    "does_not_execute_skill": True,
+                    "does_not_start_guide": True,
+                    "safe_for_customer_acceptance_testing": True,
+                },
             },
+        )
+        return JSONResponse(
+            response.model_dump(mode="python", exclude_unset=True),
             headers=_NO_STORE_HEADERS,
         )
 
-    @app.get("/api/blueprints", tags=["System"])
+    @app.options("/api/scenario-intents", include_in_schema=False)
+    async def scenario_intents_cors() -> JSONResponse:
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                **_CORS_HEADERS,
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            },
+        )
+
+    @app.options("/api/scenario-intents/preview", include_in_schema=False)
+    async def scenario_intent_preview_cors() -> JSONResponse:
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                **_CORS_HEADERS,
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            },
+        )
+
+    @app.get(
+        "/api/blueprints",
+        tags=["System"],
+        response_model=BlueprintCatalogResponse,
+        response_model_exclude_none=True,
+    )
     async def blueprints() -> JSONResponse:
         """Return product runtime blueprints with delivery readiness gates."""
         try:
-            if blueprints_provider is not None:
-                payload = blueprints_provider()
-            else:
-                from askme.blueprints import catalog_payload
-
-                payload = catalog_payload()
-            return JSONResponse(payload, headers=_NO_STORE_HEADERS)
+            payload = load_blueprints_payload(blueprints_provider)
+            return JSONResponse(
+                BlueprintCatalogResponse.model_validate(payload).model_dump(mode="python"),
+                headers=_NO_STORE_HEADERS,
+            )
         except Exception as exc:
             logger.error("Blueprint catalog endpoint failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-
-def _readiness_kind(body: dict[str, Any], manifest: dict[str, Any]) -> str:
-    raw = str(body.get("kind") or body.get("type") or manifest.get("kind") or "").strip()
-    if raw in {"capability", "capability_package"}:
-        return "capability_package"
-    if raw in {"scenario", "scenario_package"}:
-        return "scenario_package"
-    if manifest.get("scenario") or manifest.get("capability_packages"):
-        return "scenario_package"
-    if manifest.get("capability"):
-        return "capability_package"
-    return raw
-
-
-def _package_readiness_contract() -> dict[str, Any]:
-    return {
-        "endpoint": "/api/capability-packages/readiness",
-        "method": "POST",
-        "purpose": "Evaluate whether a capability or scenario package can be enabled for a site.",
-        "accepted_kinds": ["capability_package", "scenario_package"],
-        "required_payload": {
-            "kind": "capability_package | scenario_package",
-            "manifest": "CapabilityPackageManifest or ScenarioPackageManifest",
-            "inventory": "Optional PackageRuntimeInventory; omitted means derive from runtime capability snapshot.",
-        },
-        "customer_statuses": {
-            "ready": "Can enter site validation or release workflow.",
-            "manual_check": "Requires a human acceptance step before customer enablement.",
-            "blocked": "Must not be enabled for customer use until missing dependencies are resolved.",
-        },
-    }
-
-
-def _capability_center_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    center = payload.get("skills", {}).get("capability_center") if isinstance(payload.get("skills"), dict) else None
-    if isinstance(center, dict):
-        return center
-    nested = (
-        payload.get("components", {})
-        .get("skill", {})
-        .get("capabilities", {})
-        .get("capability_center")
-        if isinstance(payload.get("components"), dict)
-        else None
-    )
-    return nested if isinstance(nested, dict) else {}
-
-
-def _capability_package_catalog(center: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    capability_packages = _capability_package_items(center)
-    scenario_packages = _scenario_package_items(center)
-    return {
-        "capability_packages": capability_packages,
-        "scenario_packages": scenario_packages,
-    }
-
-
-def _capability_package_items(center: dict[str, Any]) -> list[dict[str, Any]]:
-    package_payload = center.get("capability_packages") if isinstance(center, dict) else {}
-    manifests = package_payload.get("items") if isinstance(package_payload, dict) else []
-    readiness = package_payload.get("readiness") if isinstance(package_payload, dict) else []
-    readiness_by_id = {
-        str(item.get("package_id") or ""): item
-        for item in readiness
-        if isinstance(item, dict) and item.get("package_id")
-    }
-    items: list[dict[str, Any]] = []
-    for manifest in manifests if isinstance(manifests, list) else []:
-        if not isinstance(manifest, dict):
-            continue
-        package_id = str(manifest.get("package_id") or "").strip()
-        readiness_item = readiness_by_id.get(package_id, {})
-        items.append(
-            {
-                "package_id": package_id,
-                "display_name": manifest.get("customer_visible_name")
-                or manifest.get("display_name")
-                or package_id,
-                "kind": "capability_package",
-                "capability": manifest.get("capability") or "",
-                "status": manifest.get("status") or "draft",
-                "risk_level": manifest.get("risk_level") or "low",
-                "summary": manifest.get("customer_visible_description")
-                or manifest.get("summary")
-                or "",
-                "manifest": manifest,
-                "readiness": readiness_item,
-                "enablement_decision": readiness_item.get("enablement_decision") or {},
-                "customer_status": readiness_item.get("status_label") or readiness_item.get("status") or "unknown",
-                "customer_message": readiness_item.get("customer_message") or "",
-                "customer_next_step": readiness_item.get("customer_next_step") or "",
-            }
+    @app.options("/api/blueprints/{blueprint_name}/delivery-package", include_in_schema=False)
+    async def blueprint_delivery_package_cors(blueprint_name: str) -> JSONResponse:
+        _ = blueprint_name
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                **_CORS_HEADERS,
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            },
         )
-    return items
 
+    @app.get(
+        "/api/blueprints/{blueprint_name}/delivery-package",
+        tags=["System"],
+        response_model=BlueprintDeliveryPackageResponse,
+        response_model_exclude_none=True,
+    )
+    async def blueprint_delivery_package(blueprint_name: str) -> JSONResponse:
+        """Return the customer handoff package for one runtime blueprint."""
+        try:
+            payload = load_blueprints_payload(blueprints_provider)
+            item = blueprint_item_from_payload(payload, blueprint_name)
+            if item is None:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "reason": "blueprint_not_found",
+                        "blueprint": blueprint_name,
+                        "available": available_blueprint_names(payload),
+                    },
+                    status_code=404,
+                    headers=_CORS_HEADERS,
+                )
+            package = item.get("delivery_package")
+            if not isinstance(package, dict) or not package:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "reason": "delivery_package_not_available",
+                        "blueprint": item.get("name") or blueprint_name,
+                    },
+                    status_code=409,
+                    headers=_CORS_HEADERS,
+                )
+            success = BlueprintDeliveryPackageResponse.model_validate(
+                {
+                    "ok": True,
+                    "blueprint": item.get("name") or blueprint_name,
+                    "delivery_package": package,
+                    "policy": {
+                        "delivery_package_is_customer_handoff": True,
+                        "production_ready_is_never_inferred_from_package": True,
+                        "site_validation_required_before_customer_claim": True,
+                    },
+                }
+            )
+            return JSONResponse(
+                success.model_dump(mode="python"),
+                headers=_NO_STORE_HEADERS,
+            )
+        except Exception as exc:
+            logger.error("Blueprint delivery package endpoint failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-def _scenario_package_items(center: dict[str, Any]) -> list[dict[str, Any]]:
-    blueprints = center.get("scenario_blueprints") if isinstance(center, dict) else {}
-    scenarios = blueprints.get("items") if isinstance(blueprints, dict) else []
-    items: list[dict[str, Any]] = []
-    for scenario in scenarios if isinstance(scenarios, list) else []:
-        if not isinstance(scenario, dict):
-            continue
-        manifest = scenario.get("package_manifest") if isinstance(scenario.get("package_manifest"), dict) else {}
-        readiness = scenario.get("package_readiness") if isinstance(scenario.get("package_readiness"), dict) else {}
-        package_id = str(
-            manifest.get("package_id")
-            or readiness.get("package_id")
-            or f"scenario.{scenario.get('scenario_id') or ''}"
-        ).strip()
-        items.append(
-            {
-                "package_id": package_id,
-                "display_name": manifest.get("customer_visible_name")
-                or scenario.get("display_name")
-                or package_id,
-                "kind": "scenario_package",
-                "scenario_id": scenario.get("scenario_id") or manifest.get("scenario") or "",
-                "coverage_status": scenario.get("coverage_status") or "",
-                "risk_level": readiness.get("risk_level") or manifest.get("risk_level") or "low",
-                "required_capability_packages": list(manifest.get("capability_packages") or []),
-                "customer_missing_dependencies": list(
-                    readiness.get("customer_missing_dependencies")
-                    or readiness.get("missing_required_dependencies")
-                    or []
-                ),
-                "engineering_missing_dependencies": list(
-                    readiness.get("engineering_missing_dependencies")
-                    or readiness.get("missing_required_dependencies")
-                    or []
-                ),
-                "manifest": manifest,
-                "readiness": readiness,
-                "enablement_decision": readiness.get("enablement_decision") or {},
-                "customer_status": readiness.get("status_label") or readiness.get("status") or "unknown",
-                "customer_message": readiness.get("customer_message") or "",
-                "customer_next_step": readiness.get("customer_next_step") or scenario.get("next_action") or "",
-            }
+    @app.options("/api/blueprints/{blueprint_name}", include_in_schema=False)
+    async def blueprint_detail_cors(blueprint_name: str) -> JSONResponse:
+        _ = blueprint_name
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                **_CORS_HEADERS,
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            },
         )
-    return items
 
-
-def _package_catalog_summary(catalog: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    capability_items = catalog["capability_packages"]
-    scenario_items = catalog["scenario_packages"]
-    all_items = [*capability_items, *scenario_items]
-    return {
-        "capability_package_count": len(capability_items),
-        "scenario_package_count": len(scenario_items),
-        "ready_count": sum(1 for item in all_items if _item_readiness_status(item) == "ready"),
-        "manual_check_count": sum(1 for item in all_items if _item_readiness_status(item) == "manual_check"),
-        "blocked_count": sum(1 for item in all_items if _item_readiness_status(item) == "blocked"),
-    }
-
-
-def _package_release_summary(catalog: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    all_items = [*catalog["capability_packages"], *catalog["scenario_packages"]]
-    decisions = [_item_enablement_decision(item) for item in all_items]
-    return {
-        "package_count": len(all_items),
-        "controlled_demo_allowed_count": sum(
-            1 for item in decisions if item.get("controlled_demo_allowed")
-        ),
-        "customer_pilot_allowed_count": sum(
-            1 for item in decisions if item.get("customer_pilot_allowed")
-        ),
-        "production_claim_allowed_count": sum(
-            1 for item in decisions if item.get("production_claim_allowed")
-        ),
-        "blocked_count": sum(1 for item in all_items if _item_readiness_status(item) == "blocked"),
-        "manual_acceptance_required_count": sum(
-            1
-            for item in all_items
-            if _item_readiness_status(item) == "manual_check"
-            or _item_enablement_decision(item).get("decision") == "human_acceptance_required"
-        ),
-        "claim_policy": (
-            "Production launch claims require separate onsite acceptance and human takeover "
-            "approval."
-        ),
-    }
-
-
-def _item_enablement_decision(item: dict[str, Any]) -> dict[str, Any]:
-    decision = item.get("enablement_decision")
-    if isinstance(decision, dict) and decision:
-        normalized = str(decision.get("decision") or "").strip()
-        defaults = _enablement_defaults_for_decision(normalized)
-        return {**defaults, **decision}
-    status = _item_readiness_status(item)
-    if status == "ready":
-        return _enablement_defaults_for_decision("site_validation_allowed")
-    if status == "manual_check":
-        return _enablement_defaults_for_decision("human_acceptance_required")
-    return _enablement_defaults_for_decision("blocked")
-
-
-def _enablement_defaults_for_decision(decision: str) -> dict[str, Any]:
-    normalized = str(decision or "").strip()
-    if normalized == "site_validation_allowed":
-        return {
-            "decision": normalized,
-            "controlled_demo_allowed": True,
-            "customer_pilot_allowed": True,
-            "production_claim_allowed": False,
-        }
-    if normalized == "human_acceptance_required":
-        return {
-            "decision": normalized,
-            "controlled_demo_allowed": True,
-            "customer_pilot_allowed": False,
-            "production_claim_allowed": False,
-        }
-    return {
-        "decision": normalized or "blocked",
-        "controlled_demo_allowed": False,
-        "customer_pilot_allowed": False,
-        "production_claim_allowed": False,
-    }
-
-
-def _item_readiness_status(item: dict[str, Any]) -> str:
-    readiness = item.get("readiness") if isinstance(item.get("readiness"), dict) else {}
-    return str(readiness.get("status") or "").strip()
-
-
-def _readiness_inventory(
-    body: dict[str, Any],
-    provider: CapabilitiesProvider | None,
-) -> PackageRuntimeInventory:
-    if isinstance(body.get("inventory"), dict):
-        return PackageRuntimeInventory.from_payload(body["inventory"])
-    if provider is None:
-        return PackageRuntimeInventory()
-    try:
-        payload = provider()
-    except Exception:
-        return PackageRuntimeInventory()
-    if not isinstance(payload, dict):
-        return PackageRuntimeInventory()
-    return _inventory_from_capabilities_payload(payload)
-
-
-def _inventory_from_capabilities_payload(payload: dict[str, Any]) -> PackageRuntimeInventory:
-    skills: set[str] = set()
-    services: set[str] = set()
-    capability_packages: set[str] = set()
-    _collect_skills_from_catalog(payload, skills)
-    _collect_skills_from_capability_center(payload, skills)
-    _collect_services_from_components(payload, services)
-    _collect_capability_packages(payload, capability_packages)
-    capability_packages.update(_capability_package_id(name) for name in skills)
-    return PackageRuntimeInventory(
-        skills=frozenset(skills),
-        services=frozenset(services),
-        capability_packages=frozenset(capability_packages),
+    @app.get(
+        "/api/blueprints/{blueprint_name}",
+        tags=["System"],
+        response_model=BlueprintDetailResponse,
+        response_model_exclude_none=True,
     )
-
-
-def _collect_skills_from_catalog(payload: dict[str, Any], skills: set[str]) -> None:
-    catalog = payload.get("skills", {}).get("catalog") if isinstance(payload.get("skills"), dict) else []
-    if not isinstance(catalog, list):
-        return
-    for item in catalog:
-        if not isinstance(item, dict):
-            continue
-        if item.get("enabled") is False or str(item.get("status") or "").lower() in {"disabled", "missing"}:
-            continue
-        name = str(item.get("skill_name") or item.get("name") or "").strip()
-        if name:
-            skills.add(name)
-
-
-def _collect_skills_from_capability_center(payload: dict[str, Any], skills: set[str]) -> None:
-    center = payload.get("skills", {}).get("capability_center") if isinstance(payload.get("skills"), dict) else {}
-    if not isinstance(center, dict):
-        return
-    groups = center.get("groups") if isinstance(center.get("groups"), list) else []
-    for group in groups:
-        if not isinstance(group, dict):
-            continue
-        group_skills = group.get("skills") if isinstance(group.get("skills"), list) else []
-        for item in group_skills:
-            if not isinstance(item, dict):
-                continue
-            if not item.get("installed") or not item.get("enabled"):
-                continue
-            name = str(item.get("skill_name") or "").strip()
-            if name:
-                skills.add(name)
-
-
-def _collect_services_from_components(payload: dict[str, Any], services: set[str]) -> None:
-    components = payload.get("components") if isinstance(payload.get("components"), dict) else {}
-    for name, item in components.items():
-        if not isinstance(item, dict):
-            continue
-        health = item.get("health") if isinstance(item.get("health"), dict) else item
-        status = str(health.get("status") or "").lower()
-        if status not in {"error", "failed", "blocked", "unavailable"}:
-            services.add(str(name))
-
-
-def _collect_capability_packages(payload: dict[str, Any], package_ids: set[str]) -> None:
-    packages = (
-        payload.get("skills", {}).get("skill_packages", {})
-        if isinstance(payload.get("skills"), dict)
-        else {}
-    )
-    records = packages.get("packages") if isinstance(packages, dict) else []
-    if not isinstance(records, list):
-        return
-    for item in records:
-        if not isinstance(item, dict):
-            continue
-        if not item.get("enabled") or int(item.get("rollout_percent") or 0) <= 0:
-            continue
-        package_id = str(item.get("package_id") or "").strip()
-        if package_id:
-            package_ids.add(package_id)
-
-
-def _capability_package_id(skill_name: str) -> str:
-    return f"capability.{skill_name}"
+    async def blueprint_detail(blueprint_name: str) -> JSONResponse:
+        """Return one product runtime blueprint by name or public alias."""
+        try:
+            payload = load_blueprints_payload(blueprints_provider)
+            item = blueprint_item_from_payload(payload, blueprint_name)
+            if item is None:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "reason": "blueprint_not_found",
+                        "blueprint": blueprint_name,
+                        "available": available_blueprint_names(payload),
+                    },
+                    status_code=404,
+                    headers=_CORS_HEADERS,
+                )
+            success = BlueprintDetailResponse.model_validate(
+                {
+                    "ok": True,
+                    "blueprint": item,
+                    "policy": {
+                        "customer_visible": bool(item.get("customer_visible")),
+                        "production_ready_is_never_inferred_from_catalog": True,
+                        "site_validation_required_before_customer_claim": True,
+                    },
+                }
+            )
+            return JSONResponse(
+                success.model_dump(mode="python"),
+                headers=_NO_STORE_HEADERS,
+            )
+        except Exception as exc:
+            logger.error("Blueprint detail endpoint failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)

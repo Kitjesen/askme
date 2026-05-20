@@ -1,5 +1,4 @@
 import pytest
-
 from askme.voice.runtime_bridge import VoiceRuntimeBridge
 
 
@@ -18,7 +17,7 @@ class _Response:
 def _fake_precheck(monkeypatch):
     """Make the init pre-check succeed so tests control failures via requests.post."""
     monkeypatch.setattr(
-        "askme.voice.runtime_bridge.requests.get",
+        "askme.providers.voice_runtime.requests.get",
         lambda *args, **kwargs: _Response({}),
     )
 
@@ -33,7 +32,7 @@ def test_voice_runtime_bridge_posts_turn(monkeypatch) -> None:
         captured["timeout"] = timeout
         return _Response({"handled": True, "turn": {"spoken_reply": "runtime handled"}})
 
-    monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
+    monkeypatch.setattr("askme.providers.voice_runtime.requests.post", fake_post)
 
     bridge = VoiceRuntimeBridge(
         {
@@ -62,6 +61,81 @@ def test_voice_runtime_bridge_posts_turn(monkeypatch) -> None:
     assert captured["headers"]["Idempotency-Key"].startswith("voice-turn-")
 
 
+def test_voice_runtime_bridge_retries_after_failed_startup_precheck(monkeypatch) -> None:
+    captured = {}
+
+    def fake_get(*args, **kwargs):
+        raise RuntimeError("not ready")
+
+    def fake_post(url, json, headers, timeout):
+        captured["json"] = json
+        return _Response({"handled": True, "turn": {"spoken_reply": "ok"}})
+
+    monkeypatch.setattr("askme.providers.voice_runtime.requests.get", fake_get)
+    monkeypatch.setattr("askme.providers.voice_runtime.requests.post", fake_post)
+
+    bridge = VoiceRuntimeBridge(
+        {
+            "enabled": True,
+            "base_url": "http://127.0.0.1:5100",
+            "session_id": "voice-session",
+        }
+    )
+
+    result = bridge.handle_voice_text("start patrol", session_id="conv-1")
+
+    assert result == {"handled": True, "turn": {"spoken_reply": "ok"}}
+    assert bridge.status_snapshot()["enabled"] is True
+    assert captured["json"]["session_id"] == "conv-1"
+
+
+def test_voice_runtime_bridge_accepts_voice_conversation_session_alias(monkeypatch) -> None:
+    captured = {}
+
+    def fake_post(url, json, headers, timeout):
+        captured["json"] = json
+        return _Response({"handled": True, "turn": {"spoken_reply": "ok"}})
+
+    monkeypatch.setattr("askme.providers.voice_runtime.requests.post", fake_post)
+
+    bridge = VoiceRuntimeBridge(
+        {
+            "enabled": True,
+            "base_url": "http://127.0.0.1:5100",
+            "session_id": "voice-session",
+        }
+    )
+
+    result = bridge.handle_voice_text("start patrol", conversation_session_id="conv-voice")
+
+    assert result == {"handled": True, "turn": {"spoken_reply": "ok"}}
+    assert captured["json"]["session_id"] == "conv-voice"
+
+
+def test_voice_runtime_bridge_accepts_conversation_session_alias(monkeypatch) -> None:
+    captured = {}
+
+    def fake_post(url, json, headers, timeout):
+        captured["json"] = json
+        return _Response({"handled": True, "turn": {"spoken_reply": "ok"}})
+
+    monkeypatch.setattr("askme.providers.voice_runtime.requests.post", fake_post)
+
+    bridge = VoiceRuntimeBridge(
+        {
+            "enabled": True,
+            "text_enabled": True,
+            "base_url": "http://127.0.0.1:5100",
+            "text_session_id": "text-session",
+        }
+    )
+
+    result = bridge.handle_text_input("status", conversation_session_id="conv-chat")
+
+    assert result == {"handled": True, "turn": {"spoken_reply": "ok"}}
+    assert captured["json"]["session_id"] == "conv-chat"
+
+
 def test_voice_runtime_bridge_posts_text_turn_with_text_channel(monkeypatch) -> None:
     captured = {}
 
@@ -70,7 +144,7 @@ def test_voice_runtime_bridge_posts_text_turn_with_text_channel(monkeypatch) -> 
         captured["headers"] = headers
         return _Response({"handled": True, "turn": {"spoken_reply": "status ok"}})
 
-    monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
+    monkeypatch.setattr("askme.providers.voice_runtime.requests.post", fake_post)
 
     bridge = VoiceRuntimeBridge(
         {
@@ -101,7 +175,7 @@ def test_voice_runtime_bridge_handle_turn_can_override_payload(monkeypatch) -> N
         captured["json"] = json
         return _Response({"handled": True, "turn": {"spoken_reply": "ok"}})
 
-    monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
+    monkeypatch.setattr("askme.providers.voice_runtime.requests.post", fake_post)
 
     bridge = VoiceRuntimeBridge(
         {
@@ -142,7 +216,7 @@ def test_voice_runtime_bridge_returns_none_on_invalid_json(monkeypatch) -> None:
     def fake_post(url, json, headers, timeout):
         return _BadJsonResponse({})
 
-    monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
+    monkeypatch.setattr("askme.providers.voice_runtime.requests.post", fake_post)
 
     bridge = VoiceRuntimeBridge(
         {
@@ -154,6 +228,23 @@ def test_voice_runtime_bridge_returns_none_on_invalid_json(monkeypatch) -> None:
     assert bridge.handle_voice_text("status") is None
 
 
+def test_voice_runtime_bridge_reraises_unexpected_post_bug(monkeypatch) -> None:
+    def fake_post(url, json, headers, timeout):
+        raise RuntimeError("provider bug")
+
+    monkeypatch.setattr("askme.providers.voice_runtime.requests.post", fake_post)
+
+    bridge = VoiceRuntimeBridge(
+        {
+            "enabled": True,
+            "base_url": "http://127.0.0.1:5100",
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="provider bug"):
+        bridge.handle_voice_text("status")
+
+
 def test_voice_runtime_bridge_opens_circuit_after_repeated_failures(monkeypatch) -> None:
     import requests
 
@@ -163,7 +254,7 @@ def test_voice_runtime_bridge_opens_circuit_after_repeated_failures(monkeypatch)
         captured["calls"] += 1
         raise requests.Timeout("runtime unavailable")
 
-    monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
+    monkeypatch.setattr("askme.providers.voice_runtime.requests.post", fake_post)
 
     bridge = VoiceRuntimeBridge(
         {
@@ -185,7 +276,7 @@ def test_voice_runtime_bridge_recovers_after_cooldown(monkeypatch) -> None:
 
     current_time = {"value": 100.0}
     monkeypatch.setattr(
-        "askme.voice.runtime_bridge.time.monotonic",
+        "askme.providers.voice_runtime.time.monotonic",
         lambda: current_time["value"],
     )
 
@@ -197,7 +288,7 @@ def test_voice_runtime_bridge_recovers_after_cooldown(monkeypatch) -> None:
             raise requests.Timeout("runtime unavailable")
         return _Response({"handled": True, "turn": {"spoken_reply": "ok"}})
 
-    monkeypatch.setattr("askme.voice.runtime_bridge.requests.post", fake_post)
+    monkeypatch.setattr("askme.providers.voice_runtime.requests.post", fake_post)
 
     bridge = VoiceRuntimeBridge(
         {

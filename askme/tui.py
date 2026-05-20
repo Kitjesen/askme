@@ -17,8 +17,8 @@ from colorama import just_fix_windows_console
 
 import askme.interfaces.register_defaults  # noqa: F401 — register all backends
 from askme.config import get_config
-from askme.runtime.module import RuntimeApp
-from askme.runtime.profiles import legacy_profile_for
+from askme.runtime.core.module import RuntimeApp
+from askme.runtime.core.profiles import legacy_profile_for
 
 logger = logging.getLogger(__name__)
 
@@ -510,7 +510,7 @@ class AskmeTerminalUI:
         """Build a minimal health snapshot from module data."""
         from askme import __version__ as ASKME_VERSION
         from askme.health_server import build_health_snapshot
-        from askme.robot.runtime_health import merge_voice_pipeline_status
+        from askme.robot.dog.runtime_health import merge_voice_pipeline_status
 
         cfg = get_config()
         app_name = cfg.get("app", {}).get("name", "askme")

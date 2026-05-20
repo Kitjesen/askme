@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from askme.api.schemas.voice import VoiceProfileCatalogResponse, VoiceProfileUpdateResponse
 from askme.health_server import build_health_snapshot, create_health_app
 from askme.voice.tts import TTSEngine
 from askme.voice.voice_profiles import build_voice_profiles, resolve_voice_profile_id
@@ -211,6 +212,7 @@ def test_voice_profile_http_endpoint(monkeypatch):
     try:
         profiles = client.get("/api/voice/profiles")
         assert profiles.status_code == 200
+        VoiceProfileCatalogResponse.model_validate(profiles.json())
         assert profiles.json()["profiles"]
 
         update = client.post(
@@ -219,10 +221,36 @@ def test_voice_profile_http_endpoint(monkeypatch):
             headers={"X-Askme-Operator-Id": "supervisor-1"},
         )
         assert update.status_code == 200
+        VoiceProfileUpdateResponse.model_validate(update.json())
         assert update.json()["active_profile"] == "security_clear"
         assert update.json()["applied_settings"]["label"] == "安保提醒"
         assert update.json()["applied_settings"]["cue"] == "notice_beep"
         assert update.json()["persistence_status"] == "session_only"
+    finally:
+        tts.shutdown()
+
+
+def test_voice_profile_routes_expose_response_schemas(monkeypatch):
+    monkeypatch.setattr(TTSEngine, "_log_output_devices", lambda self: None)
+    tts = TTSEngine({"backend": "edge", "minimax_voice_id": "male-qn-qingse"})
+    app = create_health_app(
+        lambda: _health_snapshot(),
+        voice_handler=tts,
+    )
+    try:
+        paths = app.openapi()["paths"]
+        assert (
+            paths["/api/voice/profiles"]["get"]["responses"]["200"]["content"][
+                "application/json"
+            ]["schema"]["$ref"]
+            .endswith("/VoiceProfileCatalogResponse")
+        )
+        assert (
+            paths["/api/voice/profile"]["post"]["responses"]["200"]["content"][
+                "application/json"
+            ]["schema"]["$ref"]
+            .endswith("/VoiceProfileUpdateResponse")
+        )
     finally:
         tts.shutdown()
 
@@ -253,5 +281,26 @@ def test_voice_profile_http_endpoint_rejects_unknown_profile(monkeypatch):
         assert unknown.status_code == 422
         assert unknown.json()["reason"] == "unknown_profile"
         assert "visitor_friendly" in unknown.json()["available"]
+    finally:
+        tts.shutdown()
+
+
+def test_voice_profile_http_endpoint_rejects_non_object_json_body(monkeypatch):
+    monkeypatch.setattr(TTSEngine, "_log_output_devices", lambda self: None)
+    tts = TTSEngine({"backend": "edge", "minimax_voice_id": "male-qn-qingse"})
+    client = TestClient(
+        create_health_app(
+            lambda: _health_snapshot(),
+            voice_handler=tts,
+        )
+    )
+    try:
+        response = client.post(
+            "/api/voice/profile",
+            json=["security_clear"],
+            headers={"X-Askme-Operator-Id": "supervisor-1"},
+        )
+        assert response.status_code == 400
+        assert response.json()["error"] == "JSON object body required"
     finally:
         tts.shutdown()

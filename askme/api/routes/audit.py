@@ -9,8 +9,16 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from askme.api.schemas.audit import AuditEventsResponse
+from askme.api.schemas.audit import AuditExportResponse
+from askme.api.schemas.audit import AuditExportRetryResponse
+from askme.api.schemas.audit import AuditExportRetryStatusResponse
+from askme.api.schemas.audit import AuditExportsResponse
+from askme.api.schemas.audit import AuditReviewSubmitResponse
+from askme.api.schemas.audit import AuditReviewsResponse
+from askme.api.schemas.audit import SkillAuditResponse
 from askme.audit import AuditExportService, AuditQueryService, AuditReviewService
-from askme.skills.audit import SkillAuditLog
+from askme.skills.governance.audit import SkillAuditLog
 
 ConfigProvider = Callable[[], dict[str, Any]]
 OptionalJsonBody = Callable[[Request], Awaitable[dict[str, Any]]]
@@ -132,21 +140,31 @@ def register_audit_routes(
     async def audit_export_retry_cors() -> Response:
         return _cors_options_response("GET, POST, OPTIONS")
 
-    @app.get("/api/skill-audit", tags=["System"])
+    @app.get(
+        "/api/skill-audit",
+        tags=["System"],
+        response_model=SkillAuditResponse,
+        response_model_exclude_none=True,
+    )
     async def skill_audit(limit: int = 50) -> JSONResponse:
         """Return recent skill execution audit records."""
         try:
             safe_limit = max(1, min(int(limit), 200))
             records = SkillAuditLog().recent(limit=safe_limit)
-            return JSONResponse(
-                {"records": records, "count": len(records), "limit": safe_limit},
-                headers=_NO_STORE_HEADERS,
+            payload = SkillAuditResponse.model_validate(
+                {"records": records, "count": len(records), "limit": safe_limit}
             )
+            return JSONResponse(payload.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
             logger.error("Skill audit endpoint failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-    @app.get("/api/audit/events", tags=["Governance"])
+    @app.get(
+        "/api/audit/events",
+        tags=["Governance"],
+        response_model=AuditEventsResponse,
+        response_model_exclude_none=True,
+    )
     async def audit_events(
         request: Request,
         limit: int = 100,
@@ -200,12 +218,18 @@ def register_audit_routes(
                 since=since,
                 until=until,
             )
-            return JSONResponse(payload, headers=_NO_STORE_HEADERS)
+            response = AuditEventsResponse.model_validate(payload)
+            return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
             logger.error("Unified audit endpoint failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-    @app.get("/api/audit/reviews", tags=["Governance"])
+    @app.get(
+        "/api/audit/reviews",
+        tags=["Governance"],
+        response_model=AuditReviewsResponse,
+        response_model_exclude_none=True,
+    )
     async def audit_reviews(
         request: Request,
         actor_id: str = "",
@@ -217,12 +241,18 @@ def register_audit_routes(
             if denied is not None:
                 return denied
             payload = AuditReviewService(config_provider()).list(limit=limit)
-            return JSONResponse(payload, headers=_NO_STORE_HEADERS)
+            response = AuditReviewsResponse.model_validate(payload)
+            return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
             logger.error("Unified audit review list failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-    @app.post("/api/audit/reviews", tags=["Governance"])
+    @app.post(
+        "/api/audit/reviews",
+        tags=["Governance"],
+        response_model=AuditReviewSubmitResponse,
+        response_model_exclude_none=True,
+    )
     async def audit_review_submit(request: Request) -> JSONResponse:
         """Append a supervisor review decision for one unified audit record."""
         try:
@@ -248,16 +278,24 @@ def register_audit_routes(
                 decision=str(body.get("decision") or ""),
                 note=str(body.get("note") or ""),
             )
+            response = AuditReviewSubmitResponse.model_validate(payload)
             return JSONResponse(
-                payload,
+                response.model_dump(mode="python", exclude_none=True),
                 status_code=200 if payload.get("ok") else 422,
                 headers=_NO_STORE_HEADERS,
             )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400, headers=_CORS_HEADERS)
         except Exception as exc:
             logger.error("Unified audit review submit failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-    @app.get("/api/audit/export/retry", tags=["Governance"])
+    @app.get(
+        "/api/audit/export/retry",
+        tags=["Governance"],
+        response_model=AuditExportRetryStatusResponse,
+        response_model_exclude_none=True,
+    )
     async def audit_export_retry_status(
         request: Request,
         actor_id: str = "",
@@ -269,12 +307,18 @@ def register_audit_routes(
             if denied is not None:
                 return denied
             payload = AuditExportService(config_provider()).retry_status(limit=limit)
-            return JSONResponse(payload, headers=_NO_STORE_HEADERS)
+            response = AuditExportRetryStatusResponse.model_validate(payload)
+            return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
             logger.error("Unified audit export retry status failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-    @app.get("/api/audit/exports", tags=["Governance"])
+    @app.get(
+        "/api/audit/exports",
+        tags=["Governance"],
+        response_model=AuditExportsResponse,
+        response_model_exclude_none=True,
+    )
     async def audit_exports(
         request: Request,
         actor_id: str = "",
@@ -286,12 +330,18 @@ def register_audit_routes(
             if denied is not None:
                 return denied
             payload = AuditExportService(config_provider()).list_exports(limit=limit)
-            return JSONResponse(payload, headers=_NO_STORE_HEADERS)
+            response = AuditExportsResponse.model_validate(payload)
+            return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
             logger.error("Unified audit export list failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-    @app.post("/api/audit/export/retry", tags=["Governance"])
+    @app.post(
+        "/api/audit/export/retry",
+        tags=["Governance"],
+        response_model=AuditExportRetryResponse,
+        response_model_exclude_none=True,
+    )
     async def audit_export_retry_delivery(request: Request) -> JSONResponse:
         """Replay pending unified audit export deliveries."""
         try:
@@ -302,12 +352,20 @@ def register_audit_routes(
             payload = AuditExportService(config_provider()).retry_queued_deliveries(
                 limit=int(body.get("limit") or 50),
             )
-            return JSONResponse(payload, headers=_NO_STORE_HEADERS)
+            response = AuditExportRetryResponse.model_validate(payload)
+            return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400, headers=_CORS_HEADERS)
         except Exception as exc:
             logger.error("Unified audit export retry delivery failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
-    @app.post("/api/audit/export", tags=["Governance"])
+    @app.post(
+        "/api/audit/export",
+        tags=["Governance"],
+        response_model=AuditExportResponse,
+        response_model_exclude_none=True,
+    )
     async def audit_export(request: Request) -> JSONResponse:
         """Create a signed unified audit export package and optionally deliver it."""
         try:
@@ -348,11 +406,14 @@ def register_audit_routes(
                 deliver=bool(body.get("deliver", False)),
                 webhook_url=str(body.get("webhook_url") or ""),
             )
+            response = AuditExportResponse.model_validate(payload)
             return JSONResponse(
-                payload,
+                response.model_dump(mode="python", exclude_none=True),
                 status_code=200 if payload.get("ok") else 400,
                 headers=_NO_STORE_HEADERS,
             )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400, headers=_CORS_HEADERS)
         except Exception as exc:
             logger.error("Unified audit export endpoint failed: %s", exc)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)

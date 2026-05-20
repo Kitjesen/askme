@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC
 from typing import Any
 
-from askme.runtime.registry import BackendRegistry
+from askme.interfaces.core.registry import BackendRegistry
 
 
 class ASRBackend(ABC):
@@ -15,7 +15,7 @@ class ASRBackend(ABC):
 
     * **Frame-by-frame** (:class:`~askme.voice.asr.ASREngine`): caller drives
       a stream with ``create_stream`` / ``decode_stream`` / ``get_result``.
-    * **Session-based** (:class:`~askme.voice.cloud_asr.CloudASR`): caller
+    * **Session-based** (:class:`~askme.voice.input.cloud_asr.CloudASR`): caller
       opens a session, feeds audio, and collects a final transcript.
 
     Methods below provide default ``NotImplementedError`` stubs so each

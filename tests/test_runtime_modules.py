@@ -7,7 +7,6 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from askme.runtime.module import ModuleRegistry
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -152,6 +151,83 @@ class TestMemoryModule:
         assert payload["records"][0]["text"] == "Floor 1: Restroom east"
 
     @pytest.mark.asyncio
+    async def test_knowledge_preview_payload_exposes_product_taxonomy(self):
+        mod = self._make_module()
+
+        payload = await mod.preview_payload({
+            "filename": "merchant.md",
+            "content": "- 梵木咖啡在 2 号楼一层",
+            "category": "merchant",
+            "owner": "交付工程师",
+        })
+
+        assert payload["records"][0]["category"] == "merchant"
+        assert payload["records"][0]["category_label"] == "商户与服务"
+        assert payload["records"][0]["owner"] == "交付工程师"
+        assert payload["category_taxonomy"]["schema_version"] == "askme.knowledge_taxonomy.v1"
+        assert {
+            item["id"]
+            for item in payload["category_taxonomy"]["categories"]
+        } >= {"route", "merchant", "incident", "safety", "sensor", "contact"}
+
+    @pytest.mark.asyncio
+    async def test_knowledge_preview_payload_applies_governance_metadata(self):
+        mod = self._make_module()
+
+        payload = await mod.preview_payload({
+            "filename": "fanmu-routes.csv",
+            "content": "text,category\nCoffee is in building 2,merchant\n",
+            "category": "merchant",
+            "quality_status": "internal",
+            "visibility": "internal",
+            "customer_id": "fanmu",
+            "project_id": "fanmu-phase-1",
+            "product_area": "space",
+            "workstream": "wayfinding",
+            "linked_object_type": "park_point",
+            "linked_object_id": "poi-fanmu-coffee",
+        })
+
+        record = payload["records"][0]
+        assert payload["document_profile"]["document_type"] == "csv"
+        assert record["quality_status"] == "internal"
+        assert record["visibility"] == "internal"
+        assert record["customer_id"] == "fanmu"
+        assert record["project_id"] == "fanmu-phase-1"
+        assert record["product_area"] == "space"
+        assert record["workstream"] == "wayfinding"
+        assert record["linked_object_type"] == "park_point"
+        assert record["linked_object_id"] == "poi-fanmu-coffee"
+
+    @pytest.mark.asyncio
+    async def test_knowledge_preview_payload_rejects_unsupported_binary_documents(self):
+        mod = self._make_module()
+
+        payload = await mod.preview_payload({
+            "filename": "site.pdf",
+            "content": "%PDF-1.4",
+            "category": "route",
+        })
+
+        assert payload["parsed"] == 0
+        assert payload["document_profile"]["supported"] is False
+        assert payload["errors"] == ["unsupported_file_type:.pdf"]
+
+    @pytest.mark.asyncio
+    async def test_knowledge_import_payload_returns_document_profile_on_rejection(self):
+        mod = self._make_module()
+
+        payload = await mod.import_payload({
+            "filename": "site.pdf",
+            "content": "%PDF-1.4",
+            "category": "route",
+        })
+
+        assert payload["imported"] == 0
+        assert payload["document_profile"]["supported"] is False
+        assert payload["document_profile"]["reason"] == "unsupported_file_type:.pdf"
+
+    @pytest.mark.asyncio
     async def test_knowledge_import_payload_saves_preview_records(self):
         mod = self._make_module()
         mod.memory_bridge.save_fact = AsyncMock()
@@ -170,6 +246,36 @@ class TestMemoryModule:
         assert text == "[location] Restroom east"
         assert metadata["category"] == "location"
         assert metadata["record_id"].startswith("know_")
+
+    @pytest.mark.asyncio
+    async def test_knowledge_import_payload_catalogs_internal_records_without_public_indexing(
+        self,
+        tmp_path,
+    ):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod.memory_bridge.save_fact = AsyncMock()
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={"updated": True})
+        mod.memory_bridge.health.return_value = {"backend": "vector"}
+
+        payload = await mod.import_payload({
+            "filename": "internal-sop.md",
+            "content": "- Staff-only shutdown note",
+            "category": "inspection",
+            "quality_status": "internal",
+            "visibility": "internal",
+            "customer_id": "fanmu",
+            "project_id": "fanmu-phase-1",
+        })
+
+        assert payload["cataloged"] == 1
+        assert payload["indexed"] == 0
+        mod.memory_bridge.save_fact.assert_not_awaited()
+        listed = await mod.list_knowledge_payload({"limit": 50})
+        record = listed["records"][0]
+        assert record["lifecycle_state"] == "internal_only"
+        assert record["prompt_eligible"] is False
+        assert listed["catalog"]["by_visibility"]["internal"] == 1
+        assert listed["catalog"]["by_customer"]["fanmu"] == 1
 
     @pytest.mark.asyncio
     async def test_knowledge_import_payload_upserts_catalog_before_syncing_eligible_records(
@@ -223,6 +329,29 @@ class TestMemoryModule:
         }
 
     @pytest.mark.asyncio
+    async def test_knowledge_import_payload_catalogs_when_memory_backend_disabled(self, tmp_path):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod.memory_bridge.save_fact = AsyncMock()
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(return_value={
+            "updated": False,
+            "error": "memory_disabled",
+        })
+        mod.memory_bridge.health.return_value = {"enabled": False, "backend": "disabled"}
+
+        payload = await mod.import_payload({
+            "filename": "site.json",
+            "content": '[{"record_id":"know_1","text":"3号楼在主通道尽头","category":"route"}]',
+        })
+
+        assert payload["cataloged"] == 1
+        assert payload["imported"] == 0
+        assert payload["indexed"] == 0
+        assert payload["skipped"] == 1
+        mod.memory_bridge.save_fact.assert_not_awaited()
+        listed = await mod.list_knowledge_payload({"limit": 50})
+        assert listed["records"][0]["record_id"] == "know_1"
+
+    @pytest.mark.asyncio
     async def test_knowledge_list_payload_returns_catalog(self, tmp_path):
         mod = self._make_module_with_catalog(tmp_path)
         mod._knowledge_catalog.upsert_payloads([{
@@ -242,6 +371,7 @@ class TestMemoryModule:
         assert payload["catalog"]["needs_reindex"] == 1
         assert payload["records"][0]["lifecycle_state"] == "needs_reindex"
         assert payload["records"][0]["lifecycle_label"] == "需重建索引"
+        assert payload["category_taxonomy"]["default_category"] == "faq"
 
     @pytest.mark.asyncio
     async def test_memory_search_payload_exposes_answer_policy(self):
@@ -263,6 +393,249 @@ class TestMemoryModule:
 
         assert payload["results"] == []
         assert payload["rag"]["answer_policy"]["state"] == "stale"
+
+    @pytest.mark.asyncio
+    async def test_memory_search_payload_falls_back_to_catalog_records(self, tmp_path):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._knowledge_catalog.upsert_payloads([{
+            "record_id": "know_route_3",
+            "text": "3号楼在主通道尽头左转80米",
+            "memory_text": "[route] 3号楼在主通道尽头左转80米",
+            "category": "route",
+            "approval_status": "published",
+        }])
+        mod.memory_bridge.retrieve = AsyncMock(return_value="")
+        mod.memory_bridge.health.return_value = {
+            "enabled": True,
+            "backend": "vector",
+            "last_backend": "vector",
+            "last_evidence": [],
+            "last_dropped_evidence": [],
+            "last_answer_policy": {},
+        }
+
+        payload = await mod.search_payload({"query": "3号楼怎么走"})
+
+        assert payload["results"][0]["record_id"] == "know_route_3"
+        assert payload["results"][0]["match_reason"] == "catalog_keyword_fallback"
+        assert payload["rag"]["last_backend"] == "catalog"
+
+    @pytest.mark.asyncio
+    async def test_memory_search_payload_catalog_fallback_exposes_expired_policy(
+        self,
+        tmp_path,
+    ):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._knowledge_catalog.upsert_payloads([
+            {
+                "record_id": "know_coffee",
+                "text": "Fanmu coffee is on the first floor of Building 2.",
+                "memory_text": "[route] Fanmu coffee is on the first floor of Building 2.",
+                "category": "route",
+                "approval_status": "published",
+            },
+            {
+                "record_id": "know_old_hall",
+                "text": "Old Hall route starts at the north gate.",
+                "memory_text": "[route] Old Hall route starts at the north gate.",
+                "category": "route",
+                "approval_status": "published",
+                "expires_at": "2000-01-01T00:00:00+00:00",
+            },
+        ])
+        mod.memory_bridge.retrieve = AsyncMock(return_value="")
+        mod.memory_bridge.health.return_value = {
+            "enabled": True,
+            "backend": "vector",
+            "last_backend": "vector",
+            "last_evidence": [],
+            "last_dropped_evidence": [],
+            "last_answer_policy": {
+                "state": "no_evidence",
+                "action": "clarify_or_refuse",
+            },
+        }
+
+        payload = await mod.search_payload({"query": "Old Hall route"})
+
+        assert payload["results"] == []
+        assert payload["rag"]["dropped_evidence"][0]["record_id"] == "know_old_hall"
+        assert payload["rag"]["dropped_evidence"][0]["drop_reason"] == "expired"
+        assert payload["rag"]["answer_policy"]["state"] == "stale"
+        assert payload["rag"]["answer_policy"]["action"] == "refuse_and_request_update"
+
+    @pytest.mark.asyncio
+    async def test_memory_health_payload_separates_customer_knowledge_from_robot_behavior(
+        self,
+        tmp_path,
+    ):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._memory_cfg = {
+            "backend": "vector",
+            "customer_knowledge_backend": "vector",
+            "robot_behavior_memory_backend": "robotmem",
+            "robot_behavior_memory_enabled": False,
+        }
+        mod._knowledge_catalog.upsert_payloads([{
+            "record_id": "know_coffee",
+            "text": "梵木咖啡在2号楼一层",
+            "memory_text": "[route] 梵木咖啡在2号楼一层",
+            "category": "route",
+            "approval_status": "published",
+        }])
+        mod.memory_bridge.health.return_value = {
+            "enabled": True,
+            "available": True,
+            "backend": "vector",
+            "configured_backend": "vector",
+            "last_backend": "vector",
+            "selected_backend_ready": True,
+            "selected_backend_installed": True,
+            "fallback_backend": "",
+            "fallback_ready": False,
+            "selected_backend_dependency": {
+                "backend": "vector",
+                "installed": True,
+                "version": "5.2.3",
+            },
+            "fallback_backend_dependency": {},
+            "backend_dependencies": {
+                "vector": {
+                    "backend": "vector",
+                    "installed": True,
+                    "version": "5.2.3",
+                },
+                "mempalace": {
+                    "backend": "mempalace",
+                    "installed": True,
+                    "version": "3.3.5",
+                },
+                "robotmem": {
+                    "backend": "robotmem",
+                    "installed": False,
+                    "version": "",
+                },
+            },
+            "robotmem_ready": False,
+            "vector_store_path": str(tmp_path / "store.json"),
+            "vector_size": 1,
+            "rag_enforce_expiry": True,
+        }
+
+        payload = await mod.health_payload({})
+
+        assert payload["status"] == "ready"
+        assert payload["ready"] is True
+        assert payload["customer_status"] == "客户知识库可用于有证据回答。"
+        assert payload["customer_next_step"] == "继续维护已发布知识，并在回答气泡展示引用证据。"
+        assert payload["current_backend"] == "vector"
+        assert payload["selected_backend_dependency"]["version"] == "5.2.3"
+        assert payload["backend_dependencies"]["mempalace"]["version"] == "3.3.5"
+        assert payload["memory_strategy"]["customer_knowledge"]["backend"] == "vector"
+        assert payload["memory_strategy"]["customer_knowledge"]["enters_prompt"] is True
+        robot_memory = payload["memory_strategy"]["robot_behavior_memory"]
+        assert robot_memory["backend"] == "robotmem"
+        assert robot_memory["enabled"] is False
+        assert robot_memory["enters_prompt"] is False
+        assert payload["paths"]["catalog"].endswith("records.json")
+        assert payload["counts"]["catalog_total"] == 1
+        assert payload["counts"]["prompt_eligible"] == 1
+        assert payload["answer_contract"] == {
+            "contract_type": "askme.customer_knowledge_answer_contract.v1",
+            "evidence_required": True,
+            "approved_knowledge_only": True,
+            "current_knowledge_only": True,
+            "conflict_free_knowledge_only": True,
+            "show_evidence_in_answer": True,
+            "refuse_when_no_evidence": True,
+            "refuse_when_expired": True,
+            "refuse_when_conflicting": True,
+            "robot_behavior_memory_enters_customer_prompt": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_memory_health_payload_warns_when_expiry_is_not_enforced(self, tmp_path):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod.memory_bridge.health.return_value = {
+            "enabled": True,
+            "available": True,
+            "backend": "vector",
+            "configured_backend": "vector",
+            "last_backend": "vector",
+            "selected_backend_ready": True,
+            "selected_backend_installed": True,
+            "fallback_backend": "",
+            "fallback_ready": False,
+            "robotmem_ready": False,
+            "rag_enforce_expiry": False,
+        }
+
+        payload = await mod.health_payload({})
+
+        assert "rag_expiry_not_enforced" in payload["warnings"]
+        assert payload["customer_status"] == "知识过期拦截未启用，不能作为客户回答依据。"
+        assert payload["customer_next_step"] == "先启用知识过期拦截，再允许知识进入回答。"
+        assert payload["answer_contract"]["current_knowledge_only"] is False
+        assert payload["answer_contract"]["refuse_when_expired"] is False
+
+    @pytest.mark.asyncio
+    async def test_memory_health_payload_reports_catalog_only_when_runtime_disabled(
+        self,
+        tmp_path,
+    ):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod._memory_cfg = {
+            "enabled": False,
+            "backend": "mempalace",
+            "customer_knowledge_backend": "mempalace",
+            "robot_behavior_memory_backend": "robotmem",
+            "robot_behavior_memory_enabled": False,
+        }
+        mod._knowledge_catalog.upsert_payloads([{
+            "record_id": "know_restroom",
+            "text": "Restroom is east of the main hall.",
+            "memory_text": "[location] Restroom is east of the main hall.",
+            "category": "location",
+            "approval_status": "published",
+            "visibility": "external",
+        }])
+        mod.memory_bridge.health.return_value = {
+            "enabled": False,
+            "available": False,
+            "backend": "mempalace",
+            "configured_backend": "mempalace",
+            "last_backend": "mempalace",
+            "selected_backend_ready": False,
+            "selected_backend_installed": True,
+            "fallback_backend": "vector",
+            "fallback_ready": True,
+            "selected_backend_dependency": {
+                "backend": "mempalace",
+                "installed": True,
+                "version": "3.3.5",
+            },
+            "fallback_backend_dependency": {
+                "backend": "vector",
+                "installed": True,
+                "version": "5.2.3",
+            },
+            "backend_dependencies": {},
+            "robotmem_ready": False,
+            "vector_store_path": str(tmp_path / "store.json"),
+            "vector_size": 0,
+            "rag_enforce_expiry": True,
+        }
+
+        payload = await mod.health_payload({})
+
+        assert payload["status"] == "catalog_only"
+        assert payload["ready"] is True
+        assert payload["catalog_answer_ready"] is True
+        assert payload["retrieval_runtime_ready"] is False
+        assert payload["counts"]["prompt_eligible"] == 1
+        assert "memory_runtime_disabled_catalog_only" in payload["warnings"]
+        assert "customer_knowledge_catalog_only" in payload["warnings"]
+        assert "memory_backend_not_ready" not in payload["warnings"]
 
     @pytest.mark.asyncio
     async def test_knowledge_update_payload_soft_deletes_record(self, tmp_path):
@@ -921,10 +1294,23 @@ class TestHealthModule:
 
             def __init__(self):
                 self.text_loop = MagicMock()
-                self.process_turn_calls: list[tuple[str, bool]] = []
+                self.process_turn_calls: list[dict[str, object]] = []
 
-                async def _process_turn(text: str, *, speak: bool = False) -> str:
-                    self.process_turn_calls.append((text, speak))
+                async def _process_turn(
+                    text: str,
+                    *,
+                    speak: bool = False,
+                    conversation_session_id: str | None = None,
+                    planning_session_id: str | None = None,
+                    runtime_policy: str = "disabled",
+                ) -> str:
+                    self.process_turn_calls.append({
+                        "text": text,
+                        "speak": speak,
+                        "conversation_session_id": conversation_session_id,
+                        "planning_session_id": planning_session_id,
+                        "runtime_policy": runtime_policy,
+                    })
                     return "reply"
 
                 self.text_loop.process_turn = _process_turn
@@ -1014,12 +1400,26 @@ class TestHealthModule:
         mock_server.set_memory_handler.assert_called_once_with(memory_mod)
 
         chat_handler = mock_server.set_chat_handler.call_args.args[0]
-        chat_payload = asyncio.run(chat_handler("hello", speak=True))
+        chat_payload = asyncio.run(
+            chat_handler(
+                "hello",
+                speak=True,
+                conversation_session_id="conv-1",
+                planning_session_id="plan-1",
+                runtime_policy="runtime_first",
+            )
+        )
         assert chat_payload["reply"] == "reply"
         assert chat_payload["spoken"] is True
         assert chat_payload["evidence"] == []
         assert chat_payload["rag"]["used_in_answer"] is False
-        assert text_mod.process_turn_calls == [("hello", True)]
+        assert text_mod.process_turn_calls == [{
+            "text": "hello",
+            "speak": True,
+            "conversation_session_id": "conv-1",
+            "planning_session_id": "plan-1",
+            "runtime_policy": "runtime_first",
+        }]
         text_mod.text_loop._audio.speak.assert_not_called()
         text_mod.text_loop._audio.start_playback.assert_not_called()
         text_mod.text_loop._audio.wait_speaking_done.assert_not_called()
@@ -1043,6 +1443,7 @@ class TestHealthModule:
 
     def test_chat_handler_includes_cognition_metadata_when_text_loop_handles_task(self):
         from askme.runtime.module import ModuleRegistry
+
         from askme.runtime.modules.health_module import HealthModule
 
         class FakeTextModule:
@@ -1088,6 +1489,7 @@ class TestHealthModule:
 
     def test_chat_handler_submits_ready_cognition_plan_to_runtime_handoff(self):
         from askme.runtime.module import ModuleRegistry
+
         from askme.runtime.modules.health_module import HealthModule
 
         class FakeTextModule:
@@ -1156,6 +1558,7 @@ class TestHealthModule:
 
     def test_chat_handler_wayfinding_question_does_not_submit_runtime_task(self):
         from askme.runtime.module import ModuleRegistry
+
         from askme.runtime.modules.health_module import HealthModule
 
         class FakeTextModule:
@@ -1291,12 +1694,13 @@ class TestLEDModule:
     def _make_module(self, led_base_url=""):
         from askme.runtime.modules.led_module import LEDModule
         mod = LEDModule()
+        mock_controller = MagicMock()
         mock_bridge = MagicMock()
         mock_bridge.run = AsyncMock()
-        with patch("askme.robot.led_controller.HttpLedController"), \
-             patch("askme.robot.led_controller.NullLedController"), \
-             patch("askme.robot.state_led_bridge.StateLedBridge", return_value=mock_bridge, create=True), \
-             patch("askme.runtime.modules.led_module.StateLedBridge", return_value=mock_bridge, create=True):
+        with patch(
+            "askme.runtime.modules.led_module.build_status_led",
+            return_value=(mock_controller, mock_bridge),
+        ):
             cfg = {"led": {"base_url": led_base_url}}
             mod.build(cfg, _make_registry())
         return mod

@@ -65,6 +65,87 @@ async def test_chat_diagnostics_records_successful_turn() -> None:
     assert metrics["last_turn_latency_ms"] == diagnostics["last_turn"]["timings_ms"]["total_ms"]
 
 
+async def test_chat_payload_passes_conversation_session_id_to_handler() -> None:
+    calls: list[dict[str, object]] = []
+
+    async def chat_handler(
+        text: str,
+        *,
+        speak: bool = False,
+        conversation_session_id: str | None = None,
+        planning_session_id: str | None = None,
+        runtime_policy: str = "disabled",
+    ):
+        calls.append({
+            "text": text,
+            "speak": speak,
+            "conversation_session_id": conversation_session_id,
+            "planning_session_id": planning_session_id,
+            "runtime_policy": runtime_policy,
+        })
+        return {"reply": "ok"}
+
+    service = ConversationService(chat_handler=chat_handler)
+
+    payload = await service.chat_payload_from_body(
+        {
+            "text": "inspect area A",
+            "speak": True,
+            "conversation_session_id": "conv-1",
+            "planning_session_id": "plan-1",
+            "runtime_policy": "runtime_first",
+        }
+    )
+
+    assert payload["reply"] == "ok"
+    assert calls == [{
+        "text": "inspect area A",
+        "speak": True,
+        "conversation_session_id": "conv-1",
+        "planning_session_id": "plan-1",
+        "runtime_policy": "runtime_first",
+    }]
+
+
+async def test_chat_payload_accepts_conversation_id_aliases() -> None:
+    calls: list[dict[str, object]] = []
+
+    async def chat_handler(
+        text: str,
+        *,
+        conversation_session_id: str | None = None,
+        planning_session_id: str | None = None,
+    ):
+        calls.append({
+            "text": text,
+            "conversation_session_id": conversation_session_id,
+            "planning_session_id": planning_session_id,
+        })
+        return {"reply": "ok"}
+
+    service = ConversationService(chat_handler=chat_handler)
+
+    await service.chat_payload_from_body(
+        {"text": "inspect area A", "conversation_id": "conv-a"}
+    )
+    await service.chat_payload_from_body(
+        {"text": "inspect area B", "chat_session_id": "conv-b"}
+    )
+
+    assert calls == [
+        {
+            "text": "inspect area A",
+            "conversation_session_id": "conv-a",
+            "planning_session_id": None,
+        },
+        {
+            "text": "inspect area B",
+            "conversation_session_id": "conv-b",
+            "planning_session_id": None,
+        },
+    ]
+
+
 async def test_chat_timeout_records_failure_diagnostics() -> None:
     async def chat_handler(text: str, *, speak: bool = False):
         await asyncio.sleep(0.05)

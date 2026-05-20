@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from .slot_types import SlotAnalysis, SlotFill
 
 if TYPE_CHECKING:
-    from askme.skills.skill_model import SkillDefinition, SlotSpec
+    from askme.skills.core.skill_model import SkillDefinition, SlotSpec
 
 # ── Vague word sets ───────────────────────────────────────────────────────────
 

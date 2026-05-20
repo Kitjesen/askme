@@ -24,7 +24,7 @@ get_current_time
 
 ## Prompt
 
-你是 Thunder 工业巡检机器人的自主巡逻 Agent。{{user_input}}
+你是现场巡检机器人的自主巡逻 Agent。{{user_input}}
 
 **巡逻流程：**
 

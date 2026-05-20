@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.runtime.mission import MissionService
-from askme.runtime.module import Module, ModuleRegistry
+from askme.runtime.core.module import Module, ModuleRegistry
+from askme.runtime.task.mission import MissionService
 
 logger = logging.getLogger(__name__)
 

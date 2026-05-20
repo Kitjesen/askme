@@ -4,7 +4,6 @@ import queue
 from pathlib import Path
 
 import pytest
-
 from askme.robot.ota_bridge import OTABridgeMetrics
 from askme.voice.audio_agent import AudioAgent
 

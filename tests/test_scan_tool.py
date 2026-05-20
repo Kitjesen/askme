@@ -6,6 +6,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from askme.tools.scan_tool import ScanAroundTool, register_scan_tools
 
+
+class _FakeRobotControl:
+    def __init__(self, result=None):
+        self.result = result or {"status": "accepted"}
+        self.calls = []
+
+    def dispatch_capability(self, capability, params=None):
+        self.calls.append((capability, params))
+        return self.result
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_tool(*, detections=None, vlm_answer="场景描述") -> ScanAroundTool:
@@ -111,17 +122,19 @@ class TestFullScan:
 
     def test_rotation_unavailable_shows_message(self):
         tool = _make_tool()
-        with patch("askme.tools.move_tool._call_runtime_api",
-                   return_value={"error": "service unreachable"}):
-            msg = tool._request_rotation_scan()
+        client = _FakeRobotControl({"error": "service unreachable"})
+        tool.set_robot_control_client(client)
+        msg = tool._request_rotation_scan()
         assert "不可用" in msg
+        assert client.calls == [("scan_360", {"speed_deg_per_sec": 45})]
 
     def test_rotation_success_message(self):
         tool = _make_tool()
-        with patch("askme.tools.move_tool._call_runtime_api",
-                   return_value={"status": "accepted"}):
-            msg = tool._request_rotation_scan()
+        client = _FakeRobotControl({"status": "accepted"})
+        tool.set_robot_control_client(client)
+        msg = tool._request_rotation_scan()
         assert "360°旋转扫描已请求" in msg
+        assert client.calls == [("scan_360", {"speed_deg_per_sec": 45})]
 
 
 # ── register_scan_tools ───────────────────────────────────────────────────────
@@ -140,6 +153,13 @@ class TestRegisterScanTools:
         register_scan_tools(registry, vision=vision)
         tool = registry.register.call_args[0][0]
         assert tool._vision is vision
+
+    def test_registers_with_robot_control_client(self):
+        registry = MagicMock()
+        client = _FakeRobotControl()
+        register_scan_tools(registry, robot_control_client=client)
+        tool = registry.register.call_args[0][0]
+        assert tool._robot_control_client is client
 
 
 # ── Tool metadata ─────────────────────────────────────────────────────────────

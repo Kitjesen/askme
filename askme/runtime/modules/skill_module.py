@@ -1,4 +1,4 @@
-"""SkillModule 鈥?wraps SkillManager + SkillDispatcher + PlannerAgent.
+"""SkillModule -wraps SkillManager + SkillDispatcher + PlannerAgent.
 
 Canonical wiring::
 
@@ -14,14 +14,15 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.llm.client import LLMClient
-from askme.pipeline.brain_pipeline import BrainPipeline
-from askme.pipeline.planner_agent import PlannerAgent
-from askme.pipeline.skill_dispatcher import SkillDispatcher
-from askme.runtime.module import In, Module, ModuleRegistry, Out
-from askme.skills.skill_executor import SkillExecutor
-from askme.skills.skill_manager import SkillManager
-from askme.tools.tool_registry import ToolRegistry
+from askme.llm.core.client import LLMClient
+from askme.pipeline.core.brain_pipeline import BrainPipeline
+from askme.pipeline.skills.planner_agent import PlannerAgent
+from askme.pipeline.skills.skill_dispatcher import SkillDispatcher
+from askme.pipeline.skills.skill_gate import SkillGate
+from askme.runtime.core.module import In, Module, ModuleRegistry, Out
+from askme.skills.core.skill_executor import SkillExecutor
+from askme.skills.core.skill_manager import SkillManager
+from askme.tools.core.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class SkillModule(Module):
     dispatcher: Out[SkillDispatcher]
     skill_manager_out: Out[SkillManager]
 
-    # In ports 鈥?auto-wired by runtime before build() is called
+    # In ports -auto-wired by runtime before build() is called
     llm_in: In[LLMClient]
     tool_registry_in: In[ToolRegistry]
     pipeline_in: In[BrainPipeline]
@@ -72,10 +73,18 @@ class SkillModule(Module):
         # Cross-link: pipeline needs skill refs for tool-calling and skill dispatch.
         # SkillModule owns skill_manager/skill_executor, so it is responsible for
         # injecting them into the pipeline that was built earlier (pipeline cannot
-        # depend on skill 鈥?that would create a cycle).
+        # depend on skill -that would create a cycle).
         if pipeline is not None:
+            self._skill_gate = SkillGate(
+                skill_manager=self._skill_manager,
+                skill_executor=self._skill_executor,
+                **pipeline.skill_gate_context(),
+            )
+            pipeline.set_skill_gate(self._skill_gate)
             pipeline.set_skill_manager(self._skill_manager)
             pipeline.set_skill_executor(self._skill_executor)
+        else:
+            self._skill_gate = None
 
         # Build planner
         self._planner = PlannerAgent(
@@ -94,9 +103,9 @@ class SkillModule(Module):
 
         # Wire dispatch_skill tool
         if tools is not None:
-            from askme.interaction.intent_router import IntentRouter
-            from askme.tools.builtin_tools import DispatchSkillTool
-            from askme.tools.skill_tools import register_skill_tools
+            from askme.robot_interaction import IntentRouter
+            from askme.tools.core.builtin_tools import DispatchSkillTool
+            from askme.tools.skills.skill_tools import register_skill_tools
 
             dispatch_tool = DispatchSkillTool()
             dispatch_tool.set_dispatcher(self._dispatcher)

@@ -1,4 +1,4 @@
-﻿"""TextModule 鈥?wraps TextLoop + CommandHandler as a declarative module.
+"""TextModule -wraps TextLoop + CommandHandler as a declarative module.
 
 Canonical wiring::
 
@@ -11,16 +11,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.llm.client import LLMClient
-from askme.pipeline.brain_pipeline import BrainPipeline
-from askme.pipeline.skill_dispatcher import SkillDispatcher
-from askme.runtime.module import In, Module, ModuleRegistry
+from askme.llm.core.client import LLMClient
+from askme.pipeline.core.brain_pipeline import BrainPipeline
+from askme.pipeline.skills.skill_dispatcher import SkillDispatcher
+from askme.ports import AudioFrontendPort
+from askme.runtime.core.module import In, Module, ModuleRegistry
+from askme.runtime.modules.voice_stack import (
+    build_runtime_voice_stack,
+    runtime_voice_stack_from_module,
+)
 from askme.schemas.messages import MemoryContext
-
-try:
-    from askme.voice.audio_agent import AudioAgent
-except ModuleNotFoundError:
-    AudioAgent = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -37,15 +37,12 @@ class TextModule(Module):
     memory_in: In[MemoryContext]
     skill_in: In[SkillDispatcher]
     pipeline_in: In[BrainPipeline]
-    voice_in: In[AudioAgent]
+    voice_in: In[AudioFrontendPort]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
-        from askme.interaction.intent_router import IntentRouter
-        from askme.pipeline.commands import CommandHandler
-        from askme.pipeline.text_loop import TextLoop
-        from askme.robot.ota_bridge import OTABridgeMetrics
-        from askme.voice.audio_agent import AudioAgent
-        from askme.voice.runtime_bridge import VoiceRuntimeBridge
+        from askme.pipeline.channels.commands import CommandHandler
+        from askme.pipeline.channels.text_loop import TextLoop
+        from askme.telemetry.ota_bridge import OTABridgeMetrics
 
         llm_mod = self.llm_in
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else OTABridgeMetrics()
@@ -64,16 +61,15 @@ class TextModule(Module):
         # Reuse voice module's audio if available, else create text-only AudioAgent
         voice_mod = self.voice_in
         if voice_mod is not None:
-            audio = getattr(voice_mod, "audio", None)
-            router = getattr(voice_mod, "router", None)
-            voice_runtime_bridge = getattr(voice_mod, "voice_runtime_bridge", None)
+            voice_stack = runtime_voice_stack_from_module(voice_mod)
         else:
-            audio = AudioAgent(cfg, voice_mode=False, metrics=ota_metrics)
-            voice_triggers = skill_manager.get_voice_triggers() if skill_manager else {}
-            router = IntentRouter(voice_triggers=voice_triggers)
-            voice_runtime_bridge = VoiceRuntimeBridge(
-                cfg.get("runtime", {}).get("voice_bridge", {})
+            voice_stack = build_runtime_voice_stack(
+                cfg,
+                voice_mode=False,
+                metrics=ota_metrics,
+                skill_manager=skill_manager,
             )
+        audio = voice_stack.audio
 
         # Wire audio into pipeline if not already done by VoiceModule
         if pipeline is not None and getattr(pipeline, "_audio", None) is None:
@@ -87,13 +83,13 @@ class TextModule(Module):
 
         # TextLoop
         self._text_loop = TextLoop(
-            router=router,
+            router=voice_stack.router,
             pipeline=pipeline,
             commands=self._commands,
             conversation=conversation,
             skill_manager=skill_manager,
             audio=audio,
-            voice_runtime_bridge=voice_runtime_bridge,
+            voice_runtime_bridge=voice_stack.voice_gateway,
             dispatcher=dispatcher,
             cognition_handler=cognition_handler,
         )

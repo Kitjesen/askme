@@ -6,15 +6,17 @@ import time
 from pathlib import Path
 from typing import Any
 
+from askme.robot.mock_pulse import MockPulse
+from askme.runtime.mission import MissionService
+from askme.runtime.module import Module, ModuleRegistry, Runtime
+
 from askme.cognition import (
     CognitionPerceptionSync,
     CognitivePlanner,
     WorkingMemory,
     WorldStateService,
 )
-from askme.robot.mock_pulse import MockPulse
-from askme.runtime.mission import MissionService
-from askme.runtime.module import Module, ModuleRegistry, Runtime
+from askme.perception.world_state import WorldState as PerceptionWorldState
 from askme.runtime.modules import CognitionModule, MemoryModule, MissionModule
 from askme.schemas.events import ChangeEvent, ChangeEventType
 
@@ -28,6 +30,28 @@ class MockPulseModule(Module):
     @property
     def bus(self) -> MockPulse:
         return self._bus
+
+
+class _MalformedPerceptionWorld:
+    async def snapshot(self) -> dict[str, Any]:
+        return {"summary": "schema changed"}
+
+
+class _FakeVisionBridge:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+
+    async def describe_scene(self) -> dict[str, Any]:
+        return self.payload
+
+
+class _FakePerceptionModule(Module):
+    name = "perception"
+    payload: dict[str, Any] = {}
+
+    def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
+        self.vision_bridge = _FakeVisionBridge(dict(self.payload))
+        self.world_state = None
 
 
 def test_world_state_resolves_fresh_deictic_reference() -> None:
@@ -299,6 +323,35 @@ def test_cognitive_planner_confirms_existing_session_for_handoff() -> None:
     )
 
 
+def test_cognitive_planner_blocks_handoff_without_mission_draft() -> None:
+    planner = CognitivePlanner(
+        world_state=WorldStateService(),
+        working_memory=WorkingMemory(),
+        mission_service=None,
+    )
+
+    draft = planner.plan_from_text("inspect area-a", robot_id="dog-1")
+    confirmed = planner.plan_from_text(
+        "",
+        planning_session_id=draft.planning_session_id,
+        operator_confirmation=True,
+        robot_id="dog-1",
+    )
+    payload = confirmed.to_dict()
+
+    assert payload["mission"] is None
+    assert payload["handoff_ready"] is False
+    assert "mission_draft" in payload["missing_inputs"]
+    assert payload["readiness"]["can_submit_to_runtime"] is False
+    assert payload["handoff_contract"]["confirmed"] is False
+    assert payload["handoff_contract"]["blocked_by"] == ["mission_draft"]
+    assert any(
+        step["status"] != "ready"
+        for step in payload["steps"]
+        if step["step"] == "submit_to_arbiter"
+    )
+
+
 def test_cognitive_planner_cancels_existing_session() -> None:
     planner = CognitivePlanner(
         world_state=WorldStateService(),
@@ -355,6 +408,22 @@ def test_perception_sync_reads_pulse_detections_and_robot_state() -> None:
     assert snapshot["robot"]["cms_state"] == "Standing"
 
 
+def test_perception_sync_keeps_robot_pulse_payload_timestamp_for_freshness() -> None:
+    pulse = MockPulse()
+    old_ts = time.time() - 10.0
+    pulse.publish("/thunder/estop", {"active": True, "_ts": old_ts})
+    world = WorldStateService()
+    sync = CognitionPerceptionSync(world, robot_stale_after_s=1.0)
+
+    asyncio.run(sync.sync_once(pulse_bus=pulse))
+
+    assert world.get_fact("robot.estop_active") is None
+    stale_fact = world.get_fact("robot.estop_active", include_stale=True)
+    assert stale_fact is not None
+    assert stale_fact.observed_at == old_ts
+    assert "robot.estop_active" in world.snapshot()["stale_keys"]
+
+
 def test_perception_sync_reads_change_event_jsonl(tmp_path: Path) -> None:
     event_file = tmp_path / "events.jsonl"
     event = ChangeEvent(
@@ -375,6 +444,77 @@ def test_perception_sync_reads_change_event_jsonl(tmp_path: Path) -> None:
     assert world.fresh_objects()[0]["track_id"] == "valve-7"
 
 
+def test_perception_sync_bridges_real_perception_world_state() -> None:
+    perception = PerceptionWorldState()
+    perception.apply_event_sync(
+        ChangeEvent(
+            event_type=ChangeEventType.OBJECT_APPEARED,
+            timestamp=time.time(),
+            subject_class="valve",
+            confidence=0.91,
+            bbox=(10, 20, 30, 40),
+            distance_m=1.4,
+            track_id="valve-9",
+        )
+    )
+    world = WorldStateService()
+    sync = CognitionPerceptionSync(world)
+
+    first = asyncio.run(sync.sync_once(perception_world_state=perception))
+    second = asyncio.run(sync.sync_once(perception_world_state=perception))
+    objects = world.fresh_objects()
+
+    assert first["perception_world_state"]["synced"] is True
+    assert second["perception_world_state"]["object_count"] == 1
+    assert len(objects) == 1
+    assert objects[0]["track_id"] == "valve-9"
+    assert objects[0]["label"] == "valve"
+    assert objects[0]["bbox"] == [10, 20, 30, 40]
+    assert objects[0]["distance_m"] == 1.4
+    assert world.resolve_reference("grab this")["resolved"]["track_id"] == "valve-9"
+
+
+def test_perception_sync_rejects_malformed_snapshot_without_clearing_scene() -> None:
+    world = WorldStateService()
+    world.update_scene(
+        objects=[{"class_id": "person", "confidence": 0.91, "track_id": "person-1"}],
+        stale_after_s=30.0,
+    )
+    sync = CognitionPerceptionSync(world)
+
+    result = asyncio.run(sync.sync_once(perception_world_state=_MalformedPerceptionWorld()))
+    objects = world.fresh_objects()
+
+    assert result["perception_world_state"] == {
+        "synced": False,
+        "reason": "snapshot_objects_missing",
+    }
+    assert len(objects) == 1
+    assert objects[0]["track_id"] == "person-1"
+
+
+def test_perception_sync_respects_stale_perception_world_state() -> None:
+    perception = PerceptionWorldState()
+    perception.apply_event_sync(
+        ChangeEvent(
+            event_type=ChangeEventType.OBJECT_APPEARED,
+            timestamp=time.time() - 10.0,
+            subject_class="valve",
+            confidence=0.91,
+            track_id="stale-valve",
+        )
+    )
+    world = WorldStateService()
+    sync = CognitionPerceptionSync(world, scene_stale_after_s=0.5)
+
+    result = asyncio.run(sync.sync_once(perception_world_state=perception))
+
+    assert result["perception_world_state"]["synced"] is True
+    assert world.fresh_objects() == []
+    assert world.snapshot()["scene"]["stale"] is True
+    assert world.resolve_reference("grab this")["reason"] == "no_fresh_scene_object"
+
+
 def test_cognition_module_builds_with_memory_and_mission() -> None:
     runtime = (
         Runtime.use(MemoryModule)
@@ -387,6 +527,9 @@ def test_cognition_module_builds_with_memory_and_mission() -> None:
 
     assert mod.health()["planner_ready"] is True
     assert mod.capabilities()["hardware_dispatch"] is False
+    assert mod.capabilities()["mission_draft_planning"] is True
+    assert mod.capabilities()["pulse_context_sync"] is False
+    assert mod.capabilities()["perception_world_state_sync"] is False
 
 
 def test_cognition_module_plans_with_fresh_pulse_context() -> None:
@@ -420,6 +563,40 @@ def test_cognition_module_plans_with_fresh_pulse_context() -> None:
     assert result["sync"]["fresh_object_count"] == 1
     assert result["plan"]["reference"]["resolved"]["label"] == "valve"
     assert result["plan"]["mission"]["mission"]["robot_id"] == "dog-1"
+
+
+def test_cognition_module_refresh_perception_preserves_snapshot_freshness() -> None:
+    observed_at = time.time() - 10.0
+    _FakePerceptionModule.payload = {
+        "summary": "old frame",
+        "objects": [
+            {
+                "class_id": "person",
+                "confidence": 0.93,
+                "last_seen": observed_at,
+                "track_id": "p-old",
+            }
+        ],
+        "source": "fake_vision",
+    }
+    runtime = (
+        Runtime.use(MemoryModule)
+        + Runtime.use(MissionModule)
+        + Runtime.use(_FakePerceptionModule)
+        + Runtime.use(CognitionModule)
+    )
+    app = asyncio.run(runtime.build({"cognition": {"scene_stale_after_s": 0.5, "sync_enabled": False}}))
+    mod = app.modules["cognition"]
+
+    result = asyncio.run(mod.refresh_perception())
+    snapshot = mod.world_state.snapshot()
+
+    assert result["refreshed"] is True
+    assert result["observed_at"] == observed_at
+    assert snapshot["scene"]["observed_at"] == observed_at
+    assert snapshot["scene"]["objects"] == []
+    assert "scene.objects" in snapshot["stale_keys"]
+    assert mod.capabilities()["active_perception_refresh"] is True
 
 
 def test_cognition_module_payload_confirms_planning_session() -> None:
@@ -463,7 +640,7 @@ def test_cognition_module_payload_cancels_planning_session() -> None:
     cancelled = asyncio.run(
         mod.plan_from_payload(
             {
-                "session_id": draft["plan"]["planning_session_id"],
+                "planning_session_id": draft["plan"]["planning_session_id"],
                 "action": "cancel",
             }
         )
@@ -472,3 +649,95 @@ def test_cognition_module_payload_cancels_planning_session() -> None:
     assert cancelled["plan"]["interaction_state"] == "cancelled"
     assert cancelled["plan"]["handoff_ready"] is False
     assert cancelled["plan"]["mission"] is None
+
+
+def test_cognition_module_keeps_conversation_session_separate_from_planning_session() -> None:
+    runtime = (
+        Runtime.use(MemoryModule)
+        + Runtime.use(MissionModule)
+        + Runtime.use(CognitionModule)
+    )
+    app = asyncio.run(runtime.build({"cognition": {"sync_enabled": False}}))
+    mod = app.modules["cognition"]
+
+    result = asyncio.run(
+        mod.plan_from_payload(
+            {
+                "text": "inspect area-a",
+                "conversation_session_id": "conv-1",
+            }
+        )
+    )
+    memory = mod.working_memory.snapshot()
+
+    assert result["plan"]["conversation_session_id"] == "conv-1"
+    assert result["plan"]["planning_session_id"] != "conv-1"
+    assert memory["focus"]["conversation_session_id"] == "conv-1"
+    assert {item["conversation_session_id"] for item in memory["items"]} == {"conv-1"}
+
+
+def test_cognitive_planner_filters_working_memory_by_conversation_session() -> None:
+    memory = WorkingMemory(retention_seconds=60)
+    memory.record("note", "session A secret", conversation_session_id="conv-a")
+    memory.record("note", "session B route", conversation_session_id="conv-b")
+    planner = CognitivePlanner(
+        world_state=WorldStateService(),
+        working_memory=memory,
+        mission_service=MissionService(),
+    )
+
+    plan = planner.plan_from_text(
+        "inspect area-b",
+        conversation_session_id="conv-b",
+    )
+
+    assert "session B route" in plan.context["working_memory"]
+    assert "session A secret" not in plan.context["working_memory"]
+
+
+def test_cognition_module_ignores_legacy_session_id_for_conversation_context() -> None:
+    runtime = (
+        Runtime.use(MemoryModule)
+        + Runtime.use(MissionModule)
+        + Runtime.use(CognitionModule)
+    )
+    app = asyncio.run(runtime.build({"cognition": {"sync_enabled": False}}))
+    mod = app.modules["cognition"]
+
+    result = asyncio.run(
+        mod.plan_from_payload({"text": "inspect area-a", "session_id": "legacy-session"})
+    )
+
+    assert result["plan"]["conversation_session_id"] == ""
+    assert result["plan"]["planning_session_id"] != "legacy-session"
+
+
+def test_cognition_continues_only_with_explicit_planning_session_id() -> None:
+    runtime = (
+        Runtime.use(MemoryModule)
+        + Runtime.use(MissionModule)
+        + Runtime.use(CognitionModule)
+    )
+    app = asyncio.run(runtime.build({"cognition": {"sync_enabled": False}}))
+    mod = app.modules["cognition"]
+
+    draft = asyncio.run(
+        mod.plan_from_payload(
+            {
+                "text": "inspect area-a",
+                "conversation_session_id": "conv-1",
+            }
+        )
+    )
+    continued = asyncio.run(
+        mod.plan_from_payload(
+            {
+                "text": "confirm",
+                "conversation_session_id": "conv-1",
+                "operator_confirmation": True,
+            }
+        )
+    )
+
+    assert continued["plan"]["conversation_session_id"] == "conv-1"
+    assert continued["plan"]["planning_session_id"] != draft["plan"]["planning_session_id"]

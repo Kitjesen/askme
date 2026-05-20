@@ -5,7 +5,6 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from askme.memory.bridge import MemoryBridge
 from askme.memory.catalog import KnowledgeCatalog
 
@@ -105,6 +104,86 @@ class TestInit:
         assert health["backend"] == "vector"
         assert health["backend_selection"]["reason"] == "auto_selected:vector"
         assert health["backend_selection"]["auto_order"] == ["robotmem", "vector", "mem0"]
+
+    def test_customer_knowledge_backend_is_separate_from_robot_behavior_memory(self):
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "backend": "robotmem",
+                "customer_knowledge_backend": "vector",
+                "robot_behavior_memory_backend": "robotmem",
+                "robot_behavior_memory_enabled": True,
+                "embed_model": "test-model",
+                "retrieve_timeout": 2.0,
+            },
+            "app": {"data_dir": "data"},
+            "brain": {"api_key": "test-key", "base_url": "http://test", "model": "test-model"},
+        }
+
+        vs_patch, vs_mock = _patch_vector_store()
+        with patch("askme.memory.bridge.get_config", return_value=cfg), vs_patch:
+            bridge = MemoryBridge()
+        bridge._store = vs_mock
+        health = bridge.health()
+
+        assert health["legacy_backend_config"] == "robotmem"
+        assert health["configured_backend"] == "vector"
+        assert health["customer_knowledge_backend"] == "vector"
+        assert health["robot_behavior_memory_backend"] == "robotmem"
+        assert health["robot_behavior_memory_enabled"] is True
+        assert health["product_memory_roles"]["customer_knowledge"]["selected_backend"] == "vector"
+        assert health["product_memory_roles"]["robot_behavior"]["configured_backend"] == "robotmem"
+        assert health["product_memory_roles"]["robot_behavior"]["enabled"] is True
+
+    def test_health_exposes_memory_backend_dependency_versions(self):
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "backend": "mempalace",
+                "customer_knowledge_backend": "mempalace",
+                "mempalace_fallback_backend": "vector",
+                "robot_behavior_memory_backend": "robotmem",
+                "robot_behavior_memory_enabled": False,
+                "embed_model": "test-model",
+                "retrieve_timeout": 2.0,
+            },
+            "app": {"data_dir": "data"},
+            "brain": {"api_key": "test-key", "base_url": "http://test", "model": "test-model"},
+        }
+
+        def fake_find_spec(name):
+            return object() if name in {"mempalace", "sentence_transformers"} else None
+
+        def fake_version(package):
+            versions = {
+                "mempalace": "3.3.5",
+                "sentence-transformers": "5.2.3",
+            }
+            if package not in versions:
+                from importlib.metadata import PackageNotFoundError
+
+                raise PackageNotFoundError(package)
+            return versions[package]
+
+        vs_patch, vs_mock = _patch_vector_store()
+        with patch("askme.memory.bridge.get_config", return_value=cfg), \
+             patch("askme.memory.bridge.importlib.util.find_spec", side_effect=fake_find_spec), \
+             patch("askme.memory.bridge.importlib_metadata.version", side_effect=fake_version), \
+             vs_patch:
+            bridge = MemoryBridge()
+        bridge._store = vs_mock
+        health = bridge.health()
+
+        assert health["selected_backend_dependency"]["backend"] == "mempalace"
+        assert health["selected_backend_dependency"]["installed"] is True
+        assert health["selected_backend_dependency"]["version"] == "3.3.5"
+        assert health["fallback_backend_dependency"]["backend"] == "vector"
+        assert health["fallback_backend_dependency"]["version"] == "5.2.3"
+        assert health["backend_dependencies"]["robotmem"]["installed"] is False
+        assert (
+            health["product_memory_roles"]["customer_knowledge"]["dependency"]["backend"]
+            == "mempalace"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +362,23 @@ class TestRetrieve:
 
         result = await bridge.retrieve("test")
         assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_fallback_filters_below_configured_vector_similarity_floor(self):
+        bridge, vs = _make_bridge()
+        bridge._mem0 = None
+        bridge._mem0_failed = True
+        vs.available = True
+        vs.search = MagicMock(return_value=[
+            {"text": "unrelated answer", "score": 0.49, "metadata": {}},
+        ])
+
+        result = await bridge.retrieve("expired route")
+        health = bridge.health()
+
+        assert result == ""
+        assert health["vector_min_similarity"] == 0.5
+        assert health["last_evidence"] == []
 
     @pytest.mark.asyncio
     async def test_fallback_filters_unapproved_knowledge(self):

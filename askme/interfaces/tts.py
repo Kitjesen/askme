@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from askme.runtime.registry import BackendRegistry
+from askme.interfaces.core.registry import BackendRegistry
 
 
 class TTSBackend(ABC):
     """Abstract TTS interface — text to audio.
 
-    Matches the public API of :class:`askme.voice.tts.TTSEngine`.
+    Matches the public API of :class:`askme.voice.output.tts.TTSEngine`.
     """
 
     @abstractmethod

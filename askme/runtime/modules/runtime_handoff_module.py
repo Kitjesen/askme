@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from askme.runtime.handoff import RuntimeHandoffService
-from askme.runtime.module import Module, ModuleRegistry, Out
+from askme.runtime.core.module import Module, ModuleRegistry, Out
+from askme.runtime.task.handoff import RuntimeHandoffService
 
 logger = logging.getLogger(__name__)
 
@@ -171,19 +171,26 @@ class RuntimeHandoffModule(Module):
         is_final: bool = True,
         channel: str = "voice",
         speak: bool = False,
+        conversation_session_id: str | None = None,
+        planning_session_id: str | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
+            voice_turn: dict[str, Any] = {
+                "recognized_text": str(text or ""),
+                "transcript_id": transcript_id,
+                "confidence": confidence,
+                "is_final": is_final,
+                "channel": channel,
+                "safety_bypass_allowed": False,
+            }
+            if conversation_session_id:
+                voice_turn["conversation_session_id"] = conversation_session_id
+            if planning_session_id:
+                voice_turn["planning_session_id"] = planning_session_id
             return {
                 "handled": False,
                 "reason": "runtime_handoff_disabled",
-                "voice_turn": {
-                    "recognized_text": str(text or ""),
-                    "transcript_id": transcript_id,
-                    "confidence": confidence,
-                    "is_final": is_final,
-                    "channel": channel,
-                    "safety_bypass_allowed": False,
-                },
+                "voice_turn": voice_turn,
             }
         return self._service.voice_turn_payload(
             text,
@@ -192,6 +199,8 @@ class RuntimeHandoffModule(Module):
             is_final=is_final,
             channel=channel,
             speak=speak,
+            conversation_session_id=conversation_session_id,
+            planning_session_id=planning_session_id,
         )
 
     def health(self) -> dict[str, Any]:

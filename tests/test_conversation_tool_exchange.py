@@ -99,6 +99,27 @@ class TestAddToolExchange:
         roles = [m["role"] for m in conv.history]
         assert roles == ["assistant", "tool", "tool"]
 
+    def test_tool_exchange_is_scoped_to_conversation_session(self, tmp_path, monkeypatch):
+        """Tool messages for one session are not included in another prompt."""
+        conv = _make_conv(tmp_path, monkeypatch)
+        conv.add_user_message("a user", conversation_session_id="a")
+        conv.add_tool_exchange(
+            [_tool_call("call_a")],
+            [_tool_result("call_a", "a result")],
+            conversation_session_id="a",
+        )
+        conv.add_user_message("b user", conversation_session_id="b")
+
+        session_a_roles = [
+            m["role"] for m in conv.get_messages("sys", conversation_session_id="a")
+        ]
+        session_b_roles = [
+            m["role"] for m in conv.get_messages("sys", conversation_session_id="b")
+        ]
+
+        assert session_a_roles == ["system", "user", "assistant", "tool"]
+        assert session_b_roles == ["system", "user"]
+
     def test_no_save_called_for_tool_exchange(self, tmp_path, monkeypatch):
         """Tool exchanges are transient — the history file must not be rewritten."""
         conv = _make_conv(tmp_path, monkeypatch)

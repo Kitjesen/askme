@@ -12,7 +12,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from askme.config import get_config
 from askme.health_server import build_health_snapshot, create_health_app
+from askme.runtime.core.module import ModuleRegistry
+from askme.runtime.modules.memory_module import MemoryModule
 
 
 def _health_snapshot() -> dict:
@@ -41,6 +44,20 @@ def _health_snapshot() -> dict:
     )
 
 
+def _memory_handler() -> MemoryModule:
+    config = get_config()
+    memory_config = dict(config.get("memory") or {})
+    # Dashboard-only is a customer-facing console smoke server. Keep it in
+    # catalog mode so opening/importing knowledge never blocks on embedding
+    # model downloads or microphone/speaker runtime dependencies.
+    memory_config["enabled"] = False
+    config = {**config, "memory": memory_config}
+    handler = MemoryModule()
+    handler.llm_client = None
+    handler.build(config, ModuleRegistry())
+    return handler
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
@@ -48,7 +65,7 @@ def main() -> None:
     parser.add_argument("--log-level", default="warning")
     args = parser.parse_args()
 
-    app = create_health_app(_health_snapshot)
+    app = create_health_app(_health_snapshot, memory_handler=_memory_handler())
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
 
 

@@ -4,11 +4,23 @@ from __future__ import annotations
 
 import json
 
-from askme.mcp.server import AppContext, mcp
+from mcp.server.fastmcp import Context
+
+from askme.mcp.context import AppContext
+from askme.mcp.registration import mcp
+
+
+def _get_app(ctx: Context) -> AppContext:
+    return ctx.request_context.lifespan_context
 
 
 @mcp.tool()
-async def memory_search(query: str, n: int = 5, layer: str = "all") -> str:
+async def memory_search(
+    query: str,
+    n: int = 5,
+    layer: str = "all",
+    ctx: Context = None,
+) -> str:
     """Search robot memory across all layers.
 
     Args:
@@ -16,14 +28,14 @@ async def memory_search(query: str, n: int = 5, layer: str = "all") -> str:
         n: Max results (default 5)
         layer: "all", "knowledge", "digest", or "conversation"
     """
-    ctx: AppContext = mcp.get_context()
+    app = _get_app(ctx)
 
     results = []
 
     # L4: RobotMem (conversation history)
-    if layer in ("all", "conversation") and ctx.memory_bridge:
+    if layer in ("all", "conversation") and app.memory_bridge:
         try:
-            text = await ctx.memory_bridge.retrieve(query)
+            text = await app.memory_bridge.retrieve(query)
             if text:
                 for line in text.split("\n"):
                     line = line.strip().lstrip("- ")
@@ -35,7 +47,7 @@ async def memory_search(query: str, n: int = 5, layer: str = "all") -> str:
     # L5: Semantic Index (knowledge + digests)
     if layer in ("all", "knowledge", "digest"):
         try:
-            from askme.memory.semantic_index import SemanticIndex
+            from askme.memory.retrieval.semantic_index import SemanticIndex
             idx = SemanticIndex()
             sem_results = await idx.search(
                 query, n=n,
@@ -52,9 +64,9 @@ async def memory_search(query: str, n: int = 5, layer: str = "all") -> str:
             pass
 
     # L3: Episodic knowledge (file-based)
-    if layer in ("all", "knowledge") and ctx.episodic_memory:
+    if layer in ("all", "knowledge") and app.episodic_memory:
         try:
-            knowledge = ctx.episodic_memory.get_knowledge_context(max_chars=500)
+            knowledge = app.episodic_memory.get_knowledge_context(max_chars=500)
             if knowledge and query.lower() in knowledge.lower():
                 results.append({"text": knowledge[:300], "source": "L3_knowledge"})
         except Exception:
@@ -67,19 +79,19 @@ async def memory_search(query: str, n: int = 5, layer: str = "all") -> str:
 
 
 @mcp.tool()
-async def memory_save(text: str, source: str = "external") -> str:
+async def memory_save(text: str, source: str = "external", ctx: Context = None) -> str:
     """Save a fact to robot long-term memory.
 
     Args:
         text: The fact to remember (e.g. "仓库A温度传感器已校准")
         source: Origin label (default "external")
     """
-    ctx: AppContext = mcp.get_context()
-    if not ctx.memory_bridge:
+    app = _get_app(ctx)
+    if not app.memory_bridge:
         return json.dumps({"status": "error", "message": "Memory not available"})
 
     try:
-        await ctx.memory_bridge.save(text, f"[{source}] saved")
+        await app.memory_bridge.save(text, f"[{source}] saved")
         return json.dumps({"status": "ok", "message": f"Saved: {text[:50]}"})
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})

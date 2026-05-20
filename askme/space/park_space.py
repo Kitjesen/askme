@@ -16,7 +16,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from askme.runtime.handoff import SkillRegistry, TaskHandoff
+from askme.runtime.task.handoff import SkillRegistry, TaskHandoff
 
 _TYPE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "restroom": (
@@ -72,6 +72,22 @@ _DESTINATION_NOT_FOUND_REPLY = (
     "\u8bf7\u6362\u4e00\u79cd\u8bf4\u6cd5\u6216\u8054\u7cfb\u5de5\u4f5c\u4eba\u5458\u786e\u8ba4\u3002"
 )
 _DEFAULT_GREETING = "\u4f60\u597d\uff0c\u8bf7\u95ee\u9700\u8981\u6307\u8def\u5417\uff1f"
+_CATEGORY_SEARCH_KEYWORDS = (
+    "\u6709\u54ea\u4e9b",
+    "\u54ea\u4e9b",
+    "\u6709\u4ec0\u4e48",
+    "\u54ea\u91cc\u6709",
+    "\u9644\u8fd1\u6709",
+    "list",
+    "available",
+)
+_POINT_TYPE_LABELS = {
+    "restroom": "\u536b\u751f\u95f4",
+    "parking": "\u505c\u8f66\u533a",
+    "restaurant": "\u9910\u996e\u5730\u70b9",
+    "exit": "\u51fa\u5165\u53e3",
+    "service": "\u670d\u52a1\u70b9",
+}
 
 
 def _slug(text: Any) -> str:
@@ -901,6 +917,12 @@ class ParkSpaceService:
                 "reply": _EMPTY_DESTINATION_REPLY,
             }
         current_point_id = str(body.get("current_point_id") or body.get("from_point_id") or "").strip()
+        category_result = self._category_resolution_payload(
+            query,
+            current_point_id=current_point_id,
+        )
+        if category_result is not None:
+            return category_result
         match = self._resolve(query, current_point_id=current_point_id)
         if match is None:
             return {
@@ -917,6 +939,67 @@ class ParkSpaceService:
             "confidence": confidence,
             "match_reason": reason,
             "point": point.to_payload(),
+            "confirmation_prompt": f"\u4f60\u662f\u8981\u53bb{point.point_name}\u5417\uff1f",
+            "requires_confirmation": True,
+        }
+
+    def _category_resolution_payload(
+        self,
+        query: str,
+        *,
+        current_point_id: str = "",
+    ) -> dict[str, Any] | None:
+        point_type = self._query_type(query)
+        if not point_type:
+            return None
+        if self._asks_nearest(query):
+            return None
+        candidates = self._category_candidates(
+            query,
+            point_type=point_type,
+            current_point_id=current_point_id,
+        )
+        if not candidates:
+            return None
+        label = self._query_category_label(query, point_type)
+        candidate_payloads = [self._candidate_payload(point) for point in candidates]
+        asks_list = self._asks_category_list(query)
+        if len(candidates) > 1 or asks_list:
+            names = "\u3001".join(point.point_name for point in candidates[:5])
+            more = "" if len(candidates) <= 5 else f"\u7b49{len(candidates)}\u4e2a"
+            needs_choice = len(candidates) > 1
+            suffix = "\u8bf7\u544a\u8bc9\u6211\u4f60\u60f3\u53bb\u54ea\u4e00\u4e2a\u3002" if needs_choice else ""
+            return {
+                "resolved": False,
+                "reason": "multiple_destinations" if len(candidates) > 1 else "category_candidates_found",
+                "query": query,
+                "point_type": point_type,
+                "point_type_label": label,
+                "candidate_count": len(candidates),
+                "candidates": candidate_payloads,
+                "reply": (
+                    f"\u6211\u627e\u5230{len(candidates)}\u4e2a{label}\uff1a{names}{more}\u3002"
+                    f"{suffix}"
+                ),
+                "requires_clarification": needs_choice,
+                "listing_only": asks_list,
+            }
+        point = candidates[0]
+        return {
+            "resolved": True,
+            "query": query,
+            "confidence": 0.84,
+            "match_reason": f"single_{point_type}_candidate",
+            "point_type": point_type,
+            "point_type_label": label,
+            "candidate_count": 1,
+            "candidates": candidate_payloads,
+            "selection_policy": "single_category_candidate",
+            "point": point.to_payload(),
+            "reply": (
+                f"\u76ee\u524d\u70b9\u4f4d\u5e93\u91cc\u627e\u5230\u4e00\u4e2a{label}\uff1a"
+                f"{point.point_name}\u3002"
+            ),
             "confirmation_prompt": f"\u4f60\u662f\u8981\u53bb{point.point_name}\u5417\uff1f",
             "requires_confirmation": True,
         }
@@ -1014,6 +1097,58 @@ class ParkSpaceService:
             return (0.68, "type_keyword")
         return (0.0, "")
 
+    def _category_candidates(
+        self,
+        query: str,
+        *,
+        point_type: str,
+        current_point_id: str = "",
+    ) -> list[ParkPoint]:
+        normalized = _slug(query)
+        matched_keywords = [
+            _slug(keyword)
+            for keyword in _TYPE_KEYWORDS.get(point_type, ())
+            if _slug(keyword) and _slug(keyword) in normalized
+        ]
+        typed = [point for point in self._points if point.enabled and point.point_type == point_type]
+        if matched_keywords:
+            focused = [
+                point
+                for point in typed
+                if any(
+                    keyword in _slug(name)
+                    for keyword in matched_keywords
+                    for name in (point.point_name, *point.aliases)
+                )
+            ]
+            if focused:
+                typed = focused
+        origin = self._point_by_id(current_point_id)
+        if origin is not None and origin.x is not None and origin.y is not None:
+            typed = sorted(typed, key=lambda point: _distance(origin, point))
+        return typed
+
+    def _candidate_payload(self, point: ParkPoint) -> dict[str, Any]:
+        payload = point.to_payload()
+        return {
+            "point_id": payload.get("point_id"),
+            "point_name": payload.get("point_name"),
+            "point_type": payload.get("point_type"),
+            "aliases": payload.get("aliases") or [],
+            "building": payload.get("building") or "",
+            "floor": payload.get("floor") or "",
+            "guide_mode": payload.get("guide_mode") or "voice",
+            "accessibility": payload.get("accessibility") or "",
+        }
+
+    def _query_category_label(self, query: str, point_type: str) -> str:
+        normalized = _slug(query)
+        if point_type == "restaurant" and any(
+            keyword in normalized for keyword in ("\u5496\u5561", "coffee", "cafe")
+        ):
+            return "\u5496\u5561\u5e97"
+        return _POINT_TYPE_LABELS.get(point_type, point_type)
+
     def _query_type(self, query: str) -> str:
         normalized = _slug(query)
         for point_type, keywords in _TYPE_KEYWORDS.items():
@@ -1024,6 +1159,10 @@ class ParkSpaceService:
     def _asks_nearest(self, query: str) -> bool:
         normalized = _slug(query)
         return any(keyword in normalized for keyword in ("\u6700\u8fd1", "\u9644\u8fd1", "nearest", "closest"))
+
+    def _asks_category_list(self, query: str) -> bool:
+        normalized = _slug(query)
+        return any(_slug(keyword) in normalized for keyword in _CATEGORY_SEARCH_KEYWORDS)
 
     def _nearest_of_type(self, point_type: str, *, current_point_id: str) -> ParkPoint | None:
         typed = [point for point in self._points if point.enabled and point.point_type == point_type]

@@ -13,6 +13,7 @@ from askme.agent_shell.thunder_agent_shell import (
     _MAX_DEPTH,
     _MAX_ITERATIONS,
     _SPAWN_AGENT_SCHEMA,
+    _build_agent_system_prompt,
     ThunderAgentShell,
 )
 
@@ -87,6 +88,24 @@ def shell(mock_llm, mock_tools, mock_audio, tmp_path) -> ThunderAgentShell:
 
 
 # ── Basic task execution ──────────────────────────────────────────────────────
+
+
+def test_agent_system_prompt_is_product_neutral(tmp_path) -> None:
+    """Runtime prompt should not expose legacy robot branding to the model."""
+    prompt = _build_agent_system_prompt(tmp_path / "workspace")
+
+    assert "现场机器人" in prompt
+    assert "自主执行 Agent" in prompt
+    assert "机器人运行时快捷接口" in prompt
+    assert "robot_api" in prompt
+    assert "Thunder 机器人" not in prompt
+    assert "Thunder runtime" not in prompt
+
+
+def test_agent_shell_neutral_alias_preserves_legacy_class() -> None:
+    from askme.agent_shell import AgentShell
+
+    assert AgentShell is ThunderAgentShell
 
 
 @pytest.mark.asyncio

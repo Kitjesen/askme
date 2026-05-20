@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock
 
 
@@ -43,6 +44,57 @@ def test_clear(tmp_path, monkeypatch):
     conv.clear()
     msgs = conv.get_messages("sys")
     assert len(msgs) == 1  # only system prompt
+
+
+def test_conversation_session_messages_are_isolated(tmp_path, monkeypatch):
+    """Named conversation sessions do not leak into each other's prompt."""
+    conv = _make_conv(tmp_path, monkeypatch)
+
+    conv.add_user_message("default")
+    conv.add_user_message("session-a-user", conversation_session_id="session-a")
+    conv.add_assistant_message("session-a-assistant", conversation_session_id="session-a")
+    conv.add_user_message("session-b-user", conversation_session_id="session-b")
+
+    default_msgs = conv.get_messages("sys")
+    session_a_msgs = conv.get_messages("sys", conversation_session_id="session-a")
+    session_b_msgs = conv.get_messages("sys", conversation_session_id="session-b")
+
+    assert [m.get("content") for m in default_msgs] == ["sys", "default"]
+    assert [m.get("content") for m in session_a_msgs] == [
+        "sys",
+        "session-a-user",
+        "session-a-assistant",
+    ]
+    assert [m.get("content") for m in session_b_msgs] == ["sys", "session-b-user"]
+
+
+def test_conversation_persistence_loads_legacy_list_format(tmp_path, monkeypatch):
+    """Existing list-shaped history files remain readable."""
+    history_file = tmp_path / "data" / "conv.json"
+    history_file.parent.mkdir()
+    history_file.write_text(
+        json.dumps([{"role": "user", "content": "legacy"}]),
+        encoding="utf-8",
+    )
+
+    conv = _make_conv(tmp_path, monkeypatch)
+
+    assert conv.history == [{"role": "user", "content": "legacy"}]
+    assert conv.get_messages("sys")[-1]["content"] == "legacy"
+
+
+def test_conversation_persistence_round_trips_named_sessions(tmp_path, monkeypatch):
+    """Multi-session state survives reload without changing old history access."""
+    conv = _make_conv(tmp_path, monkeypatch)
+    conv.add_user_message("default")
+    conv.add_user_message("session-a", conversation_session_id="a")
+    conv.add_user_message("session-b", conversation_session_id="b")
+
+    reloaded = _make_conv(tmp_path, monkeypatch)
+
+    assert reloaded.history == [{"role": "user", "content": "default"}]
+    assert reloaded.get_messages("sys", conversation_session_id="a")[-1]["content"] == "session-a"
+    assert reloaded.get_messages("sys", conversation_session_id="b")[-1]["content"] == "session-b"
 
 
 async def test_maybe_compress_below_threshold(tmp_path, monkeypatch):
@@ -169,3 +221,39 @@ async def test_maybe_compress_failure_safe(tmp_path, monkeypatch):
 
     # History should be unchanged on failure
     assert len(conv.history) == original_len
+
+
+async def test_maybe_compress_scopes_to_conversation_session(tmp_path, monkeypatch):
+    """Compression only rewrites the selected conversation session."""
+    monkeypatch.setattr(
+        "askme.llm.conversation.project_root", lambda: tmp_path
+    )
+    monkeypatch.setattr(
+        "askme.llm.conversation.get_config",
+        lambda: {"conversation": {
+            "history_file": str(tmp_path / "data" / "conv.json"),
+            "max_history": 100,
+        }},
+    )
+    monkeypatch.setattr("askme.llm.conversation.COMPRESS_THRESHOLD", 4)
+    monkeypatch.setattr("askme.llm.conversation.KEEP_RECENT", 2)
+
+    from askme.llm.conversation import SUMMARY_TAG, ConversationManager
+
+    conv = ConversationManager()
+    conv.add_user_message("default")
+    for i in range(5):
+        conv.add_user_message(f"a user {i}", conversation_session_id="a")
+        conv.add_assistant_message(f"a reply {i}", conversation_session_id="a")
+    conv.add_user_message("b user", conversation_session_id="b")
+
+    mock_llm = AsyncMock()
+    mock_llm.chat.return_value = "session a summary"
+
+    await conv.maybe_compress(mock_llm, conversation_session_id="a")
+
+    session_a = conv.get_messages("sys", conversation_session_id="a")
+    session_b = conv.get_messages("sys", conversation_session_id="b")
+    assert session_a[1]["content"].startswith(SUMMARY_TAG)
+    assert [m.get("content") for m in session_b] == ["sys", "b user"]
+    assert conv.history == [{"role": "user", "content": "default"}]

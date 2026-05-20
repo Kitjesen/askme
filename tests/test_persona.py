@@ -35,3 +35,37 @@ def test_persona_allows_explicit_ownership_label() -> None:
     prompt = persona.build_system_prompt()
 
     assert "归属口径：由客户自有运维体系管理" in prompt
+
+
+def test_persona_uses_brand_neutral_defaults_when_config_values_are_blank() -> None:
+    persona = persona_from_brain_config({
+        "persona": {
+            "robot_name": "   ",
+            "product_name": "",
+            "operator_audience": None,
+            "role": " ",
+            "speaking_style": "",
+            "max_reply_chars": "",
+        }
+    })
+
+    prompt = persona.build_system_prompt()
+    prefix = persona.build_user_prefix()
+
+    assert persona.robot_name == "现场机器人"
+    assert persona.product_name == "现场任务平台"
+    assert persona.role == "园区巡检与服务机器人"
+    assert persona.max_reply_chars == 80
+    assert "现场机器人" in prompt
+    assert "不要主动声明厂商或归属" in prompt
+    assert "80字以内" in prefix
+
+
+def test_persona_clamps_invalid_reply_length_for_voice_safety() -> None:
+    too_short = persona_from_brain_config({"persona": {"max_reply_chars": 1}})
+    too_long = persona_from_brain_config({"persona": {"max_reply_chars": 9999}})
+    invalid = persona_from_brain_config({"persona": {"max_reply_chars": "not-a-number"}})
+
+    assert too_short.max_reply_chars == 20
+    assert too_long.max_reply_chars == 300
+    assert invalid.max_reply_chars == 80

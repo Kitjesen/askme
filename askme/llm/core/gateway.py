@@ -22,7 +22,7 @@ from askme.llm.core.factory import create_llm_provider, resolve_provider_name
 from askme.llm.policy.model_policy import ModelPolicy
 from askme.llm.providers.profiles import provider_profile
 from askme.llm.streaming.retry import RETRYABLE_STATUS
-from askme.robot.ota_bridge import OTABridgeMetrics
+from askme.telemetry.ota_bridge import OTABridgeMetrics
 
 
 class LLMGateway(LLMBackend):

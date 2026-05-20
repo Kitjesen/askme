@@ -43,3 +43,7 @@ jobs:
             https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short --maxfail=10 --durations=20
+      - name: Performance smoke benchmark
+        run: |
+          python scripts/benchmark_core_paths.py --quick --iterations 40 --concurrency 8 --output artifacts/perf/core_paths_latest.json
+          python scripts/check_perf_thresholds.py --report artifacts/perf/core_paths_latest.json

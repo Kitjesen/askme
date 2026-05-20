@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import time
@@ -7,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
+import yaml
 from askme.pipeline.field_operations import FieldOperationsService
 from askme.pipeline.field_site_profile import (
     archive_customer_project_profile,
@@ -64,6 +65,15 @@ from askme.pipeline.field_site_profile import (
     verify_customer_project_proposal_bundle,
 )
 
+from askme.pipeline.field import customer_project_acceptance as acceptance_module
+
+
+def _set_demo_device_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ASKME_FIELD_CAMERA_MAIN_ROAD_SECRET", "camera-main-road-secret")
+    monkeypatch.setenv("ASKME_FIELD_CAMERA_GUIDE_SECRET", "camera-guide-secret")
+    monkeypatch.setenv("ASKME_FIELD_SMOKE_WAREHOUSE_SECRET", "smoke-warehouse-secret")
+    monkeypatch.setenv("ASKME_FIELD_ROBOT_THUNDER_SECRET", "robot-thunder-secret")
+
 
 def _artifact_test_root(tmp_path: Path, name: str) -> Path:
     root = Path("artifacts/test-field-site-profile") / f"{name}-{tmp_path.name}"
@@ -85,11 +95,16 @@ def _write_real_link_acceptance_reports(root: Path) -> dict[str, str]:
             "event_id": "field-real-1",
             "scenario_id": "illegal_parking",
             "status": "archived",
+            "created_at": time.time(),
             "payload": {
                 "source": "camera",
                 "device_trust": {
                     "trusted": True,
                     "device_id": "camera-main-road-1",
+                    "source": "camera",
+                    "status": "trusted",
+                    "signature_verified": True,
+                    "reason": "",
                 },
             },
         })
@@ -811,6 +826,65 @@ def test_delivery_resource_governance_request_approves_registry_rollback(
     assert approved_requests["summary"]["approved_count"] == 1
 
 
+def test_delivery_resource_governance_review_rejects_registry_drift(
+    tmp_path: Path,
+) -> None:
+    resource_root = tmp_path / "delivery-resources"
+    upsert_delivery_resource(
+        resource_root,
+        "vision_models",
+        "vehicle-detection",
+        {
+            "display_name": "Vehicle detector",
+            "version": "v1.0.0",
+            "publish_status": "published",
+        },
+        operator_id="delivery.operator",
+        reason="initial registration",
+    )
+    request = create_delivery_resource_governance_request(
+        resource_root,
+        "disable_resource",
+        {
+            "resource_type": "vision_models",
+            "resource_id": "vehicle-detection",
+        },
+        operator_id="delivery.operator",
+        reason="bad field accuracy",
+    )
+    assert request["accepted"] is True
+
+    upsert_delivery_resource(
+        resource_root,
+        "vision_models",
+        "vehicle-detection",
+        {
+            "display_name": "Vehicle detector",
+            "version": "v2.0.0",
+            "publish_status": "published",
+        },
+        operator_id="resource.owner",
+        reason="new model published before review",
+    )
+    reviewed = review_delivery_resource_governance_request(
+        resource_root,
+        request["request"]["request_id"],
+        decision="approve",
+        operator_id="delivery.reviewer",
+        reason="approve stale request",
+    )
+
+    assert reviewed["accepted"] is False
+    assert reviewed["reason"] == "resource_governance_registry_changed_since_request"
+    assert reviewed["request"]["status"] == "pending"
+    assert reviewed["request_registry_sha256"] == request["request"]["current_registry_sha256"]
+    assert reviewed["current_registry_sha256"] != request["request"]["current_registry_sha256"]
+    registry = list_delivery_resource_registry(resource_root)
+    current = registry["delivery_resources"]["vision_models"]["vehicle-detection"]
+    assert current["version"] == "v2.0.0"
+    assert current["publish_status"] == "published"
+
+
 def test_disabled_acceptance_resource_blocks_binding_readiness(tmp_path: Path) -> None:
     resource_root = tmp_path / "delivery-resources"
     acceptance_ref = "tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking"
@@ -933,6 +1007,83 @@ def test_customer_project_resource_catalog_resolves_object_bindings() -> None:
     assert vehicle_consumer["status"] == "linked"
 
 
+def test_customer_project_resource_catalog_uses_custom_delivery_resource_root(
+    tmp_path: Path,
+) -> None:
+    resource_root = tmp_path / "delivery-resources"
+    upsert_delivery_resource(
+        resource_root,
+        "vision_models",
+        "shared-gate-model",
+        {
+            "display_name": "Shared gate detector",
+            "version": "v2.1.0",
+            "owner": "solution.resource.team",
+            "description": "Reusable gate detector for customer project bindings.",
+        },
+        operator_id="delivery.operator",
+        reason="register shared model for customer project catalog",
+    )
+    profile_root = tmp_path / "site-profiles"
+    profile_root.mkdir(parents=True)
+    profile = profile_root / "custom-site.yaml"
+    profile.write_text(
+        json.dumps(
+            {
+                "site": {
+                    "site_id": "custom-site",
+                    "name": "Custom Site",
+                },
+                "customer": {
+                    "customer_id": "custom-customer",
+                    "customer_name": "Custom Customer",
+                    "project_id": "custom-project",
+                    "project_name": "Custom Project",
+                },
+                "managed_objects": {
+                    "custom_camera_gate": {
+                        "display_name": "Custom camera gate",
+                        "category": "access",
+                        "bindings": {
+                            "vision_models": ["shared-gate-model"],
+                            "sensor_protocols": ["camera-detection-json"],
+                            "skill_packages": ["capability.detect_illegal_parking"],
+                            "acceptance_tests": [
+                                "tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking"
+                            ],
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = build_customer_project_resource_catalog(
+        profile_root,
+        template_root=None,
+        delivery_resource_root=resource_root,
+    )
+
+    assert catalog["summary"]["unregistered_resource_count"] == 0
+    consumer = next(
+        item
+        for item in catalog["consumers"]
+        if item["object_id"] == "custom_camera_gate"
+        and item["resource_type"] == "vision_models"
+    )
+    assert consumer["status"] == "linked"
+    assert consumer["source"] == "shared_registry"
+    resource = next(
+        item
+        for item in catalog["resources"]
+        if item["resource_type"] == "vision_models"
+        and item["resource_id"] == "shared-gate-model"
+    )
+    assert resource["source"] == "shared_registry"
+    assert resource["consumer_count"] == 1
+
+
 def test_customer_project_execution_bindings_expose_ingest_and_runtime_plan() -> None:
     plan = build_customer_project_execution_bindings(
         Path("deploy/site-profiles"),
@@ -959,7 +1110,7 @@ def test_customer_project_execution_bindings_expose_ingest_and_runtime_plan() ->
     assert vehicles["input_adapters"][0]["adapter"] == "camera_detection_json"
     adapter_contract = vehicles["input_adapters"][0]["adapter_contract"]
     assert adapter_contract["normalizer"] == (
-        "askme.pipeline.field_ingest_adapters.normalize_field_ingest_payload"
+        "askme.pipeline.field.field_ingest_adapters.normalize_field_ingest_payload"
     )
     assert adapter_contract["bridge"] == "field-ingest-bridge"
     assert adapter_contract["ingest_endpoint"] == "/api/field/ingest"
@@ -1059,13 +1210,14 @@ def test_customer_project_acceptance_report_summarizes_delivery_gates(tmp_path: 
     assert len(report["env_missing"]) > 0
     gates_by_id = {gate["gate_id"]: gate for gate in report["gates"]}
     assert gates_by_id["managed_object_execution_bindings"]["status"] == "ready"
-    assert "executable ingest plans" in gates_by_id["managed_object_execution_bindings"]["evidence"]
+    assert "具备可执行接入计划" in gates_by_id["managed_object_execution_bindings"]["evidence"]
     assert gates_by_id["deployment_credentials"]["status"] == "manual_check"
     assert gates_by_id["onsite_acceptance_boundary"]["status"] == "manual_check"
     assert gates_by_id["field_readiness"]["status"] == "manual_check"
     assert gates_by_id["field_smoke_evidence"]["status"] == "manual_check"
     assert gates_by_id["voice_notification_evidence"]["status"] == "manual_check"
     assert gates_by_id["runtime_audit_trust"]["status"] == "manual_check"
+    assert gates_by_id["field_device_onboarding"]["status"] == "manual_check"
     assert {gate["gate_id"] for gate in report["gates"]} == {
         "site_profile",
         "managed_object_acceptance",
@@ -1076,6 +1228,7 @@ def test_customer_project_acceptance_report_summarizes_delivery_gates(tmp_path: 
         "field_smoke_evidence",
         "voice_notification_evidence",
         "runtime_audit_trust",
+        "field_device_onboarding",
     }
     assert report["execution_bindings"]["summary"]["overall_status"] == "ready"
     assert report["execution_bindings"]["customer_claim"]
@@ -1095,6 +1248,7 @@ def test_customer_project_acceptance_report_summarizes_delivery_gates(tmp_path: 
     assert checklist_by_id["runtime_roundtrip"]["status"] in {"blocked", "manual_check"}
     assert report["field_readiness"]["status"] == "ready_for_lab"
     assert report["field_readiness"]["reports"]["voice_smoke"]["voice_profile"] == "emergency_short"
+    assert report["field_readiness"]["device_onboarding"]["ready"] == 0
     launch = report["launch_readiness"]
     assert launch["readiness_type"] == "askme.customer_project_launch_readiness.v1"
     assert launch["overall_status"] == "blocked"
@@ -1107,6 +1261,7 @@ def test_customer_project_acceptance_report_summarizes_delivery_gates(tmp_path: 
         "deployment_credentials",
         "onsite_required_evidence",
         "field_real_link",
+        "field_device_onboarding",
         "site_acceptance_checklist",
     }
     onsite_summary = report["onsite_acceptance_evidence"]["summary"]
@@ -1134,12 +1289,14 @@ def test_customer_project_acceptance_report_summarizes_delivery_gates(tmp_path: 
         "acceptance_evidence",
         "handoff_package",
     }
-    assert "Production launch requires" in report["release_claim"]
+    assert "生产上线仍需要设备、通知、语音和机器人运行的独立现场证据" in report["release_claim"]
 
 
 def test_acceptance_report_auto_backfills_required_onsite_evidence_from_real_link_reports(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _set_demo_device_secrets(monkeypatch)
     profile_root = tmp_path / "profiles"
     shutil.copytree(Path("deploy/site-profiles"), profile_root)
     evidence_root = _artifact_test_root(tmp_path, "auto-real")
@@ -1174,9 +1331,13 @@ def test_acceptance_report_auto_backfills_required_onsite_evidence_from_real_lin
         assert receipts_by_type["voice_playback"]["sha256"]
         assert receipts_by_type["notification_delivery"]["exists"] is True
         assert receipts_by_type["runtime_roundtrip"]["external_reference"] == "final_status=shadowed"
+        assert report["field_readiness"]["device_onboarding"]["ready"] == 1
+        assert report["field_readiness"]["device_onboarding"]["manual_check"] == 3
+        assert report["field_readiness"]["device_onboarding"]["blocked"] == 0
         gates_by_id = {gate["gate_id"]: gate for gate in report["gates"]}
         assert gates_by_id["onsite_acceptance_boundary"]["status"] == "ready"
-        assert "4/4 required onsite evidence receipts passed" in gates_by_id[
+        assert gates_by_id["field_device_onboarding"]["status"] == "manual_check"
+        assert "4/4 个必需现场证据回执已通过" in gates_by_id[
             "onsite_acceptance_boundary"
         ]["evidence"]
         checklist = report["site_acceptance_checklist"]
@@ -1200,6 +1361,12 @@ def test_acceptance_report_auto_backfills_required_onsite_evidence_from_real_lin
         assert dossier_result["dossier"]["launch_readiness"]["overall_status"] == "manual_check"
         assert dossier_result["dossier"]["manifest"]["launch_readiness_status"] == "manual_check"
         assert dossier_result["dossier"]["manifest"]["launch_stage"] == "pilot_or_site_trial"
+        launch_gates = {
+            gate["gate_id"]: gate
+            for gate in dossier_result["dossier"]["launch_readiness"]["gates"]
+        }
+        assert launch_gates["field_device_onboarding"]["status"] == "manual_check"
+        assert "ready=1" in launch_gates["field_device_onboarding"]["evidence"]
         assert dossier_result["dossier"]["site_acceptance_checklist"]["items"]
         listing = list_customer_project_onsite_evidence(
             profile_root,
@@ -1223,7 +1390,11 @@ def test_acceptance_report_auto_backfills_required_onsite_evidence_from_real_lin
         shutil.rmtree(evidence_root, ignore_errors=True)
 
 
-def test_acceptance_report_auto_backfill_is_read_only_and_idempotent(tmp_path: Path) -> None:
+def test_acceptance_report_auto_backfill_is_read_only_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_demo_device_secrets(monkeypatch)
     profile_root = tmp_path / "profiles"
     shutil.copytree(Path("deploy/site-profiles"), profile_root)
     profile_file = profile_root / "park-demo.yaml"
@@ -1276,6 +1447,134 @@ def test_acceptance_report_auto_backfill_is_read_only_and_idempotent(tmp_path: P
         shutil.rmtree(evidence_root, ignore_errors=True)
 
 
+def _forged_onsite_evidence_payload(evidence_type: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "evidence_type": evidence_type,
+        "status": "passed",
+        "local_server": False,
+    }
+    if evidence_type == "device_ingest":
+        payload["trusted_device_event_count"] = 1
+    elif evidence_type == "voice_playback":
+        payload["live_tts"] = True
+    elif evidence_type == "notification_delivery":
+        payload["external_services"] = True
+        payload["collector_request_count"] = 1
+    elif evidence_type == "runtime_roundtrip":
+        payload["trusted_callbacks"] = True
+        payload["final_status_verified"] = True
+    return payload
+
+
+def _ready_customer_signoff_closure(*, onsite_gate_eligible: bool = True) -> dict[str, Any]:
+    dossier_sha = "d" * 64
+    audit_sha = "b" * 64
+    receipt_ids = {
+        "device_ingest": "auto-device-ingest",
+        "voice_playback": "auto-voice-playback",
+        "notification_delivery": "auto-notification-delivery",
+        "runtime_roundtrip": "auto-runtime-roundtrip",
+    }
+    receipts = [
+        {
+            "receipt_id": receipt_id,
+            "evidence_type": evidence_type,
+            "status": "passed",
+            "source": "field_readiness_auto_backfill",
+            "sha256": "c" * 64,
+            "trust_status": "verified" if onsite_gate_eligible else "manual_check",
+            "acceptance_gate_eligible": onsite_gate_eligible,
+        }
+        for evidence_type, receipt_id in receipt_ids.items()
+    ]
+    return {
+        "found": True,
+        "overall_status": "ready_for_customer_signoff",
+        "customer_claim": "证据和内部复核已具备，可提交客户签收。",
+        "next_step": "归档客户签收结果。",
+        "gates": [
+            {"gate_id": "customer_signoff", "status": "manual_check"},
+        ],
+        "acceptance_report": {
+            "overall_status": "ready_for_onsite_acceptance",
+            "customer_status": "可进入试点验收",
+            "release_claim": "仅用于试点验收",
+        },
+        "onsite_acceptance_evidence": {
+            "receipts": receipts,
+            "summary": {
+                "overall_status": "ready" if onsite_gate_eligible else "manual_check",
+                "passed_required_count": len(receipts) if onsite_gate_eligible else 0,
+                "latest_receipt_id": receipts[0]["receipt_id"],
+            },
+        },
+        "site_acceptance_checklist": {
+            "overall_status": "ready",
+            "items": [],
+        },
+        "manual_review": {
+            "latest": {"decision": "accepted"},
+            "reviews": [],
+            "review_count": 1,
+        },
+        "customer_signoff": {
+            "latest": {},
+            "signoffs": [],
+            "signoff_count": 0,
+            "base_ready_for_signoff": True,
+        },
+        "artifact_verification": {
+            "acceptance_dossier": {
+                "valid": True,
+                "reason": "ok",
+                "manifest": {"payload_sha256": dossier_sha},
+            },
+            "proposal_bundle": {
+                "status": "ready",
+                "evidence": "proposal valid",
+                "proposal_path": "artifacts/customer-project-proposals/demo-proposal-bundle.json",
+                "verification": {"payload_sha256": "e" * 64},
+            },
+            "audit_export": {
+                "status": "ready",
+                "evidence": "audit export valid",
+                "manifest_path": "artifacts/audit_exports/demo.manifest.json",
+                "sha256": audit_sha,
+                "export_id": "audit-demo",
+            },
+        },
+        "evidence_timeline": [],
+    }
+
+
+def _accepted_customer_signoff_payload(evidence_refs: list[str] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "decision": "accepted",
+        "signatory_name": "Fanmu Operator",
+        "signatory_role": "Customer operations owner",
+        "organization": "Fanmu Creative Park",
+        "reason": "Customer accepts the pilot handoff.",
+        "risk_acknowledgement": True,
+        "credential_ref": "customer-signoff.pdf",
+        "credential_sha256": "a" * 64,
+    }
+    if evidence_refs is not None:
+        payload["evidence_refs"] = evidence_refs
+    return payload
+
+
+def _complete_customer_signoff_evidence_refs() -> list[str]:
+    return [
+        "onsite:auto-device-ingest",
+        "onsite:auto-voice-playback",
+        "onsite:auto-notification-delivery",
+        "onsite:auto-runtime-roundtrip",
+        f"acceptance_dossier:{'d' * 64}",
+        "proposal_bundle",
+        "audit_export:audit-demo",
+    ]
+
+
 def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: Path) -> None:
     profile_root = tmp_path / "profiles"
     shutil.copytree(Path("deploy/site-profiles"), profile_root)
@@ -1290,7 +1589,7 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
         ):
             evidence_path = evidence_root / f"{evidence_type}.json"
             evidence_path.write_text(
-                json.dumps({"evidence_type": evidence_type, "status": "passed"}),
+                json.dumps(_forged_onsite_evidence_payload(evidence_type)),
                 encoding="utf-8",
             )
             registered = register_customer_project_onsite_evidence(
@@ -1310,6 +1609,8 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
             assert registered["receipt"]["sha256"]
             assert registered["receipt"]["evidence_tier"] == "acceptance_candidate"
             assert registered["receipt"]["production_eligible"] is False
+            assert registered["receipt"]["trust_status"] == "manual_check"
+            assert registered["receipt"]["acceptance_gate_eligible"] is False
 
         listing = list_customer_project_onsite_evidence(profile_root, "demo-field-ops")
         assert all(
@@ -1317,9 +1618,17 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
             for receipt in listing["onsite_acceptance_evidence"]["receipts"]
         )
         onsite_summary = listing["onsite_acceptance_evidence"]["summary"]
-        assert onsite_summary["overall_status"] == "ready"
-        assert onsite_summary["passed_required_count"] == 4
+        assert onsite_summary["overall_status"] == "manual_check"
+        assert onsite_summary["passed_required_count"] == 0
         assert not onsite_summary["missing_required_types"]
+        assert sorted(onsite_summary["manual_check_required_types"]) == sorted(
+            [
+                "device_ingest",
+                "voice_playback",
+                "notification_delivery",
+                "runtime_roundtrip",
+            ]
+        )
 
         report = customer_project_acceptance_report(
             profile_root,
@@ -1327,8 +1636,8 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
             check_env=False,
         )
         gates_by_id = {gate["gate_id"]: gate for gate in report["gates"]}
-        assert gates_by_id["onsite_acceptance_boundary"]["status"] == "ready"
-        assert "4/4 required onsite evidence receipts passed" in gates_by_id[
+        assert gates_by_id["onsite_acceptance_boundary"]["status"] == "manual_check"
+        assert "0/4 个必需现场证据回执已通过" in gates_by_id[
             "onsite_acceptance_boundary"
         ]["evidence"]
 
@@ -1422,9 +1731,9 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
             check_env=False,
         )
         dossier = dossier_result["dossier"]
-        assert dossier["manifest"]["onsite_evidence_status"] == "ready"
+        assert dossier["manifest"]["onsite_evidence_status"] == "manual_check"
         assert dossier["manifest"]["onsite_evidence_count"] == 4
-        assert dossier["manifest"]["onsite_required_evidence_ready"] is True
+        assert dossier["manifest"]["onsite_required_evidence_ready"] is False
         assert dossier["manifest"]["site_acceptance_checklist_status"] in {
             "ready",
             "manual_check",
@@ -1444,6 +1753,16 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
         ]
         assert len(onsite_inventory) == 4
         assert all(item["sha256"] for item in onsite_inventory)
+        assert all(item["exists"] is True for item in onsite_inventory)
+        assert all(item["size_bytes"] > 0 for item in onsite_inventory)
+        assert all(item["evidence_url"].startswith("/api/field/evidence?path=") for item in onsite_inventory)
+        assert {item["onsite_evidence_type"] for item in onsite_inventory} == {
+            "device_ingest",
+            "voice_playback",
+            "notification_delivery",
+            "runtime_roundtrip",
+        }
+        assert all(item["receipt_id"] for item in onsite_inventory)
         assert verify_customer_project_acceptance_dossier(dossier)["valid"] is True
     finally:
         shutil.rmtree(evidence_root, ignore_errors=True)
@@ -1453,12 +1772,272 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
             pass
 
 
+def test_customer_project_customer_signoff_rejects_missing_unknown_and_incomplete_evidence_refs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_root = tmp_path / "profiles"
+    shutil.copytree(Path("deploy/site-profiles"), profile_root)
+    monkeypatch.setattr(
+        acceptance_module,
+        "customer_project_acceptance_closure",
+        lambda *args, **kwargs: _ready_customer_signoff_closure(),
+    )
+
+    missing = acceptance_module.register_customer_project_customer_signoff(
+        profile_root,
+        "demo-field-ops",
+        _accepted_customer_signoff_payload(),
+        operator_id="delivery.lead",
+        reason="Missing evidence refs should block customer acceptance.",
+    )
+    unknown = acceptance_module.register_customer_project_customer_signoff(
+        profile_root,
+        "demo-field-ops",
+        _accepted_customer_signoff_payload(["arbitrary-string"]),
+        operator_id="delivery.lead",
+        reason="Unknown evidence refs should block customer acceptance.",
+    )
+    incomplete = acceptance_module.register_customer_project_customer_signoff(
+        profile_root,
+        "demo-field-ops",
+        _accepted_customer_signoff_payload(
+            [
+                "onsite:auto-device-ingest",
+                f"acceptance_dossier:{'d' * 64}",
+            ]
+        ),
+        operator_id="delivery.lead",
+        reason="Incomplete evidence refs should block customer acceptance.",
+    )
+
+    assert missing["accepted"] is False
+    assert missing["reason"] == "customer_signoff_evidence_refs_required"
+    assert missing["evidence_ref_assessment"]["missing_material_types"] == [
+        "acceptance_dossier",
+        "proposal_bundle",
+        "audit_export",
+    ]
+    assert unknown["accepted"] is False
+    assert unknown["reason"] == "customer_signoff_evidence_refs_unresolved"
+    assert unknown["evidence_ref_assessment"]["unresolved_refs"] == ["arbitrary-string"]
+    assert incomplete["accepted"] is False
+    assert incomplete["reason"] == "customer_signoff_evidence_refs_incomplete"
+    assert sorted(incomplete["evidence_ref_assessment"]["missing_onsite_evidence_types"]) == [
+        "notification_delivery",
+        "runtime_roundtrip",
+        "voice_playback",
+    ]
+    assert incomplete["evidence_ref_assessment"]["missing_material_types"] == [
+        "proposal_bundle",
+        "audit_export",
+    ]
+    signoffs = acceptance_module.list_customer_project_customer_signoffs(
+        profile_root,
+        "demo-field-ops",
+    )
+    assert signoffs["signoff_count"] == 0
+
+
+def test_customer_project_customer_signoff_accepts_complete_verified_evidence_refs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_root = tmp_path / "profiles"
+    shutil.copytree(Path("deploy/site-profiles"), profile_root)
+    monkeypatch.setattr(
+        acceptance_module,
+        "customer_project_acceptance_closure",
+        lambda *args, **kwargs: _ready_customer_signoff_closure(),
+    )
+
+    accepted = acceptance_module.register_customer_project_customer_signoff(
+        profile_root,
+        "demo-field-ops",
+        _accepted_customer_signoff_payload(_complete_customer_signoff_evidence_refs()),
+        operator_id="delivery.lead",
+        reason="Customer accepts the verified handoff package.",
+    )
+
+    assert accepted["accepted"] is True
+    assessment = accepted["signoff"]["evidence_ref_assessment"]
+    assert assessment["valid"] is True
+    assert assessment["reason"] == "ok"
+    assert assessment["resolved_count"] == len(_complete_customer_signoff_evidence_refs())
+    assert assessment["missing_onsite_evidence_types"] == []
+    assert assessment["missing_material_types"] == []
+    assert set(assessment["available_ref_types"]) == {
+        "acceptance_dossier",
+        "audit_export",
+        "onsite_receipt",
+        "proposal_bundle",
+    }
+    signoffs = acceptance_module.list_customer_project_customer_signoffs(
+        profile_root,
+        "demo-field-ops",
+    )
+    assert signoffs["signoff_count"] == 1
+    assert signoffs["latest"]["decision"] == "accepted"
+    assert signoffs["latest"]["integrity_valid"] is True
+    assert signoffs["latest"]["evidence_ref_assessment"]["valid"] is True
+
+
+def test_customer_project_customer_signoff_rejects_manual_check_onsite_refs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_root = tmp_path / "profiles"
+    shutil.copytree(Path("deploy/site-profiles"), profile_root)
+    monkeypatch.setattr(
+        acceptance_module,
+        "customer_project_acceptance_closure",
+        lambda *args, **kwargs: _ready_customer_signoff_closure(onsite_gate_eligible=False),
+    )
+
+    rejected = acceptance_module.register_customer_project_customer_signoff(
+        profile_root,
+        "demo-field-ops",
+        _accepted_customer_signoff_payload(_complete_customer_signoff_evidence_refs()),
+        operator_id="delivery.lead",
+        reason="Manual-check onsite receipts should not satisfy customer signoff.",
+    )
+
+    assert rejected["accepted"] is False
+    assert rejected["reason"] == "customer_signoff_evidence_refs_unresolved"
+    assert sorted(rejected["evidence_ref_assessment"]["unresolved_refs"]) == sorted(
+        [
+            "onsite:auto-device-ingest",
+            "onsite:auto-voice-playback",
+            "onsite:auto-notification-delivery",
+            "onsite:auto-runtime-roundtrip",
+        ]
+    )
+    signoffs = acceptance_module.list_customer_project_customer_signoffs(
+        profile_root,
+        "demo-field-ops",
+    )
+    assert signoffs["signoff_count"] == 0
+
+
+def test_customer_project_customer_signoff_downgrades_legacy_accepted_without_evidence_assessment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_root = tmp_path / "profiles"
+    shutil.copytree(Path("deploy/site-profiles"), profile_root)
+    detail = get_customer_project_profile(profile_root, "demo-field-ops")
+    profile_path = Path(detail["profile_path"])
+    profile = load_field_site_profile(profile_path)
+    profile["acceptance_reviews"] = [
+        {
+            "review_id": "legacy-ready-review",
+            "reviewed_at": time.time(),
+            "operator_id": "delivery.lead",
+            "decision": "accepted",
+            "reason": "Internal delivery review accepted the pilot handoff.",
+            "risk_acknowledgement": True,
+        }
+    ]
+    profile["customer_signoffs"] = [
+        {
+            "signoff_type": "askme.customer_project_customer_signoff",
+            "signoff_version": 1,
+            "signoff_id": "legacy-accepted-without-evidence-assessment",
+            "signed_at": time.time(),
+            "operator_id": "legacy.delivery",
+            "decision": "accepted",
+            "signatory_name": "Legacy Customer",
+            "signatory_role": "Customer owner",
+            "organization": "Legacy Org",
+            "reason": "Legacy signoff before evidence refs were enforced.",
+            "risk_acknowledgement": True,
+            "credential_ref": "legacy-signoff.pdf",
+            "credential_sha256": "a" * 64,
+            "evidence_refs": ["legacy-free-text-ref"],
+        }
+    ]
+    profile_path.write_text(
+        yaml.safe_dump(profile, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    ready_closure = _ready_customer_signoff_closure()
+    ready_report = {
+        "found": True,
+        "overall_status": "ready_for_onsite_acceptance",
+        "customer_status": "ready",
+        "release_claim": "pilot acceptance only",
+        "customer": {"customer_id": "demo"},
+        "site": {"site_id": "demo-field-ops"},
+        "onsite_acceptance_evidence": ready_closure["onsite_acceptance_evidence"],
+        "site_acceptance_checklist": {
+            "overall_status": "ready",
+            "ready_count": 4,
+            "manual_check_count": 0,
+            "blocked_count": 0,
+            "customer_message": "Checklist is ready.",
+        },
+    }
+    monkeypatch.setattr(
+        acceptance_module,
+        "customer_project_acceptance_report",
+        lambda *args, **kwargs: ready_report,
+    )
+    monkeypatch.setattr(
+        acceptance_module,
+        "_customer_project_acceptance_dossier_verification",
+        lambda report: ready_closure["artifact_verification"]["acceptance_dossier"],
+    )
+    monkeypatch.setattr(
+        acceptance_module,
+        "_customer_project_latest_proposal_verification",
+        lambda profile: ready_closure["artifact_verification"]["proposal_bundle"],
+    )
+    monkeypatch.setattr(
+        acceptance_module,
+        "_customer_project_latest_audit_export",
+        lambda profile: ready_closure["artifact_verification"]["audit_export"],
+    )
+
+    signoffs = acceptance_module.list_customer_project_customer_signoffs(
+        profile_root,
+        "demo-field-ops",
+    )
+    latest = signoffs["latest"]
+    assert latest["decision"] == "accepted"
+    assert latest["integrity_valid"] is True
+    assert latest["evidence_ref_assessment"]["valid"] is False
+    assert latest["evidence_ref_assessment"]["reason"] == (
+        "customer_signoff_evidence_refs_legacy_unverified"
+    )
+    assert latest["evidence_ref_assessment"]["legacy_unverified"] is True
+
+    gate = acceptance_module._customer_project_customer_signoff_gate(
+        latest,
+        base_ready_for_signoff=True,
+    )
+    assert gate["status"] == "manual_check"
+    assert "evidence refs are not verified" in gate["evidence"]
+
+    closure = acceptance_module.customer_project_acceptance_closure(
+        profile_root,
+        "demo-field-ops",
+        check_env=False,
+    )
+    closure_gates = {gate["gate_id"]: gate for gate in closure["gates"]}
+    assert closure["customer_signoff"]["base_ready_for_signoff"] is True
+    assert closure_gates["customer_signoff"]["status"] == "manual_check"
+    assert closure["overall_status"] == "ready_for_customer_signoff"
+    assert closure["overall_status"] != "accepted_by_customer"
+
+
 def test_customer_project_onsite_evidence_rejects_invalid_receipts(tmp_path: Path) -> None:
     profile_root = tmp_path / "profiles"
     shutil.copytree(Path("deploy/site-profiles"), profile_root)
     detail = get_customer_project_profile(profile_root, "demo-field-ops")
     profile_path = Path(detail["profile_path"])
     before = profile_path.read_text(encoding="utf-8")
+    evidence_path = tmp_path / "verified-device-ingest.json"
+    evidence_path.write_text(json.dumps(_forged_onsite_evidence_payload("device_ingest")), encoding="utf-8")
 
     bad_type = register_customer_project_onsite_evidence(
         profile_root,
@@ -1474,12 +2053,274 @@ def test_customer_project_onsite_evidence_rejects_invalid_receipts(tmp_path: Pat
         operator_id="delivery.lead",
         reason="Invalid evidence status should not write.",
     )
+    fake_pass = register_customer_project_onsite_evidence(
+        profile_root,
+        "demo-field-ops",
+        {
+            "evidence_type": "device_ingest",
+            "status": "passed",
+            "summary": "A required onsite gate cannot pass without a verifiable artifact.",
+        },
+        operator_id="delivery.lead",
+        reason="Unverified passed evidence should not write.",
+    )
+    missing_file = register_customer_project_onsite_evidence(
+        profile_root,
+        "demo-field-ops",
+        {
+            "evidence_type": "runtime_roundtrip",
+            "status": "passed",
+            "path": str(tmp_path / "missing-runtime.json"),
+        },
+        operator_id="delivery.lead",
+        reason="Missing passed evidence should not write.",
+    )
+    bad_tier = register_customer_project_onsite_evidence(
+        profile_root,
+        "demo-field-ops",
+        {
+            "evidence_type": "device_ingest",
+            "status": "passed",
+            "path": str(evidence_path),
+            "evidence_tier": "production_launch",
+        },
+        operator_id="delivery.lead",
+        reason="Production trust tier should not write.",
+    )
 
     assert bad_type["accepted"] is False
     assert bad_type["reason"] == "unsupported_onsite_evidence_type"
     assert bad_status["accepted"] is False
     assert bad_status["reason"] == "unsupported_onsite_evidence_status"
+    assert fake_pass["accepted"] is False
+    assert fake_pass["reason"] == "passed_required_onsite_evidence_requires_path"
+    assert fake_pass["trust"]["status"] == "unverified"
+    assert missing_file["accepted"] is False
+    assert missing_file["reason"] == "passed_required_onsite_evidence_path_not_found"
+    assert bad_tier["accepted"] is False
+    assert bad_tier["reason"] == "unsupported_onsite_evidence_trust_tier"
     assert profile_path.read_text(encoding="utf-8") == before
+
+
+def test_customer_project_onsite_evidence_sanitizes_client_production_claims(
+    tmp_path: Path,
+) -> None:
+    profile_root = tmp_path / "profiles"
+    shutil.copytree(Path("deploy/site-profiles"), profile_root)
+    evidence_path = tmp_path / "verified-device-ingest.json"
+    evidence_path.write_text(json.dumps(_forged_onsite_evidence_payload("device_ingest")), encoding="utf-8")
+
+    registered = register_customer_project_onsite_evidence(
+        profile_root,
+        "demo-field-ops",
+        {
+            "evidence_type": "device_ingest",
+            "status": "passed",
+            "path": str(evidence_path),
+            "production_eligible": True,
+        },
+        operator_id="delivery.lead",
+        reason="Client-side production claim must be ignored.",
+    )
+
+    assert registered["accepted"] is True
+    receipt = registered["receipt"]
+    assert receipt["evidence_tier"] == "acceptance_candidate"
+    assert receipt["production_eligible"] is False
+    assert receipt["verified_evidence"] is True
+    assert receipt["trust_status"] == "manual_check"
+    assert receipt["acceptance_gate_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    "evidence_type",
+    [
+        "device_ingest",
+        "voice_playback",
+        "notification_delivery",
+        "runtime_roundtrip",
+    ],
+)
+def test_customer_project_onsite_evidence_forged_json_does_not_open_acceptance_gate(
+    tmp_path: Path,
+    evidence_type: str,
+) -> None:
+    profile_root = tmp_path / "profiles"
+    shutil.copytree(Path("deploy/site-profiles"), profile_root)
+    evidence_path = tmp_path / f"forged-{evidence_type}.json"
+    evidence_path.write_text(
+        json.dumps(_forged_onsite_evidence_payload(evidence_type)),
+        encoding="utf-8",
+    )
+
+    registered = register_customer_project_onsite_evidence(
+        profile_root,
+        "demo-field-ops",
+        {
+            "evidence_type": evidence_type,
+            "status": "passed",
+            "path": str(evidence_path),
+            "summary": "This file self-claims real-link success but is not system verified.",
+        },
+        operator_id="delivery.lead",
+        reason="Forged JSON must not open onsite acceptance.",
+    )
+
+    assert registered["accepted"] is True
+    receipt = registered["receipt"]
+    assert receipt["status"] == "passed"
+    assert receipt["verified_evidence"] is True
+    assert receipt["trust_status"] == "manual_check"
+    assert receipt["acceptance_gate_eligible"] is False
+    summary = registered["onsite_acceptance_evidence"]["summary"]
+    assert summary["overall_status"] == "manual_check"
+    assert summary["passed_required_count"] == 0
+    assert summary["manual_check_required_types"] == [evidence_type]
+
+
+def test_customer_project_onsite_evidence_ignores_claimed_sha256(tmp_path: Path) -> None:
+    profile_root = tmp_path / "profiles"
+    shutil.copytree(Path("deploy/site-profiles"), profile_root)
+    evidence_path = tmp_path / "manual-device-ingest.json"
+    evidence_path.write_text(
+        json.dumps(_forged_onsite_evidence_payload("device_ingest")),
+        encoding="utf-8",
+    )
+    claimed_sha = "f" * 64
+
+    registered = register_customer_project_onsite_evidence(
+        profile_root,
+        "demo-field-ops",
+        {
+            "evidence_type": "device_ingest",
+            "status": "passed",
+            "path": str(evidence_path),
+            "sha256": claimed_sha,
+        },
+        operator_id="delivery.lead",
+        reason="Client-supplied hash must not override file inventory.",
+    )
+
+    actual_sha = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    assert registered["accepted"] is True
+    assert registered["receipt"]["sha256"] == actual_sha
+    assert registered["receipt"]["sha256"] != claimed_sha
+
+
+def test_customer_project_onsite_evidence_plain_file_does_not_open_acceptance_gate(
+    tmp_path: Path,
+) -> None:
+    profile_root = tmp_path / "profiles"
+    shutil.copytree(Path("deploy/site-profiles"), profile_root)
+    evidence_path = tmp_path / "manual-device-ingest.json"
+    evidence_path.write_text(
+        json.dumps({"evidence_type": "device_ingest", "status": "passed"}),
+        encoding="utf-8",
+    )
+
+    registered = register_customer_project_onsite_evidence(
+        profile_root,
+        "demo-field-ops",
+        {
+            "evidence_type": "device_ingest",
+            "status": "passed",
+            "path": str(evidence_path),
+            "summary": "A plain JSON file is not enough to prove live device ingest.",
+        },
+        operator_id="delivery.lead",
+        reason="Manual file should require delivery review.",
+    )
+
+    assert registered["accepted"] is True
+    receipt = registered["receipt"]
+    assert receipt["status"] == "passed"
+    assert receipt["verified_evidence"] is True
+    assert receipt["trust_status"] == "manual_check"
+    assert receipt["acceptance_gate_eligible"] is False
+    summary = registered["onsite_acceptance_evidence"]["summary"]
+    assert summary["overall_status"] == "manual_check"
+    assert summary["passed_required_count"] == 0
+    assert summary["manual_check_required_types"] == ["device_ingest"]
+    report = customer_project_acceptance_report(
+        profile_root,
+        "demo-field-ops",
+        check_env=False,
+    )
+    checklist_by_id = {
+        item["item_id"]: item
+        for item in report["site_acceptance_checklist"]["items"]
+    }
+    assert checklist_by_id["device_ingest"]["status"] == "manual_check"
+    assert report["site_acceptance_checklist"]["overall_status"] != "ready"
+
+
+def test_customer_project_onsite_evidence_downgrades_legacy_unverified_passed_receipts(
+    tmp_path: Path,
+) -> None:
+    profile_root = tmp_path / "profiles"
+    shutil.copytree(Path("deploy/site-profiles"), profile_root)
+    detail = get_customer_project_profile(profile_root, "demo-field-ops")
+    profile_path = Path(detail["profile_path"])
+    profile = load_field_site_profile(profile_path)
+    profile["onsite_acceptance_evidence"] = [
+        {
+            "evidence_type": "device_ingest",
+            "status": "passed",
+            "summary": "Legacy manual receipt without a file.",
+            "evidence_tier": "site_acceptance",
+            "production_eligible": True,
+        },
+        {
+            "evidence_type": "voice_playback",
+            "status": "passed",
+            "summary": "Legacy manual receipt without a file.",
+            "evidence_tier": "site_acceptance",
+            "production_eligible": True,
+        },
+        {
+            "evidence_type": "notification_delivery",
+            "status": "passed",
+            "summary": "Legacy manual receipt without a file.",
+            "evidence_tier": "site_acceptance",
+            "production_eligible": True,
+        },
+        {
+            "evidence_type": "runtime_roundtrip",
+            "status": "passed",
+            "summary": "Legacy manual receipt without a file.",
+            "evidence_tier": "site_acceptance",
+            "production_eligible": True,
+        },
+    ]
+    profile_path.write_text(
+        yaml.safe_dump(profile, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    listing = list_customer_project_onsite_evidence(
+        profile_root,
+        "demo-field-ops",
+        include_readiness_auto=False,
+    )
+
+    receipts = listing["onsite_acceptance_evidence"]["receipts"]
+    assert {receipt["status"] for receipt in receipts} == {"manual_check"}
+    assert {receipt["original_status"] for receipt in receipts} == {"passed"}
+    assert all(receipt["verified_evidence"] is False for receipt in receipts)
+    assert all(receipt["trust_status"] == "unverified" for receipt in receipts)
+    assert all(receipt["production_eligible"] is False for receipt in receipts)
+    assert {receipt["evidence_tier"] for receipt in receipts} == {"acceptance_candidate"}
+    summary = listing["onsite_acceptance_evidence"]["summary"]
+    assert summary["overall_status"] == "manual_check"
+    assert summary["passed_required_count"] == 0
+    assert sorted(summary["manual_check_required_types"]) == sorted(
+        [
+            "device_ingest",
+            "voice_playback",
+            "notification_delivery",
+            "runtime_roundtrip",
+        ]
+    )
 
 
 def test_customer_project_onsite_failed_receipt_blocks_acceptance(tmp_path: Path) -> None:
@@ -1496,7 +2337,7 @@ def test_customer_project_onsite_failed_receipt_blocks_acceptance(tmp_path: Path
         ):
             evidence_path = evidence_root / f"{evidence_type}.json"
             evidence_path.write_text(
-                json.dumps({"evidence_type": evidence_type, "status": "passed"}),
+                json.dumps(_forged_onsite_evidence_payload(evidence_type)),
                 encoding="utf-8",
             )
             assert register_customer_project_onsite_evidence(
@@ -1542,7 +2383,7 @@ def test_customer_project_onsite_failed_receipt_blocks_acceptance(tmp_path: Path
 
         recovered_path = evidence_root / "device_ingest_recovered.json"
         recovered_path.write_text(
-            json.dumps({"evidence_type": "device_ingest", "status": "passed"}),
+            json.dumps(_forged_onsite_evidence_payload("device_ingest")),
             encoding="utf-8",
         )
         recovered = register_customer_project_onsite_evidence(
@@ -1556,8 +2397,10 @@ def test_customer_project_onsite_failed_receipt_blocks_acceptance(tmp_path: Path
             operator_id="delivery.lead",
             reason="Device ingest smoke recovered.",
         )
-        assert recovered["onsite_acceptance_evidence"]["summary"]["overall_status"] == "ready"
-        assert recovered["onsite_acceptance_evidence"]["summary"]["failed_required_types"] == []
+        recovered_summary = recovered["onsite_acceptance_evidence"]["summary"]
+        assert recovered_summary["overall_status"] == "manual_check"
+        assert recovered_summary["failed_required_types"] == []
+        assert recovered_summary["passed_required_count"] == 0
     finally:
         shutil.rmtree(evidence_root, ignore_errors=True)
         try:
@@ -1579,8 +2422,8 @@ def test_customer_project_acceptance_dossier_exports_hash_manifest(tmp_path: Pat
     html_path = Path(dossier_result["html_path"])
     assert html_path.exists()
     html = html_path.read_text(encoding="utf-8")
-    assert "Customer Acceptance Dossier" in html
-    assert "Manifest SHA-256" in html
+    assert "AskMe 客户验收资料包" in html
+    assert "清单 SHA-256" in html
     assert "field-ingest-smoke" in html
     dossier = dossier_result["dossier"]
     assert dossier["dossier_type"] == "askme.customer_project_acceptance"
@@ -1599,8 +2442,14 @@ def test_customer_project_acceptance_dossier_exports_hash_manifest(tmp_path: Pat
     assert dossier["delivery_workflow"]["steps"]
     assert dossier["site_acceptance_checklist"]["items"]
     assert dossier["evidence_inventory"]
-    assert any(item["sha256"] for item in dossier["evidence_inventory"])
-    assert "Delivery Workflow" in html
+    hashed_inventory = [item for item in dossier["evidence_inventory"] if item["sha256"]]
+    assert hashed_inventory
+    assert all(item["exists"] is True for item in hashed_inventory)
+    assert all(item["size_bytes"] > 0 for item in hashed_inventory)
+    assert all(len(item["sha256"]) == 64 for item in hashed_inventory)
+    assert all(item["path"] for item in hashed_inventory)
+    assert all(item["evidence_url"].startswith("/api/field/evidence?path=") for item in hashed_inventory)
+    assert "交付流程" in html
     assert "上线准入" in html
     assert dossier["launch_readiness"]["launch_stage"] in html
     assert "\ufffd" not in html
@@ -1727,11 +2576,11 @@ def test_customer_project_proposal_bundle_binds_package_dossier_and_release_note
     assert launch_rejected["valid"] is False
     assert "manifest.payload_sha256 mismatch" in launch_rejected["errors"]
     html = Path(result["html_path"]).read_text(encoding="utf-8")
-    assert "AskMe Customer Project Proposal Bundle" in html
+    assert "AskMe 客户项目提案包" in html
     assert "factory-inspection" in html
     assert "上线准入" in html
     assert proposal["launch_readiness"]["launch_stage"] in html
-    assert "Acceptance Gates" in html
+    assert "验收门禁" in html
 
 
 def test_field_site_profile_env_references_cover_responder_and_device_envs() -> None:
@@ -1895,6 +2744,24 @@ def test_customer_project_templates_are_valid_solution_starters() -> None:
     assert all(item["delivery_summary"]["scenario_ids"] for item in payload["templates"])
     assert all(item["delivery_summary"]["skill_packages"] for item in payload["templates"])
     assert all(item["delivery_summary"]["acceptance_tests"] for item in payload["templates"])
+    assert payload["summary"]["runtime_blueprint_bound_count"] >= 4
+    assert payload["summary"]["runtime_blueprint_manual_check_count"] >= 4
+    assert all(
+        item["runtime_blueprint_binding"]["binding_type"]
+        == "askme.customer_project_template.runtime_blueprint_binding.v1"
+        for item in payload["templates"]
+    )
+    assert all(
+        item["runtime_blueprint_binding"]["selected_blueprint"]["name"]
+        for item in payload["templates"]
+    )
+    assert all(
+        item["runtime_blueprint_binding"]["policy"][
+            "template_must_bind_runtime_blueprint_before_delivery"
+        ]
+        is True
+        for item in payload["templates"]
+    )
     assert all(item["applicability_scope"]["scope_type"] == "askme.customer_delivery_applicability_scope.v1" for item in payload["templates"])
     assert all(item["applicability_scope"]["industries"] for item in payload["templates"])
     assert all(item["applicability_scope"]["scenarios"] for item in payload["templates"])
@@ -1919,6 +2786,9 @@ def test_customer_project_templates_are_valid_solution_starters() -> None:
     assert factory["tenant_id"] == "default"
     assert factory["delivery_namespace"] == "default"
     assert factory["product_status"] == "manual_check"
+    assert factory["runtime_blueprint_binding"]["status"] == "manual_check"
+    assert factory["runtime_blueprint_binding"]["selected_blueprint"]["name"] == "edge_robot"
+    assert factory["runtime_blueprint_binding"]["match_reason"] == "industry_default:manufacturing"
     checklist_by_id = {item["step_id"]: item for item in factory["delivery_checklist"]}
     assert checklist_by_id["validate_template"]["status"] == "ready"
     assert checklist_by_id["review_template_release"]["status"] == "manual_check"
@@ -1981,7 +2851,7 @@ def test_customer_project_template_release_governance_records_revisions(tmp_path
     template_root = tmp_path / "templates"
     shutil.copytree(Path("deploy/customer-project-templates"), template_root)
 
-    updated = update_customer_project_template_release(
+    direct_publish = update_customer_project_template_release(
         template_root,
         "factory-inspection",
         {
@@ -1993,10 +2863,28 @@ def test_customer_project_template_release_governance_records_revisions(tmp_path
         operator_id="product.owner",
         reason="Promote after template package review.",
     )
+    assert direct_publish["accepted"] is False
+    assert direct_publish["reason"] == "published_release_requires_approval_request"
+
+    updated = update_customer_project_template_release(
+        template_root,
+        "factory-inspection",
+        {
+            "version": "0.1.1",
+            "publish_status": "published",
+            "release_channel": "stable",
+            "release_note": "Validated for reusable factory pilot handoff.",
+        },
+        operator_id="product.reviewer",
+        reason="Promote after approved template package review.",
+        allow_published=True,
+        approval_request_id="approved-release-request",
+    )
 
     assert updated["accepted"] is True
     assert updated["template"]["version"] == "0.1.1"
     assert updated["template"]["publish_status"] == "published"
+    assert updated["template"]["release_approval_request_id"] == "approved-release-request"
     assert updated["template_package"]["product_status"] == "manual_check"
     assert updated["template_package"]["manual_checks"] == [
         "Template acceptance references require manual review before signoff."
@@ -2015,7 +2903,7 @@ def test_customer_project_template_release_governance_records_revisions(tmp_path
     history = list_customer_project_template_revisions(template_root, "factory-inspection")
     assert history["found"] is True
     assert history["revision_count"] == 1
-    assert history["revisions"][0]["operator_id"] == "product.owner"
+    assert history["revisions"][0]["operator_id"] == "product.reviewer"
     assert history["revisions"][0]["template_release"]["publish_status"] == "pilot"
     assert history["revisions"][0]["template_release"]["version"] == "0.1.0"
 
@@ -2096,13 +2984,31 @@ def test_customer_project_template_release_request_requires_second_approver(tmp_
     )
     assert factory_after_review["template_package"]["version"] == "0.1.1"
     assert factory_after_review["template_package"]["publish_status"] == "published"
+    assert approved["release_result"]["template"]["release_approval_request_id"] == request_id
+
+    omitted_status_direct_write = update_customer_project_template_release(
+        template_root,
+        "factory-inspection",
+        {"release_note": "Try to edit an already-published template without approval."},
+        operator_id="product.owner",
+        reason="Direct edit should not bypass the approval gate.",
+    )
+    assert omitted_status_direct_write["accepted"] is False
+    assert omitted_status_direct_write["reason"] == "published_release_requires_approval_request"
+
+    approved_request_storage = json.loads(
+        Path(approved["request"]["request_path"]).read_text(encoding="utf-8")
+    )
+    assert approved_request_storage["status"] == "approved"
+    assert "request_path" not in approved_request_storage
+    assert list_customer_project_template_release_requests(template_root)["summary"]["applying_count"] == 0
 
     notes = customer_project_template_release_notes(template_root)
     assert notes["summary"]["approved_release_count"] == 1
     assert notes["notes"][0]["template_id"] == "factory-inspection"
     assert notes["notes"][0]["version"] == "0.1.1"
     assert notes["notes"][0]["approved_by"] == "product.reviewer"
-    assert "onsite acceptance evidence" in notes["notes"][0]["customer_claim"]
+    assert "现场验收证据" in notes["notes"][0]["customer_claim"]
     assert notes["notes"][0]["applicability_scope"]["industries"] == ["manufacturing"]
     assert notes["notes"][0]["scenario_acceptance_criteria"]
     assert notes["notes"][0]["dependency_matrix"]
@@ -2143,6 +3049,100 @@ def test_customer_project_template_release_request_requires_second_approver(tmp_
     )
     assert second_review["accepted"] is False
     assert second_review["reason"] == "release_request_not_pending"
+
+
+def test_customer_project_template_release_request_records_apply_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from askme.pipeline.field import customer_project_template_release as release_module
+
+    template_root = tmp_path / "templates"
+    shutil.copytree(Path("deploy/customer-project-templates"), template_root)
+
+    rejected_request = create_customer_project_template_release_request(
+        template_root,
+        "factory-inspection",
+        {
+            "version": "0.1.1",
+            "publish_status": "published",
+            "release_channel": "stable",
+        },
+        operator_id="product.owner",
+        reason="Exercise failed release apply path.",
+    )
+    time.sleep(0.01)
+    exception_request = create_customer_project_template_release_request(
+        template_root,
+        "factory-inspection",
+        {
+            "version": "0.1.2",
+            "publish_status": "published",
+            "release_channel": "stable",
+        },
+        operator_id="product.owner",
+        reason="Exercise exception release apply path.",
+    )
+    assert rejected_request["accepted"] is True
+    assert exception_request["accepted"] is True
+
+    def reject_update(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"accepted": False, "reason": "simulated_apply_denied"}
+
+    monkeypatch.setattr(release_module, "update_customer_project_template_release", reject_update)
+    rejected = review_customer_project_template_release_request(
+        template_root,
+        rejected_request["request"]["request_id"],
+        decision="approve",
+        operator_id="product.reviewer",
+        reason="Second product owner approval.",
+    )
+    assert rejected["accepted"] is False
+    assert rejected["reason"] == "simulated_apply_denied"
+    assert rejected["request"]["status"] == "apply_failed"
+    assert rejected["request"]["apply_failure_reason"] == "simulated_apply_denied"
+
+    rejected_storage = json.loads(
+        Path(rejected["request"]["request_path"]).read_text(encoding="utf-8")
+    )
+    assert rejected_storage["status"] == "apply_failed"
+    assert rejected_storage["apply_failure_reason"] == "simulated_apply_denied"
+
+    retry = review_customer_project_template_release_request(
+        template_root,
+        rejected_request["request"]["request_id"],
+        decision="approve",
+        operator_id="product.reviewer",
+    )
+    assert retry["accepted"] is False
+    assert retry["reason"] == "release_request_not_pending"
+    assert retry["request"]["status"] == "apply_failed"
+
+    def raise_update(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("simulated apply crash")
+
+    monkeypatch.setattr(release_module, "update_customer_project_template_release", raise_update)
+    crashed = review_customer_project_template_release_request(
+        template_root,
+        exception_request["request"]["request_id"],
+        decision="approve",
+        operator_id="product.reviewer",
+        reason="Second product owner approval.",
+    )
+    assert crashed["accepted"] is False
+    assert crashed["reason"] == "release_apply_exception"
+    assert crashed["request"]["status"] == "apply_failed"
+    assert crashed["request"]["apply_failure_reason"] == "simulated apply crash"
+    assert crashed["release_result"]["error"] == "simulated apply crash"
+
+    crashed_storage = json.loads(
+        Path(crashed["request"]["request_path"]).read_text(encoding="utf-8")
+    )
+    assert crashed_storage["status"] == "apply_failed"
+    assert crashed_storage["apply_failure_reason"] == "simulated apply crash"
+    assert list_customer_project_template_release_requests(template_root)["summary"][
+        "apply_failed_count"
+    ] == 2
 
 
 def test_customer_project_template_create_update_export_import_and_archive(tmp_path: Path) -> None:

@@ -89,7 +89,7 @@ async def test_llm_creates_generated_skill_draft_then_operator_approves(
 ) -> None:
     import askme.skills.skill_manager as skill_manager_module
     from askme.llm.conversation import ConversationManager
-    from askme.llm.intent_router import IntentRouter, IntentType
+    from askme.robot_interaction import IntentRouter, IntentType
     from askme.memory.bridge import MemoryBridge
     from askme.pipeline.brain_pipeline import BrainPipeline
     from askme.skills.audit import SkillAuditLog

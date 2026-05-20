@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from askme.skills.skill_model import SkillDefinition
+    from askme.skills.core.skill_model import SkillDefinition
 
     from .session_state import ClarificationSession
 

@@ -1,4 +1,4 @@
-﻿"""MemoryModule 鈥?wraps the four-layer memory stack as a declarative module.
+"""MemoryModule -wraps the four-layer memory stack as a declarative module.
 
 Canonical wiring::
 
@@ -18,18 +18,23 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from askme.llm.client import LLMClient
-from askme.memory.bridge import MemoryBridge
-from askme.memory.catalog import KnowledgeCatalog
-from askme.memory.conversation import ConversationManager
-from askme.memory.episodic_memory import EpisodicMemory
-from askme.memory.index_jobs import KnowledgeIndexJobStore
-from askme.memory.session import SessionMemory
-from askme.memory.system import MemorySystem
-from askme.runtime.module import In, Module, ModuleRegistry, Out
+from askme.llm.core.client import LLMClient
+from askme.memory.core.conversation import ConversationManager
+from askme.memory.core.episodic_memory import EpisodicMemory
+from askme.memory.core.session import SessionMemory
+from askme.memory.core.system import MemorySystem
+from askme.memory.retrieval.bridge import MemoryBridge
+from askme.memory.retrieval.catalog import KnowledgeCatalog
+from askme.memory.retrieval.index_jobs import KnowledgeIndexJobStore
+from askme.memory.retrieval.taxonomy import (
+    knowledge_category_metadata,
+    knowledge_category_taxonomy_payload,
+)
+from askme.runtime.core.module import In, Module, ModuleRegistry, Out
 from askme.schemas.messages import MemoryContext
 
 logger = logging.getLogger(__name__)
@@ -49,6 +54,60 @@ def _parse_optional_time(value: Any) -> datetime | None:
     return parsed.astimezone(_UTC)
 
 
+def _knowledge_document_profile(filename: str, content: str = "") -> dict[str, Any]:
+    suffix = str(filename or "").rsplit(".", 1)
+    ext = f".{suffix[-1].lower()}" if len(suffix) > 1 else ""
+    supported = {
+        ".md": ("markdown", "line_records"),
+        ".markdown": ("markdown", "line_records"),
+        ".txt": ("text", "line_records"),
+        ".csv": ("csv", "table_records"),
+        ".json": ("json", "structured_records"),
+        ".jsonl": ("jsonl", "structured_records"),
+        ".ndjson": ("jsonl", "structured_records"),
+        "": ("text", "line_records"),
+    }
+    if ext not in supported:
+        return {
+            "filename": filename,
+            "extension": ext,
+            "supported": False,
+            "document_type": ext.lstrip(".") or "unknown",
+            "preview_mode": "unsupported",
+            "reason": f"unsupported_file_type:{ext or 'unknown'}",
+            "guidance": "Convert PDF, DOCX, XLSX, image, or binary files to Markdown, CSV, JSON, or plain text before importing.",
+            "bytes": len(str(content or "").encode("utf-8", errors="ignore")),
+        }
+    document_type, preview_mode = supported[ext]
+    return {
+        "filename": filename,
+        "extension": ext,
+        "supported": True,
+        "document_type": document_type,
+        "preview_mode": preview_mode,
+        "reason": "",
+        "guidance": "Preview parses records before publishing; only approved, current, non-conflicting external records can answer customers.",
+        "bytes": len(str(content or "").encode("utf-8", errors="ignore")),
+    }
+
+
+def _knowledge_governance_fields(payload: dict[str, Any], *, filename: str = "") -> dict[str, str]:
+    profile = _knowledge_document_profile(filename)
+    return {
+        "quality_status": str(payload.get("quality_status") or "").strip(),
+        "visibility": str(payload.get("visibility") or "").strip(),
+        "customer_id": str(payload.get("customer_id") or payload.get("customer") or "").strip(),
+        "project_id": str(payload.get("project_id") or payload.get("project") or "").strip(),
+        "product_area": str(payload.get("product_area") or payload.get("product") or "").strip(),
+        "workstream": str(payload.get("workstream") or payload.get("initiative") or "").strip(),
+        "linked_object_type": str(
+            payload.get("linked_object_type") or payload.get("object_type") or ""
+        ).strip(),
+        "linked_object_id": str(payload.get("linked_object_id") or payload.get("object_id") or "").strip(),
+        "document_type": str(payload.get("document_type") or profile["document_type"] or "").strip(),
+    }
+
+
 class MemoryModule(Module):
     """Provides the four-layer memory stack to the runtime."""
 
@@ -62,6 +121,8 @@ class MemoryModule(Module):
         # Get LLMClient from LLMModule (auto-wired In port gives module instance)
         llm_mod = self.llm_client
         llm: LLMClient | None = getattr(llm_mod, "client", None) if llm_mod else None
+        self._config = cfg
+        self._memory_cfg = cfg.get("memory", {}) if isinstance(cfg.get("memory"), dict) else {}
 
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else None
 
@@ -141,15 +202,224 @@ class MemoryModule(Module):
 
     def health(self) -> dict[str, Any]:
         bridge_health = self._memory_bridge.health()
+        catalog_health = self._knowledge_catalog.health()
+        index_jobs_health = self._knowledge_job_store.health()
         return {
             "status": "ok",
             "conversation_len": len(self._conversation.history),
             "episodic_buffer_len": len(self._episodic._buffer),
             "rag": bridge_health,
-            "knowledge_catalog": self._knowledge_catalog.health(),
-            "knowledge_index_jobs": self._knowledge_job_store.health(),
+            "memory_strategy": self._memory_strategy_payload(bridge_health),
+            "knowledge_catalog": catalog_health,
+            "knowledge_index_jobs": index_jobs_health,
             **bridge_health,
         }
+
+    async def health_payload(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Return product-facing memory backend readiness for Dashboard/API."""
+
+        _ = payload
+        bridge_health = self._memory_bridge.health()
+        catalog_health = self._knowledge_catalog.health()
+        index_jobs_health = self._knowledge_job_store.health()
+        strategy = self._memory_strategy_payload(bridge_health)
+        bridge_enabled = bool(bridge_health.get("enabled", True))
+        catalog_prompt_eligible = int(catalog_health.get("prompt_eligible") or 0)
+        catalog_answer_ready = catalog_prompt_eligible > 0
+        bridge_ready = bool(bridge_enabled and bridge_health.get("available"))
+        ready = bool(bridge_ready or catalog_answer_ready)
+        degraded = bool(
+            bridge_ready
+            and not bridge_health.get("selected_backend_ready")
+            and bridge_health.get("fallback_ready")
+        )
+        warnings = self._memory_health_warnings(
+            bridge_health,
+            strategy=strategy,
+            ready=ready,
+            degraded=degraded,
+            catalog_answer_ready=catalog_answer_ready,
+        )
+        if bridge_ready:
+            status = "degraded" if degraded else "ready"
+        elif catalog_answer_ready:
+            status = "catalog_only"
+        elif not bridge_enabled:
+            status = "disabled"
+        else:
+            status = "not_ready"
+        answer_contract = self._memory_answer_contract(bridge_health)
+        return {
+            "status": status,
+            "ready": ready,
+            "customer_status": self._memory_customer_status(
+                status,
+                warnings=warnings,
+                catalog_answer_ready=catalog_answer_ready,
+            ),
+            "customer_next_step": self._memory_customer_next_step(
+                status,
+                warnings=warnings,
+                bridge_health=bridge_health,
+                catalog_health=catalog_health,
+            ),
+            "catalog_answer_ready": catalog_answer_ready,
+            "retrieval_runtime_ready": bridge_ready,
+            "current_backend": bridge_health.get("last_backend")
+            or bridge_health.get("backend", ""),
+            "configured_backend": bridge_health.get("configured_backend", ""),
+            "selected_backend": bridge_health.get("backend", ""),
+            "selected_backend_ready": bool(bridge_health.get("selected_backend_ready")),
+            "selected_backend_installed": bool(bridge_health.get("selected_backend_installed")),
+            "selected_backend_dependency": bridge_health.get("selected_backend_dependency", {}),
+            "fallback_backend": bridge_health.get("fallback_backend", ""),
+            "fallback_ready": bool(bridge_health.get("fallback_ready")),
+            "fallback_backend_dependency": bridge_health.get("fallback_backend_dependency", {}),
+            "backend_dependencies": bridge_health.get("backend_dependencies", {}),
+            "memory_strategy": strategy,
+            "paths": {
+                "catalog": catalog_health.get("path", ""),
+                "index_jobs": index_jobs_health.get("path", ""),
+                "vector_store": bridge_health.get("vector_store_path", ""),
+                "mempalace": bridge_health.get("mempalace_path", ""),
+            },
+            "counts": {
+                "catalog_total": catalog_health.get("total", 0),
+                "prompt_eligible": catalog_health.get("prompt_eligible", 0),
+                "needs_review": catalog_health.get("needs_review", 0),
+                "expired": catalog_health.get("expired", 0),
+                "conflicted": catalog_health.get("conflicted", 0),
+                "vector_size": bridge_health.get("vector_size", 0),
+                "index_jobs": index_jobs_health.get("total", 0),
+            },
+            "rag": bridge_health,
+            "knowledge_catalog": catalog_health,
+            "knowledge_index_jobs": index_jobs_health,
+            "answer_contract": answer_contract,
+            "warnings": warnings,
+        }
+
+    def _memory_strategy_payload(self, bridge_health: dict[str, Any]) -> dict[str, Any]:
+        cfg = getattr(self, "_memory_cfg", {})
+        customer_backend = str(
+            cfg.get("customer_knowledge_backend")
+            or cfg.get("backend")
+            or bridge_health.get("configured_backend")
+            or bridge_health.get("backend")
+            or "vector"
+        ).strip().lower()
+        robot_backend = str(cfg.get("robot_behavior_memory_backend") or "robotmem").strip().lower()
+        robot_enabled = bool(cfg.get("robot_behavior_memory_enabled", False))
+        return {
+            "product_default": "customer_knowledge_first",
+            "customer_knowledge": {
+                "purpose": "customer_rag_evidence",
+                "backend": customer_backend,
+                "active_backend": bridge_health.get("backend", ""),
+                "ready": bool(bridge_health.get("available")),
+                "data_scope": "routes_sop_devices_faq",
+                "enters_prompt": True,
+                "expiry_enforced": bool(bridge_health.get("rag_enforce_expiry", True)),
+            },
+            "robot_behavior_memory": {
+                "purpose": "long_term_robot_behavior",
+                "backend": robot_backend,
+                "enabled": robot_enabled,
+                "ready": bool(bridge_health.get("robotmem_ready"))
+                if robot_backend == "robotmem"
+                else False,
+                "enters_prompt": False,
+                "notes": "Keep robot behavior memory separate from customer RAG evidence.",
+            },
+        }
+
+    @staticmethod
+    def _memory_health_warnings(
+        bridge_health: dict[str, Any],
+        *,
+        strategy: dict[str, Any],
+        ready: bool,
+        degraded: bool,
+        catalog_answer_ready: bool,
+    ) -> list[str]:
+        warnings: list[str] = []
+        if not bridge_health.get("enabled", True):
+            warnings.append("memory_runtime_disabled_catalog_only")
+        if not ready:
+            warnings.append("memory_backend_not_ready")
+        if degraded:
+            warnings.append("selected_backend_not_ready_using_fallback")
+        if catalog_answer_ready and not bridge_health.get("available"):
+            warnings.append("customer_knowledge_catalog_only")
+        customer = strategy.get("customer_knowledge", {})
+        if customer.get("backend") != bridge_health.get("backend"):
+            warnings.append("customer_backend_config_differs_from_active_backend")
+        robot = strategy.get("robot_behavior_memory", {})
+        if robot.get("enabled") and not robot.get("ready"):
+            warnings.append("robot_behavior_memory_not_ready")
+        if bridge_health.get("rag_enforce_expiry") is False:
+            warnings.append("rag_expiry_not_enforced")
+        return warnings
+
+    @staticmethod
+    def _memory_answer_contract(bridge_health: dict[str, Any]) -> dict[str, Any]:
+        expiry_enforced = bool(bridge_health.get("rag_enforce_expiry", True))
+        return {
+            "contract_type": "askme.customer_knowledge_answer_contract.v1",
+            "evidence_required": True,
+            "approved_knowledge_only": True,
+            "current_knowledge_only": expiry_enforced,
+            "conflict_free_knowledge_only": True,
+            "show_evidence_in_answer": True,
+            "refuse_when_no_evidence": True,
+            "refuse_when_expired": expiry_enforced,
+            "refuse_when_conflicting": True,
+            "robot_behavior_memory_enters_customer_prompt": False,
+        }
+
+    @staticmethod
+    def _memory_customer_status(
+        status: str,
+        *,
+        warnings: list[str],
+        catalog_answer_ready: bool,
+    ) -> str:
+        if "rag_expiry_not_enforced" in warnings:
+            return "知识过期拦截未启用，不能作为客户回答依据。"
+        if status == "ready":
+            return "客户知识库可用于有证据回答。"
+        if status == "degraded":
+            return "客户知识库可回答，但正在使用降级或备用检索。"
+        if status == "catalog_only" and catalog_answer_ready:
+            return "仅使用已发布知识目录回答，检索后端未完全就绪。"
+        if status == "disabled":
+            return "记忆检索已关闭，只能依赖已发布目录或拒答。"
+        return "客户知识库未就绪，不能直接回答客户问题。"
+
+    @staticmethod
+    def _memory_customer_next_step(
+        status: str,
+        *,
+        warnings: list[str],
+        bridge_health: dict[str, Any],
+        catalog_health: dict[str, Any],
+    ) -> str:
+        if "rag_expiry_not_enforced" in warnings:
+            return "先启用知识过期拦截，再允许知识进入回答。"
+        if "robot_behavior_memory_not_ready" in warnings:
+            return "机器人长期行为记忆未就绪；先保持它与客户知识库隔离。"
+        if status == "ready":
+            return "继续维护已发布知识，并在回答气泡展示引用证据。"
+        if status == "degraded":
+            fallback = str(bridge_health.get("fallback_backend") or "fallback")
+            return f"修复主检索后端，当前由 {fallback} 承接回答。"
+        if status == "catalog_only":
+            return "完成向量或 MemPalace 检索后端配置，并重建知识索引。"
+        if status == "disabled":
+            return "启用 memory.backend，或只允许已发布目录中的固定证据回答。"
+        if int(catalog_health.get("needs_review") or 0):
+            return "先审批待复核知识，只有已发布知识可以进入回答。"
+        return "上传并发布可回答知识，然后重建索引。"
 
     async def search_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         """HTTP-facing memory/RAG search contract for dashboards and readiness checks."""
@@ -167,9 +437,25 @@ class MemoryModule(Module):
         evidence = health.get("last_evidence")
         dropped = health.get("last_dropped_evidence")
         answer_policy = health.get("last_answer_policy")
+        results = evidence if isinstance(evidence, list) else []
+        dropped_results = dropped if isinstance(dropped, list) else []
+        fallback = {}
+        if not results and not dropped_results:
+            fallback = self._knowledge_catalog.search_records(
+                query,
+                limit=_int_or_default(payload.get("limit"), 5),
+            )
+            fallback_records = fallback.get("records")
+            fallback_dropped = fallback.get("dropped_records")
+            if isinstance(fallback_records, list) and fallback_records:
+                results = fallback_records
+                health = {**health, "last_backend": "catalog"}
+            if isinstance(fallback_dropped, list) and fallback_dropped:
+                dropped_results = [*dropped_results, *fallback_dropped]
+        answer_policy = self._search_answer_policy(results, dropped_results, answer_policy)
         return {
             "query": query,
-            "results": evidence if isinstance(evidence, list) else [],
+            "results": results,
             "rag": {
                 "enabled": health.get("enabled", False),
                 "backend": health.get("backend", ""),
@@ -181,20 +467,83 @@ class MemoryModule(Module):
                 "last_retrieved_items": health.get("last_retrieved_items", 0),
                 "fallback_count": health.get("fallback_count", 0),
                 "last_fallback_reason": health.get("last_fallback_reason", ""),
-                "dropped_evidence": dropped if isinstance(dropped, list) else [],
-                "answer_policy": answer_policy if isinstance(answer_policy, dict) else {},
+                "dropped_evidence": dropped_results,
+                "answer_policy": answer_policy,
+                "catalog_fallback": fallback if fallback else {},
             },
             "warnings": [],
         }
 
+    @staticmethod
+    def _search_answer_policy(
+        results: list[Any],
+        dropped_results: list[Any],
+        current_policy: Any,
+    ) -> dict[str, Any]:
+        """Return a product-facing answer policy after bridge and catalog filtering."""
+
+        policy = current_policy if isinstance(current_policy, dict) else {}
+        if results:
+            if policy.get("state") == "grounded":
+                return policy
+            return {
+                "state": "grounded",
+                "action": "answer_with_evidence",
+                "reason": "eligible_evidence_found",
+            }
+        reasons = {
+            str(item.get("drop_reason") or "")
+            for item in dropped_results
+            if isinstance(item, dict)
+        }
+        if reasons:
+            if any("conflict" in reason for reason in reasons):
+                if policy.get("state") == "conflict":
+                    return policy
+                return {
+                    "state": "conflict",
+                    "action": "clarify_or_escalate",
+                    "reason": "conflicting_knowledge",
+                    "drop_reasons": sorted(reasons),
+                }
+            if any(
+                reason == "expired" or "evidence_version" in reason or "stale" in reason
+                for reason in reasons
+            ):
+                if policy.get("state") == "stale":
+                    return policy
+                return {
+                    "state": "stale",
+                    "action": "refuse_and_request_update",
+                    "reason": "knowledge_expired_or_outdated",
+                    "drop_reasons": sorted(reasons),
+                }
+            if policy.get("state") == "unapproved":
+                return policy
+            return {
+                "state": "unapproved",
+                "action": "refuse_and_request_approval",
+                "reason": "knowledge_not_prompt_eligible",
+                "drop_reasons": sorted(reasons),
+            }
+        if policy:
+            return policy
+        return {
+            "state": "no_evidence",
+            "action": "clarify_or_refuse",
+            "reason": "no_eligible_evidence",
+        }
+
     async def preview_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Parse uploaded knowledge content and return records without indexing."""
-        from askme.memory.importer import parse_knowledge_text
+        from askme.memory.retrieval.importer import parse_knowledge_text
 
         content = str(payload.get("content") or "")
         filename = str(payload.get("filename") or payload.get("source") or "knowledge.md")
         source = str(payload.get("source") or filename)
+        owner = str(payload.get("owner") or "").strip()
         category = payload.get("category")
+        governance = _knowledge_governance_fields(payload, filename=filename)
         if not content.strip():
             return {
                 "source": source,
@@ -202,6 +551,19 @@ class MemoryModule(Module):
                 "records": [],
                 "errors": ["empty_content"],
                 "dry_run": True,
+                "document_profile": _knowledge_document_profile(filename, content),
+                "category_taxonomy": knowledge_category_taxonomy_payload(),
+            }
+        profile = _knowledge_document_profile(filename, content)
+        if not profile["supported"]:
+            return {
+                "source": source,
+                "parsed": 0,
+                "records": [],
+                "errors": [profile["reason"]],
+                "dry_run": True,
+                "document_profile": profile,
+                "category_taxonomy": knowledge_category_taxonomy_payload(),
             }
         try:
             records = parse_knowledge_text(
@@ -210,6 +572,23 @@ class MemoryModule(Module):
                 source=source,
                 category=str(category) if category else None,
             )
+            if owner:
+                records = [replace(record, owner=record.owner or owner) for record in records]
+            records = [
+                replace(
+                    record,
+                    quality_status=governance["quality_status"] or record.quality_status,
+                    visibility=governance["visibility"] or record.visibility,
+                    customer_id=governance["customer_id"] or record.customer_id,
+                    project_id=governance["project_id"] or record.project_id,
+                    product_area=governance["product_area"] or record.product_area,
+                    workstream=governance["workstream"] or record.workstream,
+                    linked_object_type=governance["linked_object_type"] or record.linked_object_type,
+                    linked_object_id=governance["linked_object_id"] or record.linked_object_id,
+                    document_type=governance["document_type"] or record.document_type,
+                )
+                for record in records
+            ]
         except Exception as exc:
             return {
                 "source": source,
@@ -217,6 +596,8 @@ class MemoryModule(Module):
                 "records": [],
                 "errors": [f"parse_error: {type(exc).__name__}: {exc}"],
                 "dry_run": True,
+                "document_profile": profile,
+                "category_taxonomy": knowledge_category_taxonomy_payload(),
             }
         return {
             "source": source,
@@ -224,6 +605,8 @@ class MemoryModule(Module):
             "records": [self._knowledge_record_payload(record) for record in records[:100]],
             "errors": [],
             "dry_run": True,
+            "document_profile": profile,
+            "category_taxonomy": knowledge_category_taxonomy_payload(),
         }
 
     async def import_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -236,7 +619,9 @@ class MemoryModule(Module):
                 "imported": 0,
                 "skipped": 0,
                 "errors": preview["errors"],
+                "document_profile": preview.get("document_profile", {}),
                 "rag": self._memory_bridge.health(),
+                "category_taxonomy": knowledge_category_taxonomy_payload(),
             }
         imported = 0
         errors: list[str] = []
@@ -250,14 +635,21 @@ class MemoryModule(Module):
         imported += int(sync_result.get("indexed", 0) or 0)
         errors.extend(sync_result.get("errors", []))
         skipped = max(0, int(preview.get("parsed", 0) or 0) - imported)
+        cataloged = len([
+            record for record in catalog_result.get("records", []) if isinstance(record, dict)
+        ])
         return {
             "source": preview.get("source", ""),
             "parsed": int(preview.get("parsed", 0) or 0),
+            "cataloged": cataloged,
+            "indexed": imported,
             "imported": imported,
             "skipped": skipped,
             "errors": errors,
+            "document_profile": preview.get("document_profile", {}),
             "catalog": self._knowledge_catalog.health(),
             "rag": self._memory_bridge.health(),
+            "category_taxonomy": knowledge_category_taxonomy_payload(),
         }
 
     async def list_knowledge_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -271,11 +663,13 @@ class MemoryModule(Module):
             "backend": catalog.get("backend", ""),
             "catalog": catalog.get("catalog", {}),
             "operations": self._knowledge_operations_payload(catalog.get("records", [])),
+            "category_taxonomy": knowledge_category_taxonomy_payload(),
             "index_jobs": self._knowledge_job_store.list_jobs(limit=_int_or_default(
                 payload.get("job_limit"),
                 5,
             )),
             "rag": self._memory_bridge.health(),
+            "memory_health": await self.health_payload({}),
         }
 
     def _knowledge_operations_payload(self, records: Any) -> dict[str, Any]:
@@ -298,6 +692,13 @@ class MemoryModule(Module):
                 "source": record.get("source", ""),
                 "owner": record.get("owner", ""),
                 "category": record.get("category", ""),
+                "category_label": record.get("category_label", ""),
+                "quality_status": record.get("quality_status", ""),
+                "visibility": record.get("visibility", ""),
+                "customer_id": record.get("customer_id", ""),
+                "project_id": record.get("project_id", ""),
+                "product_area": record.get("product_area", ""),
+                "workstream": record.get("workstream", ""),
                 "updated_at": record.get("updated_at", ""),
                 "evidence_version": record.get("evidence_version", ""),
             }
@@ -690,16 +1091,29 @@ class MemoryModule(Module):
     @staticmethod
     def _knowledge_record_payload(record: Any) -> dict[str, Any]:
         metadata = record.to_metadata()
+        category_meta = knowledge_category_metadata(record.normalized_category())
         return {
             "text": record.text,
             "memory_text": record.to_memory_text(),
             "category": record.normalized_category(),
+            "category_label": category_meta["label"],
+            "category_group": category_meta["group"],
+            "category_description": category_meta["description"],
             "source": record.source,
             "owner": record.owner,
             "updated_at": record.updated_at,
             "expires_at": record.expires_at,
             "confidence": record.confidence,
             "approval_status": record.approval_status,
+            "quality_status": record.quality_status,
+            "visibility": record.visibility,
+            "customer_id": record.customer_id,
+            "project_id": record.project_id,
+            "product_area": record.product_area,
+            "workstream": record.workstream,
+            "linked_object_type": record.linked_object_type,
+            "linked_object_id": record.linked_object_id,
+            "document_type": record.document_type,
             "metadata": metadata,
         }
 
@@ -707,6 +1121,15 @@ class MemoryModule(Module):
         indexed = 0
         skipped = 0
         errors: list[str] = []
+        bridge_health = self._memory_bridge.health()
+        if bridge_health.get("enabled") is False:
+            return {
+                "indexed": 0,
+                "skipped": len(records),
+                "errors": [],
+                "backend": bridge_health.get("backend", "disabled"),
+                "reason": "memory_backend_disabled",
+            }
         for index, record in enumerate(records, start=1):
             record_id = str(record.get("record_id") or "").strip()
             metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
@@ -717,6 +1140,19 @@ class MemoryModule(Module):
                 "owner": record.get("owner") or metadata.get("owner") or "",
                 "updated_at": record.get("updated_at") or metadata.get("updated_at") or "",
                 "expires_at": record.get("expires_at") or metadata.get("expires_at") or "",
+                "quality_status": record.get("quality_status") or metadata.get("quality_status") or "",
+                "visibility": record.get("visibility") or metadata.get("visibility") or "",
+                "customer_id": record.get("customer_id") or metadata.get("customer_id") or "",
+                "project_id": record.get("project_id") or metadata.get("project_id") or "",
+                "product_area": record.get("product_area") or metadata.get("product_area") or "",
+                "workstream": record.get("workstream") or metadata.get("workstream") or "",
+                "linked_object_type": (
+                    record.get("linked_object_type") or metadata.get("linked_object_type") or ""
+                ),
+                "linked_object_id": (
+                    record.get("linked_object_id") or metadata.get("linked_object_id") or ""
+                ),
+                "document_type": record.get("document_type") or metadata.get("document_type") or "",
                 "source_version": record.get("source_version") or metadata.get("source_version") or "",
                 "evidence_version": record.get("evidence_version") or metadata.get("evidence_version") or "",
                 "conflict_set_id": record.get("conflict_set_id") or metadata.get("conflict_set_id") or "",

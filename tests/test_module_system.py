@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from askme.runtime.module import (
     Alias,
     AmbiguousPortError,
@@ -100,6 +99,12 @@ def test_add_deduplicates_by_name():
     rt = Runtime.use(FakeBus) + Runtime.use(MockBus)
     assert len(rt._module_classes) == 1
     assert rt._module_classes[0] is MockBus  # last wins
+
+
+def test_module_names_exposes_composition_without_private_state():
+    rt = Runtime.use(FakeBus) + Runtime.use(FakePerception) + Runtime.use(FakeVoice)
+
+    assert rt.module_names() == ("pulse", "perception", "voice_io")
 
 
 def test_replace():
@@ -672,3 +677,24 @@ async def test_build_still_overwrites_preset_none_with_provider():
     # with the provider module.  Not None any more.
     assert consumer.detections is not None
     assert consumer.detections is app.modules["sensor_bus"]
+
+
+async def test_runtime_example_blueprint_builds_and_reports_flow_stats():
+    """The README example remains a no-IO smoke test for runtime assembly."""
+    from askme.runtime.examples import (
+        assemble_blueprint_example,
+        describe_blueprint_modules,
+    )
+
+    runtime = assemble_blueprint_example()
+
+    assert describe_blueprint_modules(runtime) == ["clock", "greeter"]
+
+    app = await runtime.build({})
+    await app.start()
+    try:
+        assert app.greeter.message == "greeter ready at 09:30"
+        assert app.health()["greeter"]["started"] is True
+        assert app.flow_stats()["wired_ports"] == 1
+    finally:
+        await app.stop()
