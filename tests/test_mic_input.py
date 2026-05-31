@@ -60,6 +60,18 @@ class TestMicInputInit:
         mic = MicInput.from_config(cfg)
         assert mic._input_transport == "usb_direct"
 
+    def test_rejects_channel_select_outside_configured_channels(self):
+        with pytest.raises(ValueError, match="mic_channel_select"):
+            MicInput(mic_native_rate=48000, mic_channels=2, mic_channel_select=2)
+
+    def test_rejects_zero_mic_channels(self):
+        with pytest.raises(ValueError, match="mic_channels"):
+            MicInput(mic_native_rate=48000, mic_channels=0)
+
+    def test_rejects_negative_channel_select(self):
+        with pytest.raises(ValueError, match="mic_channel_select"):
+            MicInput(mic_native_rate=48000, mic_channels=2, mic_channel_select=-1)
+
 
 class TestPreRoll:
     def test_buffer_pre_roll(self):

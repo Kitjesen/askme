@@ -46,6 +46,10 @@ _LAZY_EXPORTS = {
         "askme.voice.diagnostics.online_smoke",
         "print_voice_online_smoke_summary",
     ),
+    "print_windows_beep_loopback_summary": (
+        "askme.voice.diagnostics.audio_devices",
+        "print_windows_beep_loopback_summary",
+    ),
     "query_audio_devices": ("askme.voice.diagnostics.audio_devices", "query_audio_devices"),
     "resolve_minimax_hybrid_voice_brain": (
         "askme.voice.diagnostics.minimax_hybrid",
@@ -53,6 +57,10 @@ _LAZY_EXPORTS = {
     ),
     "run_audio_loopback": ("askme.voice.diagnostics.audio_devices", "run_audio_loopback"),
     "run_audio_route_scan": ("askme.voice.diagnostics.audio_devices", "run_audio_route_scan"),
+    "run_windows_beep_loopback": (
+        "askme.voice.diagnostics.audio_devices",
+        "run_windows_beep_loopback",
+    ),
     "run_sunrise_audio_doctor": (
         "askme.voice.diagnostics.sunrise_audio_doctor",
         "run_sunrise_audio_doctor",

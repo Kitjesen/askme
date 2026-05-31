@@ -432,3 +432,63 @@ class TestPrepareMessages:
         user_msgs = [m for m in result if m["role"] == "user"]
         assert user_msgs[0]["content"] == "first user"
         assert user_msgs[1]["content"].startswith("[TAG]\n")
+
+    # ── source='text' channel hint ─────────────────────────────────────────
+
+    def test_source_text_injects_channel_hint_to_last_user(self):
+        pb = _make_builder(prompt_seed=[], user_prefix="[TTS]")
+        msgs = self._msgs("ask me something")
+        result = pb.prepare_messages(msgs, source="text")
+        last_user = next(m for m in reversed(result) if m["role"] == "user")
+        assert "文本/API通道" in last_user["content"]
+        assert "[TTS]" in last_user["content"]
+
+    def test_source_voice_injects_no_text_channel_hint(self):
+        pb = _make_builder(prompt_seed=[], user_prefix="[TTS]")
+        msgs = self._msgs("ask me something")
+        result = pb.prepare_messages(msgs, source="voice")
+        last_user = next(m for m in reversed(result) if m["role"] == "user")
+        assert "文本/API通道" not in last_user["content"]
+
+    def test_source_text_without_user_prefix_injects_only_hint(self):
+        pb = _make_builder(prompt_seed=[], user_prefix="")
+        msgs = self._msgs("ask me something")
+        result = pb.prepare_messages(msgs, source="text")
+        last_user = next(m for m in reversed(result) if m["role"] == "user")
+        assert last_user["content"].startswith("文本/API通道")
+        assert "ask me something" in last_user["content"]
+
+    def test_source_text_with_prompt_seed_injects_hint(self):
+        seed = [{"role": "user", "content": "SEED"}, {"role": "assistant", "content": "OK"}]
+        pb = _make_builder(prompt_seed=seed, user_prefix="")
+        msgs = self._msgs("hello")
+        result = pb.prepare_messages(msgs, source="text")
+        last_user = next(m for m in reversed(result) if m["role"] == "user")
+        assert "文本/API通道" in last_user["content"]
+
+    # ── memory evidence injection ──────────────────────────────────────────
+
+    def test_memory_block_injected_with_prompt_seed(self):
+        seed = [{"role": "user", "content": "SEED"}, {"role": "assistant", "content": "OK"}]
+        pb = _make_builder(prompt_seed=seed)
+        system_prompt = "System.\nRelevant memory:\nThunder test id is TOKEN123\n"
+        msgs = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "what is the test id?"},
+        ]
+        result = pb.prepare_messages(msgs)
+        contents = "\n".join(m.get("content", "") for m in result)
+        assert "Thunder test id is TOKEN123" in contents
+        assert "记忆证据" in contents
+
+    def test_no_memory_block_when_system_prompt_lacks_heading(self):
+        seed = [{"role": "user", "content": "SEED"}, {"role": "assistant", "content": "OK"}]
+        pb = _make_builder(prompt_seed=seed)
+        system_prompt = "System.\nNo memory heading here.\n"
+        msgs = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "hello"},
+        ]
+        result = pb.prepare_messages(msgs)
+        contents = "\n".join(m.get("content", "") for m in result)
+        assert "记忆证据" not in contents

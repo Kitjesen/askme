@@ -11,6 +11,7 @@ runtime/
   core/module.py     runtime engine: Module, In/Out ports, auto-wire, Runtime, RuntimeApp
   modules/           concrete modules: LLMModule, VoiceModule, PipelineModule, ControlModule
   task/              mission handoff, runtime arbiter, callbacks, audit
+  diagnostics/       runtime diagnostic smoke checks (dialogue, memory retrieval)
   examples.py        small runnable examples for learning the module system
 ```
 
@@ -19,6 +20,7 @@ Subpackage ownership:
 - `core/`: runtime engine and wiring primitives.
 - `modules/`: concrete runtime modules used by blueprints.
 - `task/`: mission handoff, arbiters, callbacks, and audit helpers.
+- `diagnostics/`: runtime diagnostic smoke checks for dialogue and memory retrieval.
 
 ## Responsibilities
 
@@ -256,6 +258,7 @@ Need to change one concrete module?       runtime/modules/<name>_module.py
 Need to change which modules run?         blueprints/presets/*.py
 Need customer readiness metadata?         blueprints/catalog/catalog.py
 Need mission handoff behavior?            runtime/task/
+Need runtime smoke/diagnostics?           runtime/diagnostics/
 ```
 
 ## Verification

@@ -147,6 +147,80 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print raw JSON",
     )
 
+    runtime_dialogue_smoke = runtime_subparsers.add_parser(
+        "dialogue-smoke",
+        help="Run a real text dialogue turn with isolated memory retrieval evidence",
+    )
+    runtime_dialogue_smoke.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_dialogue_smoke.add_argument(
+        "--message",
+        default="What is Thunder's current test identifier? Answer only the identifier.",
+        help="User message sent through ConversationService/TextLoop",
+    )
+    runtime_dialogue_smoke.add_argument(
+        "--memory-text",
+        default="",
+        help="Temporary knowledge record. Defaults to a token-bearing test fact.",
+    )
+    runtime_dialogue_smoke.add_argument(
+        "--memory-query",
+        default="",
+        help="Direct retrieval query before the chat turn. Defaults to --message.",
+    )
+    runtime_dialogue_smoke.add_argument(
+        "--output-dir",
+        default="",
+        help="Artifact directory for seed data and report.json",
+    )
+    runtime_dialogue_smoke.add_argument(
+        "--data-dir",
+        default="",
+        help="Isolated runtime data directory. Defaults under --output-dir.",
+    )
+    runtime_dialogue_smoke.add_argument(
+        "--token",
+        default="",
+        help="Expected token for memory/reply checks. Defaults to a generated token.",
+    )
+    runtime_dialogue_smoke.add_argument("--chat-timeout", type=float, default=90.0)
+    runtime_dialogue_smoke.add_argument("--memory-timeout", type=float, default=30.0)
+    runtime_dialogue_smoke.add_argument("--vector-min-similarity", type=float, default=0.1)
+    runtime_dialogue_smoke.add_argument(
+        "--fake-llm",
+        action="store_true",
+        help="Use the fake LLM provider. Off by default so the smoke exercises configured LLM.",
+    )
+    runtime_dialogue_smoke.add_argument(
+        "--allow-reply-without-token",
+        action="store_true",
+        help="Pass when retrieval evidence is correct but the LLM paraphrases the reply.",
+    )
+    runtime_dialogue_burst = runtime_subparsers.add_parser(
+        "dialogue-burst",
+        help="Run repeated real-machine text dialogue smokes with memory evidence",
+    )
+    runtime_dialogue_burst.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_dialogue_burst.add_argument("--fake-runs", type=int, default=5)
+    runtime_dialogue_burst.add_argument("--real-runs", type=int, default=1)
+    runtime_dialogue_burst.add_argument(
+        "--output-dir",
+        default="",
+        help="Artifact directory for burst-report.json and per-run reports",
+    )
+    runtime_dialogue_burst.add_argument(
+        "--token-prefix",
+        default="",
+        help="Token prefix for generated per-run identifiers",
+    )
+    runtime_dialogue_burst.add_argument("--chat-timeout", type=float, default=90.0)
+    runtime_dialogue_burst.add_argument("--memory-timeout", type=float, default=30.0)
+    runtime_dialogue_burst.add_argument("--vector-min-similarity", type=float, default=0.1)
+    runtime_dialogue_burst.add_argument(
+        "--allow-reply-without-token",
+        action="store_true",
+        help="Pass when retrieval evidence is correct but the LLM paraphrases the reply.",
+    )
+
     runtime_voice_health = runtime_subparsers.add_parser(
         "voice-health",
         help="Run an offline voice pipeline health check",
@@ -184,6 +258,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--play-recording",
         action="store_true",
         help="Replay the captured microphone audio after the loopback test",
+    )
+    runtime_audio_beep_loopback = runtime_subparsers.add_parser(
+        "audio-beep-loopback",
+        help="Play a Windows system beep while recording the microphone",
+    )
+    runtime_audio_beep_loopback.add_argument("--json", action="store_true", help="Print raw JSON")
+    runtime_audio_beep_loopback.add_argument("--input-device", default=None)
+    runtime_audio_beep_loopback.add_argument("--sample-rate", type=int, default=None)
+    runtime_audio_beep_loopback.add_argument("--record-seconds", type=float, default=3.0)
+    runtime_audio_beep_loopback.add_argument("--tone-seconds", type=float, default=1.0)
+    runtime_audio_beep_loopback.add_argument("--frequency-hz", type=float, default=880.0)
+    runtime_audio_beep_loopback.add_argument("--min-capture-peak", type=int, default=300)
+    runtime_audio_beep_loopback.add_argument(
+        "--wav-out",
+        default="artifacts/audio/windows-beep-loopback.wav",
+        help="Write captured microphone audio to this WAV file",
+    )
+    runtime_audio_beep_loopback.add_argument(
+        "--play-recording",
+        action="store_true",
+        help="Replay the captured microphone audio after the beep test",
     )
     runtime_audio_route_scan = runtime_subparsers.add_parser(
         "audio-route-scan",
@@ -1298,6 +1393,57 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
         _emit_payload(payload, json_output=args.json)
         return
 
+    if args.runtime_command == "dialogue-smoke":
+        from askme.runtime.diagnostics.dialogue_smoke import (
+            print_dialogue_smoke_summary,
+            run_dialogue_smoke_sync,
+        )
+
+        payload = run_dialogue_smoke_sync(
+            message=args.message,
+            memory_text=args.memory_text,
+            memory_query=args.memory_query,
+            output_dir=args.output_dir,
+            data_dir=args.data_dir,
+            token=args.token,
+            chat_timeout_s=args.chat_timeout,
+            memory_timeout_s=args.memory_timeout,
+            vector_min_similarity=args.vector_min_similarity,
+            fake_llm=bool(args.fake_llm),
+            require_reply_token=not bool(args.allow_reply_without_token),
+        )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            print_dialogue_smoke_summary(payload)
+        if payload.get("status") != "passed":
+            raise SystemExit(1)
+        return
+
+    if args.runtime_command == "dialogue-burst":
+        from askme.runtime.diagnostics.dialogue_smoke import (
+            print_dialogue_burst_summary,
+            run_dialogue_burst_sync,
+        )
+
+        payload = run_dialogue_burst_sync(
+            fake_runs=args.fake_runs,
+            real_runs=args.real_runs,
+            output_dir=args.output_dir,
+            token_prefix=args.token_prefix,
+            chat_timeout_s=args.chat_timeout,
+            memory_timeout_s=args.memory_timeout,
+            vector_min_similarity=args.vector_min_similarity,
+            allow_reply_without_token=bool(args.allow_reply_without_token),
+        )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            print_dialogue_burst_summary(payload)
+        if payload.get("status") != "passed":
+            raise SystemExit(1)
+        return
+
     if args.runtime_command == "voice-health":
         payload = _run_voice_health_check(live=args.live)
         if args.json:
@@ -1345,6 +1491,30 @@ def _handle_runtime_command(args: argparse.Namespace) -> None:
             _emit_payload(payload, json_output=True)
         else:
             print_audio_loopback_summary(payload)
+        if payload.get("status") != "ok":
+            raise SystemExit(1)
+        return
+
+    if args.runtime_command == "audio-beep-loopback":
+        from askme.voice.diagnostics.audio_devices import (
+            print_windows_beep_loopback_summary,
+            run_windows_beep_loopback,
+        )
+
+        payload = run_windows_beep_loopback(
+            input_device=args.input_device,
+            sample_rate=args.sample_rate,
+            record_seconds=args.record_seconds,
+            tone_seconds=args.tone_seconds,
+            frequency_hz=args.frequency_hz,
+            min_capture_peak=args.min_capture_peak,
+            wav_out=args.wav_out,
+            play_recording=args.play_recording,
+        )
+        if args.json:
+            _emit_payload(payload, json_output=True)
+        else:
+            print_windows_beep_loopback_summary(payload)
         if payload.get("status") != "ok":
             raise SystemExit(1)
         return

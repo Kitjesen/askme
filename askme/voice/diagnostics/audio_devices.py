@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import platform
+import threading
+import time
 import wave
 from pathlib import Path
 from typing import Any
@@ -63,15 +65,160 @@ def _default_device_pair() -> tuple[int | None, int | None]:
     return None, None
 
 
+_PREFERRED_HOSTAPI_NAMES = (
+    "windows wasapi",
+    "windows wdm-ks",
+    "windows directsound",
+    "mme",
+)
+
+
 def _preferred_hostapi_default(hostapis: list[dict[str, Any]], *, kind: str) -> int | None:
-    preferred_names = ("windows wasapi", "windows directsound", "mme")
     field = "default_input_device" if kind == "input" else "default_output_device"
-    for expected_name in preferred_names:
+    for expected_name in _PREFERRED_HOSTAPI_NAMES:
         for api in hostapis:
             if str(api.get("name", "")).strip().lower() == expected_name:
                 value = api.get(field)
                 return int(value) if isinstance(value, int) and value >= 0 else None
     return None
+
+
+def _hostapi_default_routes(
+    hostapis: list[dict[str, Any]],
+    *,
+    default_input: int | None,
+    default_output: int | None,
+) -> list[tuple[int, int]]:
+    routes: list[tuple[int, int]] = []
+
+    def add_route(input_device: Any, output_device: Any) -> None:
+        if not isinstance(input_device, int) or not isinstance(output_device, int):
+            return
+        if input_device < 0 or output_device < 0:
+            return
+        route = (input_device, output_device)
+        if route not in routes:
+            routes.append(route)
+
+    for expected_name in _PREFERRED_HOSTAPI_NAMES:
+        for api in hostapis:
+            if str(api.get("name", "")).strip().lower() == expected_name:
+                add_route(api.get("default_input_device"), api.get("default_output_device"))
+
+    add_route(default_input, default_output)
+    for api in hostapis:
+        add_route(api.get("default_input_device"), api.get("default_output_device"))
+    return routes
+
+
+def _route_sample_rates(input_device: int, output_device: int) -> list[int]:
+    rates: list[int] = []
+    for rate in (
+        _device_default_samplerate(output_device, fallback=48000),
+        _device_default_samplerate(input_device, fallback=48000),
+        48000,
+        44100,
+    ):
+        value = int(rate)
+        if value > 0 and value not in rates:
+            rates.append(value)
+    return rates
+
+
+def _route_opens_full_duplex(input_device: int, output_device: int) -> bool:
+    if sd is None:
+        return False
+    stream_cls = getattr(sd, "Stream", None)
+    if stream_cls is None:
+        return True
+
+    input_channels = _device_max_input_channels(input_device, fallback=1)
+    output_channels = min(2, _device_max_output_channels(output_device, fallback=2))
+
+    def _silence_callback(_indata: Any, outdata: Any, *_args: Any) -> None:
+        if outdata is not None:
+            outdata.fill(0)
+
+    for sample_rate in _route_sample_rates(input_device, output_device):
+        stream = None
+        try:
+            stream = stream_cls(
+                samplerate=sample_rate,
+                device=(input_device, output_device),
+                channels=(input_channels, output_channels),
+                dtype="float32",
+                callback=_silence_callback,
+            )
+            stream.start()
+            stream.stop()
+            return True
+        except Exception:
+            continue
+        finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+    return False
+
+
+def _recommended_route(
+    devices: list[dict[str, Any]],
+    hostapis: list[dict[str, Any]],
+    *,
+    default_input: int | None,
+    default_output: int | None,
+) -> tuple[int | None, int | None]:
+    fallback_input = _preferred_hostapi_default(hostapis, kind="input")
+    if fallback_input is None:
+        fallback_input = default_input
+    fallback_output = _preferred_hostapi_default(hostapis, kind="output")
+    if fallback_output is None:
+        fallback_output = default_output
+
+    routes: list[tuple[int, int]] = []
+
+    def add_route(route: tuple[int, int]) -> None:
+        if route not in routes:
+            routes.append(route)
+
+    hostapi_by_device = _hostapi_index_by_device(devices)
+    input_devices = _input_devices(devices)
+    output_devices = _output_devices(devices)
+    default_routes = _hostapi_default_routes(
+        hostapis,
+        default_input=default_input,
+        default_output=default_output,
+    )
+    for route in default_routes:
+        add_route(route)
+
+    for anchor_input, anchor_output in default_routes:
+        hostapi_index = hostapi_by_device.get(anchor_input)
+        if hostapi_index is None:
+            continue
+        for output_device in output_devices:
+            if hostapi_by_device.get(output_device) == hostapi_index:
+                add_route((anchor_input, output_device))
+        for input_device in input_devices:
+            if hostapi_by_device.get(input_device) == hostapi_index:
+                add_route((input_device, anchor_output))
+
+    for route in _candidate_routes(
+        devices,
+        input_devices=None,
+        output_devices=None,
+        include_all_pairs=False,
+        max_routes=max(1, len(input_devices) * len(output_devices)),
+    ):
+        add_route(route)
+
+    for input_device, output_device in routes:
+        if _route_opens_full_duplex(input_device, output_device):
+            return input_device, output_device
+
+    return fallback_input, fallback_output
 
 
 def query_audio_devices() -> dict[str, Any]:
@@ -90,12 +237,12 @@ def query_audio_devices() -> dict[str, Any]:
         devices = [_clean_device(device, idx) for idx, device in enumerate(sd.query_devices())]
         hostapis = [_clean_hostapi(api) for api in sd.query_hostapis()]
         default_input, default_output = _default_device_pair()
-        recommended_input = _preferred_hostapi_default(hostapis, kind="input")
-        if recommended_input is None:
-            recommended_input = default_input
-        recommended_output = _preferred_hostapi_default(hostapis, kind="output")
-        if recommended_output is None:
-            recommended_output = default_output
+        recommended_input, recommended_output = _recommended_route(
+            devices,
+            hostapis,
+            default_input=default_input,
+            default_output=default_output,
+        )
         recommendation = {
             "input_device": recommended_input,
             "output_device": recommended_output,
@@ -256,6 +403,71 @@ def _loopback_failure_reason(
     return ""
 
 
+def _playrec_with_callback_streams(
+    out: np.ndarray,
+    *,
+    input_device: int | str | None,
+    output_device: int | str | None,
+    sample_rate: int,
+    input_channels: int,
+    output_channels: int,
+    total_seconds: float,
+) -> np.ndarray:
+    """Fallback duplex path for Windows devices where playrec captures zeros."""
+
+    chunks: list[np.ndarray] = []
+    out_pos = 0
+    total_frames = len(out)
+
+    def input_callback(
+        indata: np.ndarray,
+        frames: int,
+        time_info: Any,
+        status: Any,
+    ) -> None:
+        del frames, time_info, status
+        chunks.append(indata.copy())
+
+    def output_callback(
+        outdata: np.ndarray,
+        frames: int,
+        time_info: Any,
+        status: Any,
+    ) -> None:
+        del time_info, status
+        nonlocal out_pos
+        end = min(total_frames, out_pos + frames)
+        block = out[out_pos:end]
+        if len(block) < frames:
+            padded = np.zeros((frames, output_channels), dtype=np.float32)
+            if len(block):
+                padded[: len(block)] = block
+            outdata[:] = padded
+        else:
+            outdata[:] = block
+        out_pos = end
+
+    with sd.InputStream(
+        device=input_device,
+        samplerate=sample_rate,
+        channels=input_channels,
+        dtype="float32",
+        callback=input_callback,
+    ):
+        with sd.OutputStream(
+            device=output_device,
+            samplerate=sample_rate,
+            channels=output_channels,
+            dtype="float32",
+            callback=output_callback,
+        ):
+            time.sleep(total_seconds + 0.25)
+
+    if not chunks:
+        return np.empty((0, input_channels), dtype=np.float32)
+    return np.concatenate(chunks, axis=0)[:total_frames]
+
+
 def run_audio_loopback(
     *,
     input_device: int | str | None = None,
@@ -307,6 +519,8 @@ def run_audio_loopback(
 
     playback_ok = False
     playback_error = ""
+    capture_method = "playrec"
+    fallback_error = ""
     try:
         captured = sd.playrec(
             out,
@@ -320,6 +534,33 @@ def run_audio_loopback(
     except Exception as exc:  # pragma: no cover - hardware/runtime path
         captured = np.empty((0, 1), dtype=np.float32)
         playback_error = str(exc)
+
+    initial_peak = (
+        int(float(np.max(np.abs(_safe_float_audio(captured.reshape(-1))))) * 32768)
+        if playback_ok and captured.size
+        else 0
+    )
+    if playback_ok and initial_peak <= 1:
+        try:
+            fallback = _playrec_with_callback_streams(
+                out,
+                input_device=input_dev,
+                output_device=output_dev,
+                sample_rate=resolved_sample_rate,
+                input_channels=input_channels,
+                output_channels=output_channels,
+                total_seconds=total_seconds,
+            )
+            fallback_peak = (
+                int(float(np.max(np.abs(_safe_float_audio(fallback.reshape(-1))))) * 32768)
+                if fallback.size
+                else 0
+            )
+            if fallback_peak > initial_peak:
+                captured = fallback
+                capture_method = "callback_streams"
+        except Exception as exc:  # pragma: no cover - hardware/runtime path
+            fallback_error = str(exc)
 
     channels = _channel_metrics(
         captured,
@@ -390,6 +631,154 @@ def run_audio_loopback(
         "selected_input_channel": channel_index,
         "channel_metrics": channels,
         "output_channels": output_channels,
+        "record_seconds": total_seconds,
+        "tone_seconds": tone_seconds,
+        "frequency_hz": frequency_hz,
+        "wav_out": wav_path,
+        "replay_ok": replay_ok,
+        "replay_error": replay_error,
+        "capture_method": capture_method,
+        "fallback_error": fallback_error,
+    }
+
+
+def run_windows_beep_loopback(
+    *,
+    input_device: int | str | None = None,
+    sample_rate: int | None = None,
+    record_seconds: float = 3.0,
+    tone_seconds: float = 1.0,
+    frequency_hz: float = 880.0,
+    min_capture_peak: int = 300,
+    wav_out: str | Path | None = None,
+    play_recording: bool = False,
+) -> dict[str, Any]:
+    """Play a Windows system beep through the default output while recording."""
+    if sd is None:
+        return {"status": "error", "error": "sounddevice is not installed"}
+    try:
+        import winsound
+    except ModuleNotFoundError:
+        return {"status": "error", "error": "winsound is only available on Windows"}
+
+    devices_payload = query_audio_devices()
+    recommendation = devices_payload.get("recommendation", {})
+    input_dev = _coerce_device(input_device)
+    if input_dev is None:
+        input_dev = recommendation.get("input_device")
+
+    resolved_sample_rate = int(
+        sample_rate or _device_default_samplerate(input_dev, fallback=48000)
+    )
+    total_seconds = max(record_seconds, tone_seconds + 0.7)
+    total_frames = max(1, int(total_seconds * resolved_sample_rate))
+    start_frame = max(0, int(0.35 * resolved_sample_rate))
+    tone_frames = max(1, int(tone_seconds * resolved_sample_rate))
+    end_frame = min(total_frames, start_frame + tone_frames)
+    input_channels = _device_max_input_channels(input_dev, fallback=1)
+    beep_errors: list[str] = []
+    record_error = ""
+
+    def beep_later() -> None:
+        try:
+            time.sleep(start_frame / float(resolved_sample_rate))
+            winsound.Beep(int(frequency_hz), max(1, int(tone_seconds * 1000)))
+        except Exception as exc:  # pragma: no cover - hardware/runtime path
+            beep_errors.append(str(exc))
+
+    playback_thread = threading.Thread(target=beep_later, daemon=True)
+    playback_thread.start()
+    try:
+        captured = sd.rec(
+            total_frames,
+            samplerate=resolved_sample_rate,
+            channels=input_channels,
+            dtype="float32",
+            device=input_dev,
+            blocking=True,
+        )
+    except Exception as exc:  # pragma: no cover - hardware/runtime path
+        captured = np.empty((0, input_channels), dtype=np.float32)
+        record_error = str(exc)
+    playback_thread.join(timeout=tone_seconds + 2.0)
+
+    channels = _channel_metrics(
+        captured,
+        start_frame=start_frame,
+        end_frame=end_frame,
+        sample_rate=resolved_sample_rate,
+        frequency_hz=frequency_hz,
+        min_capture_peak=min_capture_peak,
+    )
+    channel_index = _best_channel(channels)
+    if captured.ndim == 2 and captured.shape[1] > channel_index:
+        mono = _safe_float_audio(captured[:, channel_index])
+    else:
+        mono = _safe_float_audio(captured.reshape(-1))
+    peak = int(float(np.max(np.abs(mono))) * 32768) if len(mono) else 0
+    rms = int(float(np.sqrt(np.mean(mono * mono))) * 32768) if len(mono) else 0
+
+    segment = mono[start_frame:end_frame] if len(mono) >= end_frame else mono
+    correlation = 0.0
+    if len(segment) > 0:
+        ref_t = np.arange(len(segment), dtype=np.float32) / float(resolved_sample_rate)
+        reference = np.sin(2.0 * np.pi * frequency_hz * ref_t).astype(np.float32)
+        denom = float(np.linalg.norm(segment) * np.linalg.norm(reference))
+        if denom > 0:
+            correlation = abs(float(np.dot(segment, reference)) / denom)
+
+    playback_ok = not beep_errors
+    recording_ok = not record_error
+    signal_ok = bool(recording_ok and peak >= min_capture_peak)
+    tone_detected = bool(signal_ok and correlation >= 0.12)
+    status = "ok" if playback_ok and recording_ok and tone_detected else "degraded"
+    if beep_errors:
+        failure_reason = "beep_playback_failed"
+    elif record_error:
+        failure_reason = "record_stream_failed"
+    else:
+        failure_reason = _loopback_failure_reason(
+            playback_ok=playback_ok,
+            playback_error="; ".join(beep_errors),
+            peak=peak,
+            min_capture_peak=min_capture_peak,
+            tone_detected=tone_detected,
+        )
+
+    wav_path = str(wav_out) if wav_out else ""
+    if wav_path:
+        write_wav(wav_path, mono, resolved_sample_rate)
+
+    replay_ok = None
+    replay_error = ""
+    if play_recording and len(mono):
+        try:
+            sd.play(mono, samplerate=resolved_sample_rate)
+            sd.wait()
+            replay_ok = True
+        except Exception as exc:  # pragma: no cover - hardware/runtime path
+            replay_ok = False
+            replay_error = str(exc)
+
+    return {
+        "status": status,
+        "playback": "winsound.Beep",
+        "playback_ok": playback_ok,
+        "playback_error": "; ".join(beep_errors),
+        "recording_ok": recording_ok,
+        "record_error": record_error,
+        "signal_ok": signal_ok,
+        "tone_detected": tone_detected,
+        "tone_correlation": round(correlation, 3),
+        "failure_reason": failure_reason,
+        "peak": peak,
+        "rms": rms,
+        "min_capture_peak": min_capture_peak,
+        "sample_rate": resolved_sample_rate,
+        "input_device": input_dev,
+        "input_channels": input_channels,
+        "selected_input_channel": channel_index,
+        "channel_metrics": channels,
         "record_seconds": total_seconds,
         "tone_seconds": tone_seconds,
         "frequency_hz": frequency_hz,
@@ -580,8 +969,35 @@ def print_audio_loopback_summary(payload: dict[str, Any]) -> None:
     print(f"Audio loopback: {payload.get('status', 'unknown')}")  # noqa: T201
     print(f"  input/output: {payload.get('input_device')} -> {payload.get('output_device')}")  # noqa: T201
     print(f"  playback-ok: {payload.get('playback_ok')}")  # noqa: T201
+    if payload.get("capture_method"):
+        print(f"  capture-method: {payload['capture_method']}")  # noqa: T201
     if payload.get("playback_error"):
         print(f"  playback-error: {payload['playback_error']}")  # noqa: T201
+    if payload.get("fallback_error"):
+        print(f"  fallback-error: {payload['fallback_error']}")  # noqa: T201
+    if payload.get("failure_reason"):
+        print(f"  failure-reason: {payload['failure_reason']}")  # noqa: T201
+    print(  # noqa: T201
+        "  capture: "
+        f"peak={payload.get('peak')} rms={payload.get('rms')} "
+        f"signal_ok={payload.get('signal_ok')} tone_detected={payload.get('tone_detected')} "
+        f"corr={payload.get('tone_correlation')}"
+    )
+    if payload.get("wav_out"):
+        print(f"  wav: {payload['wav_out']}")  # noqa: T201
+
+
+def print_windows_beep_loopback_summary(payload: dict[str, Any]) -> None:
+    print(f"Windows beep loopback: {payload.get('status', 'unknown')}")  # noqa: T201
+    print(f"  input: {payload.get('input_device')}")  # noqa: T201
+    print(  # noqa: T201
+        "  playback/recording: "
+        f"playback_ok={payload.get('playback_ok')} recording_ok={payload.get('recording_ok')}"
+    )
+    if payload.get("playback_error"):
+        print(f"  playback-error: {payload['playback_error']}")  # noqa: T201
+    if payload.get("record_error"):
+        print(f"  record-error: {payload['record_error']}")  # noqa: T201
     if payload.get("failure_reason"):
         print(f"  failure-reason: {payload['failure_reason']}")  # noqa: T201
     print(  # noqa: T201

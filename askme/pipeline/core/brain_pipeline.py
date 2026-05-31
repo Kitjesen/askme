@@ -555,9 +555,6 @@ class BrainPipeline:
         if hasattr(self, "_turn_executor"):
             self._turn_executor._llm_semaphore = value
 
-    def _prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return self._prompt_builder.prepare_messages(messages)
-
     def _build_l0_runtime_block(self) -> str:
         return self._prompt_builder.build_l0_runtime_block()
 

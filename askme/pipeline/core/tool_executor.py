@@ -164,7 +164,8 @@ class ToolExecutor:
         self._conversation.add_tool_exchange(tool_call_objs, tool_results)
 
         follow_msgs = self._prompt_builder.prepare_messages(
-            self._conversation.get_messages(system_prompt)
+            self._conversation.get_messages(system_prompt),
+            source=source,
         )
         return await self._stream_and_speak(follow_msgs, model=model, source=source)
 

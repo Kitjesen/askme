@@ -40,6 +40,25 @@ def _check_st_available() -> bool:
     return _ST_AVAILABLE
 
 
+def _top_score_indices(scores: np.ndarray, top_k: int) -> np.ndarray:
+    """Return indices for the highest scores in descending score order.
+
+    Uses ``argpartition`` for bounded top-k selection so large stores avoid
+    sorting every row when callers only need a small retrieval window.
+    """
+    safe_top_k = int(top_k)
+    if safe_top_k <= 0 or scores.size == 0:
+        return np.array([], dtype=np.int64)
+
+    result_count = min(safe_top_k, int(scores.size))
+    if result_count == int(scores.size):
+        return np.argsort(scores)[::-1]
+
+    candidate_indices = np.argpartition(scores, -result_count)[-result_count:]
+    ordered_candidates = np.argsort(scores[candidate_indices])[::-1]
+    return candidate_indices[ordered_candidates]
+
+
 class VectorStore:
     """Lightweight vector store using sentence-transformers + numpy cosine similarity."""
 
@@ -137,7 +156,7 @@ class VectorStore:
                 return []
             # Cosine similarity (embeddings are already L2-normalized)
             scores = self._embeddings @ q_vec
-            top_indices = np.argsort(scores)[::-1][:top_k]
+            top_indices = _top_score_indices(scores, top_k)
 
             results = []
             for idx in top_indices:

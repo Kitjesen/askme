@@ -78,7 +78,7 @@ def _make_executor(**kwargs) -> TurnExecutor:
     prompt_builder = MagicMock()
     prompt_builder.build_system_prompt = MagicMock(return_value="You are a robot.")
     prompt_builder.build_forced_rag_reply = MagicMock(return_value="")
-    prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs: msgs)
+    prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs, **kw: msgs)
 
     stream_processor = MagicMock()
     stream_processor.stream_with_tools = AsyncMock(return_value="robot answer")
@@ -174,7 +174,7 @@ class TestProcessHappyPath:
         prompt_builder = MagicMock()
         prompt_builder.build_system_prompt = MagicMock(return_value="sys")
         prompt_builder.build_forced_rag_reply = MagicMock(return_value="这条路线信息有冲突，请管理员确认。")
-        prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs: msgs)
+        prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs, **kw: msgs)
         stream_processor = MagicMock()
         stream_processor.stream_with_tools = AsyncMock(return_value="错误的自由回答")
         te = _make_executor(
@@ -196,7 +196,7 @@ class TestProcessHappyPath:
         prompt_builder = MagicMock()
         prompt_builder.build_system_prompt = MagicMock(return_value="sys")
         prompt_builder.build_forced_rag_reply = MagicMock(return_value="这条知识已过期，请先刷新。")
-        prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs: msgs)
+        prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs, **kw: msgs)
         stream_processor = MagicMock()
         stream_processor.stream_with_tools = AsyncMock(return_value="错误回答")
         te = _make_executor(prompt_builder=prompt_builder, stream_processor=stream_processor)

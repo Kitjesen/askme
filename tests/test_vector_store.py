@@ -4,8 +4,7 @@ import threading
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-
-from askme.memory.vector_store import VectorStore
+from askme.memory.vector_store import VectorStore, _top_score_indices
 
 # -- Helpers ------------------------------------------------------------------
 
@@ -63,6 +62,43 @@ class TestAvailability:
         with _patch_available(False):
             store = VectorStore()
             assert store.search("hello") == []
+
+
+class TestTopScoreIndices:
+    def test_returns_scores_descending_without_full_sorting(self):
+        scores = np.array([0.2, 0.9, 0.1, 0.7, 0.4], dtype=np.float32)
+
+        assert _top_score_indices(scores, 3).tolist() == [1, 3, 4]
+
+    def test_non_positive_top_k_returns_empty(self):
+        scores = np.array([0.2, 0.9, 0.1], dtype=np.float32)
+
+        assert _top_score_indices(scores, 0).tolist() == []
+        assert _top_score_indices(scores, -2).tolist() == []
+
+    def test_top_k_larger_than_scores_returns_all_sorted(self):
+        scores = np.array([0.2, 0.9, 0.1], dtype=np.float32)
+
+        assert _top_score_indices(scores, 10).tolist() == [1, 0, 2]
+
+    def test_empty_scores_returns_empty(self):
+        scores = np.array([], dtype=np.float32)
+        assert _top_score_indices(scores, 3).tolist() == []
+
+    def test_single_element_returns_its_index(self):
+        scores = np.array([0.5], dtype=np.float32)
+        assert _top_score_indices(scores, 3).tolist() == [0]
+
+    def test_top_k_one_with_multiple_scores(self):
+        scores = np.array([0.2, 0.9, 0.1, 0.7], dtype=np.float32)
+        assert _top_score_indices(scores, 1).tolist() == [1]
+
+    def test_identical_scores_returns_correct_count(self):
+        scores = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+        result = _top_score_indices(scores, 2)
+        assert len(result) == 2
+        # argpartition is not stable for tied scores — only verify count and bounds
+        assert all(0 <= idx < 3 for idx in result.tolist())
 
 
 class TestAddAndSearch:

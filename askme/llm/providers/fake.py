@@ -37,7 +37,9 @@ class FakeLLMProvider:
         yield SimpleNamespace(
             choices=[
                 SimpleNamespace(
-                    delta=SimpleNamespace(content=self.response_text),
+                    delta=SimpleNamespace(content=self.response_text, tool_calls=None),
+                    finish_reason="stop",
+                    index=0,
                 )
             ]
         )
@@ -47,7 +49,9 @@ class FakeLLMProvider:
         return SimpleNamespace(
             choices=[
                 SimpleNamespace(
-                    message=SimpleNamespace(content=self.response_text),
+                    message=SimpleNamespace(content=self.response_text, tool_calls=None),
+                    finish_reason="stop",
+                    index=0,
                 )
             ]
         )

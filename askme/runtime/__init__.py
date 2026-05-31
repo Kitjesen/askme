@@ -4,6 +4,7 @@ Owner subpackages:
 - ``core``: runtime module graph, profiles and backend registry.
 - ``task``: TaskHandoff, arbiter clients, mission service and runtime audit.
 - ``modules``: runtime modules grouped around concrete product capabilities.
+- ``diagnostics``: runtime diagnostic smoke checks for dialogue and memory retrieval.
 
 Historical imports such as ``askme.runtime.module`` remain available for
 compatibility. New code should import from the owner subpackage.

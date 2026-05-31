@@ -275,7 +275,8 @@ class TurnExecutor:
 
         self._track_task(_compress_bg(), name="conv_compress")
         messages = self._prompt_builder.prepare_messages(
-            self._get_messages(system_prompt, conversation_session_id=session_scope)
+            self._get_messages(system_prompt, conversation_session_id=session_scope),
+            source=source,
         )
 
         self._log_episode("command", f"用户说: {user_text}")

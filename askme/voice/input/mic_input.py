@@ -105,6 +105,13 @@ class MicInput:
             logger.warning("Unknown mic input_transport=%s; using auto", input_transport)
             self._input_transport = "auto"
 
+        if mic_channels < 1:
+            raise ValueError("mic_channels must be at least 1")
+        if mic_channel_select < 0 or mic_channel_select >= mic_channels:
+            raise ValueError(
+                "mic_channel_select must be within configured mic_channels"
+            )
+
         # Resampling pipeline config
         self._native_rate = mic_native_rate or sample_rate
         self._native_channels = mic_channels

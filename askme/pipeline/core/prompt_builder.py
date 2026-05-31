@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 class PromptBuilder:
     """Assembles system prompts and prepares message lists for LLM calls."""
 
+    _TEXT_CHANNEL_HINT = "文本/API通道：当前用户消息已明确发给你；除非消息为空或噪声，不要回复[SILENT]。"
+
     _DEFAULT_RAG_POLICY_REPLIES = {
         "filtered": "我找到了相关资料，但还不能作为可靠依据。请管理员先复核知识。",
         "stale": "这条知识已经过期，我不能按旧信息回答。请先刷新问答可用性。",
@@ -164,7 +166,12 @@ class PromptBuilder:
         """Return a deterministic customer-facing reply when RAG policy forbids answering."""
         return forced_rag_reply(policy, templates=self._rag_policy_templates)
 
-    def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def prepare_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        source: str = "voice",
+    ) -> list[dict[str, Any]]:
         """Inject prompt seed and user format prefix for relay compatibility.
 
         The relay service overrides our system prompt with its own developer
@@ -178,7 +185,10 @@ class PromptBuilder:
         Original conversation history is NOT modified — transformations are
         applied only to the copy sent to the LLM.
         """
-        if not self._prompt_seed and not self._user_prefix:
+        source = str(source or "voice").strip().lower()
+        text_channel_hint = self._TEXT_CHANNEL_HINT if source != "voice" else ""
+
+        if not self._prompt_seed and not self._user_prefix and not text_channel_hint:
             return messages
 
         # When seed is present, skip system message to avoid relay conflict.
@@ -212,6 +222,20 @@ class PromptBuilder:
                     "content": "明白，需要真实数据时我会调用工具获取。",
                 })
 
+            memory_block = self._extract_system_section(system_prompt, "Relevant memory:")
+            if memory_block:
+                result.append({
+                    "role": "user",
+                    "content": (
+                        "当前回合可引用的记忆证据如下。回答必须优先贴合这些证据，"
+                        f"不要说没有记录。\n{memory_block}"
+                    ),
+                })
+                result.append({
+                    "role": "assistant",
+                    "content": "明白，我会使用当前回合提供的记忆证据回答，不会忽略这些记录。",
+                })
+
             rag_policy_block = self._extract_system_section(system_prompt, "[知识回答策略]")
             if rag_policy_block:
                 result.append({
@@ -231,12 +255,15 @@ class PromptBuilder:
             result = [messages[0]] if messages else []
             rest = list(messages[1:])
 
-        if self._user_prefix:
+        if self._user_prefix or text_channel_hint:
+            prefix = "\n".join(
+                part for part in (self._user_prefix, text_channel_hint) if part
+            )
             for i in range(len(rest) - 1, -1, -1):
                 if rest[i].get("role") == "user":
                     rest[i] = {
                         **rest[i],
-                        "content": f"{self._user_prefix}\n{rest[i]['content']}",
+                        "content": f"{prefix}\n{rest[i]['content']}",
                     }
                     break
 
