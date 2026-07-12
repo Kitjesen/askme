@@ -19,11 +19,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from askme.config import get_config  # noqa: E402
-from askme.llm.client import LLMClient  # noqa: E402
 from askme.pipeline.stream_processor import _ThinkFilter  # noqa: E402
 from askme.voice.stream_splitter import StreamSplitter  # noqa: E402
 from askme.voice.tts import TTSEngine  # noqa: E402
+
+from askme.config import get_config  # noqa: E402
+from askme.llm.client import LLMClient  # noqa: E402
 
 
 def _chunk_content(chunk: Any) -> str:

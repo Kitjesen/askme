@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import time
 
-from askme.cognition import CognitivePlanner, WorkingMemory, WorldStateService
 from askme.runtime.handoff import RuntimeHandoffService
 from askme.runtime.mission import MissionService
+
+from askme.cognition import CognitivePlanner, WorkingMemory, WorldStateService
 
 
 def _planner_stack() -> tuple[WorldStateService, CognitivePlanner, RuntimeHandoffService]:

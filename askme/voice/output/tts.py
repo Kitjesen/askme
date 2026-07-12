@@ -19,6 +19,13 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from askme.interfaces.tts import TTSBackend
+from askme.voice.output.voice_profiles import (
+    VoiceProfile,
+    build_voice_profiles,
+    resolve_voice_profile_id,
+)
+
 try:
     import sounddevice as sd
 except ModuleNotFoundError:
@@ -44,9 +51,6 @@ except ModuleNotFoundError:
 
 if TYPE_CHECKING:
     from askme.voice.output.audio_router import AudioRouter
-
-from askme.interfaces.tts import TTSBackend
-from askme.voice.output.voice_profiles import VoiceProfile, build_voice_profiles, resolve_voice_profile_id
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +113,15 @@ class TTSEngine(TTSBackend):
 
     def __init__(self, config: dict[str, Any], *, audio_router: AudioRouter | None = None) -> None:
         self._backend: str = config.get("backend", "local")
+        self._fallback_backend: str = str(
+            config.get("fallback_backend", "edge")
+        ).strip().lower()
+        if self._fallback_backend not in {"local", "edge"}:
+            logger.warning(
+                "Unknown TTS fallback_backend=%s, using edge",
+                self._fallback_backend,
+            )
+            self._fallback_backend = "edge"
         self._sample_rate: int = int(config.get("sample_rate", 24000))
         self._output_device: int | str | None = config.get("output_device")
         self._output_transport: str = str(config.get("output_transport", "auto")).lower()
@@ -275,8 +288,12 @@ class TTSEngine(TTSBackend):
 
         # Auto-detect backend
         if self._backend == "minimax" and not self._minimax_api_key:
-            logger.warning("MiniMax TTS: no API key configured, falling back to edge-tts")
-            self._backend = "edge"
+            if self._fallback_backend == "local" and os.path.isdir(self._model_dir):
+                logger.warning("MiniMax TTS: no API key configured, using local fallback")
+                self._backend = "local"
+            else:
+                logger.warning("MiniMax TTS: no API key configured, falling back to edge-tts")
+                self._backend = "edge"
         if self._backend == "local" and not os.path.isdir(self._model_dir):
             logger.warning("Local TTS model not found at %s, falling back to edge-tts", self._model_dir)
             self._backend = "edge"
@@ -580,6 +597,7 @@ class TTSEngine(TTSBackend):
         )
         return {
             "backend": self._backend,
+            "fallback_backend": self._fallback_backend,
             "output_transport": self._output_transport,
             "sample_rate": self._sample_rate,
             "is_playing": playing,
@@ -935,6 +953,12 @@ class TTSEngine(TTSBackend):
 
     def _use_minimax_fallback(self, text: str, generation: int) -> None:
         """Use local or edge TTS as a fallback when MiniMax is unavailable."""
+        if (
+            self._local_tts is None
+            and self._fallback_backend == "local"
+            and os.path.isdir(self._model_dir)
+        ):
+            self._init_local_tts()
         if self._local_tts is not None:
             self._generate_local(text, generation)
         else:

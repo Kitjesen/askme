@@ -24,6 +24,7 @@ def _make_builder(
     memory_system=None,
     rag_policy_templates: dict[str, str] | None = None,
     general_tool_max_safety_level: str = "normal",
+    relay_compat_mode: bool = False,
 ) -> PromptBuilder:
     if tools is None:
         tools = MagicMock()
@@ -45,6 +46,7 @@ def _make_builder(
         qp_memory=qp_memory,
         memory_system=memory_system,
         rag_policy_templates=rag_policy_templates,
+        relay_compat_mode=relay_compat_mode,
     )
 
 
@@ -357,21 +359,29 @@ class TestPrepareMessages:
         pb.prepare_messages(msgs)
         assert msgs[1]["content"] == original_user  # original unchanged
 
-    def test_with_seed_system_message_dropped(self):
+    def test_with_seed_preserves_system_message_for_direct_providers(self):
         seed = [{"role": "user", "content": "You are a robot."}, {"role": "assistant", "content": "Understood."}]
         pb = _make_builder(prompt_seed=seed)
         msgs = self._msgs("hello")
         result = pb.prepare_messages(msgs)
         roles = [m["role"] for m in result]
-        assert "system" not in roles
+        assert roles[0] == "system"
+        assert result[0]["content"] == "System message."
+
+    def test_relay_compat_mode_drops_system_message(self):
+        seed = [{"role": "user", "content": "You are a robot."}, {"role": "assistant", "content": "Understood."}]
+        pb = _make_builder(prompt_seed=seed, relay_compat_mode=True)
+        result = pb.prepare_messages(self._msgs("hello"))
+        assert all(message["role"] != "system" for message in result)
 
     def test_with_seed_seed_messages_prepended(self):
         seed = [{"role": "user", "content": "SEED_USER"}, {"role": "assistant", "content": "SEED_ASST"}]
         pb = _make_builder(prompt_seed=seed)
         msgs = self._msgs("hello")
         result = pb.prepare_messages(msgs)
-        assert result[0]["content"] == "SEED_USER"
-        assert result[1]["content"] == "SEED_ASST"
+        assert result[0]["role"] == "system"
+        assert result[1]["content"] == "SEED_USER"
+        assert result[2]["content"] == "SEED_ASST"
 
     def test_with_seed_and_tools_injects_tool_exchange(self):
         seed = [{"role": "user", "content": "SEED"}, {"role": "assistant", "content": "OK"}]
@@ -409,8 +419,8 @@ class TestPrepareMessages:
         pb = _make_builder(prompt_seed=seed, tools=tools)
         msgs = self._msgs("hello")
         result = pb.prepare_messages(msgs)
-        # Seed + original (minus system)
-        assert len(result) == len(seed) + 1  # seed + 1 user msg
+        # System + seed + original user.
+        assert len(result) == len(seed) + 2
 
     def test_empty_messages_with_seed(self):
         seed = [{"role": "user", "content": "SEED"}, {"role": "assistant", "content": "OK"}]

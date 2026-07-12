@@ -10,19 +10,15 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from askme.api.schemas.customer_projects import CustomerProjectAcceptanceClosureResponse
-from askme.api.schemas.customer_projects import CustomerProjectAcceptanceReportResponse
 from askme.api.schemas.customer_projects import (
+    CustomerProjectAcceptanceClosureResponse,
+    CustomerProjectAcceptanceReportResponse,
     CustomerProjectAcceptanceReviewRegisterResponse,
-)
-from askme.api.schemas.customer_projects import (
     CustomerProjectCustomerSignoffRegisterResponse,
-)
-from askme.api.schemas.customer_projects import (
     CustomerProjectOnsiteEvidenceRegisterResponse,
+    CustomerProjectOnsiteEvidenceResponse,
+    CustomerProjectSignoffResponse,
 )
-from askme.api.schemas.customer_projects import CustomerProjectOnsiteEvidenceResponse
-from askme.api.schemas.customer_projects import CustomerProjectSignoffResponse
 from askme.pipeline.field.customer_projects import (
     customer_project_acceptance_closure,
     customer_project_acceptance_report,

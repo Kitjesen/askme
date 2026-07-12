@@ -77,6 +77,7 @@ API_SURFACES: tuple[ApiSurfaceSpec, ...] = (
         audience="operations and deployment monitoring",
         owns=("health", "metrics", "system status", "monitor snapshots"),
         route_modules=(
+            "askme.api.routes.health",
             "askme.api.routes.monitor",
             "askme.api.routes.system",
         ),
@@ -309,29 +310,66 @@ def _route_methods(route: Any) -> list[str]:
     return sorted(methods)
 
 
-def _route_is_inventory_candidate(route: Any) -> bool:
-    path = str(getattr(route, "path", ""))
+def _joined_route_path(prefix: str, path: str) -> str:
+    """Join an included-router prefix with a child route path."""
+
+    clean_prefix = str(prefix or "").rstrip("/")
+    clean_path = str(path or "")
+    if not clean_prefix:
+        return clean_path
+    if not clean_path:
+        return clean_prefix or "/"
+    return clean_prefix + (clean_path if clean_path.startswith("/") else f"/{clean_path}")
+
+
+def _iter_inventory_route_candidates(
+    routes: Any,
+    *,
+    prefix: str = "",
+) -> list[tuple[Any, str]]:
+    """Flatten FastAPI routes, including new lazy ``include_router`` wrappers."""
+
+    candidates: list[tuple[Any, str]] = []
+    for route in routes:
+        original_router = getattr(route, "original_router", None)
+        if original_router is not None:
+            include_context = getattr(route, "include_context", None)
+            include_prefix = str(getattr(include_context, "prefix", "") or "")
+            candidates.extend(
+                _iter_inventory_route_candidates(
+                    getattr(original_router, "routes", ()) or (),
+                    prefix=_joined_route_path(prefix, include_prefix),
+                )
+            )
+            continue
+        path = _joined_route_path(prefix, str(getattr(route, "path", "")))
+        candidates.append((route, path))
+    return candidates
+
+
+def _route_is_inventory_candidate(route: Any, *, path: str | None = None) -> bool:
+    resolved_path = str(path if path is not None else getattr(route, "path", ""))
     name = str(getattr(route, "name", ""))
     if name in _FRAMEWORK_DOC_ROUTE_NAMES:
         return False
-    if path in _INVENTORY_PATHS:
+    if resolved_path in _INVENTORY_PATHS:
         return True
-    return any(path.startswith(prefix) for prefix in _INVENTORY_PATH_PREFIXES)
+    return any(resolved_path.startswith(prefix) for prefix in _INVENTORY_PATH_PREFIXES)
 
 
 def api_route_inventory(app: FastAPI) -> dict[str, Any]:
     """Return a machine-checkable inventory of HTTP routes by product surface."""
 
     routes: list[dict[str, Any]] = []
-    for route in app.routes:
-        if not _route_is_inventory_candidate(route):
+    for route, path in _iter_inventory_route_candidates(app.routes):
+        if not _route_is_inventory_candidate(route, path=path):
             continue
         endpoint = getattr(route, "endpoint", None)
         module = str(getattr(endpoint, "__module__", ""))
         surface = api_surface_for_route_module(module)
         routes.append(
             {
-                "path": str(getattr(route, "path", "")),
+                "path": path,
                 "methods": _route_methods(route),
                 "name": str(getattr(route, "name", "")),
                 "module": module,
@@ -456,7 +494,8 @@ def api_surface_readiness(route_inventory: Mapping[str, Any]) -> dict[str, Any]:
             else "API 边界仍有未分类或缺失的接口，不能作为产品交付口径。"
         ),
         "release_claim": (
-            "可以向客户说明产品页只调用客户可见接口，内部机器人控制接口不会驱动客户 UI。"
+            "可以向客户说明 Dashboard 按页面和权限使用客户、治理和平台接口，"
+            "内部机器人控制接口不会驱动客户 UI 或客户交付口径。"
             if status == "ready"
             else "只能说明 API 分层仍在整改，不能承诺接口边界已完成。"
         ),

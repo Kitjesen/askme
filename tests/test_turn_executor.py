@@ -32,9 +32,16 @@ def _make_executor(**kwargs) -> TurnExecutor:
     def _add_assistant_message(
         content: str,
         *,
+        evidence: list[dict[str, object]] | None = None,
+        rag: dict[str, object] | None = None,
         conversation_session_id: str | None = None,
     ) -> None:
-        _history_for(conversation_session_id).append({"role": "assistant", "content": content})
+        message: dict[str, object] = {"role": "assistant", "content": content}
+        if evidence is not None:
+            message["evidence"] = evidence
+        if rag is not None:
+            message["rag"] = rag
+        _history_for(conversation_session_id).append(message)
 
     def _get_messages(
         system_prompt: str,
@@ -247,6 +254,15 @@ class TestProcessHappyPath:
         await te.process("again a", source="text", conversation_session_id="conv-a")
 
         third_messages = stream_processor.stream_with_tools.call_args_list[2].args[0]
+        assert stream_processor.stream_with_tools.call_args_list[0].kwargs[
+            "conversation_session_id"
+        ] == "conv-a"
+        assert stream_processor.stream_with_tools.call_args_list[1].kwargs[
+            "conversation_session_id"
+        ] == "conv-b"
+        assert stream_processor.stream_with_tools.call_args_list[2].kwargs[
+            "conversation_session_id"
+        ] == "conv-a"
         assert {"role": "user", "content": "hello a"} in third_messages
         assert {"role": "assistant", "content": "answer a1"} in third_messages
         assert {"role": "user", "content": "again a"} in third_messages
@@ -261,6 +277,28 @@ class TestProcessHappyPath:
             call("answer b1", conversation_session_id="conv-b"),
             call("answer a2", conversation_session_id="conv-a"),
         ]
+
+    @pytest.mark.asyncio
+    async def test_turn_exposes_retrieval_context_for_response_payload(self):
+        retrieval = MagicMock()
+        retrieval.context = "- scoped fact"
+        retrieval.evidence = [{"record_id": "rec-a", "text": "scoped fact"}]
+        retrieval.rag = {
+            "turn_scoped": True,
+            "answer_policy": {"state": "grounded", "action": "answer_with_evidence"},
+        }
+        memory = MagicMock()
+        memory.retrieve_with_context = AsyncMock(return_value=retrieval)
+        memory.save = AsyncMock()
+        te = _make_executor(memory=memory)
+
+        await te.process("hello", source="text", conversation_session_id="conv-a")
+
+        assert te.current_turn_rag == {
+            "evidence": retrieval.evidence,
+            "rag": retrieval.rag,
+        }
+        memory.retrieve_with_context.assert_awaited_once_with("hello")
 
     @pytest.mark.asyncio
     async def test_default_conversation_path_still_uses_conversation_manager(self):

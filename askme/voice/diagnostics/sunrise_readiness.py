@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import logging
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from askme.config import get_config, project_root
+from askme.voice.input.cloud_asr import cloud_asr_credentials_present
+
+logger = logging.getLogger(__name__)
 from askme.voice.diagnostics.health_check import run_voice_health
 from askme.voice.diagnostics.sunrise_audio_doctor import (
     DEFAULT_FIRST_TOKEN_GUARD_SECONDS,
@@ -125,15 +129,15 @@ def print_sunrise_voice_readiness_summary(payload: dict[str, Any]) -> None:
     cloud_asr = checks.get("cloud_asr", {})
     room_loop = checks.get("room_loop", {})
 
-    print(f"sunrise-voice-readiness: {payload.get('status', 'unknown')}")  # noqa: T201
-    print(f"  voice-health: {voice_health.get('status', 'unknown')}")  # noqa: T201
+    logger.info(f"sunrise-voice-readiness: {payload.get('status', 'unknown')}")
+    logger.info(f"  voice-health: {voice_health.get('status', 'unknown')}")
     print_sunrise_audio_doctor_summary(audio_doctor)
-    print(f"  cloud-asr: {cloud_asr.get('status', 'unknown')}")  # noqa: T201
-    print(f"  room-loop: {room_loop.get('status', 'unknown')}")  # noqa: T201
+    logger.info(f"  cloud-asr: {cloud_asr.get('status', 'unknown')}")
+    logger.info(f"  room-loop: {room_loop.get('status', 'unknown')}")
     for warning in payload.get("warnings", []):
-        print(f"  warn: {warning}")  # noqa: T201
+        logger.warning(f"  warn: {warning}")
     for error in payload.get("errors", []):
-        print(f"  error: {error}")  # noqa: T201
+        logger.error(f"  error: {error}")
 
 
 def _run_voice_health(config: dict[str, Any]) -> dict[str, Any]:
@@ -151,24 +155,34 @@ def _check_cloud_asr_requirement(config: dict[str, Any], *, required: bool) -> d
         cloud_cfg = {}
 
     enabled = bool(cloud_cfg.get("enabled", False))
-    api_key = str(cloud_cfg.get("api_key", "") or "").strip()
-    api_key_present = bool(api_key) and not api_key.startswith("${")
+    provider = str(cloud_cfg.get("provider", "dashscope")).strip().lower()
+    credentials_present = cloud_asr_credentials_present(cloud_cfg)
     websocket_ok = _websocket_client_available()
     errors: list[str] = []
 
     if required:
         if not enabled:
             errors.append("voice.cloud_asr.enabled is not true")
-        if not api_key_present:
-            errors.append("voice.cloud_asr.api_key is empty")
+        if not credentials_present:
+            if provider in {
+                "volcengine",
+                "doubao",
+                "seed_asr",
+                "volcengine_seed_asr",
+            }:
+                errors.append("voice.cloud_asr Volcengine credentials are incomplete")
+            else:
+                errors.append("voice.cloud_asr.api_key is empty")
         if not websocket_ok:
             errors.append("Cloud ASR dependency missing: websocket-client")
 
     return {
         "status": "ok" if not errors and required else "skipped" if not required else "degraded",
         "required": bool(required),
+        "provider": provider,
         "enabled": enabled,
-        "api_key_present": api_key_present,
+        "api_key_present": credentials_present,
+        "credentials_present": credentials_present,
         "dependency_ok": websocket_ok,
         "model": str(cloud_cfg.get("model", "paraformer-realtime-v2")),
         "errors": errors,
@@ -331,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))  # noqa: T201
+        logger.info(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print_sunrise_voice_readiness_summary(payload)
     return 0 if payload.get("status") == "ok" else 1

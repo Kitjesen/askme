@@ -38,7 +38,7 @@ register_mcp_modules()
 def main() -> None:
     """Entry point for ``askme-mcp`` command."""
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
-        print(
+        logger.info(
             "askme MCP server\n\n"
             "Usage:\n"
             "  askme-mcp\n"
@@ -48,7 +48,6 @@ def main() -> None:
             "  -h, --help   Show this help without starting MCP services.\n\n"
             "Use the askme CLI for MCP transport options:\n"
             "  python -m askme mcp serve --help",
-            flush=True,
         )
         return
     mcp.run()

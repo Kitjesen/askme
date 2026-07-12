@@ -17,6 +17,7 @@ documented buckets below instead of beside this README.
 | `scripts/demo/` | Manual customer/demo utilities and experimental operator flows. | CI gates, production launchers. | Manual only unless the script is explicitly designed for `--help` or dry-run. |
 | `scripts/bench/` | Benchmarks, latency probes, audio readiness checks, and benchmark helper scripts. | Pytest unit tests. | `pytest tests/test_performance_benchmarks.py tests/test_generated_voice_capability_check.py -q` for supported benchmark code. |
 | `scripts/e2e/` | Provider-backed or hardware-backed end-to-end probes. | Automatic pytest collection. | Manual execution only; document required keys, models, devices, and network. |
+| `scripts/audit/` | Secret scanning, key rotation guides, and security audit helpers. | Product APIs and runtime services. | Script-specific `--help` when present. |
 | `scripts/artifacts/` | Media, fixtures, and sample files used by scripts. | Executable scripts. | Static structure checks only. |
 | `scripts/tools/` | Low-level maintenance helpers used by scripts or manual flows. | Product APIs and runtime services. | Static tests, plus script-specific `--help` when present. |
 
@@ -24,6 +25,8 @@ documented buckets below instead of beside this README.
 
 Root scripts are reserved for cross-cutting CI or performance entrypoints:
 
+- `__init__.py`: package marker so `scripts.eval` and sibling packages are importable.
+- `zeroclaw_bridge.py`: ZeroClaw ↔ Askme MCP process orchestration and health monitoring.
 - `benchmark_audit_query.py`: audit query benchmark and optimization evidence.
 - `benchmark_core_paths.py`: core API/tool/memory path benchmark.
 - `check_perf_thresholds.py`: benchmark report threshold gate.

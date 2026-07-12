@@ -51,6 +51,7 @@ _DEFAULT_PERMISSIONS: dict[str, set[str]] = {
         "skill:review",
         "voice:profile:read",
         "voice:profile:update",
+        "voice:system:update",
     },
     "product_owner": {
         "audit:read",
@@ -102,6 +103,11 @@ class OperatorIdentity:
     customer_ids: tuple[str, ...] = ()
     project_ids: tuple[str, ...] = ()
     site_ids: tuple[str, ...] = ()
+    default_tenant_ids: tuple[str, ...] = ()
+    default_delivery_namespaces: tuple[str, ...] = ()
+    default_customer_ids: tuple[str, ...] = ()
+    default_project_ids: tuple[str, ...] = ()
+    default_site_ids: tuple[str, ...] = ()
     authenticated: bool = False
     known: bool = True
 
@@ -189,6 +195,14 @@ class OperatorDirectory:
             customer_ids=_scope_values(payload, "customer_ids"),
             project_ids=_scope_values(payload, "project_ids"),
             site_ids=_scope_values(payload, "site_ids"),
+            default_tenant_ids=_scope_values(payload, "default_tenant_ids"),
+            default_delivery_namespaces=_scope_values(
+                payload,
+                "default_delivery_namespaces",
+            ),
+            default_customer_ids=_scope_values(payload, "default_customer_ids"),
+            default_project_ids=_scope_values(payload, "default_project_ids"),
+            default_site_ids=_scope_values(payload, "default_site_ids"),
             source=self.identity_provider,
             authenticated=self.identity_provider not in {"", "local_config", "demo_config"},
             known=True,
@@ -657,6 +671,13 @@ class OperatorDirectory:
                 "customer_ids": list(identity.customer_ids),
                 "project_ids": list(identity.project_ids),
                 "site_ids": list(identity.site_ids),
+                "default_tenant_ids": list(identity.default_tenant_ids),
+                "default_delivery_namespaces": list(
+                    identity.default_delivery_namespaces
+                ),
+                "default_customer_ids": list(identity.default_customer_ids),
+                "default_project_ids": list(identity.default_project_ids),
+                "default_site_ids": list(identity.default_site_ids),
                 "unrestricted": _scope_unrestricted(identity),
             },
         }

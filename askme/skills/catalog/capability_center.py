@@ -107,7 +107,14 @@ _SPECS: dict[str, CapabilitySpec] = {
     "speed_reset": _spec("speed_reset", "恢复默认语速", "voice", "恢复默认播报语速。", "P1"),
     "list_skills": _spec("list_skills", "查看能力清单", "governance", "列出当前可用能力。", "P0"),
     "system_status": _spec("system_status", "查看系统状态", "governance", "查看机器人和服务健康状态。", "P0"),
-    "agent_task": _spec("agent_task", "后台专家任务", "agent", "把复杂任务交给受控 agent 执行。", "P1", requires_approval=True),
+    "agent_task": _spec(
+        "agent_task",
+        "后台专家任务",
+        "agent",
+        "旧后台专家任务入口，仅保留审批兼容；真实多步 agent 决策走 MCP 受控接入。",
+        "P1",
+        requires_approval=True,
+    ),
 }
 
 

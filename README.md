@@ -1,5 +1,127 @@
 # Askme
 
+> 版本：4.1.0 | 更新时间：2026-06-01
+
+Askme 是面向机器人方案商/集成商的现场运营交付中台。它把语音、文本、客户知识、现场事件、运行交接、acceptance dossier 和审计证据组合成可复制、可验收的 Demo-to-pilot 交付入口。
+
+## 产品和架构入口
+
+- 产品需求主干：`docs/PRODUCT_REQUIREMENTS.md`
+- 高级软件架构蓝图：`docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md`
+- R1-R7 需求到架构追踪：`docs/PRODUCT_ARCHITECTURE_TRACE.md`
+- 需求证据台账：`docs/DEMAND_EVIDENCE_LEDGER.md`
+
+当前 P0 是机器人方案商/集成商交付中台，不是通用聊天机器人，也不替代底盘控制。Field Delivery Domain 是客户项目、现场事件、证据、客户签收和 readiness gaps 的产品事实源；Runtime / Safety / Hardware 仍拥有真实执行。customer signoff != production readiness，不承诺无人值守生产上线。
+
+## 快速开始
+
+### Docker 一键启动
+
+```powershell
+# 纯 Askme MCP 服务（无语音硬件）
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+```
+
+```powershell
+# 完整栈：Askme + ZeroClaw（Agent 大脑）
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+```
+
+启动后访问：
+- Dashboard: `http://localhost:8765/dashboard`
+- MCP SSE: `http://localhost:8765/mcp`
+- 健康检查: `http://localhost:8765/healthz`
+
+### 本地开发
+
+```powershell
+pip install -e ".[dev]"
+python -m askme.blueprints.presets.text     # 文本运行时
+python -m askme.blueprints.presets.voice    # 语音任务中心
+python -m askme.blueprints.presets.edge_robot  # 园区巡检机器人
+```
+
+详细启动见[运行蓝图](#运行蓝图)章节。
+
+## 当前版本能力
+
+| 能力 | 状态 | 说明 |
+|------|------|------|
+| 语音任务中心 | 可用 | ASR→LLM→TTS 全链路，含打断和文本兜底 |
+| 园区巡检机器人 | 试点可用 | 语音+感知+现场事件+运行交接+控制适配 |
+| 客户知识库 | 已有闭环 | 上传→预览→审批→索引→检索证据→过期治理 |
+| 现场事件 | 产品链路 | 摔倒、卡住、电机故障、违停、烟火等场景 |
+| 空间认知 | 已有模型 | 点位+别名+服务点+路线+问路+带路 |
+| 能力中心 | 已有目录 | 技能→能力包→场景蓝图→风险等级→审批依赖 |
+| MCP 工具服务 | 已有入口 | 受控工具和资源暴露给 MCP 客户端 |
+| Agent Profile | 已有管理 | 可审计的角色配置、工具白名单、MCP 连接 |
+| 企业审计 | 已有 | SkillAuditLog + 统一审计时间线 + 导出证据包 |
+| ZeroClaw 集成 | v0.1.7 基线 | MCP 协议对接，支持 zeroclaw onboard；NanoClaw 作为后续边缘 profile，不另起一套 Agent 大脑 |
+
+## ZeroClaw 集成状态
+
+Askme 可作为 ZeroClaw（Agent 大脑）的 MCP 服务端，为 ZeroClaw 提供受控现场交付工具、客户项目上下文、证据和运行交接能力。
+
+当前版本基线：`zeroclaw 0.1.7`。Docker/部署脚本默认固定到 `ZEROCLAW_VERSION=0.1.7`，避免继续使用漂移的 `latest`。ZeroClaw 和 NanoClaw 归为同一运行时家族：ZeroClaw 是标准 Agent/Gateway 形态，NanoClaw 是未来真机边缘化时的轻量 profile，不作为第二个并列大脑。
+
+```text
+ZeroClaw (Rust Agent 大脑) → MCP → Askme (现场运营交付中台) → Runtime / Safety / Hardware
+```
+
+集成方式：
+
+```powershell
+# 方式 1：Docker 完整栈
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+
+# 方式 2：手动绑定
+python scripts/dev/setup_zeroclaw.py    # 读取 MiniMax API Key 并配置
+zeroclaw agent                           # 启动 ZeroClaw Agent
+
+# 方式 3：独立 MCP 服务
+python -m askme.mcp.server --transport sse --port 8765
+```
+
+当前能力范围：知识检索、空间查询、技能目录、现场事件触发、运行时状态感知和受控 handoff，不提供原始硬件控制。更多细节见 `docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md` 和 `docs/ARCHITECTURE_V2.md`。
+
+## 企业级特性
+
+| 特性 | 说明 |
+|------|------|
+| 四表面 API 分层 | Platform / Product / Admin / Internal，每层独立访问策略 |
+| 网关验签 IAM | 支持 OIDC/IAM 网关注入受信身份头，覆盖本地 operator_id |
+| RBAC 权限模型 | 细粒度权限（knowledge:read, skill:review, runtime:pause 等） |
+| 项目范围隔离 | tenant/customer/project/site 多层 scope 过滤 |
+| SafetyPreflight | 硬件动作执行前的安全预检门禁 |
+| 审计证据链 | SHA-256 + 可选 HMAC 签名的审计证据包 |
+| SIEM 投递 | 审计包可投递到企业 SIEM/WORM webhook |
+| 统一审计查询 | 跨 skill/field/runtime 的审计时间线查询和复核 |
+| 技能治理流水线 | 成长候选→草稿→审核→能力包→灰度发布→回滚 |
+| 灰度发布 | 能力包 rollout_percent 控制灰度比例 |
+| 操作确认门禁 | 高风险任务在执行前必须获得操作员确认 |
+| 客户项目验收 | acceptance-report / onsite-evidence / customer-signoff 闭环 |
+| 交付资源治理 | 资源注册表 + 治理请求 + 升级机制 |
+| K8s 就绪探针 | /healthz (liveness) + /ready (readiness) + /health (detail) |
+| Prometheus 指标 | /metrics/prometheus 提供标准 Prometheus 格式 |
+| 分布式追踪 | X-Trace-Id 贯穿所有请求和日志 |
+
+## 更多文档
+
+| 文档 | 说明 |
+|------|------|
+| [产品需求主干](docs/PRODUCT_REQUIREMENTS.md) | P0、R1-R7、证据门禁、ROI/定价和 release gates |
+| [高级软件架构蓝图](docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md) | bounded contexts、包所有权、API 表面和架构变更门禁 |
+| [需求到架构追踪](docs/PRODUCT_ARCHITECTURE_TRACE.md) | R1-R7 到 Field Delivery Domain、API 表面和验证测试 |
+| [需求证据台账](docs/DEMAND_EVIDENCE_LEDGER.md) | evidence_id、hypothesis_status 和 validated/research_pending 边界 |
+| [架构说明](docs/ARCHITECTURE.md) | v1 架构——模块依赖和运行时模块 |
+| [架构 v2](docs/ARCHITECTURE_V2.md) | ZeroClaw 集成 + 企业安全架构 |
+| [API 文档](docs/API.md) | 全部 HTTP 端点参考 |
+| [产品手册](docs/PRODUCT.md) | 产品能力和路线图 |
+| [运维手册](docs/OPERATIONS.md) | 部署和运维指南 |
+| [操作边界](docs/ASKME_BOUNDARY.md) | 核心/感知/插件三层边界 |
+
+---
+
 ## Contributor Start Here
 
 For parallel development, start with the ownership and workflow contracts before
@@ -12,7 +134,7 @@ editing code:
 - Boundary-sensitive changes should always run
   `pytest tests/test_six_layer_package_boundaries.py tests/test_package_migration_compat.py -q`.
 
-Askme 是面向园区、厂区、仓储和景区巡检机器人的现场任务平台。它把语音、文本、知识库、技能、现场事件、运行交接和审计记录组合成一个可交付的机器人产品入口。
+Askme 是面向园区、厂区、仓储和景区机器人项目的现场运营交付中台。它把语音、文本、知识库、技能、现场事件、运行交接和审计记录组合成一个可验收、可复用、可审计的方案商交付中台。
 
 Askme 的产品边界很明确：
 
@@ -38,7 +160,7 @@ Askme 的产品边界很明确：
 安装依赖：
 
 ```powershell
-cd D:\inovxio\tools\askme
+cd <repo-root>
 pip install -e ".[dev]"
 ```
 
@@ -115,7 +237,7 @@ Dashboard 是客户和交付人员查看产品能力的入口。当前重点页�
 - `/dashboard`：总览、对话、现场事件、运行状态。
 - `/dashboard/knowledge`：客户知识库，查看已有知识、上传、预览、审批、重建索引和证据。
 - `/dashboard/capabilities`：机器人能力中心，查看巡检、安防、访客服务、空间认知、语音、审计等能力。
-- `/dashboard/projects`：客户项目、对象目录、模板和交付包。
+- `/dashboard/delivery`：交付门禁、客户项目、对象目录、模板和验收材料。
 - `/dashboard/voice`：语音状态、音色、播放策略和语音健康。
 
 客户演示时优先走这条顺序：
@@ -192,6 +314,7 @@ python -m askme.cli runtime sunrise-voice-readiness --json
 客户试点前至少要提供这些证据：
 
 - 蓝图交付包：`runtime blueprints --delivery-package`
+- 运行 profile：客户现场验证必须使用 `lab` 或 `prod`；`fake`、`sim`、`shadow` 只作为演示、仿真或影子验证证据
 - 现场 readiness：`runtime field-readiness --json`
 - 语音健康：`runtime voice-health --json`
 - 现场事件冒烟：`runtime field-smoke-suite`
@@ -240,6 +363,7 @@ askme/
   api/            FastAPI 路由和产品 API 表面
   audit/          审计查询、导出、完整性和复核
   blueprints/     产品运行蓝图
+  cli/            操作员 CLI、诊断命令和脚本入口
   cognition/      认知规划、任务理解和上下文
   memory/         客户知识库和机器人行为记忆
   pipeline/       现场事件、空间认知、交付 readiness
@@ -251,6 +375,10 @@ docs/
   PRODUCT.md      产品手册和路线图
   ARCHITECTURE.md 架构说明
   OPERATIONS.md   运维和交付说明
+deploy/
+  README.md       部署资产、systemd、站点模板和快捷启动说明
+docker/
+  README.md       Dockerfile 和 Compose 使用说明
 ```
 
 ## 交付边界

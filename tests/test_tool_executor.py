@@ -77,6 +77,24 @@ class TestBasicExecution:
         )
         executor._conversation.add_tool_exchange.assert_called_once()
 
+    async def test_session_scope_is_used_for_tool_exchange_and_follow_up(self):
+        executor = _make_executor()
+
+        await executor.execute_tools(
+            _make_tool_calls(["nav_to"]),
+            system_prompt="system",
+            conversation_session_id="conv-a",
+        )
+
+        executor._conversation.add_tool_exchange.assert_called_once()
+        assert executor._conversation.add_tool_exchange.call_args.kwargs == {
+            "conversation_session_id": "conv-a"
+        }
+        executor._conversation.get_messages.assert_called_once_with(
+            "system",
+            conversation_session_id="conv-a",
+        )
+
     async def test_multiple_tools_in_order(self):
         call_log: list[str] = []
         tools = MagicMock()

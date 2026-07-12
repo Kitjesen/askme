@@ -52,11 +52,11 @@ def asr_on_wavfile(wav_path: str, asr) -> str:
 
 
 async def run_voice_loop_test():
-    from askme.brain.intent_router import IntentType
-
     from askme.blueprints.voice import voice as voice_blueprint
-    from askme.config import get_config
+    from askme.brain.intent_router import IntentType
     from askme.voice.asr import ASREngine
+
+    from askme.config import get_config
 
     cfg = get_config()
 

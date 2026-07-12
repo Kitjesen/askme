@@ -8,8 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from askme.api.schemas.memory import (
     KnowledgeImportResponse,
@@ -20,11 +19,13 @@ from askme.api.schemas.memory import (
     MemorySearchResponse,
 )
 from askme.api.services.http_helpers import require_json_object
-from askme.api.services.knowledge_route_payloads import invalid_request_payload
-from askme.api.services.knowledge_route_payloads import knowledge_update_permission
-from askme.api.services.knowledge_route_payloads import memory_route_failure
-from askme.api.services.knowledge_route_payloads import validate_memory_dispatch_payload
-from askme.api.services.knowledge_route_payloads import validation_error_message
+from askme.api.services.knowledge_route_payloads import (
+    invalid_request_payload,
+    knowledge_update_permission,
+    memory_route_failure,
+    validate_memory_dispatch_payload,
+    validation_error_message,
+)
 
 MemoryDispatch = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 MissionJsonWithStatus = Callable[..., JSONResponse]

@@ -80,6 +80,58 @@ _ALSA_DEVICE_PATTERN = re.compile(
     r"^(?:plug)?hw:|^sysdefault:|^dmix:|^dsnoop:|^front:|^surround",
     flags=re.IGNORECASE,
 )
+_PROJECT_RELATIVE_CONFIG_PATHS = (
+    ("app", "data_dir"),
+    ("app", "log_file"),
+    ("brain", "soul_file"),
+    ("memory", "mempalace_palace_path"),
+    ("memory", "knowledge_index_jobs", "path"),
+    ("conversation", "history_file"),
+    ("voice", "asr", "model_dir"),
+    ("voice", "vad", "model"),
+    ("voice", "vad", "model_path"),
+    ("voice", "punctuation", "model_path"),
+    ("voice", "kws", "model_dir"),
+    ("voice", "tts", "model_dir"),
+    ("voice", "tts", "voice_profile_state_path"),
+    ("voice", "control_state_path"),
+    ("vision", "model_path"),
+    ("robot", "policy_model_path"),
+    ("proactive", "alerts", "incident_archive_path"),
+    ("ota", "state_file"),
+    ("field_operations", "archive_path"),
+    ("field_operations", "scenario_report_path"),
+    ("field_operations", "site_profile_path"),
+    (
+        "field_operations",
+        "delivery_resource_governance",
+        "delivery_owner_notifications",
+        "incident_archive_path",
+    ),
+    ("field_operations", "action_audit", "path"),
+    ("field_operations", "action_audit", "retry_queue_path"),
+    ("space_cognition", "store_path"),
+    ("perception", "interaction_provider", "paths", "pose_gaze"),
+    ("perception", "interaction_provider", "paths", "gesture"),
+    ("perception", "interaction_provider", "paths", "sound_source"),
+    (
+        "perception",
+        "interaction_provider",
+        "paths",
+        "audio_visual_association",
+    ),
+    ("perception", "interaction_provider", "paths", "approach_dwell"),
+    (
+        "perception",
+        "interaction_provider",
+        "paths",
+        "multi_person_arbitration",
+    ),
+    ("audit", "export", "output_dir"),
+    ("audit", "export", "retry_queue_path"),
+    ("runtime_handoff", "audit", "path"),
+    ("runtime_handoff", "store", "path"),
+)
 
 
 def _apply_feature_flags(config: dict) -> None:
@@ -107,6 +159,27 @@ def _looks_like_alsa_device(value: Any) -> bool:
     return bool(_ALSA_DEVICE_PATTERN.match(value.strip()))
 
 
+def _apply_project_relative_paths(config: dict) -> None:
+    """Anchor configured local files to the project, not the process cwd."""
+    for config_path in _PROJECT_RELATIVE_CONFIG_PATHS:
+        section: Any = config
+        for part in config_path[:-1]:
+            if not isinstance(section, dict):
+                break
+            section = section.get(part)
+        if not isinstance(section, dict):
+            continue
+
+        key = config_path[-1]
+        value = section.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = _PROJECT_ROOT / path
+        section[key] = str(path.resolve())
+
+
 def _apply_platform_audio_overrides(config: dict) -> None:
     """Normalize hardware-specific audio settings for the current OS.
 
@@ -126,6 +199,32 @@ def _apply_platform_audio_overrides(config: dict) -> None:
         return
 
     overrides: list[str] = []
+
+    platform_overrides = voice_cfg.get("platform_overrides", {})
+    windows_overrides = (
+        platform_overrides.get("windows", {})
+        if isinstance(platform_overrides, dict)
+        else {}
+    )
+    if isinstance(windows_overrides, dict):
+        for key in (
+            "input_device",
+            "input_transport",
+            "mic_native_rate",
+            "mic_channels",
+            "mic_channel_select",
+        ):
+            if key in windows_overrides:
+                voice_cfg[key] = windows_overrides[key]
+                overrides.append(f"voice.{key}: Windows platform override")
+
+        tts_cfg = voice_cfg.get("tts")
+        windows_tts = windows_overrides.get("tts", {})
+        if isinstance(tts_cfg, dict) and isinstance(windows_tts, dict):
+            for key in ("output_device", "output_transport"):
+                if key in windows_tts:
+                    tts_cfg[key] = windows_tts[key]
+                    overrides.append(f"voice.tts.{key}: Windows platform override")
 
     if _looks_like_alsa_device(voice_cfg.get("input_device")):
         voice_cfg["input_device"] = None
@@ -176,10 +275,13 @@ def _load_config_from_disk() -> dict:
     # 5. Apply feature flag overrides
     _apply_feature_flags(resolved)
 
-    # 6. Apply platform-specific safe defaults
+    # 6. Resolve project-owned files independently of process cwd
+    _apply_project_relative_paths(resolved)
+
+    # 7. Apply platform-specific safe defaults
     _apply_platform_audio_overrides(resolved)
 
-    # 7. Inject convenience helpers
+    # 8. Inject convenience helpers
     resolved["_project_root"] = str(_PROJECT_ROOT)
 
     return resolved

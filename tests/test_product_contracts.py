@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import time
 
+from askme.voice.interaction_gate import InteractionAction, InteractionDecision
+from askme.voice.perception_context import InteractionPerceptionSnapshot
+
 from askme.contracts import (
     ActionDecision,
     Freshness,
@@ -12,8 +15,6 @@ from askme.contracts import (
     interaction_decision_to_action_decision,
     perception_snapshot_to_input,
 )
-from askme.voice.interaction_gate import InteractionAction, InteractionDecision
-from askme.voice.perception_context import InteractionPerceptionSnapshot
 
 
 def test_perception_input_round_trips_robot_sensor_context() -> None:

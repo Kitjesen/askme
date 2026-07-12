@@ -1,0 +1,20 @@
+# ZeroClaw Configuration --- Askme Integration
+# 启动: zeroclaw gateway --config .zeroclaw/config.toml
+
+[agent]
+identity_file = "agent/IDENTITY.md"
+soul_file = "agent/SOUL.md"
+tools_file = "agent/TOOLS.md"
+memory_file = "agent/MEMORY.md"
+max_tool_iterations = 50
+parallel_tools = true
+
+[mcp]
+enabled = true
+deferred_loading = false
+
+[[mcp.servers]]
+name = "askme"
+command = "python"
+args = ["-m", "askme.mcp.server"]
+cwd = "."

@@ -13,7 +13,6 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-
 from askme.voice.asr_manager import ASRResult
 from askme.voice.audio_agent import AudioAgent
 from askme.voice.vad_controller import VADEvent
@@ -199,6 +198,39 @@ class TestListenLoopIntegration:
             voice_turn = agent.status_snapshot()["voice_turn"]
             assert voice_turn["latest"]["status"] == "timeout"
             asr.reset.assert_called()
+
+    def test_wake_prompt_does_not_spawn_raw_aplay_beep(self, monkeypatch):
+        """The shared chime path must handle Windows without a raw aplay call."""
+        import subprocess
+        import threading
+
+        with _agent_ctx() as agent:
+            mic = _setup_mic_open(agent)
+            proc = agent._audio_proc
+            vad = agent._vad_ctrl
+            asr = agent._asr_mgr
+            raw_aplay_called = threading.Event()
+
+            agent.kws.available = True
+            agent.kws_stream = object()
+            agent._wait_for_wake_word_mic = MagicMock(return_value=True)
+            agent._play_chime = MagicMock()
+            agent._asr_timeout = 0.03
+
+            mic.read_chunk.return_value = _CHUNK
+            proc.process.return_value = (_CHUNK, _CHUNK_I16, 50, False)
+            vad.feed.return_value = VADEvent.SILENCE
+            asr.check_endpoint.return_value = None
+
+            def fake_run(*_args, **_kwargs):
+                raw_aplay_called.set()
+                return MagicMock(returncode=0)
+
+            monkeypatch.setattr(subprocess, "run", fake_run)
+
+            assert agent.listen_loop() is None
+            assert not raw_aplay_called.wait(timeout=0.1)
+            agent._play_chime.assert_called_once_with("wake")
 
     def test_barge_in_stops_tts_and_feeds_buffer(self):
         """BARGE_IN_CONFIRMED -> tts.stop_immediately + tts.drain_buffers called, buffer fed to ASR."""

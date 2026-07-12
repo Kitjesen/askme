@@ -106,7 +106,9 @@ _BUILTIN_PROFILES: dict[str, AgentProfile] = {
         instructions=(
             "你只处理知识库和证据问题。回答必须说明证据来源；过期、冲突或未审批知识不能直接用于结论。"
         ),
-        allowed_tools=frozenset({"read_file", "list_directory", "web_search", "web_fetch", "http_request"}),
+        allowed_tools=frozenset(
+            {"read_file", "list_directory", "web_search", "web_fetch", "http_request"}
+        ),
         risk_level="low",
     ),
     "wayfinding_guide": AgentProfile(
@@ -124,9 +126,7 @@ _BUILTIN_PROFILES: dict[str, AgentProfile] = {
         name="safety_reviewer",
         display_name="安全复核代理",
         description="用于高风险操作前的结构化复核。",
-        instructions=(
-            "你只做风险复核。输出是否允许、阻断原因、缺失证据和建议的低风险替代动作。"
-        ),
+        instructions=("你只做风险复核。输出是否允许、阻断原因、缺失证据和建议的低风险替代动作。"),
         allowed_tools=frozenset({"read_file", "http_request", "robot_api"}),
         risk_level="high",
     ),
@@ -138,14 +138,16 @@ _BUILTIN_PROFILES: dict[str, AgentProfile] = {
             "你负责把稳定的重复需求转成技能草稿。新增技能必须写清触发词、适用场景、工具边界、"
             "安全等级、验收用例和回滚方式；没有审批前不能承诺生产可用。"
         ),
-        allowed_tools=frozenset({
-            "create_skill",
-            "create_agent_profile",
-            "read_file",
-            "list_directory",
-            "web_search",
-            "web_fetch",
-        }),
+        allowed_tools=frozenset(
+            {
+                "create_skill",
+                "create_agent_profile",
+                "read_file",
+                "list_directory",
+                "web_search",
+                "web_fetch",
+            }
+        ),
         risk_level="medium",
     ),
 }
@@ -189,9 +191,7 @@ class AgentProfileRegistry:
             "profiles": profiles,
             "profile_count": len(profiles),
             "inherited_tool_count": len(tools),
-            "profile_locations": [
-                str(path) for path, _source in self._profile_locations()
-            ],
+            "profile_locations": [str(path) for path, _source in self._profile_locations()],
             "profile_scopes": [
                 {"source": source, "path": str(path), "priority": index + 1}
                 for index, (path, source) in enumerate(self._profile_locations())
@@ -401,7 +401,7 @@ class AgentProfileRegistry:
         if match is None:
             return None
         meta = _yaml_dict(match.group(1))
-        body = content[match.end():].strip()
+        body = content[match.end() :].strip()
         name = _clean(meta.get("name") or file_path.stem)
         if not name:
             return None
@@ -418,9 +418,13 @@ class AgentProfileRegistry:
                 _list(meta.get("spawnableProfiles", meta.get("spawnable_profiles")))
             ),
             max_iterations=_optional_int(meta.get("maxTurns", meta.get("max_iterations"))),
-            timeout_seconds=_optional_float(meta.get("timeoutSeconds", meta.get("timeout_seconds"))),
+            timeout_seconds=_optional_float(
+                meta.get("timeoutSeconds", meta.get("timeout_seconds"))
+            ),
             model=_clean(meta.get("model") or "inherit"),
-            permission_mode=_clean(meta.get("permissionMode", meta.get("permission_mode")) or "default"),
+            permission_mode=_clean(
+                meta.get("permissionMode", meta.get("permission_mode")) or "default"
+            ),
             preloaded_skills=tuple(_list(meta.get("skills", meta.get("preloaded_skills")))),
             mcp_servers=tuple(_list(meta.get("mcpServers", meta.get("mcp_servers")))),
             hooks=_dict(meta.get("hooks")),

@@ -13,7 +13,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from askme.pipeline.skill_dispatcher import SkillDispatcher
 
 # ── Helpers ────────────────────────────────────────────────────────

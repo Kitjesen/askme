@@ -8,6 +8,7 @@ them with the stable field-ingest adapter, then POST to ``/api/field/ingest``.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -17,6 +18,8 @@ import requests
 
 from askme.pipeline.field.field_device_signature import sign_field_device_payload
 from askme.pipeline.field.field_ingest_adapters import normalize_field_ingest_payload
+
+logger = logging.getLogger(__name__)
 
 PostFunc = Callable[[str, dict[str, Any], float], dict[str, Any]]
 
@@ -115,7 +118,7 @@ def watch_field_ingest_bridge(
             device_secrets=device_secrets,
         )
         if payload["count"]:
-            print(_summary_line(payload), flush=True)
+            logger.info(_summary_line(payload))
         time.sleep(max(0.1, interval_s))
 
 

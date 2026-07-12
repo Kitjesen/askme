@@ -12,12 +12,20 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from askme.runtime.core.module import Runtime
 
+logger = logging.getLogger(__name__)
+
 
 def run_blueprint(blueprint: Runtime, label: str = "Runtime") -> None:
     """Build, start, wait for SIGINT/SIGTERM, and stop a blueprint."""
     args = set(sys.argv[1:])
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stderr,
+    )
     if any(arg in {"-h", "--help"} for arg in args):
-        print(
+        logger.info(
             f"{label}\n\n"
             "用途：启动一个 askme 产品蓝图，用于演示、实验或试点验证。\n"
             "Purpose: start one askme product runtime blueprint for demo, lab, "
@@ -34,29 +42,20 @@ def run_blueprint(blueprint: Runtime, label: str = "Runtime") -> None:
             "交付检查：\n"
             "Catalog and delivery gates:\n"
             "  python -m askme runtime blueprints --help",
-            flush=True,
         )
         return
 
     if "--preflight" in args:
         payload = _preflight_payload(blueprint, label)
         if "--json" in args:
-            print(json.dumps(payload, ensure_ascii=False, indent=2), flush=True)
+            logger.info(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
-            print(
+            logger.info(
                 f"{payload['label']} preflight ok: "
                 f"{payload['module_count']} modules "
                 f"({', '.join(payload['modules'])})",
-                flush=True,
             )
         return
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S",
-        stream=sys.stderr,
-    )
 
     async def _main() -> None:
         from askme.config import get_config
@@ -72,14 +71,14 @@ def run_blueprint(blueprint: Runtime, label: str = "Runtime") -> None:
                 pass
 
         await app.start()
-        print(f"{label} started with {len(app.modules)} modules.", flush=True)
+        logger.info(f"{label} started with {len(app.modules)} modules.")
         try:
             await stop.wait()
         except asyncio.CancelledError:
             pass
         finally:
             await app.stop()
-            print(f"{label} stopped.", flush=True)
+            logger.info(f"{label} stopped.")
 
     asyncio.run(_main())
 

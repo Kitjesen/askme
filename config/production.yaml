@@ -1,0 +1,169 @@
+# ============================================================
+# Askme - Production Security Configuration Template
+# ============================================================
+# WARNING:
+#   This file MUST be reviewed and customized before any
+#   production deployment.  Values marked 「MUST SET」 have
+#   no safe default and will expose your system if left
+#   unchanged.
+#
+#   Use ${ENV_VAR} for secrets (resolved from .env at runtime).
+#   Never commit .env files; see .env.example for the schema.
+#
+# Reference: OWASP Top 10 (2021), ASVS v4.0
+# ============================================================
+
+# ----------------------------------------------------------
+# Server / TLS
+# ----------------------------------------------------------
+server:
+  # Host MUST be 127.0.0.1 when behind a reverse proxy (nginx/caddy).
+  # Use 0.0.0.0 only when TLS is terminated at the app level.
+  host: "0.0.0.0"                          # 【MUST SET】 restrict in production
+  port: 8080                                # 【MUST SET】 use non-default port
+
+  # TLS — prefer reverse-proxy termination (nginx/caddy).
+  # Only enable here if the app faces the internet directly.
+  tls:
+    enabled: false                          # 【MUST SET】 true if exposed directly
+    cert_path: ""                           # 【MUST SET】 path to PEM certificate
+    key_path: ""                            # 【MUST SET】 path to PEM private key
+
+  # Maximum request body size in bytes (10 MB default).
+  max_body_size: 10_485_760
+
+# ----------------------------------------------------------
+# Rate Limiting
+# ----------------------------------------------------------
+rate_limit:
+  # Per-IP token bucket limits
+  enabled: true
+  max_requests: 60                          # requests per window
+  window_seconds: 60                        # sliding window duration
+
+  # Separate, stricter rate limit for authenticated endpoints
+  auth:
+    enabled: true
+    max_requests: 10
+    window_seconds: 60
+
+# ----------------------------------------------------------
+# Authentication & Authorization
+# ----------------------------------------------------------
+auth:
+  # Control API key — used for administrative endpoints.
+  # 【MUST SET】
+  control_api_key: "${CONTROL_API_KEY}"
+
+  # JWT (if applicable)
+  jwt_secret: "${JWT_SECRET}"              # 【MUST SET】 64+ chars, cryptographically random
+  jwt_algorithm: "HS256"
+  jwt_expiry_minutes: 30
+
+  # Session idle timeout (seconds) — force re-auth after inactivity.
+  session_idle_timeout: 600                # 10 minutes
+
+# ----------------------------------------------------------
+# Input Validation
+# ----------------------------------------------------------
+input_validation:
+  enabled: true
+  max_text_length: 10000                   # max characters per text field
+  max_audio_seconds: 30                    # max duration of voice input
+  allowed_content_types:
+    - "application/json"
+    - "multipart/form-data"
+    - "audio/wav"
+    - "audio/ogg"
+
+# ----------------------------------------------------------
+# CORS
+# ----------------------------------------------------------
+cors:
+  # 【MUST SET】 list allowed origins.  Never use "*" in production.
+  allow_origins:
+    - "https://your-product-domain.com"
+  allow_methods:
+    - "GET"
+    - "POST"
+    - "PUT"
+    - "DELETE"
+  allow_headers:
+    - "Authorization"
+    - "Content-Type"
+    - "X-Askme-Api-Key"
+  allow_credentials: true
+  max_age: 600
+
+# ----------------------------------------------------------
+# Security Headers
+# ----------------------------------------------------------
+headers:
+  x_content_type_options: "nosniff"
+  x_frame_options: "DENY"
+  x_xss_protection: "1; mode=block"
+  strict_transport_security: "max-age=31536000; includeSubDomains"
+  content_security_policy:
+    enabled: true
+    policy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; upgrade-insecure-requests"
+  cache_control: "no-store, max-age=0"
+
+# ----------------------------------------------------------
+# Logging & Audit
+# ----------------------------------------------------------
+audit:
+  enabled: true
+  log_all_requests: true                   # logs method, path, status, client IP
+  log_request_body: false                  # 【SECURITY】 enable only for debugging
+  log_headers: false                       # 【SECURITY】 enable only for debugging
+  retention_days: 90
+  # Destination — file path or "syslog".  Leave empty for stdout.
+  log_path: "/var/log/askme/audit.log"
+
+# ----------------------------------------------------------
+# Secrets & Credentials
+# ----------------------------------------------------------
+secrets:
+  # Path to .env file (resolved at startup, never committed).
+  env_file: "/etc/askme/.env"
+
+  # WARNING: the entries below have no defaults.  The app will
+  # refuse to start if these env vars are unset in production.
+  required_env_vars:
+    - "CONTROL_API_KEY"
+    - "MINIMAX_API_KEY"
+    - "DASHSCOPE_API_KEY"
+
+# ----------------------------------------------------------
+# Telemetry & Monitoring
+# ----------------------------------------------------------
+monitoring:
+  # Expose Prometheus metrics at /metrics (restrict via firewall).
+  prometheus_enabled: true
+  metrics_port: 9090                        # separate port recommended
+
+  # Health check endpoint is always public for load-balancer probes.
+  health_check_path: "/health"
+
+# ----------------------------------------------------------
+# Integrations — third-party service security settings
+# ----------------------------------------------------------
+integrations:
+  # LLM provider — production failover timeout
+  llm:
+    timeout_seconds: 30
+    max_retries: 2
+    allowed_models:
+      - "MiniMax-M2.5-highspeed"
+      - "MiniMax-M2.7"
+
+# ----------------------------------------------------------
+# External Access Control (firewall / VPN rules — informational)
+# ----------------------------------------------------------
+network:
+  # Document the expected network topology; not enforced by the app.
+  notes: |
+    - Place Askme behind a reverse proxy (nginx, Caddy, or Cloudflare Tunnel).
+    - Restrict port 8080 to internal/VPN IPs only.
+    - Do NOT expose Prometheus metrics port (9090) to the public internet.
+    - Use Web Application Firewall (WAF) if available.

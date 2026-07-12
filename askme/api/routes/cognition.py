@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
@@ -63,6 +66,7 @@ def create_cognition_router(
         except RuntimeError as exc:
             return json_error(str(exc), status_code=503)
         except Exception as exc:
+            logger.exception("Cognition context endpoint failed")
             return json_error(str(exc), status_code=500)
 
     @router.post(
@@ -81,6 +85,7 @@ def create_cognition_router(
         except RuntimeError as exc:
             return json_error(str(exc), status_code=503)
         except Exception as exc:
+            logger.exception("Cognition plan endpoint failed")
             return json_error(str(exc), status_code=500)
 
     @router.options("/api/cognition/context", include_in_schema=False)

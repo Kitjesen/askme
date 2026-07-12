@@ -2217,6 +2217,17 @@ def test_cli_agent_send_uses_server(monkeypatch, capsys) -> None:
     assert capsys.readouterr().out.strip() == "server:hello"
 
 
+def test_cli_agent_help_describes_runtime_chat_surface(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["agent", "--help"])
+
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "one-shot chat message" in help_text
+    assert "runtime" in help_text
+    assert "agent shell" not in help_text.lower()
+
+
 def test_cli_agent_send_falls_back_to_local(monkeypatch, capsys) -> None:
     def _fail(message: str, server: str, *, speak: bool = False) -> dict[str, str]:
         raise requests.RequestException("offline")

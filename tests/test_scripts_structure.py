@@ -4,15 +4,16 @@ import re
 import tomllib
 from pathlib import Path
 
-
 SCRIPTS_ROOT = Path("scripts")
 
 ALLOWED_ROOT_FILES = {
     "README.md",
+    "__init__.py",
     "benchmark_audit_query.py",
     "benchmark_core_paths.py",
     "check_perf_thresholds.py",
     "check_text_encoding.py",
+    "zeroclaw_bridge.py",
 }
 
 

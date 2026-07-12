@@ -14,9 +14,14 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from askme.pipeline.proactive.base import ProactiveResult
 from askme.pipeline.voice_loop import VoiceLoop
+
+from askme.pipeline.proactive.base import ProactiveResult
 from askme.robot_interaction import IntentType
+from askme.robot_interaction.interaction_gate import (
+    InteractionAction,
+    InteractionDecision,
+)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -92,6 +97,33 @@ def _make_loop(
     loop._proactive = mock_proactive
 
     return loop, mock_dispatcher, mock_proactive, mock_router
+
+
+async def test_voice_gate_receives_live_mission_context() -> None:
+    loop, _, _, _ = _make_loop(
+        listen_answers=["现在状态怎么样"],
+        router_side_effect=[_general_intent()],
+        proactive_side_effect=[],
+    )
+    gate = MagicMock()
+    gate.evaluate.return_value = InteractionDecision(
+        InteractionAction.RESPOND,
+        "mission_status_allowed",
+        0.9,
+    )
+    loop.set_interaction_gate(gate)
+    loop.set_mission_context_provider(
+        lambda: {"mission_mode": "paused", "actor_role": "supervisor"}
+    )
+
+    await loop.run()
+
+    assert gate.evaluate.call_args.kwargs["mission_mode"] == "paused"
+    assert gate.evaluate.call_args.kwargs["actor_role"] == "supervisor"
+    assert loop.interaction_status_snapshot()["mission_context"] == {
+        "mission_mode": "paused",
+        "actor_role": "supervisor",
+    }
 
 
 # ── Class 1: TestRerouteToVoiceTrigger ────────────────────────────────────────

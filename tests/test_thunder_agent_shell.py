@@ -1,4 +1,9 @@
-"""Tests for ThunderAgentShell — agentic loop, tool routing, timeout handling."""
+"""Tests for ThunderAgentShell — agentic loop, tool routing, timeout handling.
+
+.. deprecated::
+    ThunderAgentShell has been replaced by ZeroClaw MCP Agent.
+    Only deprecation stub tests are kept active.
+"""
 
 from __future__ import annotations
 
@@ -13,9 +18,15 @@ from askme.agent_shell.thunder_agent_shell import (
     _MAX_DEPTH,
     _MAX_ITERATIONS,
     _SPAWN_AGENT_SCHEMA,
-    _build_agent_system_prompt,
     ThunderAgentShell,
+    _build_agent_system_prompt,
 )
+
+# ── Deprecation notice ────────────────────────────────────────────────────────
+# ThunderAgentShell ReAct loop has been replaced by ZeroClaw MCP Agent.
+# Only deprecation stub tests (system_prompt, alias) are still active.
+# All ReAct-loop tests below are skipped via conftest.py auto-mark.
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -121,15 +132,17 @@ async def test_simple_task_returns_response(shell, mock_llm) -> None:
 
 
 @pytest.mark.asyncio
-async def test_start_announcement_spoken(shell, mock_llm, mock_audio) -> None:
-    """Shell always speaks announcement at task start."""
+async def test_run_task_returns_deprecation_message_without_speaking(
+    shell, mock_llm, mock_audio
+) -> None:
+    """Deprecated shell stub returns guidance without running audio side effects."""
     mock_llm.chat_stream.return_value = _text_stream(_make_chunk("done"))
 
-    await shell.run_task("测试任务")
-    mock_audio.speak.assert_called()
-    # First speak call should be the "好的，我来处理一下" announcement
-    first_call = mock_audio.speak.call_args_list[0][0][0]
-    assert "好的" in first_call or "处理" in first_call
+    result = await shell.run_task("测试任务")
+
+    assert "DEPRECATED" in result
+    assert "ZeroClaw MCP Agent" in result
+    mock_audio.speak.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -73,7 +73,7 @@ class MemorySystem:
             try:
                 from askme.config import get_config
                 config = get_config()
-            except Exception:
+            except (ImportError, TypeError, AttributeError):
                 config = {}
 
         # L5: Semantic Index (unified search across L2+L3+L4)
@@ -225,6 +225,7 @@ class MemorySystem:
             try:
                 procedures = self._procedural.get_context()
             except Exception:
+                logger.exception("[MemorySystem] Procedural context fetch failed")
                 pass
         return await self._strategy.suggest(
             trends=trends,

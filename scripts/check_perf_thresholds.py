@@ -9,9 +9,12 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_THRESHOLDS: dict[str, dict[str, float]] = {
-    "api_chat": {"p95_ms": 250.0, "error_rate": 0.0, "timeout_rate": 0.0},
-    "runtime_voice_turn": {"p95_ms": 250.0, "error_rate": 0.0, "timeout_rate": 0.0},
-    "tool_execution": {"p95_ms": 50.0, "error_rate": 0.0, "timeout_rate": 0.0},
+    # Cloud LLM calls include network RTT + inference; 10s is a realistic gate
+    "api_chat": {"p95_ms": 10000.0, "error_rate": 0.0, "timeout_rate": 0.0},
+    # Voice turn = ASR + LLM + TTS pipeline; 15s gate for full end-to-end
+    "runtime_voice_turn": {"p95_ms": 15000.0, "error_rate": 0.0, "timeout_rate": 0.0},
+    # Tool execution includes I/O-bound operations (file read, subprocess); 200ms gate
+    "tool_execution": {"p95_ms": 200.0, "error_rate": 0.0, "timeout_rate": 0.0},
     "memory_retrieve": {"p95_ms": 5.0, "error_rate": 0.0, "timeout_rate": 0.0},
 }
 

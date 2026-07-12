@@ -3,12 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>现场任务平台</title>
+  <title>小算 · 现场运行总览</title>
   <link rel="stylesheet" href="/dashboard/app.css">
+  <link rel="stylesheet" href="/dashboard/voice.css?v=20260712-5">
+  <link rel="stylesheet" href="/dashboard/product.css?v=20260712-8">
 </head>
 <body>
+  <button id="nav-toggle" class="nav-toggle" type="button" aria-label="打开页面导航" aria-controls="nav-drawer" aria-expanded="false" title="页面导航">
+    <span aria-hidden="true"></span>
+  </button>
+  <button id="nav-backdrop" class="nav-backdrop" type="button" aria-label="关闭页面导航" tabindex="-1"></button>
   <div class="product-shell">
-    <aside class="nav-rail" aria-label="产品导航">
+    <aside id="nav-drawer" class="nav-rail" aria-label="页面导航" aria-hidden="true">
+      <header class="nav-drawer-head">
+        <div>
+          <strong>页面导航</strong>
+          <small>聚龙科创 e 谷</small>
+        </div>
+        <button id="nav-close" class="nav-close" type="button" aria-label="关闭页面导航" title="关闭">×</button>
+      </header>
       <nav id="dashboard-nav" class="nav-list"></nav>
       <div class="nav-footer">
         <span id="global-status-dot" class="status-dot warn"></span>
@@ -19,12 +32,11 @@
     <main class="page-shell">
       <header class="page-header">
         <div>
-          <p id="page-kicker" class="page-kicker">产品总览</p>
-          <h1 id="page-title">现场任务平台</h1>
-          <p id="page-description">把语音、知识、事件、客户项目和交付检查拆成可验收的产品页面。</p>
+          <p id="page-kicker" class="page-kicker">运行总览</p>
+          <h1 id="page-title">现场运行总览</h1>
+          <p id="page-description">集中查看对话链路、现场事件、园区场景和交付门禁。</p>
         </div>
         <div class="header-actions">
-          <button class="ghost-button" data-route="/dashboard/projects">客户项目</button>
           <button class="primary-button" data-route="/dashboard/conversation">开始对话</button>
         </div>
       </header>
@@ -35,6 +47,6 @@
     </main>
   </div>
 
-  <script src="/dashboard/app.js" defer></script>
+  <script src="/dashboard/app.js?v=20260712-2" defer></script>
 </body>
 </html>

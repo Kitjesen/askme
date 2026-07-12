@@ -193,7 +193,7 @@ def _probe_http(url: str, timeout: float = 1.5) -> bool:
             return resp.status < 500
     except urllib.error.HTTPError as exc:
         return exc.code < 500
-    except Exception:
+    except OSError:
         return False
 
 

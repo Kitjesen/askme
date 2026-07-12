@@ -17,9 +17,9 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 from askme.brain.llm_client import LLMClient
+from askme.pipeline.brain_pipeline import _ThinkFilter
 
 from askme.config import get_config
-from askme.pipeline.brain_pipeline import _ThinkFilter
 
 
 async def chat_round(client, messages, label="", model=None):

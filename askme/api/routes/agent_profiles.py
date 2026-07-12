@@ -72,7 +72,7 @@ def register_agent_profile_routes(
                 response.model_dump(mode="python", exclude_none=True),
                 headers=NO_STORE_HEADERS,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return route_error_response(
                 logger,
                 public_error="agent profile route failed",
@@ -142,7 +142,7 @@ def register_agent_profile_routes(
             return field_error_response(exc, headers=CORS_HEADERS)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=CORS_HEADERS)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return route_error_response(
                 logger,
                 public_error="agent profile route failed",
@@ -166,7 +166,7 @@ def register_agent_profile_routes(
                 status_code=200 if payload.get("ok") else 404,
                 headers=NO_STORE_HEADERS,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return route_error_response(
                 logger,
                 public_error="agent profile route failed",

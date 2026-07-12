@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from askme.robot_interaction.mission.mode import (
+    MissionActorRole,
+    MissionCommandCategory,
+    MissionMode,
+    evaluate_mission_mode,
+)
 from askme.robot_interaction.perception_context import InteractionPerceptionSnapshot
 
 
@@ -38,7 +44,7 @@ class InteractionDecision:
         return self.action == InteractionAction.RESPOND
 
 
-_WAKE_TERMS = (
+_DEFAULT_WAKE_TERMS = (
     "thunder",
     "\u673a\u5668\u4eba",  # robot
     "\u673a\u5668\u72d7",  # robot dog
@@ -76,6 +82,16 @@ _ROBOT_TASK_TERMS = (
     "\u53d6\u6d88",
     "\u786e\u8ba4",
     "\u505c\u4e0b",
+    "\u6025\u505c",
+    "\u7d27\u6025\u505c\u6b62",
+)
+
+_SAFETY_TERMS = (
+    "暂停",
+    "停下",
+    "急停",
+    "紧急停止",
+    "别动",
 )
 
 _CASUAL_TERMS = (
@@ -149,6 +165,13 @@ class InteractionGate:
         refresh_perception_reply: str
         defer_reply: str
         refuse_reply: str
+        default_mission_mode: str
+        default_actor_role: str
+        wake_terms: list[str]
+        allow_unaddressed_public_help: bool
+        allow_unaddressed_robot_tasks: bool
+        silent_on_ambiguous: bool
+        mission_modes: dict
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -162,6 +185,24 @@ class InteractionGate:
         self.sound_angle_tolerance_deg = float(
             cfg.get("sound_angle_tolerance_deg", 35.0)
         )
+        self.allow_unaddressed_public_help = bool(
+            cfg.get("allow_unaddressed_public_help", True)
+        )
+        self.allow_unaddressed_robot_tasks = bool(
+            cfg.get("allow_unaddressed_robot_tasks", True)
+        )
+        self.silent_on_ambiguous = bool(cfg.get("silent_on_ambiguous", False))
+        configured_wake_terms = cfg.get("wake_terms")
+        if configured_wake_terms is None:
+            self.wake_terms: tuple[str, ...] = _DEFAULT_WAKE_TERMS
+        else:
+            if isinstance(configured_wake_terms, str):
+                configured_wake_terms = [configured_wake_terms]
+            self.wake_terms = tuple(
+                str(term).strip().lower()
+                for term in configured_wake_terms
+                if str(term).strip()
+            )
         self.clarify_reply = str(
             cfg.get("clarify_reply")
             or "\u9700\u8981\u6211\u5e2e\u4f60\u95ee\u8def\u6216\u5904\u7406\u4efb\u52a1\u5417\uff1f"
@@ -178,6 +219,26 @@ class InteractionGate:
             cfg.get("refuse_reply")
             or "\u8fd9\u4e2a\u64cd\u4f5c\u6d89\u53ca\u5b89\u5168\u6216\u9690\u79c1\uff0c\u6211\u4e0d\u80fd\u6267\u884c\u3002"
         )
+        self.default_mission_mode = MissionMode.coerce(
+            cfg.get("default_mission_mode", cfg.get("mission_mode", MissionMode.IDLE.value))
+        ).value
+        self.default_actor_role = MissionActorRole.coerce(
+            cfg.get("default_actor_role", cfg.get("actor_role", MissionActorRole.OPERATOR.value))
+        ).value
+        self.mission_mode_replies = self._mission_mode_replies(cfg.get("mission_modes"))
+
+    def set_mission_context(
+        self,
+        *,
+        mission_mode: str | MissionMode | None = None,
+        actor_role: str | MissionActorRole | None = None,
+    ) -> None:
+        """Update the default mission context used by future voice turns."""
+
+        if mission_mode is not None:
+            self.default_mission_mode = MissionMode.coerce(mission_mode).value
+        if actor_role is not None:
+            self.default_actor_role = MissionActorRole.coerce(actor_role).value
 
     def evaluate(
         self,
@@ -189,6 +250,12 @@ class InteractionGate:
         sound_source_matches_person: bool | None = None,
         perception: InteractionPerceptionSnapshot | dict[str, Any] | None = None,
         task_interruptible: bool = True,
+        mission_mode: str | MissionMode | None = None,
+        actor_role: str | MissionActorRole | None = None,
+        wake_authorized: bool = False,
+        wake_source: str = "none",
+        followup_active: bool = False,
+        awaiting_confirmation: bool = False,
     ) -> InteractionDecision:
         """Classify a recognized utterance before it reaches the brain."""
 
@@ -202,9 +269,15 @@ class InteractionGate:
         if not self.enabled:
             return InteractionDecision(InteractionAction.RESPOND, "gate_disabled", 1.0)
 
-        strong_address = self._contains_any(clean, _WAKE_TERMS)
+        normalized_wake_source = str(wake_source or "none").strip().lower()
+        explicit_wake = bool(wake_authorized) or normalized_wake_source == "keyword"
+        strong_address = explicit_wake or self._contains_any(
+            clean,
+            self.wake_terms,
+        )
         public_help = self._contains_any(clean, _HELP_TERMS)
         robot_task = self._contains_any(clean, _ROBOT_TASK_TERMS)
+        safety_command = self._contains_any(clean, _SAFETY_TERMS)
         casual = self._contains_any(clean, _CASUAL_TERMS)
         unsafe = self._contains_any(clean, _PRIVACY_OR_UNSAFE_TERMS)
         short_greeting = clean in _SHORT_GREETING
@@ -250,6 +323,29 @@ class InteractionGate:
                 should_record_environment=True,
             )
 
+        mission_decision = evaluate_mission_mode(
+            clean,
+            mission_mode=mission_mode or self.default_mission_mode,
+            actor_role=actor_role or self.default_actor_role,
+            addressed=addressed,
+            replies=self.mission_mode_replies,
+        )
+        if mission_decision is not None:
+            return InteractionDecision(
+                InteractionAction(mission_decision.action),
+                mission_decision.reason,
+                mission_decision.confidence,
+                reply=mission_decision.reply,
+                should_record_environment=mission_decision.should_record_environment,
+            )
+
+        if followup_active and awaiting_confirmation:
+            return InteractionDecision(
+                InteractionAction.RESPOND,
+                "expected_followup_answer",
+                0.9,
+            )
+
         if casual and not addressed and not public_help and not robot_task:
             return InteractionDecision(
                 InteractionAction.RECORD_ONLY,
@@ -259,7 +355,13 @@ class InteractionGate:
             )
 
         if perception_snapshot is not None:
-            sensory_lock = strong_address or public_help or robot_task
+            public_help_lock = public_help and (
+                addressed or self.allow_unaddressed_public_help
+            )
+            robot_task_lock = robot_task and (
+                addressed or self.allow_unaddressed_robot_tasks or safety_command
+            )
+            sensory_lock = strong_address or public_help_lock or robot_task_lock
             gesture = perception_snapshot.gesture
             posture = perception_snapshot.posture
             visually_engaged = perception_snapshot.visual_attention is True
@@ -273,7 +375,7 @@ class InteractionGate:
                 perception_snapshot.sound_source_matches_person is not True
             )
             if not perception_snapshot.fresh and not sensory_lock:
-                if addressed or short_greeting:
+                if (addressed or short_greeting) and not self.silent_on_ambiguous:
                     return InteractionDecision(
                         InteractionAction.CLARIFY,
                         "stale_perception_needs_refresh",
@@ -311,6 +413,13 @@ class InteractionGate:
                 and not strong_address
                 and not robot_task
             ):
+                if self.silent_on_ambiguous:
+                    return InteractionDecision(
+                        InteractionAction.RECORD_ONLY,
+                        "multi_person_ambiguous_speaker",
+                        0.82,
+                        should_record_environment=True,
+                    )
                 return InteractionDecision(
                     InteractionAction.CLARIFY,
                     "multi_person_ambiguous_speaker",
@@ -372,6 +481,18 @@ class InteractionGate:
                     reply=self.clarify_reply,
                     should_record_environment=True,
                 )
+            if public_help and (visually_engaged or facing_robot or attention_gesture):
+                return InteractionDecision(
+                    InteractionAction.RESPOND,
+                    "public_help_with_attention",
+                    0.82,
+                )
+            if robot_task and (visually_engaged or facing_robot or attention_gesture):
+                return InteractionDecision(
+                    InteractionAction.RESPOND,
+                    "robot_task_with_attention",
+                    0.84,
+                )
             if addressed and engaged_posture and not public_help:
                 return InteractionDecision(
                     InteractionAction.RESPOND,
@@ -398,22 +519,58 @@ class InteractionGate:
                 should_record_environment=True,
             )
 
+        if explicit_wake:
+            return InteractionDecision(
+                InteractionAction.RESPOND,
+                "wake_word_authorized",
+                0.98,
+            )
+
         if strong_address:
             return InteractionDecision(InteractionAction.RESPOND, "explicit_robot_address", 0.95)
 
-        if robot_task:
+        if robot_task and (
+            addressed or self.allow_unaddressed_robot_tasks or safety_command
+        ):
             return InteractionDecision(InteractionAction.RESPOND, "robot_task_intent", 0.88)
 
-        if public_help:
+        if robot_task:
+            return InteractionDecision(
+                InteractionAction.IGNORE,
+                "unaddressed_robot_task",
+                0.8,
+            )
+
+        if public_help and (addressed or self.allow_unaddressed_public_help):
             return InteractionDecision(InteractionAction.RESPOND, "public_help_or_wayfinding", 0.82)
 
+        if public_help:
+            return InteractionDecision(
+                InteractionAction.IGNORE,
+                "unaddressed_public_help",
+                0.8,
+            )
+
         if short_greeting:
+            if not addressed and self.silent_on_ambiguous:
+                return InteractionDecision(
+                    InteractionAction.IGNORE,
+                    "unaddressed_greeting",
+                    0.8,
+                )
             return InteractionDecision(
                 InteractionAction.CLARIFY,
                 "weak_greeting",
                 0.6,
                 reply=self.clarify_reply,
                 should_record_environment=True,
+            )
+
+        if followup_active and not addressed:
+            return InteractionDecision(
+                InteractionAction.IGNORE,
+                "followup_not_addressed",
+                0.82,
             )
 
         if not addressed:
@@ -437,3 +594,28 @@ class InteractionGate:
     @staticmethod
     def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
         return any(term and term in text for term in terms)
+
+    @staticmethod
+    def _mission_mode_replies(raw: object) -> dict[str, str]:
+        if not isinstance(raw, dict):
+            return {}
+        replies: dict[str, str] = {}
+        for mode, value in raw.items():
+            normalized = MissionMode.coerce(mode).value
+            if isinstance(value, dict):
+                reply = value.get("reply")
+            else:
+                reply = value
+            if reply:
+                replies[normalized] = str(reply)
+        return replies
+
+
+__all__ = [
+    "InteractionAction",
+    "InteractionDecision",
+    "InteractionGate",
+    "MissionActorRole",
+    "MissionCommandCategory",
+    "MissionMode",
+]

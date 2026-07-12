@@ -8,7 +8,12 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from askme.api.schemas.voice import VoiceProfileCatalogResponse, VoiceProfileUpdateResponse
+from askme.api.schemas.voice import (
+    VoiceProfileCatalogResponse,
+    VoiceProfileUpdateResponse,
+    VoiceSystemControlResponse,
+    VoiceSystemUpdateResponse,
+)
 
 Dispatch = Callable[..., Awaitable[dict[str, Any]]]
 MissionJson = Callable[..., JSONResponse]
@@ -86,12 +91,79 @@ def create_voice_router(
         except Exception as exc:
             return mission_json({"error": str(exc)}, status_code=500)
 
+    @router.get(
+        "/api/voice/system",
+        response_model=VoiceSystemControlResponse,
+    )
+    async def voice_system_control() -> JSONResponse:
+        try:
+            result = await dispatch_voice("system_control_payload")
+            VoiceSystemControlResponse.model_validate(result)
+            return mission_json(result)
+        except RuntimeError as exc:
+            return mission_json({"error": str(exc)}, status_code=503)
+        except Exception as exc:
+            return mission_json({"error": str(exc)}, status_code=500)
+
+    @router.post(
+        "/api/voice/system/switch",
+        response_model=VoiceSystemUpdateResponse,
+    )
+    async def voice_system_switch(request: Request) -> JSONResponse:
+        try:
+            body = await optional_json_body(request)
+            failure = authorize(request, body, "voice:system:update")
+            if failure is not None:
+                return failure
+            result = await dispatch_voice("switch_system_component_payload", body)
+            VoiceSystemUpdateResponse.model_validate(result)
+            status_code = 200 if result.get("updated") or result.get("state") == "pending" else 422
+            return mission_json(result, status_code=status_code)
+        except ValueError as exc:
+            return mission_json({"error": str(exc)}, status_code=400)
+        except RuntimeError as exc:
+            return mission_json({"error": str(exc)}, status_code=503)
+        except Exception as exc:
+            return mission_json({"error": str(exc)}, status_code=500)
+
+    @router.post(
+        "/api/voice/system/prompt",
+        response_model=VoiceSystemUpdateResponse,
+    )
+    async def voice_system_prompt(request: Request) -> JSONResponse:
+        try:
+            body = await optional_json_body(request)
+            failure = authorize(request, body, "voice:system:update")
+            if failure is not None:
+                return failure
+            result = await dispatch_voice("update_prompt_payload", body)
+            VoiceSystemUpdateResponse.model_validate(result)
+            return mission_json(result, status_code=200 if result.get("updated") else 422)
+        except ValueError as exc:
+            return mission_json({"error": str(exc)}, status_code=400)
+        except RuntimeError as exc:
+            return mission_json({"error": str(exc)}, status_code=503)
+        except Exception as exc:
+            return mission_json({"error": str(exc)}, status_code=500)
+
     @router.options("/api/voice/profiles", include_in_schema=False)
     async def voice_profiles_cors() -> Response:
         return cors_options_response("GET, OPTIONS")
 
     @router.options("/api/voice/profile", include_in_schema=False)
     async def voice_profile_cors() -> Response:
+        return cors_options_response("POST, OPTIONS")
+
+    @router.options("/api/voice/system", include_in_schema=False)
+    async def voice_system_cors() -> Response:
+        return cors_options_response("GET, OPTIONS")
+
+    @router.options("/api/voice/system/switch", include_in_schema=False)
+    async def voice_system_switch_cors() -> Response:
+        return cors_options_response("POST, OPTIONS")
+
+    @router.options("/api/voice/system/prompt", include_in_schema=False)
+    async def voice_system_prompt_cors() -> Response:
         return cors_options_response("POST, OPTIONS")
 
     return router

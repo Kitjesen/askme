@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from askme.pipeline.field_ingest_bridge import run_field_ingest_bridge_once
 from askme.pipeline.field_operations import FieldOperationsService
 

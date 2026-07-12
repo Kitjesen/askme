@@ -113,12 +113,19 @@ class AudioAgent:
         self.audio_queue: queue.Queue[str] = queue.Queue()
         self.stop_event = threading.Event()
         self.woken_up: bool = False
+        self.last_turn_wake_authorized: bool = False
+        self.last_turn_wake_source: str = "none"
         self._muted: bool = False  # software mute — still listens, VoiceLoop filters results
         self._agent_state: AgentState = AgentState.IDLE
         # When True, confirmation words bypass the noise filter.
         self.awaiting_confirmation: bool = False
         self._chime_lock = threading.Lock()
         self._last_chime_at: float = 0.0
+        self._runtime_switch_lock = threading.RLock()
+        self._listen_loop_active = False
+        self._asr_phase_active = False
+        self._pending_asr_config: dict[str, Any] | None = None
+        self._pending_tts_config: dict[str, Any] | None = None
 
         # Wake timeout: after wake word detection + successful interaction,
         # stay "awake" for this many seconds so the user can continue chatting
@@ -176,10 +183,16 @@ class AudioAgent:
         self._mic = MicInput.from_config(config, audio_router=audio_router)
         self._media_transport = self._resolve_media_transport_label(voice_cfg)
         self._audio_proc = AudioProcessor(voice_cfg)
-        self._vad_ctrl = VADController(voice_cfg)
-        self._asr_mgr = ASRManager(voice_cfg)
+        # Keep text-mode construction lightweight and safe on machines with
+        # native audio/VAD libraries installed: sherpa-onnx VAD initialization
+        # can abort the interpreter on some Windows setups. Only voice mode
+        # needs a live VAD controller.
+        self._vad_ctrl = VADController(voice_cfg) if voice_mode else None
+        self._asr_mgr = ASRManager(voice_cfg) if voice_mode else None
 
         if voice_mode:
+            assert self._vad_ctrl is not None
+            assert self._asr_mgr is not None
             # Share engines from modules — avoid constructing duplicates
             self.asr = self._asr_mgr._asr
             self.vad = self._vad_ctrl._vad
@@ -196,7 +209,7 @@ class AudioAgent:
             self.asr = None  # type: ignore[assignment]
             self.vad = None  # type: ignore[assignment]
             self.kws = None  # type: ignore[assignment]
-            self.punct = self._asr_mgr._punct
+            self.punct = None
             self.asr_stream = None
             self.kws_stream = None
             self.woken_up = True
@@ -232,6 +245,7 @@ class AudioAgent:
         self._begin_post_tts_input_cooldown()
         self._agent_state = AgentState.IDLE
         self._turn_traces.mark("playback_done")
+        self.mark_interaction_turn()
         self._refresh_voice_metrics()
         self._schedule_ready_chime()
 
@@ -353,6 +367,90 @@ class AudioAgent:
         """Adjust TTS speed by delta. Returns new value."""
         return self.set_speed(self.tts.speed + delta)
 
+    def reconfigure_asr(self, voice_config: dict[str, Any]) -> dict[str, Any]:
+        """Replace ASR for the next listen cycle without restarting the runtime."""
+
+        if not self.voice_mode:
+            raise RuntimeError("ASR reconfiguration requires voice mode")
+        clean = dict(voice_config or {})
+        with self._runtime_switch_lock:
+            if self._asr_phase_active or bool(
+                getattr(self._asr_mgr, "_recognition_active", False)
+            ):
+                self._pending_asr_config = clean
+                return {
+                    "updated": True,
+                    "component": "asr",
+                    "state": "pending",
+                    "effective": "next_listen_cycle",
+                }
+        return self._apply_asr_config(clean)
+
+    def reconfigure_tts(self, tts_config: dict[str, Any]) -> dict[str, Any]:
+        """Replace TTS immediately when idle, or queue it after playback."""
+
+        clean = dict(tts_config or {})
+        with self._runtime_switch_lock:
+            if self.is_busy or self.tts.is_active():
+                self._pending_tts_config = clean
+                return {
+                    "updated": True,
+                    "component": "tts",
+                    "state": "pending",
+                    "effective": "after_playback",
+                }
+        return self._apply_tts_config(clean)
+
+    def _apply_asr_config(self, voice_config: dict[str, Any]) -> dict[str, Any]:
+        next_manager = ASRManager(voice_config)
+        with self._runtime_switch_lock:
+            previous = self._asr_mgr
+            self._asr_mgr = next_manager
+            self.asr = next_manager._asr
+            self.asr_stream = next_manager._stream
+            self.punct = next_manager._punct
+            self._pending_asr_config = None
+        if previous is not None:
+            previous.reset()
+        self._refresh_voice_metrics()
+        return {
+            "updated": True,
+            "component": "asr",
+            "state": "active",
+            "runtime": next_manager.status_snapshot(),
+        }
+
+    def _apply_tts_config(self, tts_config: dict[str, Any]) -> dict[str, Any]:
+        next_tts = TTSEngine(tts_config, audio_router=self._audio_router)
+        with self._runtime_switch_lock:
+            previous = self.tts
+            self.tts = next_tts
+            self._pending_tts_config = None
+        if previous is not None:
+            previous.shutdown()
+        self._refresh_voice_metrics()
+        return {
+            "updated": True,
+            "component": "tts",
+            "state": "active",
+            "runtime": next_tts.status_snapshot(),
+        }
+
+    def _apply_pending_runtime_updates(self) -> None:
+        with self._runtime_switch_lock:
+            asr_config = self._pending_asr_config
+            tts_config = self._pending_tts_config if not self.is_busy else None
+        if asr_config is not None:
+            try:
+                self._apply_asr_config(asr_config)
+            except Exception as exc:
+                logger.warning("Pending ASR switch failed: %s", exc)
+        if tts_config is not None:
+            try:
+                self._apply_tts_config(tts_config)
+            except Exception as exc:
+                logger.warning("Pending TTS switch failed: %s", exc)
+
     # ------------------------------------------------------------------
     # Microphone mute control
     # ------------------------------------------------------------------
@@ -438,14 +536,18 @@ class AudioAgent:
             raise RuntimeError("listen_loop requires voice_mode=True")
 
         self._start_voice_turn_trace()
+        self.last_turn_wake_authorized = False
+        self.last_turn_wake_source = "none"
         self._metrics.mark_voice_listen_started()
         self._refresh_voice_metrics()
 
         mic = self._mic
         proc = self._audio_proc
         vad = self._vad_ctrl
-        asr = self._asr_mgr
 
+        with self._runtime_switch_lock:
+            self._listen_loop_active = True
+            self._asr_phase_active = False
         try:
             # Mic is persistently open (started by VoiceModule).
             # Flush stale audio that accumulated during LLM+TTS processing.
@@ -460,6 +562,7 @@ class AudioAgent:
                         and (time.monotonic() - self._last_interaction_time) < self._wake_timeout
                     )
                     if _within_wake_window:
+                        self.last_turn_wake_source = "followup_window"
                         logger.info(
                             "Wake timeout active (%.0fs left), skipping KWS",
                             self._wake_timeout - (time.monotonic() - self._last_interaction_time),
@@ -470,28 +573,17 @@ class AudioAgent:
                         if not self._wait_for_wake_word_mic(mic_ctx):
                             self._turn_traces.finish("wake_word_not_detected")
                             return None
+                        self.last_turn_wake_authorized = True
+                        self.last_turn_wake_source = "keyword"
                         self._play_chime("wake")
+                else:
+                    self.last_turn_wake_source = "always_awake"
 
-                # Phase 2: VAD-gated ASR
-                # Play beep in background (non-blocking)
-                try:
-                    import subprocess as _sp
-                    import threading as _th
-                    _out_dev = getattr(self.tts, "_output_device", None)
-                    _beep_cmd = ["aplay", "-r", "44100", "-f", "S16_LE", "-c", "1", "-q"]
-                    if _out_dev:
-                        _beep_cmd += ["-D", str(_out_dev)]
-                    _beep_sr = 44100
-                    _beep_t = np.linspace(0, 0.15, int(_beep_sr * 0.15))
-                    _beep_pcm = (np.sin(2 * np.pi * 880 * _beep_t) * 20000).astype(np.int16).tobytes()
-                    def _play_beep():
-                        try:
-                            _sp.run(_beep_cmd, input=_beep_pcm, capture_output=True, timeout=2)
-                        except Exception:
-                            pass
-                    _th.Thread(target=_play_beep, daemon=True).start()
-                except Exception:
-                    pass
+                # Phase 2: VAD-gated ASR. The wake chime above already routes
+                # through the configured cross-platform output path.
+                with self._runtime_switch_lock:
+                    self._asr_phase_active = True
+                    asr = self._asr_mgr
                 logger.info("Listening for speech...")
                 asr.preconnect_cloud()  # warm up WebSocket (fast, ~100ms)
                 deadline = time.monotonic() + self._asr_timeout
@@ -703,6 +795,11 @@ class AudioAgent:
             self._turn_traces.finish("error", error=str(exc))
             self._refresh_voice_metrics(pipeline_ok=False)
             raise
+        finally:
+            with self._runtime_switch_lock:
+                self._listen_loop_active = False
+                self._asr_phase_active = False
+            self._apply_pending_runtime_updates()
 
         return None
 
@@ -732,10 +829,14 @@ class AudioAgent:
         self._metrics.mark_voice_input(text)
         self._clear_input_failure()
         self._agent_state = AgentState.PROCESSING
-        self._last_interaction_time = time.monotonic()
         self._refresh_voice_metrics()
         self._asr_mgr.reset()
         return text
+
+    def mark_interaction_turn(self) -> None:
+        """Renew the weak follow-up window only after a turn is admitted."""
+        self._last_interaction_time = time.monotonic()
+        self._refresh_voice_metrics()
 
     @staticmethod
     def _rms_int16(samples_int16: np.ndarray) -> float:
@@ -821,6 +922,7 @@ class AudioAgent:
             try:
                 tts_active = bool(tts_is_active())
             except Exception:
+                logger.exception("[Audio] tts_is_active() check failed, using fallback")
                 tts_active = self.is_busy
         else:
             tts_active = self.is_busy
@@ -882,6 +984,13 @@ class AudioAgent:
         sample_rate = mic_ctx.sample_rate
         while not self.stop_event.is_set():
             samples = mic_ctx.read_chunk()
+            samples_i16 = MicInput.to_int16(samples)
+            self._record_input_observation(
+                peak=MicInput.get_peak(samples_i16) if len(samples_i16) else 0,
+                rms=self._rms_int16(samples_i16),
+                vad_state="wake_word",
+                gate_state="open",
+            )
 
             try:
                 self.kws_stream.accept_waveform(sample_rate, samples)
@@ -994,7 +1103,7 @@ class AudioAgent:
                             try:
                                 proc.kill()
                             except Exception:
-                                pass
+                                logger.exception("[Audio] Chime proc kill failed")
                         except Exception as _e:
                             logger.warning("chime '%s' failed (attempt %d): %s", event, attempt + 1, _e)
                         if attempt == 0:
@@ -1156,6 +1265,18 @@ class AudioAgent:
                 self.voice_mode and self.kws and getattr(self.kws, "available", False)
             ),
             "woken_up": self.woken_up,
+            "last_turn_wake_authorized": self.last_turn_wake_authorized,
+            "last_turn_wake_source": self.last_turn_wake_source,
+            "wake_timeout_s": self._wake_timeout,
+            "wake_timeout_remaining_s": round(
+                max(
+                    0.0,
+                    self._wake_timeout - (time.monotonic() - self._last_interaction_time),
+                )
+                if self._last_interaction_time > 0
+                else 0.0,
+                2,
+            ),
             "muted": self._muted,
             "tts_backend": self.tts.backend,
             "tts_busy": self.is_busy,
@@ -1165,6 +1286,10 @@ class AudioAgent:
             "voice_turn": self._turn_traces.snapshot(),
             "asr": self._component_status_snapshot(self._asr_mgr),
             "tts": self._component_status_snapshot(self.tts),
+            "pending_runtime_updates": {
+                "asr": self._pending_asr_config is not None,
+                "tts": self._pending_tts_config is not None,
+            },
             "input": self._input_status_snapshot(),
         }
         snapshot.update(overrides)

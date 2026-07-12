@@ -7,6 +7,21 @@ map to choose the first file to read before editing.
 
 For a compact folder-by-folder classification, start with `askme/README.md`.
 
+## Product And Architecture Spine
+
+Before choosing an owner package, read `docs/PRODUCT_REQUIREMENTS.md`,
+`docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md`,
+`docs/PRODUCT_ARCHITECTURE_TRACE.md`, and
+`docs/DEMAND_EVIDENCE_LEDGER.md`. Code ownership follows the PRD and bounded
+contexts; this map is navigation, not product authority.
+
+Field Delivery Domain owns customer projects, field events, evidence,
+acceptance dossiers, customer signoff, and readiness gaps.
+Product/Admin/Platform/Internal surfaces expose Dashboard/API/admin workflows.
+Runtime / Safety / Hardware owns real execution, safety state, hardware
+adaptation, runtime roundtrip, takeover, and rollback.
+customer signoff != production readiness.
+
 ## Current Rule
 
 The current architecture is owner-package based:
@@ -22,6 +37,8 @@ The current architecture is owner-package based:
 - `interfaces`: legacy backend ABCs and `interfaces/core/registry.py`.
 - `providers`: bottom-layer concrete provider/hardware adapter factories.
 - `api`: HTTP surfaces, route composition, request/response schemas.
+- `cli`: operator CLI parser, command dispatch, diagnostics, and script-facing
+  entrypoints. `askme/cli.py` is only the compatibility facade.
 - `robot`: hardware and robot-control adapters.
 - `perception`: camera/sensor bridges and environment snapshots.
 - `cognition`: world state, planning, working memory, perception sync.

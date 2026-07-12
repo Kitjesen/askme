@@ -14,6 +14,13 @@ def test_rag_policy_only_blocks_no_evidence_on_explicit_refusal() -> None:
     assert "没有可靠依据" in forced_rag_reply({"state": "no_evidence", "action": "refuse"})
 
 
+def test_rag_policy_fails_closed_when_retrieval_is_unavailable() -> None:
+    policy = {"state": "unavailable", "action": "refuse"}
+
+    assert is_rag_policy_blocking(policy) is True
+    assert "检索当前不可用" in forced_rag_reply(policy)
+
+
 def test_rag_policy_uses_surface_template_override() -> None:
     assert forced_rag_reply(
         {"state": "conflict", "action": "clarify"},

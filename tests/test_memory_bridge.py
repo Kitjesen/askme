@@ -762,6 +762,31 @@ class TestRetrieve:
         assert health["retrieve_count"] == 2
         assert health["retrieve_cache"]["coalesced"] >= 1
 
+    @pytest.mark.asyncio
+    async def test_retrieve_with_context_isolates_concurrent_turn_evidence(self):
+        bridge, _ = _make_bridge()
+
+        async def fake_retrieve(text: str) -> str:
+            bridge._last_backend = "vector"
+            bridge._last_evidence = [{"record_id": text, "text": f"fact:{text}"}]
+            bridge._last_dropped_evidence = []
+            await asyncio.sleep(0.01)
+            return f"- fact:{text}"
+
+        bridge._retrieve_with_fallbacks_unlocked = fake_retrieve
+
+        first, second = await asyncio.gather(
+            bridge.retrieve_with_context("turn-a"),
+            bridge.retrieve_with_context("turn-b"),
+        )
+
+        assert first.context == "- fact:turn-a"
+        assert first.evidence[0]["record_id"] == "turn-a"
+        assert second.context == "- fact:turn-b"
+        assert second.evidence[0]["record_id"] == "turn-b"
+        assert first.rag["turn_scoped"] is True
+        assert second.rag["turn_scoped"] is True
+
 
 # ---------------------------------------------------------------------------
 # Tests: save

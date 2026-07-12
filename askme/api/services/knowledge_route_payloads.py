@@ -8,7 +8,6 @@ from pydantic import ValidationError
 
 from askme.api.schemas.memory import KnowledgePreviewRequest, MemorySearchRequest
 
-
 _DISPATCH_CONTRACTS: dict[str, type[Any]] = {
     "search_payload": MemorySearchRequest,
     "preview_payload": KnowledgePreviewRequest,

@@ -5,7 +5,6 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from askme.memory.robotmem_backend import RobotMemBackend
 
 # ---------------------------------------------------------------------------

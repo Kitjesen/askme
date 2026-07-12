@@ -20,9 +20,9 @@ if sys.platform == "win32":
 import re
 
 from askme.brain.llm_client import LLMClient
+from askme.voice.tts import TTSEngine
 
 from askme.config import get_config
-from askme.voice.tts import TTSEngine
 
 _REFUSAL_KEYWORDS = [
     "I can't", "I cannot", "I'm Claude", "I am Claude",

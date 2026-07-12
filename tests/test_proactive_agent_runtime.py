@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from askme.pipeline.proactive_agent import ProactiveAgent
+
 from askme.schemas.events import ChangeEvent, ChangeEventType
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import askme.skills.contracts_builtin  # noqa: F401 — triggers @skill_contract decorators
+
 from askme.skills.contracts import registered_skill_contracts
 
 
@@ -64,10 +65,12 @@ class TestBuiltinContracts:
         query_param = next(p for p in contract.parameters if p.name == "query")
         assert query_param.required is True
 
-    def test_agent_task_execution_is_agent_shell(self):
+    def test_agent_task_execution_is_deprecated_agent_shell_compat(self):
         registry = registered_skill_contracts()
         contract = registry["agent_task"]
         assert contract.execution == "agent_shell"
+        assert "Deprecated local AgentShell compatibility" in contract.description
+        assert "deprecated" in contract.tags
 
     def test_navigate_has_robot_tag(self):
         registry = registered_skill_contracts()

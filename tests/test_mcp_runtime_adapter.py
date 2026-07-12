@@ -109,9 +109,11 @@ def test_mcp_runtime_tool_surface_registers_skill_execution_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_robot_tools_work_with_runtime_app_adapted_context() -> None:
+async def test_robot_tools_work_with_runtime_app_adapted_context(monkeypatch) -> None:
     from askme.mcp.runtime_adapter import app_context_from_runtime_app
-    from askme.mcp.tools.robot_tools import robot_estop, robot_move, robot_state
+    from askme.mcp.tools import robot_tools
+
+    monkeypatch.setattr(robot_tools, "_LAB_UNSAFE", True)
 
     arm = MagicMock()
     arm.execute = MagicMock(return_value={"status": "ok", "action": "move"})
@@ -121,9 +123,9 @@ async def test_robot_tools_work_with_runtime_app_adapted_context() -> None:
     app = app_context_from_runtime_app(runtime)
     ctx = _make_ctx(app)
 
-    move = json.loads(await robot_move(1.0, 2.0, 3.0, ctx))
-    state = json.loads(await robot_state(ctx))
-    estop = json.loads(await robot_estop(ctx))
+    move = json.loads(await robot_tools.robot_move(1.0, 2.0, 3.0, ctx))
+    state = json.loads(await robot_tools.robot_state(ctx))
+    estop = json.loads(await robot_tools.robot_estop(ctx))
 
     assert app.robot_enabled is True
     assert move == {"status": "ok", "action": "move"}

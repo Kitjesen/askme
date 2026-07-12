@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -40,6 +41,24 @@ _SERVICE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _open_url(request: urllib.request.Request, timeout: float) -> Any:
+    """Open runtime requests without proxying loopback traffic.
+
+    Developer machines often export HTTP_PROXY for internet access. Python's
+    urllib can otherwise send localhost robot-control calls to that proxy,
+    producing misleading 5xx responses instead of reaching the local runtime.
+    """
+    host = (urllib.parse.urlsplit(request.full_url).hostname or "").lower()
+    if (
+        host == "localhost"
+        or host.endswith(".localhost")
+        or host in {"127.0.0.1", "::1"}
+    ):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        return opener.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
 def _service_base_url(service: str) -> str:
     """Resolve service URL with canonical env vars before localhost fallback."""
     env_key = _SERVICE_ENV_URLS.get(service)
@@ -52,7 +71,7 @@ def _service_base_url(service: str) -> str:
             base_url = runtime_cfg.get(cfg_key, {}).get("base_url", "")
             if base_url:
                 return str(base_url).rstrip("/")
-    except Exception:
+    except (TypeError, AttributeError):
         pass
 
     return f"http://localhost:{_SERVICE_PORTS[service]}"
@@ -73,7 +92,7 @@ def _runtime_bearer_token() -> str:
         voice_bridge_key = runtime_cfg.get("voice_bridge", {}).get("api_key", "")
         if voice_bridge_key:
             return str(voice_bridge_key)
-    except Exception:
+    except (TypeError, AttributeError):
         pass
 
     return os.environ.get("RUNTIME_API_KEY", "")
@@ -177,7 +196,7 @@ class RobotApiTool(BaseTool):
 
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=self._TIMEOUT) as resp:
+            with _open_url(req, timeout=self._TIMEOUT) as resp:
                 raw = resp.read(self._MAX_RESPONSE).decode("utf-8", errors="replace")
                 status = resp.status
                 content_type = resp.headers.get("Content-Type", "")

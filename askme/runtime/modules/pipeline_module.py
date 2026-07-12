@@ -18,9 +18,9 @@ from typing import Any
 
 # LLMClient imported lazily to avoid circular imports at module scan time
 from askme.llm.core.client import LLMClient
-from askme.ports import RobotControlPort, SafetyPort, VisionPort
 from askme.pipeline.core.brain_pipeline import BrainPipeline
 from askme.pipeline.core.persona import persona_from_brain_config
+from askme.ports import RobotControlPort, SafetyPort, VisionPort
 from askme.runtime.core.module import In, Module, ModuleRegistry, Out
 from askme.schemas.messages import MemoryContext
 from askme.tools.core.tool_registry import ToolRegistry
@@ -134,6 +134,7 @@ class PipelineModule(Module):
             voice_tts_coalesce=bool(brain_cfg.get("voice_tts_coalesce", False)),
             memory_system=memory_system,
             rag_policy_templates=brain_cfg.get("rag_policy_templates", {}),
+            relay_compat_mode=bool(brain_cfg.get("relay_compat_mode", False)),
         )
         logger.info("PipelineModule: built")
 

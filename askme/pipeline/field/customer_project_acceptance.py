@@ -440,12 +440,17 @@ def customer_project_acceptance_closure(
             "audit_export": audit_export,
         },
         "evidence_timeline": _customer_project_acceptance_evidence_timeline(onsite, reviews, signoffs),
-        "blocked_uses": [
-            "无人值守生产上线",
-            "无人工复核的最终验收承诺",
-        ]
-        if overall != "accepted_by_customer"
-        else [],
+        "blocked_uses": (
+            [
+                "无人值守生产上线",
+                "超出已签收项目、对象和证据范围的验收承诺",
+            ]
+            if overall == "accepted_by_customer"
+            else [
+                "无人值守生产上线",
+                "无人工复核的最终验收承诺",
+            ]
+        ),
     }
 
 

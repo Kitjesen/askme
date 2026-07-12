@@ -4,6 +4,17 @@ from askme.voice.interaction_gate import InteractionAction, InteractionGate
 from askme.voice.perception_context import InteractionPerceptionSnapshot
 
 
+def test_interaction_gate_uses_deployment_wake_terms() -> None:
+    gate = InteractionGate({"enabled": True, "wake_terms": ["小算"]})
+
+    current = gate.evaluate("小算，今天园区有什么安排", addressed=False)
+    legacy = gate.evaluate("雷霆，今天园区有什么安排", addressed=False)
+
+    assert current.action == InteractionAction.RESPOND
+    assert current.reason == "explicit_robot_address"
+    assert legacy.action == InteractionAction.IGNORE
+
+
 def test_interaction_gate_records_casual_bystander_speech() -> None:
     gate = InteractionGate({"enabled": True})
 
@@ -69,6 +80,138 @@ def test_interaction_gate_keeps_explicit_robot_task_during_active_task() -> None
 
     assert decision.action == InteractionAction.RESPOND
     assert decision.reason == "robot_task_intent"
+
+
+def test_mission_active_blocks_addressed_free_chat() -> None:
+    gate = InteractionGate({"enabled": True})
+
+    decision = gate.evaluate(
+        "\u4eca\u5929\u5929\u6c14\u600e\u4e48\u6837",
+        addressed=True,
+        mission_mode="mission_active",
+        actor_role="visitor",
+    )
+
+    assert decision.action == InteractionAction.DEFER
+    assert decision.reason == "mission_active_chat_blocked:chat"
+    assert decision.should_continue_to_brain is False
+
+
+def test_mission_active_keeps_safety_pause_for_visitor() -> None:
+    gate = InteractionGate({"enabled": True})
+
+    decision = gate.evaluate(
+        "\u6682\u505c",
+        addressed=False,
+        mission_mode="mission_active",
+        actor_role="visitor",
+    )
+
+    assert decision.action == InteractionAction.RESPOND
+    assert decision.reason == "mission_active_command_allowed:pause"
+    assert decision.should_continue_to_brain is True
+
+
+def test_strict_gate_ignores_unaddressed_public_help_without_sensory_lock() -> None:
+    gate = InteractionGate(
+        {
+            "enabled": True,
+            "allow_unaddressed_public_help": False,
+            "silent_on_ambiguous": True,
+        }
+    )
+
+    decision = gate.evaluate("请问厕所在哪里", addressed=False)
+
+    assert decision.action == InteractionAction.IGNORE
+    assert decision.reason == "unaddressed_public_help"
+
+
+def test_followup_window_alone_does_not_authorize_ambient_speech() -> None:
+    gate = InteractionGate({"enabled": True, "silent_on_ambiguous": True})
+
+    decision = gate.evaluate(
+        "这个是那些琉璃布",
+        addressed=False,
+        wake_source="followup_window",
+        followup_active=True,
+    )
+
+    assert decision.action == InteractionAction.IGNORE
+    assert decision.reason == "followup_not_addressed"
+    assert decision.should_continue_to_brain is False
+
+
+def test_expected_followup_answer_is_allowed_without_repeating_wake_word() -> None:
+    gate = InteractionGate({"enabled": True, "silent_on_ambiguous": True})
+
+    decision = gate.evaluate(
+        "对",
+        addressed=False,
+        wake_source="followup_window",
+        followup_active=True,
+        awaiting_confirmation=True,
+    )
+
+    assert decision.action == InteractionAction.RESPOND
+    assert decision.reason == "expected_followup_answer"
+    assert decision.should_continue_to_brain is True
+
+
+def test_strict_gate_silently_ignores_unaddressed_greeting() -> None:
+    gate = InteractionGate({"enabled": True, "silent_on_ambiguous": True})
+
+    decision = gate.evaluate("你好", addressed=False)
+
+    assert decision.action == InteractionAction.IGNORE
+    assert decision.reason == "unaddressed_greeting"
+
+
+def test_mission_active_blocks_wayfinding_during_patrol() -> None:
+    gate = InteractionGate({"enabled": True})
+
+    decision = gate.evaluate(
+        "\u5395\u6240\u5728\u54ea\u91cc",
+        addressed=True,
+        mission_mode="mission_active",
+        actor_role="visitor",
+    )
+
+    assert decision.action == InteractionAction.DEFER
+    assert decision.reason == "mission_active_chat_blocked:wayfinding"
+    assert decision.should_record_environment is True
+
+
+def test_emergency_resume_requires_supervisor_role() -> None:
+    gate = InteractionGate({"enabled": True})
+
+    visitor = gate.evaluate(
+        "\u7ee7\u7eed",
+        addressed=True,
+        mission_mode="emergency",
+        actor_role="visitor",
+    )
+    supervisor = gate.evaluate(
+        "\u7ee7\u7eed",
+        addressed=True,
+        mission_mode="emergency",
+        actor_role="supervisor",
+    )
+
+    assert visitor.action == InteractionAction.REFUSE
+    assert visitor.reason == "mission_emergency_chat_blocked:resume"
+    assert supervisor.action == InteractionAction.RESPOND
+    assert supervisor.reason == "mission_emergency_command_allowed:resume"
+
+
+def test_interaction_gate_updates_default_mission_context() -> None:
+    gate = InteractionGate({"enabled": True})
+    gate.set_mission_context(mission_mode="paused", actor_role="operator")
+
+    decision = gate.evaluate("\u7ee7\u7eed", addressed=True)
+
+    assert decision.action == InteractionAction.RESPOND
+    assert decision.reason == "mission_paused_command_allowed:resume"
 
 
 def test_perception_snapshot_infers_attention_from_fresh_centered_person() -> None:

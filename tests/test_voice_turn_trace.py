@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from askme.voice import turn_trace
 from askme.voice.turn_trace import VoiceTurnTraceRecorder, evaluate_voice_turn_slo
+
+from askme.voice import turn_trace
 
 
 def test_voice_turn_trace_records_first_stage_occurrence() -> None:

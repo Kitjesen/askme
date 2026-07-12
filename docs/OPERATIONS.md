@@ -7,7 +7,7 @@
 ## 本地快速启动
 
 ```powershell
-cd D:\inovxio\tools\askme
+cd <repo-root>
 python -m askme.blueprints.presets.edge_robot
 ```
 

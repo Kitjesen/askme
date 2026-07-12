@@ -835,7 +835,7 @@ class SkillManager:
         try:
             result = yaml.safe_load(yaml_text)
             return result if isinstance(result, dict) else {}
-        except Exception:
+        except yaml.YAMLError:
             return {}
 
     @staticmethod

@@ -1,6 +1,8 @@
 """Tests for VectorStore — works without sentence-transformers via mocking."""
 
 import threading
+import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -62,6 +64,23 @@ class TestAvailability:
         with _patch_available(False):
             store = VectorStore()
             assert store.search("hello") == []
+
+    def test_embedding_model_is_pinned_to_cpu_provider(self):
+        constructor = MagicMock(return_value=object())
+        fake_module = SimpleNamespace(TextEmbedding=constructor)
+
+        with (
+            patch.dict(sys.modules, {"fastembed": fake_module}),
+            patch("askme.memory.vector_store._MODEL_CACHE", {}),
+            _patch_available(True),
+        ):
+            VectorStore()._get_model()
+
+        constructor.assert_called_once_with(
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            providers=["CPUExecutionProvider"],
+            cuda=False,
+        )
 
 
 class TestTopScoreIndices:

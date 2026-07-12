@@ -1,12 +1,16 @@
 
+import os
+
 import requests
 
 # Minimax API Configuration
-MINIMAX_API_KEY = "sk-api-UVY-jfMCd7XYRA_ZRbpMIu_yQGm3CZ9jnqjQUh3y78L1DBZZ2N6jUsIu-p4T5n9wmdyOXR8QbqMVyqRaaDlT4w3VecToXGnCj3mhYzytbgRwVhYaTTkKBjg"
-MINIMAX_GROUP_ID = "1880126057781301267"
+MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
+MINIMAX_GROUP_ID = os.environ.get("MINIMAX_GROUP_ID", "")
 MINIMAX_URL = "https://api.minimaxi.com/v1/t2a_v2"
 
 def test_minimax_tts(text="楚天罡真牛逼"):
+    if not MINIMAX_API_KEY:
+        raise RuntimeError("MINIMAX_API_KEY is required")
     print(f"Testing MiniMax TTS with text: {text}")
     print("Sending request...")
 

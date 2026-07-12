@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from askme.skills.skill_model import SkillDefinition, SlotSpec
+
 from askme.pipeline.proactive.base import ProactiveContext
 from askme.pipeline.proactive.clarification_agent import (
     ClarificationPlannerAgent,
@@ -33,7 +35,6 @@ from askme.pipeline.proactive.clarification_agent import (
 from askme.pipeline.proactive.confirm_agent import ConfirmationAgent
 from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
 from askme.pipeline.proactive.session_state import ClarificationSession, ClarificationState
-from askme.skills.skill_model import SkillDefinition, SlotSpec
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 

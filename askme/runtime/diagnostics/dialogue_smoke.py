@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ import askme.interfaces.register_defaults  # noqa: F401 - register runtime backe
 from askme.api.services.conversation_service import ConversationService
 from askme.config import get_config
 from askme.runtime.core.profiles import TEXT_PROFILE
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MESSAGE = "What is Thunder's current test identifier? Answer only the identifier."
 DEFAULT_MEMORY_TEMPLATE = (
@@ -52,7 +55,7 @@ async def run_dialogue_burst(
         raise ValueError("fake_runs and real_runs must be non-negative")
 
     started = time.perf_counter()
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     prefix = _safe_token_prefix(token_prefix or f"ASKME-BURST-{stamp}")
     out_dir = Path(output_dir) if output_dir else Path("artifacts") / "runtime-dialogue-smoke" / "burst"
     out_dir = out_dir.resolve()
@@ -179,6 +182,13 @@ async def run_dialogue_smoke(
         app = await text_blueprint.build(cfg)
         await app.start()
         memory_module = app.modules.get("memory")
+        # Await background warmup so embedding model is loaded before the first turn.
+        # Avoids 17s SentenceTransformer import + model load hitting the first retrieval.
+        warmup_task = getattr(memory_module, "_warmup_task", None)
+        if warmup_task is not None and not warmup_task.done():
+            logger.info("Waiting for memory warmup (embedding model pre-load)...")
+            await warmup_task
+            logger.info("Memory warmup complete.")
         text_module = app.modules.get("text")
         memory_bridge = getattr(memory_module, "memory_bridge", None) if memory_module else None
         text_loop = getattr(text_module, "text_loop", None) if text_module else None
@@ -282,17 +292,17 @@ async def run_dialogue_smoke(
 def print_dialogue_smoke_summary(payload: dict[str, Any]) -> None:
     """Print a compact human-readable summary."""
 
-    print(f"Runtime dialogue smoke: {payload.get('status', 'unknown')}")  # noqa: T201
-    print(f"  token: {payload.get('token', '')}")  # noqa: T201
+    logger.info(f"Runtime dialogue smoke: {payload.get('status', 'unknown')}")
+    logger.info(f"  token: {payload.get('token', '')}")
     for name, passed in (payload.get("checks") or {}).items():
-        print(f"  {name}: {'ok' if passed else 'failed'}")  # noqa: T201
+        logger.info(f"  {name}: {'ok' if passed else 'failed'}")
     failure = payload.get("failure_reason")
     if failure:
-        print(f"  failure_reason: {failure}")  # noqa: T201
+        logger.info(f"  failure_reason: {failure}")
     reply = str((payload.get("chat") or {}).get("reply") or "")
     if reply:
-        print(f"  reply: {reply[:160]}")  # noqa: T201
-    print(f"  report: {(payload.get('paths') or {}).get('output_dir', '')}")  # noqa: T201
+        logger.info(f"  reply: {reply[:160]}")
+    logger.info(f"  report: {(payload.get('paths') or {}).get('output_dir', '')}")
 
 
 def print_dialogue_burst_summary(payload: dict[str, Any]) -> None:
@@ -300,23 +310,23 @@ def print_dialogue_burst_summary(payload: dict[str, Any]) -> None:
 
     counts = payload.get("counts") or {}
     timing = payload.get("timing_ms") or {}
-    print(f"Runtime dialogue burst: {payload.get('status', 'unknown')}")  # noqa: T201
-    print(  # noqa: T201
+    logger.info(f"Runtime dialogue burst: {payload.get('status', 'unknown')}")
+    logger.info(
         "  runs: "
         f"{counts.get('passed', 0)}/{counts.get('total', 0)} passed "
         f"(fake={counts.get('fake', 0)}, real={counts.get('real', 0)})"
     )
-    print(  # noqa: T201
+    logger.info(
         "  timing_ms: "
         f"min={timing.get('min', 0)} p50={timing.get('p50', 0)} "
         f"p95={timing.get('p95', 0)} max={timing.get('max', 0)}"
     )
     for name, passed in (payload.get("contract_checks") or {}).items():
-        print(f"  {name}: {'ok' if passed else 'failed'}")  # noqa: T201
+        logger.info(f"  {name}: {'ok' if passed else 'failed'}")
     failure = payload.get("failure_reason")
     if failure:
-        print(f"  failure_reason: {failure}")  # noqa: T201
-    print(f"  report: {(payload.get('paths') or {}).get('report', '')}")  # noqa: T201
+        logger.info(f"  failure_reason: {failure}")
+    logger.info(f"  report: {(payload.get('paths') or {}).get('report', '')}")
 
 
 async def _run_burst_case(
@@ -467,7 +477,7 @@ def _write_memory_seed(output_dir: Path, *, text: str, token: str) -> Path:
                 "visibility": "external",
                 "quality_status": "public",
                 "record_id": f"dialogue_smoke_{_safe_run_id(token)}",
-                "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
             }
         ]
     }
@@ -499,7 +509,8 @@ def _build_checks(
         and "system error" not in reply.lower(),
         "chat_payload_has_rag": isinstance(rag, dict)
         and bool(rag.get("enabled"))
-        and int(rag.get("last_retrieved_items") or 0) > 0,
+        and rag.get("turn_scoped") is True
+        and rag.get("used_in_answer") is True,
         "chat_evidence_contains_token": _token_in_evidence(token, evidence),
         "chat_reply_contains_token": token in reply if require_reply_token else True,
     }

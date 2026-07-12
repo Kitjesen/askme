@@ -11,8 +11,10 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from askme.api.schemas.customer_projects import CustomerProjectExecutionBindingsResponse
-from askme.api.schemas.customer_projects import CustomerProjectExecutionRehearsalResponse
+from askme.api.schemas.customer_projects import (
+    CustomerProjectExecutionBindingsResponse,
+    CustomerProjectExecutionRehearsalResponse,
+)
 from askme.pipeline.field.customer_projects import (
     build_customer_project_execution_bindings,
     register_customer_project_onsite_evidence,
@@ -419,7 +421,6 @@ def _rehearsal_onsite_evidence_candidate(
         "delivered",
         "recorded",
     }
-    status = "passed" if signature_verified and runtime_completed else "manual_check"
     missing: list[str] = []
     if not signature_verified:
         missing.append("trusted_device_signature")
@@ -430,15 +431,15 @@ def _rehearsal_onsite_evidence_candidate(
         "requested": True,
         "accepted": True,
         "registered": True,
-        "status": status,
+        "status": "manual_check",
         "evidence": {
             "evidence_type": "device_ingest",
-            "status": status,
+            "status": "manual_check",
             "source": "object_execution_rehearsal",
             "label": f"对象演练 shadow 上报：{plan.get('display_name') or object_id_value}",
             "summary": (
                 "已确认的 shadow-post 演练生成了现场事件。它只能作为现场验收候选证据；"
-                "生产发布仍需要可信签名、运行完成回调和交付复核。"
+                "现场验收通过仍需要真实现场证据、可信签名、运行完成回调和交付复核。"
             ),
             "managed_object_id": object_id_value,
             "event_id": str(event.get("event_id") or ingest_result.get("event_id") or ""),
@@ -452,12 +453,13 @@ def _rehearsal_onsite_evidence_candidate(
         "eligibility": {
             "signature_verified": signature_verified,
             "runtime_completed": runtime_completed,
-            "missing_for_passed": missing,
+            "ready_for_delivery_review": signature_verified and runtime_completed,
+            "missing_for_delivery_review": missing,
         },
         "production_eligible": False,
         "customer_status": (
-            "已登记为验收候选证据；在真实设备信任和运行回调门禁通过前，"
-            "不能作为生产上线证据。"
+            "已登记为验收候选证据；交付负责人复核并关联真实现场证据前，"
+            "不能作为现场验收通过或生产上线证据。"
         ),
     }
 

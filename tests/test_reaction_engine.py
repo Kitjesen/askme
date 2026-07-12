@@ -6,11 +6,11 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
-
 from askme.pipeline.reaction_engine import (
     RuleBasedReaction,
     evaluate_rules,
 )
+
 from askme.schemas.events import ChangeEvent, ChangeEventType
 from askme.schemas.reaction import ReactionDecision, ReactionType, SceneContext
 

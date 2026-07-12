@@ -107,6 +107,74 @@ async def test_chat_payload_passes_conversation_session_id_to_handler() -> None:
     }]
 
 
+async def test_turn_scoped_rag_is_not_overwritten_by_global_memory_health() -> None:
+    class MemoryHandler:
+        def health(self):
+            return {
+                "enabled": True,
+                "backend": "vector",
+                "last_evidence": [{"record_id": "wrong", "text": "wrong fact"}],
+                "last_answer_policy": {
+                    "state": "stale",
+                    "action": "refuse_and_request_update",
+                },
+            }
+
+    async def chat_handler(text: str):
+        return {
+            "reply": f"reply:{text}",
+            "evidence": [{"record_id": "right", "text": "right fact"}],
+            "rag": {
+                "turn_scoped": True,
+                "answer_policy": {
+                    "state": "grounded",
+                    "action": "answer_with_evidence",
+                },
+            },
+        }
+
+    payload = await ConversationService(
+        chat_handler=chat_handler,
+        memory_handler=MemoryHandler(),
+    ).chat_payload_from_body({"text": "hello"})
+
+    assert payload["reply"] == "reply:hello"
+    assert payload["evidence"][0]["record_id"] == "right"
+    assert payload["rag"]["answer_policy"]["state"] == "grounded"
+
+
+async def test_bound_text_handler_exposes_turn_scoped_rag_to_service() -> None:
+    class TextHandler:
+        current_turn_rag: dict[str, object] | None = None
+
+        async def process_turn(self, text: str):
+            self.current_turn_rag = {
+                "evidence": [{"record_id": "bound-turn", "text": text}],
+                "rag": {
+                    "turn_scoped": True,
+                    "answer_policy": {"state": "grounded"},
+                },
+            }
+            return "bound reply"
+
+    class MemoryHandler:
+        def health(self):
+            return {
+                "last_evidence": [{"record_id": "global-wrong"}],
+                "last_answer_policy": {"state": "stale", "action": "refuse"},
+            }
+
+    handler = TextHandler()
+    payload = await ConversationService(
+        chat_handler=handler.process_turn,
+        memory_handler=MemoryHandler(),
+    ).chat_payload_from_body({"text": "hello"})
+
+    assert payload["reply"] == "bound reply"
+    assert payload["evidence"][0]["record_id"] == "bound-turn"
+    assert payload["rag"]["turn_scoped"] is True
+
+
 async def test_chat_payload_accepts_conversation_id_aliases() -> None:
     calls: list[dict[str, object]] = []
 

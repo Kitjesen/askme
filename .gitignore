@@ -59,6 +59,18 @@ docs/voice_samples/
 .claude/worktrees/
 memU/
 
+# Remote work directories
+.codex_remote/
+.remote_robot_lab/
+.remote_work/
+_remote_*/
+
+# Credentials / secrets (never commit)
+*.pem
+*-key.json
+credentials*
+secrets/
+
 # Frontend/video generated artifacts
 video-lab/node_modules/
 video-lab/out/

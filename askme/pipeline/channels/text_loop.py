@@ -39,7 +39,7 @@ class _TextClarificationAudio:
 
     def speak(self, text: str) -> None:
         self.spoken.append(text)
-        print(f"\n[Clarification]: {text}")  # noqa: T201
+        logger.info(f"\n[Clarification]: {text}")
 
     def start_playback(self) -> None: ...
     def stop_playback(self) -> None: ...
@@ -76,6 +76,10 @@ class TextLoop:
     """
 
     MAX_CONSECUTIVE_ERRORS = 5  # text mode is more tolerant than voice (3)
+
+    @property
+    def current_turn_rag(self) -> dict[str, Any] | None:
+        return self._pipeline.current_turn_rag
 
     def __init__(
         self,
@@ -306,7 +310,7 @@ class TextLoop:
                         "Text loop degraded: %d consecutive errors, pausing 3s",
                         consecutive_errors,
                     )
-                    print("多次错误，系统暂时异常，请稍后重试。")  # noqa: T201
+                    logger.info("多次错误，系统暂时异常，请稍后重试。")
                     await asyncio.sleep(3)
                     consecutive_errors = 0
             finally:
@@ -346,6 +350,9 @@ class TextLoop:
         """
         from askme.robot_interaction import IntentType
 
+        clear_turn_context = getattr(self._pipeline, "clear_turn_context", None)
+        if callable(clear_turn_context):
+            clear_turn_context()
         self._text_audio.spoken.clear()
         self.last_cognition_result = None
         source = "voice" if speak else "text"

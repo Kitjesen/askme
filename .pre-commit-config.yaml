@@ -1,0 +1,39 @@
+repos:
+  # 通用检查
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: detect-private-key
+
+  # Ruff lint（快速——只检查，不修复）
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.0
+    hooks:
+      - id: ruff
+        args: [--exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # Mypy（可选——只在 CI 中强制，pre-commit 中跳过安装，因为需要所有依赖）
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.15.0
+    hooks:
+      - id: mypy
+        args: [--ignore-missing-imports, --no-error-summary]
+        files: ^askme/
+        additional_dependencies:
+          - fastapi>=0.103.0
+          - pydantic>=2.0.0
+          - types-requests
+          - types-pyyaml
+          - types-python-dotenv
+        # pre-commit 的 mypy 在没有完整虚拟环境时容易出错，
+        # 标记为 manual 模式——在 CI 中单独一个 job 跑 mypy
+        stages: [manual]

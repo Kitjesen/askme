@@ -1,4 +1,5 @@
 import json
+import os
 import queue
 import sys
 import threading
@@ -9,7 +10,7 @@ import requests
 import sounddevice as sd
 
 # Minimax API Configuration
-MINIMAX_API_KEY = "sk-api-UVY-jfMCd7XYRA_ZRbpMIu_yQGm3CZ9jnqjQUh3y78L1DBZZ2N6jUsIu-p4T5n9wmdyOXR8QbqMVyqRaaDlT4w3VecToXGnCj3mhYzytbgRwVhYaTTkKBjg"
+MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
 MINIMAX_URL = "https://api.minimaxi.com/v1/t2a_v2"
 
 # Playback Buffer
@@ -61,6 +62,8 @@ def start_playback_thread():
 
 def test_minimax_stream(text="你好，这是一段MiniMax流式语音合成的实时播放测试。"):
     global is_playing
+    if not MINIMAX_API_KEY:
+        raise RuntimeError("MINIMAX_API_KEY is required")
     # Check if thread is already running to avoid duplicate playback
     if is_playing:
         print("Playback already running, skipping start.")

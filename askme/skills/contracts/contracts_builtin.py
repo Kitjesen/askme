@@ -12,9 +12,12 @@ from .contracts import SkillParameter, skill_contract
 
 @skill_contract(
     name="agent_task",
-    description="Delegate a multi-step task to the autonomous agent shell.",
+    description=(
+        "Deprecated local AgentShell compatibility skill; active multi-step "
+        "agent execution belongs to the ZeroClaw/MCP path."
+    ),
     execution="agent_shell",
-    tags=("agent", "automation"),
+    tags=("agent", "automation", "deprecated"),
 )
 def _agent_task_contract() -> None:
     return None

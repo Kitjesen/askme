@@ -88,8 +88,6 @@ async def test_llm_creates_generated_skill_draft_then_operator_approves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import askme.skills.skill_manager as skill_manager_module
-    from askme.llm.conversation import ConversationManager
-    from askme.robot_interaction import IntentRouter, IntentType
     from askme.memory.bridge import MemoryBridge
     from askme.pipeline.brain_pipeline import BrainPipeline
     from askme.skills.audit import SkillAuditLog
@@ -99,6 +97,9 @@ async def test_llm_creates_generated_skill_draft_then_operator_approves(
     from askme.tools.skill_tools import register_skill_tools
     from askme.tools.tool_registry import ToolRegistry
     from askme.voice.stream_splitter import StreamSplitter
+
+    from askme.llm.conversation import ConversationManager
+    from askme.robot_interaction import IntentRouter, IntentType
 
     original_generated_dir = SkillManager.__dict__["generated_skills_dir"]
     SkillManager.generated_skills_dir = property(lambda self: tmp_path / "skills")  # type: ignore[assignment]

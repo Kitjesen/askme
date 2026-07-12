@@ -15,8 +15,24 @@ Read these in order before assigning agents:
    round.
 3. `docs/MODULE_OWNERSHIP.md` - current package owner matrix, exclusions, and
    default verification commands.
-4. `askme/README.md` - package map for top-level `askme/` directories.
-5. `docs/REPOSITORY_LAYOUT.md` - root directory placement rules.
+4. `docs/MISSION_VOICE_STATES.md` - voice admission states for setup, idle,
+   active mission, pause, emergency, and review.
+5. `askme/README.md` - package map for top-level `askme/` directories.
+6. `docs/REPOSITORY_LAYOUT.md` - root directory placement rules.
+7. `docs/PRODUCT_REQUIREMENTS.md` - PRD-level product requirements spine connecting demand evidence to architecture contracts.
+8. `docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md` - bounded contexts, package ownership, API surface rules, and architecture decision gates.
+9. `docs/SOLUTION_PROVIDER_ICP.md` - product-demand source for the P0 solution-provider delivery lane.
+10. `docs/PRODUCT_ARCHITECTURE_TRACE.md` - R1-R7 demand-to-architecture ownership and verification map.
+11. `docs/GITHUB_SKILL_RESEARCH.md` - external GitHub skill candidates for market, product, and architecture research.
+12. `docs/DEMAND_EVIDENCE_LEDGER.md` - research evidence ledger separating hypotheses from validated product and architecture claims.
+13. `docs/COMPETITIVE_REPLACEMENT_MATRIX.md` - competitive and replacement boundaries for the solution-provider delivery product.
+14. `docs/INTERVIEW_GUIDE_SOLUTION_PROVIDER.md` - interview plan for validating ICP, replacement boundaries, R1-R7 demand, and architecture assumptions.
+15. `docs/INDUSTRY_SCENARIO_DEMAND_CARDS.md` - four-industry scenario cards constrained to three high-value scenes each.
+16. `docs/PILOT_ACCEPTANCE_DOSSIER_PRODUCT_SURFACE.md` - pilot acceptance dossier product surface and signoff/readiness boundary.
+17. `docs/EXTERNAL_SYSTEM_INTEGRATION_CONTRACTS.md` - minimum fields, failure states, and audit boundaries for VMS, CMMS, IAM, map, OEM fleet, notification, and SIEM/WORM connections.
+18. `docs/SITE_LAUNCH_READINESS_CHECKLIST.md` - site acceptance checklist, launch readiness, and hardware acceptance boundary.
+19. `docs/PRICING_PACKAGING_HYPOTHESES.md` - pricing and packaging hypotheses bound to Field Delivery Domain facts and usage evidence.
+20. `docs/SCENARIO_ROI_MODEL.md` - scenario ROI model tying industry cards to baseline, value metrics, payback signals, and usage evidence.
 
 ## 6-Agent Round Map
 
@@ -30,7 +46,7 @@ Workers must not edit outside their lane without routing back to the lead.
 | 3 | Cognition / pipeline core | `askme/cognition`, `askme/pipeline/core`, `askme/pipeline/channels`, `askme/pipeline/proactive`, `askme/pipeline/reactions`, `askme/pipeline/skills` | Concrete providers, HTTP routes, hardware clients | `python -m pytest tests/test_cognition.py tests/test_working_memory.py tests/test_text_loop.py tests/test_voice_loop.py tests/test_turn_executor.py -q` |
 | 4 | Providers / robot / ports | `askme/ports`, `askme/providers`, `askme/robot`, `askme/perception` | Product orchestration, API/MCP/routes/runtime policy | `python -m pytest tests/test_six_layer_package_boundaries.py tests/test_register_defaults.py tests/test_registry.py tests/test_robot_tools_ext.py tests/test_arm_controller.py -q` |
 | 5 | API / MCP / tools | `askme/api`, `askme/mcp`, `askme/tools` | Runtime lifecycle, provider internals, field workflow ownership outside route/service glue | `python -m pytest tests/test_api_route_dependency_injection.py tests/test_mcp_tools.py tests/test_mcp_memory_tools.py tests/test_mcp_misc_resources.py tests/test_builtin_tools.py tests/test_tool_registry.py -q` |
-| 6 | Field workflows / tests / compatibility | `askme/pipeline/field`, field route services, `askme/compat`, `tests` | Core runtime graph, low-level providers, unrelated package reshapes | `python -m pytest tests/test_field_operations.py tests/test_field_ingest_adapters.py tests/test_field_contracts.py tests/test_dashboard_customer_project_contract.py tests/test_package_migration_compat.py -q` |
+| 6 | Field Delivery Domain / tests / compatibility | `askme/pipeline/field`, `askme/api/routes/field_*`, `askme/api/services/field_*`, `askme/compat`, `tests` | Core runtime graph, low-level providers, API transport composition outside field route/service glue, unrelated package reshapes | `python -m pytest tests/test_field_operations.py tests/test_field_ingest_adapters.py tests/test_field_contracts.py tests/test_dashboard_customer_project_contract.py tests/test_field_customer_project_acceptance_routes.py tests/test_package_migration_compat.py -q` |
 
 The lead owns `docs/`, integration order, final conflict resolution, and the
 final cross-lane verification run.

@@ -115,7 +115,9 @@ class AgentHookRunner:
             if isinstance(nested, list):
                 for child in nested:
                     if isinstance(child, dict):
-                        rules.append({**child, "matcher": child.get("matcher", item.get("matcher"))})
+                        rules.append(
+                            {**child, "matcher": child.get("matcher", item.get("matcher"))}
+                        )
             else:
                 rules.append(item)
         return rules

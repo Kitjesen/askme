@@ -9,6 +9,12 @@ _LAZY_EXPORTS = {
     "InteractionAction": ("askme.robot_interaction.interaction_gate", "InteractionAction"),
     "InteractionDecision": ("askme.robot_interaction.interaction_gate", "InteractionDecision"),
     "InteractionGate": ("askme.robot_interaction.interaction_gate", "InteractionGate"),
+    "MissionActorRole": ("askme.robot_interaction.interaction_gate", "MissionActorRole"),
+    "MissionCommandCategory": (
+        "askme.robot_interaction.interaction_gate",
+        "MissionCommandCategory",
+    ),
+    "MissionMode": ("askme.robot_interaction.interaction_gate", "MissionMode"),
     "InteractionPerceptionSnapshot": (
         "askme.robot_interaction.perception_context",
         "InteractionPerceptionSnapshot",

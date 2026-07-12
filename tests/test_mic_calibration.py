@@ -6,11 +6,11 @@ import json
 import queue
 
 import numpy as np
-
 from askme.robot.ota_bridge import OTABridgeMetrics
 from askme.robot.runtime_health import merge_voice_pipeline_status
-from askme.voice import mic_calibration
 from askme.voice.audio_agent import AudioAgent
+
+from askme.voice import mic_calibration
 
 
 class _DummyASRManager:

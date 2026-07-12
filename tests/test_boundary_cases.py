@@ -12,10 +12,11 @@ These tests guard against:
 
 from __future__ import annotations
 
+from askme.skills.skill_model import SkillDefinition, SlotSpec
+
 from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
 from askme.pipeline.proactive.slot_analyst import analyze_slots, is_vague
 from askme.pipeline.proactive.slot_utils import slot_present
-from askme.skills.skill_model import SkillDefinition, SlotSpec
 
 # ── Mock helpers ──────────────────────────────────────────────────────────────
 

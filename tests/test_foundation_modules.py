@@ -10,8 +10,10 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from askme.llm.client import LLMClient
 from askme.runtime.module import Module, ModuleRegistry, Out, Runtime
+from askme.tools.tool_registry import ToolRegistry
+
+from askme.llm.client import LLMClient
 from askme.schemas.messages import (
     CmsState,
     DetectionFrame,
@@ -19,7 +21,6 @@ from askme.schemas.messages import (
     ImuSnapshot,
     JointStateSnapshot,
 )
-from askme.tools.tool_registry import ToolRegistry
 
 # ── Helpers / Mocks ──────────────────────────────────────────────
 

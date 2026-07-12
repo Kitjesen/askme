@@ -2,7 +2,27 @@
 
 更新时间：2026-05-13
 
-本文是 askme 当前唯一的架构入口。
+本文是 askme 当前基础架构入口。面向 ZeroClaw、企业安全和市场需求驱动的高级架构扩展见
+`docs/ARCHITECTURE_V2.md`；高级软件架构蓝图和 bounded contexts 见
+`docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md`；P0 方案商交付需求和
+Demo-to-pilot 边界见 `docs/SOLUTION_PROVIDER_ICP.md`；PRD 主干见
+`docs/PRODUCT_REQUIREMENTS.md`；需求到架构追踪见
+`docs/PRODUCT_ARCHITECTURE_TRACE.md`；需求证据状态见
+`docs/DEMAND_EVIDENCE_LEDGER.md`。
+
+## 产品驱动架构入口
+
+AskMe 当前 P0 是机器人方案商/集成商交付中台，也是面向多客户现场项目的现场运营交付中台。基础架构入口必须服从 PRD 和高级软件架构蓝图，而不是把系统重新解释成通用聊天机器人、机器人底盘控制系统或一次性 Demo 脚本。
+
+核心边界：
+
+- Field Delivery Domain 是客户项目、对象目录、现场事件、交付证据、acceptance dossier、客户签收和 readiness gaps 的产品事实源。
+- Product/Admin/Platform/Internal 表面负责 Dashboard、API、客户项目治理、模板、技能包、知识、审计和交付编排。
+- Runtime / Safety / Hardware 负责真实执行、急停、安全状态、硬件适配、runtime roundtrip、takeover 和 rollback。
+- customer signoff != production readiness；客户签收不等于生产上线。
+- AskMe 不替代底盘控制，不承诺无人值守生产上线。
+
+因此，架构修改必须先说明它服务哪条 PRD 需求、依赖哪些 evidence_id / hypothesis_status、落在哪个 bounded context、是否改变 Product/Admin/Platform/Internal 或 Runtime / Safety / Hardware 所有权，并在 `docs/PRODUCT_ARCHITECTURE_TRACE.md` 或 `docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md` 中保留可验证的测试入口。
 
 ## 一句话架构
 
@@ -77,8 +97,8 @@ askme 借鉴 Claude Code 的可配置 agent 思路，但面向机器人现场产
 - Agent Profile 是可审计的角色配置，不是自由人格。内置角色包括现场任务总控、知识运营、园区问路、安全复核和在线技能增长。
 - Profile 可从 `~/.askme/agents/*.md`、项目 `.askme/agents/*.md`、项目 `agents/*.md`、managed `.askme/managed/agents/*.md` 加载；项目覆盖用户，managed 覆盖项目。
 - Profile frontmatter 支持 `tools`、`disallowedTools`、`spawnableProfiles`、`skills`、`mcpServers`、`hooks`、`memory`、`model`、`permissionMode`、`maxTurns`、`timeoutSeconds`、`effort`、`isolation`、`color`、`disabled`、`risk_level`。
-- `skills` 表示启动时预加载的领域能力说明；工具 allow/deny 决定 agent 真实可用工具。
-- `maxTurns`、`timeoutSeconds`、`model` 已进入 AgentShell 运行策略；子 agent 只能由父 profile 显式 allowlist 派生。
+- `skills` 表示启动时预加载的领域能力说明；工具 allow/deny 是产品治理策略，真实可用工具仍由 MCP 服务端 RBAC、SkillGate 和 SafetyPreflight 决定。
+- 本地 Python `AgentShell` ReAct 执行循环已废弃，只保留兼容 stub；`maxTurns`、`timeoutSeconds`、`model` 和 `spawnableProfiles` 现在是 Agent Profile 治理元数据，供 ZeroClaw/MCP 接入、审计和后续执行策略映射使用，不代表 Askme 本地还有可调用的自主 agent executor。
 - `hooks` 当前支持声明式 `PreToolUse` / `PostToolUse` 规则，可按工具名和参数/结果内容阻断调用；不会执行 profile 中的任意 shell/HTTP hook。
 - `mcpServers` 当前进入 profile catalog 和系统提示，用于产品审计与下一步 MCP scope 接入；真实安全边界仍由服务端 RBAC、SkillGate、SafetyPreflight 兜底。
 - LLM 生成的新能力写入 `data/skills/<skill>/SKILL.md`，先进入 governance store。
@@ -219,6 +239,7 @@ Profile：
 - `prod`：生产，默认禁用。
 
 external/lab runtime 必须显式配置 endpoint 和 enable flag。默认不会联网或触碰硬件。
+面向物理机器人或客户现场验证的蓝图必须使用 `lab` 或 `prod` profile；`fake`、`sim`、`shadow` 只能证明本地演示、仿真或影子链路，不能作为客户现场验收证据。
 
 ## 感知与 WorldState
 
@@ -256,13 +277,13 @@ WorldState 是 planner 和 safety 的事实来源。感知快照要带 `observed
 
 | 文件 | 作用 |
 | --- | --- |
-| `askme/voice/interaction_gate.py` | 交互准入门 |
-| `askme/voice/perception_context.py` | 感知快照归一化 |
-| `askme/memory/catalog.py` | 知识生命周期事实源 |
+| `askme/robot_interaction/interaction_gate.py` | 交互准入门 |
+| `askme/robot_interaction/perception_context.py` | 感知快照归一化 |
+| `askme/memory/retrieval/catalog.py` | 知识生命周期事实源 |
 | `askme/runtime/modules/memory_module.py` | 知识导入、检索、重建、批量更新 |
 | `askme/cognition/active_perception.py` | 缺事实时主动刷新感知 |
-| `askme/runtime/handoff.py` | TaskHandoff、TaskRun、runtime state machine |
-| `askme/runtime/arbiter_client.py` | external/lab contract-only client |
+| `askme/runtime/task/handoff.py` | TaskHandoff、TaskRun、runtime state machine |
+| `askme/runtime/task/arbiter_client.py` | external/lab contract-only client |
 | `askme/runtime/modules/health_module.py` | HTTP/Dashboard wiring 与 evidence report |
 | `askme/static/dashboard.html` | Voice Mission Center |
 

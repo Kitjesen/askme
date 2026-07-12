@@ -7,7 +7,6 @@ import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-
 from askme.voice.tts import TTSEngine
 
 # ---------------------------------------------------------------------------
@@ -545,6 +544,28 @@ def test_auto_fallback_minimax_no_key():
     engine = _make_engine(backend="minimax", minimax_api_key="")
     try:
         assert engine._backend == "edge"
+    finally:
+        engine.shutdown()
+
+
+def test_explicit_local_fallback_is_used_when_minimax_key_is_missing():
+    def fake_init_local(self):
+        self._local_tts = MagicMock()
+        self._local_sample_rate = 24000
+
+    with patch.object(TTSEngine, "_init_local_tts", fake_init_local), patch(
+        "askme.voice.tts.os.path.isdir",
+        return_value=True,
+    ):
+        engine = _make_engine(
+            backend="minimax",
+            minimax_api_key="",
+            fallback_backend="local",
+            model_dir="models/tts/local",
+        )
+    try:
+        assert engine._backend == "local"
+        assert engine._local_tts is not None
     finally:
         engine.shutdown()
 

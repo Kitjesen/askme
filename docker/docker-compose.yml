@@ -1,0 +1,63 @@
+# Askme + ZeroClaw 一键部署
+# 启动: docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  askme:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.askme
+    container_name: askme
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      - MINIMAX_API_KEY=${MINIMAX_API_KEY}
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      - LLM_API_KEY=${LLM_API_KEY:-${MINIMAX_API_KEY}}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.minimax.chat/v1}
+    volumes:
+      - ../models:/app/models:ro
+      - askme_data:/app/data
+    networks:
+      - askme-net
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8765/healthz',timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  zeroclaw:
+    image: ghcr.io/zeroclaw-labs/zeroclaw:${ZEROCLAW_VERSION:-0.1.7}
+    container_name: askme-zeroclaw
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - MINIMAX_API_KEY=${MINIMAX_API_KEY}
+      - ZEROCLAW_VERSION=${ZEROCLAW_VERSION:-0.1.7}
+      - ZEROCLAW_PROFILE=${ZEROCLAW_PROFILE:-standard}
+    volumes:
+      - zeroclaw_workspace:/root/.zeroclaw/workspace
+    depends_on:
+      askme:
+        condition: service_started
+    networks:
+      - askme-net
+    logging: *default-logging
+    entrypoint: ["zeroclaw", "gateway", "--host", "0.0.0.0", "--port", "8080"]
+
+networks:
+  askme-net:
+    driver: bridge
+
+volumes:
+  askme_data:
+  zeroclaw_workspace:

@@ -559,7 +559,7 @@ def _customer_missing_dependency_names(missing_required: list[dict[str, Any]]) -
 
 def _readiness_customer_message(*, package_name: str, status: str, missing: list[str]) -> str:
     if status == "ready":
-        return f"{package_name} 已满足启用条件，可进入现场验证或发布流程。"
+        return f"{package_name} 已满足启用前检查，可进入现场验证或试点发布评审。"
     if status == "manual_check":
         return f"{package_name} 仍有人工确认项，确认完成前不要对客户承诺自动运行。"
     missing_label = ", ".join(missing) if missing else "required fields"
@@ -610,7 +610,7 @@ def _enablement_decision(
             "can_run_controlled_demo": True,
             "can_enter_customer_pilot": True,
             "can_claim_unattended_production": False,
-            "release_claim": "可进入现场验证或客户试点，不能声明无人值守生产上线。",
+            "release_claim": "可进入现场验证或客户试点启用评审，不能声明无人值守生产上线。",
             "next_action": next_step,
             "blocking_dependencies": [],
             "manual_acceptance_dependencies": [],

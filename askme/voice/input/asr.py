@@ -77,6 +77,8 @@ class ASREngine(ASRBackend):
             decoder=decoder,
             joiner=joiner,
             num_threads=int(config.get("num_threads", 1)),
+            provider=str(config.get("provider", "cpu")),
+            device=int(config.get("device", 0)),
             sample_rate=self.sample_rate,
             feature_dim=int(config.get("feature_dim", 80)),
             enable_endpoint_detection=config.get("enable_endpoint_detection", True),

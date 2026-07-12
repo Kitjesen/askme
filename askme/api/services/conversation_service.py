@@ -144,6 +144,7 @@ class ConversationService:
                 speak=speak,
                 voice_turn=voice_turn,
             )
+            payload = self._attach_handler_turn_rag(payload)
             timings["response_build_ms"] = _elapsed_ms(response_started)
 
             memory_started = time.perf_counter()
@@ -463,6 +464,9 @@ class ConversationService:
 
     async def attach_memory_chat_context(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Attach latest RAG evidence/policy when chat handler returned plain text."""
+        existing_rag = payload.get("rag")
+        if isinstance(existing_rag, dict) and existing_rag.get("turn_scoped") is True:
+            return payload
         if self._memory_handler is None:
             return payload
         health_method = getattr(self._memory_handler, "health", None)
@@ -506,6 +510,25 @@ class ConversationService:
                 rag_payload["answer_blocked"] = True
                 rag_payload["forced_reply"] = True
                 rag_payload["block_reason"] = answer_policy.get("reason", "")
+        return payload
+
+    def _attach_handler_turn_rag(self, payload: dict[str, Any]) -> dict[str, Any]:
+        handler_owner = getattr(self._chat_handler, "__self__", None)
+        turn_rag = getattr(handler_owner, "current_turn_rag", None)
+        if callable(turn_rag):
+            turn_rag = turn_rag()
+        if not isinstance(turn_rag, dict):
+            return payload
+        rag = turn_rag.get("rag")
+        if not isinstance(rag, dict) or rag.get("turn_scoped") is not True:
+            return payload
+        evidence = turn_rag.get("evidence")
+        payload["evidence"] = (
+            [dict(item) for item in evidence if isinstance(item, dict)]
+            if isinstance(evidence, list)
+            else []
+        )
+        payload["rag"] = dict(rag)
         return payload
 
 

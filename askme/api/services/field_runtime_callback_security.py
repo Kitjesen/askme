@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hmac
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from askme.runtime.task.field_callbacks import (
@@ -14,7 +14,7 @@ from askme.runtime.task.field_callbacks import (
     unsigned_field_runtime_callback_payload,
 )
 
-_UTC = timezone.utc
+_UTC = UTC
 _FIELD_RUNTIME_CALLBACK_TIMESTAMP_FIELDS = (
     "runtime_signature_timestamp",
     "signature_timestamp",

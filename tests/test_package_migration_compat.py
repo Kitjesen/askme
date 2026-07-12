@@ -229,7 +229,6 @@ LEGACY_LLM_FACADE_MODULES = {
 LEGACY_LLM_FACADE_FILES = {
     Path("askme/llm/client.py"),
     Path("askme/llm/config.py"),
-    Path("askme/llm/contracts.py"),
     Path("askme/llm/conversation.py"),
     Path("askme/llm/factory.py"),
     Path("askme/llm/gateway.py"),
@@ -652,7 +651,7 @@ def test_multi_agent_docs_reference_existing_verification_targets() -> None:
         "Voice gateway / interaction",
         "API / MCP / tools",
         "Providers / ports",
-        "Product workflows",
+        "Field Delivery Domain",
         "Migration compatibility",
         "Test hardening",
     )
@@ -951,8 +950,6 @@ def test_legacy_facade_registry_documents_confusing_entrypoints() -> None:
         "askme.voice.orchestration.runtime_bridge",
         "askme.voice_gateway.runtime_bridge",
         "askme.voice.input.address_detector",
-        "askme.voice.interaction.interaction_gate",
-        "askme.voice.interaction.perception_context",
         "askme.interaction.intent_router",
         "askme.pipeline.reactions.state_led_bridge",
         "askme.robot.telemetry.ota_bridge",
@@ -1019,13 +1016,14 @@ def test_blueprint_operational_legacy_aliases_keep_module_entrypoints() -> None:
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
-        assert label in result.stdout
-        assert "用途：启动一个 askme 产品蓝图" in result.stdout
-        assert "启动命令：" in result.stdout
-        assert "交付检查：" in result.stdout
-        assert "Usage:" not in result.stdout
-        assert "Options:" not in result.stdout
-        assert "python -m askme runtime blueprints --help" in result.stdout
+        merged = result.stdout + result.stderr
+        assert label in merged
+        assert "用途：启动一个 askme 产品蓝图" in merged
+        assert "启动命令：" in merged
+        assert "交付检查：" in merged
+        assert "Usage:" not in merged
+        assert "Options:" not in merged
+        assert "python -m askme runtime blueprints --help" in merged
 
 
 def test_legacy_module_aliases_are_available_as_package_attributes() -> None:

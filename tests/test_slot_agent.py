@@ -5,11 +5,11 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from askme.skills.skill_model import SkillDefinition, SlotSpec
 
 from askme.pipeline.proactive.base import ProactiveContext
 from askme.pipeline.proactive.slot_agent import SlotCollectorAgent
 from askme.pipeline.proactive.slot_utils import slot_present
-from askme.skills.skill_model import SkillDefinition, SlotSpec
 
 # ── slot_present ──────────────────────────────────────────────────────────────
 

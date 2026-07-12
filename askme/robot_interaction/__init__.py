@@ -7,12 +7,15 @@ service APIs. Legacy ``askme.interaction`` imports remain as facades.
 from __future__ import annotations
 
 from askme.robot_interaction.address_detector import AddressDetector
+from askme.robot_interaction.intent_router import Intent, IntentRouter, IntentType
 from askme.robot_interaction.interaction_gate import (
     InteractionAction,
     InteractionDecision,
     InteractionGate,
+    MissionActorRole,
+    MissionCommandCategory,
+    MissionMode,
 )
-from askme.robot_interaction.intent_router import Intent, IntentRouter, IntentType
 from askme.robot_interaction.observability import (
     attach_intent_route_trace,
     intent_route_payload,
@@ -34,6 +37,9 @@ __all__ = [
     "Intent",
     "IntentRouter",
     "IntentType",
+    "MissionActorRole",
+    "MissionCommandCategory",
+    "MissionMode",
     "RobotInteractionService",
     "RoutingPolicy",
     "ScenarioIntentDecision",

@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-
 from askme.tools.tool_registry import (
     BaseTool,
     ToolRegistry,

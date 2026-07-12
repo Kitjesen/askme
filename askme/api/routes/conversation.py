@@ -107,7 +107,7 @@ def create_conversation_router(
         except ChatUnavailable as exc:
             return JSONResponse({"error": str(exc)}, status_code=503, headers=trace_headers)
         except Exception as exc:
-            logger.error("Chat endpoint failed: %s", exc)
+            logger.exception("Chat endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=trace_headers)
 
     @router.get(
@@ -186,7 +186,7 @@ def create_conversation_router(
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=_CORS_HEADERS)
         except Exception as exc:
-            logger.error("Runtime voice-turn endpoint failed: %s", exc)
+            logger.exception("Runtime voice-turn endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @router.options("/api/chat", include_in_schema=False)

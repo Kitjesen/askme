@@ -84,6 +84,38 @@ async def test_gateway_stream_supports_thinking_mode_without_minimax_extra_body(
     assert "extra_body" not in provider.calls[0]
 
 
+@pytest.mark.asyncio
+async def test_gateway_disables_deepseek_thinking_for_realtime_turns() -> None:
+    provider = _FakeProvider()
+    gateway = LLMGateway(
+        llm_config=LLMConfig(model="deepseek-v4-flash"),
+        provider=provider,
+    )
+
+    await gateway.chat([{"role": "user", "content": "hi"}])
+
+    assert provider.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.asyncio
+async def test_gateway_can_explicitly_enable_deepseek_thinking() -> None:
+    provider = _FakeProvider()
+    gateway = LLMGateway(
+        llm_config=LLMConfig(model="deepseek-v4-pro"),
+        provider=provider,
+    )
+
+    chunks = []
+    async for chunk in gateway.chat_stream(
+        [{"role": "user", "content": "hi"}],
+        thinking=True,
+    ):
+        chunks.append(chunk)
+
+    assert len(chunks) == 1
+    assert provider.calls[0]["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
 def test_factory_resolves_domestic_provider_aliases() -> None:
     assert resolve_provider_name(LLMConfig(provider="minimax")) == "minimax"
     assert resolve_provider_name(LLMConfig(provider="ark")) == "doubao"

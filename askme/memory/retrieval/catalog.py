@@ -855,7 +855,7 @@ class KnowledgeCatalog:
                 for record in records
                 if isinstance(record, dict) and str(record.get("record_id") or "").strip()
             }
-        except Exception:
+        except (OSError, ValueError, TypeError):
             self._records = {}
 
     @staticmethod

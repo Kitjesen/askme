@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 
-from askme.space import ParkSpaceService
 from askme.tools.builtin_tools import register_builtin_tools
 from askme.tools.space_tool import SpaceLookupPlaceTool, SpaceRecommendRouteTool
 from askme.tools.tool_registry import ToolRegistry
+
+from askme.space import ParkSpaceService
 
 
 def _space_service() -> ParkSpaceService:

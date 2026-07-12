@@ -1,10 +1,50 @@
-.env
+# ── Version control ──────────────────────────────────────────
 .git
+.gitignore
+.gitattributes
+
+# ── Python cache / artifacts ────────────────────────────────
 __pycache__
 *.pyc
-models/
-memU/
+*.pyo
+*.pyd
 .pytest_cache
-.vscode
+*.egg-info/
+dist/
+build/
+*.whl
+
+# ── Environment ─────────────────────────────────────────────
+.env
+.venv
+venv/
+.venv*/
+virtualenv/
+.envrc
+
+# ── IDE / editors ──────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Project-specific ───────────────────────────────────────
+# Model files (mounted at runtime via volume)
+models/
+# Runtime data (mounted at runtime via volume)
 data/
-*.egg-info
+memU/
+# Test directories (not needed at runtime)
+tests/
+test-output/
+
+# ── Documentation (not needed at runtime) ───────────────────
+docs/
+
+# ── Docker (not needed at runtime; built from docker/) ─────
+docker-compose.yml
+
+# ── OS artifacts ──────────────────────────────────────────
+.DS_Store
+Thumbs.db

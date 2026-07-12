@@ -7,7 +7,6 @@ from uuid import uuid4
 
 import pytest
 import requests
-
 from askme.robot.ota_bridge import OTABridge, OTABridgeMetrics
 
 

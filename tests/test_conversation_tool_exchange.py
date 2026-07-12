@@ -120,6 +120,26 @@ class TestAddToolExchange:
         assert session_a_roles == ["system", "user", "assistant", "tool"]
         assert session_b_roles == ["system", "user"]
 
+    def test_last_assistant_metadata_is_scoped_to_conversation_session(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        conv = _make_conv(tmp_path, monkeypatch)
+        conv.add_assistant_message("answer a", conversation_session_id="a")
+        conv.add_assistant_message("answer b", conversation_session_id="b")
+
+        updated = conv.update_last_assistant_metadata(
+            {"evidence": [{"record_id": "rec-a"}]},
+            conversation_session_id="a",
+        )
+
+        assert updated is True
+        session_a = conv.get_messages("sys", conversation_session_id="a")
+        session_b = conv.get_messages("sys", conversation_session_id="b")
+        assert session_a[-1]["evidence"] == [{"record_id": "rec-a"}]
+        assert "evidence" not in session_b[-1]
+
     def test_no_save_called_for_tool_exchange(self, tmp_path, monkeypatch):
         """Tool exchanges are transient — the history file must not be rewritten."""
         conv = _make_conv(tmp_path, monkeypatch)

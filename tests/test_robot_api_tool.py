@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.request
 from unittest.mock import MagicMock, patch
 
-from askme.tools.robot_api_tool import _SERVICE_PORTS, RobotApiTool
+from askme.tools.robot_api_tool import _SERVICE_PORTS, RobotApiTool, _open_url
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -68,7 +69,7 @@ class TestSuccessResponses:
     def test_json_response_parsed(self):
         tool = _make_tool()
         mock_resp = self._mock_urlopen(200, '{"ok": true}')
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with patch("askme.tools.robot_api_tool._open_url", return_value=mock_resp):
             result = tool.execute(service="nav", method="GET", path="/api/v1/tasks")
         data = json.loads(result)
         assert data["status"] == 200
@@ -77,7 +78,7 @@ class TestSuccessResponses:
     def test_non_json_response_returned_as_text(self):
         tool = _make_tool()
         mock_resp = self._mock_urlopen(200, "plain text response", "text/plain")
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with patch("askme.tools.robot_api_tool._open_url", return_value=mock_resp):
             result = tool.execute(service="telemetry", method="GET", path="/health")
         data = json.loads(result)
         assert data["body"] == "plain text response"
@@ -85,7 +86,7 @@ class TestSuccessResponses:
     def test_post_with_body_sends_json(self):
         tool = _make_tool()
         mock_resp = self._mock_urlopen(201, '{"created": true}')
-        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        with patch("askme.tools.robot_api_tool._open_url", return_value=mock_resp) as mock_open:
             tool.execute(service="control", method="POST", path="/api/v1/posture",
                         body={"posture": "stand"})
         request = mock_open.call_args[0][0]
@@ -107,7 +108,7 @@ class TestSuccessResponses:
             captured.append(req.full_url)
             return mock_resp
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("askme.tools.robot_api_tool._open_url", side_effect=fake_urlopen):
             tool.execute(service="control", method="GET", path="/health")
             tool.execute(service="safety", method="GET", path="/health")
             tool.execute(service="nav", method="GET", path="/health")
@@ -124,7 +125,7 @@ class TestSuccessResponses:
         tool = _make_tool()
         mock_resp = self._mock_urlopen(200, '{"ok": true}')
 
-        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        with patch("askme.tools.robot_api_tool._open_url", return_value=mock_resp) as mock_open:
             tool.execute(service="nav", method="GET", path="/health")
 
         request = mock_open.call_args[0][0]
@@ -138,7 +139,7 @@ class TestSuccessResponses:
         mock_resp = self._mock_urlopen(200, '{"ok": true}')
 
         with patch("askme.tools.robot_api_tool.get_section", return_value={}):
-            with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+            with patch("askme.tools.robot_api_tool._open_url", return_value=mock_resp) as mock_open:
                 tool.execute(service="nav", method="GET", path="/health")
 
         request = mock_open.call_args[0][0]
@@ -150,7 +151,7 @@ class TestSuccessResponses:
 class TestErrorResponses:
     def test_url_error_returns_unreachable_message(self):
         tool = _make_tool()
-        with patch("urllib.request.urlopen",
+        with patch("askme.tools.robot_api_tool._open_url",
                    side_effect=urllib.error.URLError("connection refused")):
             result = tool.execute(service="safety", method="GET", path="/api/v1/estop")
         assert "[Error]" in result
@@ -158,7 +159,7 @@ class TestErrorResponses:
 
     def test_timeout_error_returns_timeout_message(self):
         tool = _make_tool()
-        with patch("urllib.request.urlopen", side_effect=TimeoutError()):
+        with patch("askme.tools.robot_api_tool._open_url", side_effect=TimeoutError()):
             result = tool.execute(service="arbiter", method="GET", path="/api/v1/missions")
         assert "[Error]" in result
         assert "超时" in result
@@ -172,16 +173,30 @@ class TestErrorResponses:
             hdrs=None,
             fp=MagicMock(read=MagicMock(return_value=b'{"detail": "not found"}')),
         )
-        with patch("urllib.request.urlopen", side_effect=exc):
+        with patch("askme.tools.robot_api_tool._open_url", side_effect=exc):
             result = tool.execute(service="nav", method="GET", path="/api/v1/nonexistent")
         data = json.loads(result)
         assert data["status"] == 404
 
     def test_generic_exception_returns_error(self):
         tool = _make_tool()
-        with patch("urllib.request.urlopen", side_effect=RuntimeError("boom")):
+        with patch("askme.tools.robot_api_tool._open_url", side_effect=RuntimeError("boom")):
             result = tool.execute(service="ops", method="GET", path="/api/v1/config")
         assert "[Error]" in result
+
+
+def test_localhost_runtime_requests_bypass_environment_proxy():
+    request = urllib.request.Request("http://localhost:5070/health")
+    response = MagicMock()
+    opener = MagicMock()
+    opener.open.return_value = response
+
+    with patch("urllib.request.build_opener", return_value=opener) as build_opener:
+        assert _open_url(request, timeout=1.0) is response
+
+    proxy_handler = build_opener.call_args.args[0]
+    assert proxy_handler.proxies == {}
+    opener.open.assert_called_once_with(request, timeout=1.0)
 
 
 # ── Service port mapping ──────────────────────────────────────────────────────

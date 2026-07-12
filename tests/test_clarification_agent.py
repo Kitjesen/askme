@@ -2,12 +2,13 @@
 
 from unittest.mock import MagicMock
 
+from askme.skills.skill_model import SkillDefinition, SlotSpec
+
 from askme.pipeline.proactive.base import ProactiveContext
 from askme.pipeline.proactive.clarification_agent import (
     ClarificationPlannerAgent,
     _combine_prompts,
 )
-from askme.skills.skill_model import SkillDefinition, SlotSpec
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

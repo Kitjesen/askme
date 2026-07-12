@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 from askme.skills.audit import SkillAuditLog
 from askme.skills.skill_manager import SkillManager
 from askme.tools.skill_tools import CreateAgentProfileTool, CreateSkillTool, register_skill_tools

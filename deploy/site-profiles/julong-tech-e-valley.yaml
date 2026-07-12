@@ -1,0 +1,166 @@
+site:
+  site_id: julong-tech-e-valley
+  name: 聚龙科创e谷
+  map_version: 2026-07-commissioning
+
+customer:
+  customer_id: julong-tech-e-valley
+  customer_name: 聚龙科创e谷
+  industry: creative_park
+  project_id: julong-guide-patrol
+  project_name: 聚龙科创e谷导览巡检落地
+  delivery_model: solution_project
+  object_scope_note: 首期范围为访客导览与园区巡检；点位、路线和 SOP 待现场标定与验收。
+
+deployment:
+  stage: commissioning
+  supported_use_cases:
+    - visitor_wayfinding
+    - visitor_escort
+    - inspection_patrol
+  pending_on_site:
+    - wake_word_positive_negative_acoustic_calibration
+    - map_coordinate_survey
+    - destination_and_route_approval
+    - patrol_checkpoint_survey
+    - patrol_sop_and_escalation_policy
+    - device_credentials_and_connectivity
+
+managed_objects:
+  visitors:
+    display_name: 园区访客与导览目的地
+    category: visitor_service
+    object_labels:
+      - visitor
+      - help_point
+      - destination
+    scenario_ids:
+      - wayfinding_help_point
+      - visitor_escort
+    zone_types:
+      - help_point
+    device_sources:
+      - camera
+      - robot
+    responder_group: operations
+    evidence_required:
+      - service_point
+      - visitor_intent
+      - approved_route
+      - route_result
+    bindings:
+      vision_models:
+        - person-dwell-detection
+      sensor_protocols:
+        - voice-turn-json
+        - robot-route-status-json
+      skill_packages:
+        - capability.answer_wayfinding
+        - capability.escort_visitor
+      acceptance_tests:
+        - tests/scenario_tests/test_rag_trust_evaluation.py::visitor_wayfinding
+        - tests/test_space_cognition.py::visitor_escort
+    customer_visible: true
+  patrol_checkpoints:
+    display_name: 园区巡检路线与检查点
+    category: patrol
+    object_labels:
+      - patrol_route
+      - patrol_checkpoint
+      - anomaly
+    scenario_ids:
+      - urgent_patrol_dispatch
+    zone_types:
+      - main_channel
+      - patrol_checkpoint
+    device_sources:
+      - camera
+      - sensor
+      - robot
+    responder_group: operations
+    evidence_required:
+      - operator_identity
+      - target_location
+      - approved_patrol_sop
+      - photo
+      - sensor_reading
+      - route_result
+    bindings:
+      vision_models:
+        - person-dwell-detection
+      sensor_protocols:
+        - camera-detection-json
+        - smoke-temperature-json
+        - robot-route-status-json
+        - robot-status-json
+      skill_packages:
+        - capability.navigate
+        - capability.patrol_scan
+      acceptance_tests:
+        - tests/test_capability_scenario_intent_routes.py::test_scenario_intent_preview_covers_customer_scenario_matrix_without_execution
+    customer_visible: true
+
+responder_groups:
+  security:
+    name: 聚龙科创e谷安保响应组
+    webhook_env: ASKME_DINGTALK_SECURITY_WEBHOOK
+    secret_env: ASKME_DINGTALK_SECURITY_SECRET
+  cleaning:
+    name: 聚龙科创e谷保洁响应组
+    webhook_env: ASKME_DINGTALK_CLEANING_WEBHOOK
+    secret_env: ASKME_DINGTALK_CLEANING_SECRET
+  operations:
+    name: 聚龙科创e谷运营响应组
+    webhook_env: ASKME_DINGTALK_OPERATIONS_WEBHOOK
+    secret_env: ASKME_DINGTALK_OPERATIONS_SECRET
+
+zones:
+  julong-main-entrance:
+    name: 聚龙科创e谷主入口通道（待现场标定）
+    location: 聚龙科创e谷主入口（待现场标定）
+    type: main_channel
+    parking_allowed: false
+    commissioning_status: pending_site_survey
+  julong-guide-01:
+    name: 聚龙科创e谷导览服务点（待现场标定）
+    location: 聚龙科创e谷访客接待区域（待现场标定）
+    type: help_point
+    help_point_id: julong-guide-01
+    commissioning_status: pending_site_survey
+  julong-patrol-01:
+    name: 聚龙科创e谷巡检检查点01（待现场标定）
+    location: 聚龙科创e谷巡检路线（待现场标定）
+    type: patrol_checkpoint
+    commissioning_status: pending_site_survey
+
+devices:
+  camera-julong-guide-01:
+    name: 聚龙科创e谷导览点摄像头（待接入）
+    source: camera
+    camera_id: cam-julong-guide-01
+    zone_id: julong-guide-01
+    secret_env: ASKME_FIELD_CAMERA_JULONG_GUIDE_SECRET
+    commissioning_status: pending_device_binding
+  sensor-julong-patrol-01:
+    name: 聚龙科创e谷巡检环境传感器（待接入）
+    source: sensor
+    sensor_type: smoke_temperature
+    zone_id: julong-patrol-01
+    secret_env: ASKME_FIELD_SENSOR_JULONG_PATROL_SECRET
+    commissioning_status: pending_device_binding
+  robot-xiaosuan-1:
+    name: 小算
+    source: robot
+    robot_id: xiaosuan-1
+    zone_id: julong-main-entrance
+    secret_env: ASKME_FIELD_ROBOT_XIAOSUAN_SECRET
+    commissioning_status: pending_device_binding
+
+thresholds:
+  parking_duration_s: 120
+  night_stranger_dwell_s: 10
+  fire_temperature_c: 60
+  smoke_level: 0.7
+  trash_fill_ratio: 0.8
+  crowd_person_count: 5
+  crowd_duration_min: 30

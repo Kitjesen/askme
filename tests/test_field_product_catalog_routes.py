@@ -9,8 +9,10 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-from askme.api.routes.field_product_catalog import FieldProductCatalogPipeline
-from askme.api.routes.field_product_catalog import create_field_product_catalog_router
+from askme.api.routes.field_product_catalog import (
+    FieldProductCatalogPipeline,
+    create_field_product_catalog_router,
+)
 
 
 def test_product_catalog_routes_are_extracted_from_main_field_router() -> None:

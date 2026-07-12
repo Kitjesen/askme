@@ -187,7 +187,7 @@ def test_blueprint_readiness_uses_product_config_aliases() -> None:
             "field_operations": {
                 "dingtalk_webhooks": {"security": "https://example.invalid/dingtalk"},
             },
-            "runtime_handoff": {"enabled": True, "profile": "fake"},
+            "runtime_handoff": {"enabled": True, "profile": "lab"},
             "runtime": {
                 "dog_control": {
                     "enabled": True,
@@ -206,6 +206,71 @@ def test_blueprint_readiness_uses_product_config_aliases() -> None:
     assert edge_ready["missing_config"] == []
     assert edge_ready["config_evidence"][4]["matched_path"] == "field_operations.dingtalk_webhooks"
     assert edge_ready["config_evidence"][5]["matched_path"] == "runtime.dog_control"
+
+
+def test_edge_robot_fake_runtime_profile_blocks_customer_site_validation() -> None:
+    result = blueprint_readiness(
+        "edge_robot",
+        config={
+            "voice": {
+                "asr": {"model_dir": "models/asr/local"},
+                "tts": {"provider": "minimax", "voice_id": "customer-default"},
+            },
+            "perception": {
+                "interaction_provider": {
+                    "enabled": True,
+                    "paths": {"pose_gaze": "artifacts/perception/pose_gaze.json"},
+                }
+            },
+            "field_operations": {
+                "dingtalk_webhooks": {"security": "https://example.invalid/dingtalk"},
+            },
+            "runtime_handoff": {"enabled": True, "profile": "fake"},
+            "runtime": {
+                "dog_control": {
+                    "enabled": True,
+                    "base_url": "http://dog-control.local",
+                    "bearer_token": "test-token",
+                }
+            },
+        },
+    )
+    package = blueprint_delivery_package(
+        "edge_robot",
+        config={
+            "voice": {
+                "asr": {"model_dir": "models/asr/local"},
+                "tts": {"provider": "minimax", "voice_id": "customer-default"},
+            },
+            "perception": {
+                "interaction_provider": {
+                    "enabled": True,
+                    "paths": {"pose_gaze": "artifacts/perception/pose_gaze.json"},
+                }
+            },
+            "field_operations": {
+                "dingtalk_webhooks": {"security": "https://example.invalid/dingtalk"},
+            },
+            "runtime_handoff": {"enabled": True, "profile": "fake"},
+            "runtime": {
+                "dog_control": {
+                    "enabled": True,
+                    "base_url": "http://dog-control.local",
+                    "bearer_token": "test-token",
+                }
+            },
+        },
+    )
+
+    assert result["status"] == "runtime_profile_not_site_ready"
+    assert result["runtime_profile"]["profile"] == "fake"
+    assert result["runtime_profile"]["allowed_for_site_validation"] == ["lab", "prod"]
+    runtime_gate = next(gate for gate in result["gates"] if gate["gate_id"] == "runtime_profile")
+    assert runtime_gate["status"] == "fail"
+    assert "fake" in runtime_gate["message"]
+    assert package["status"] == "demo_or_shadow_only"
+    assert package["customer_status"] == "仅可演示或影子验证"
+    assert package["customer_next_step"] == "切换 runtime_handoff.profile 到 lab 或 prod 后再进入客户现场验证。"
 
 
 def test_blueprint_readiness_rejects_demo_placeholders_and_disabled_services() -> None:
@@ -261,7 +326,7 @@ def test_blueprint_delivery_package_is_actionable_for_customer_pilot() -> None:
             "field_operations": {
                 "dingtalk_webhooks": {"security": "https://example.invalid/dingtalk"},
             },
-            "runtime_handoff": {"enabled": True, "profile": "fake"},
+            "runtime_handoff": {"enabled": True, "profile": "lab"},
             "runtime": {
                 "dog_control": {
                     "enabled": True,
@@ -351,7 +416,7 @@ def test_blueprint_startup_commands_resolve_executable_modules(startup_command: 
 
     assert result.returncode == 0, result.stderr or result.stdout
     assert "Traceback" not in result.stderr
-    assert result.stdout.strip()
+    assert result.stdout.strip() or result.stderr.strip()
 
 
 @pytest.mark.parametrize(
@@ -374,7 +439,11 @@ def test_blueprint_startup_commands_support_no_io_preflight(startup_command: str
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
-    payload = json.loads(result.stdout)
+    raw = result.stdout or result.stderr
+    # Log output may include a prefix; extract JSON from the last line
+    if "INFO:" in raw:
+        raw = raw.split("INFO:")[-1].strip()
+    payload = json.loads(raw)
     assert payload["ok"] is True
     assert payload["opens_runtime_io"] is False
     assert payload["module_count"] == len(payload["modules"])

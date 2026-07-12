@@ -128,6 +128,7 @@ def build_components() -> tuple[Any, Any, Any]:
     import asyncio
 
     from askme.blueprints.text import text as text_blueprint
+
     from askme.config import get_config
 
     cfg = get_config()

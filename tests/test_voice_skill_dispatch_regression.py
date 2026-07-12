@@ -4,10 +4,10 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
-from askme.robot_interaction import IntentRouter, IntentType
 from askme.pipeline.voice_loop import VoiceLoop
 from askme.skills.skill_manager import SkillManager
+
+from askme.robot_interaction import IntentRouter, IntentType
 
 VOICE_TEXT = "\u770b\u770b\u6587\u4ef6"
 EXPECTED_SKILL = "list_directory"

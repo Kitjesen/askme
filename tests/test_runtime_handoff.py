@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 
-from askme.cognition import CognitivePlanner, WorkingMemory, WorldStateService
 from askme.runtime.handoff import (
     RuntimeHandoffService,
     SafetyPreflightService,
@@ -11,6 +10,8 @@ from askme.runtime.handoff import (
     TaskStep,
 )
 from askme.runtime.mission import MissionService
+
+from askme.cognition import CognitivePlanner, WorkingMemory, WorldStateService
 
 
 def _confirmed_plan() -> tuple[WorldStateService, dict]:

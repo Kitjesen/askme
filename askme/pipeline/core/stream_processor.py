@@ -11,8 +11,8 @@ from askme.pipeline.core.trace import get_tracer
 
 if TYPE_CHECKING:
     from askme.llm.core.client import LLMClient
-    from askme.ports import AudioFrontendPort
     from askme.pipeline.core.tool_executor import ToolExecutor
+    from askme.ports import AudioFrontendPort
     from askme.tools.core.tool_registry import ToolRegistry
     from askme.voice.core.stream_splitter import StreamSplitter
 
@@ -70,8 +70,8 @@ class _ThinkFilter:
 class StreamProcessor:
     """Handles LLM streaming: think filtering, sentence splitting, TTS piping, tool accumulation."""
 
-    THINKING_DELAY = 1.2          # seconds before playing the "thinking" audio cue
-    SLOW_NETWORK_DELAY = 5.0      # seconds before playing a second "slow network" cue
+    THINKING_DELAY = 999.0         # effectively disabled — silence feels more natural than a cue
+    SLOW_NETWORK_DELAY = 8.0       # only alert on genuine network stalls
     TRUNCATION_HINT = "还有更多内容，说继续我就接着说。"
 
     def __init__(
@@ -220,6 +220,7 @@ class StreamProcessor:
     async def stream_with_tools(
         self, messages: list[dict[str, Any]], system_prompt: str,
         model: str | None = None, source: str = "voice",
+        conversation_session_id: str | None = None,
     ) -> str:
         """Stream LLM response, speak sentences immediately, handle tool calls."""
         tool_definitions = self._tools.get_definitions(
@@ -234,6 +235,15 @@ class StreamProcessor:
 
         is_voice = source == "voice"
 
+        # Voice turns use a tighter token cap for lower latency.
+        per_call_max_tokens: int | None = None
+        if is_voice:
+            try:
+                from askme.config import get_config
+                per_call_max_tokens = get_config().get("brain", {}).get("voice_max_tokens")
+            except Exception:
+                per_call_max_tokens = None
+
         thinking_task: asyncio.Task[None] | None = None
         slow_network_task: asyncio.Task[None] | None = None
         if is_voice:
@@ -246,6 +256,7 @@ class StreamProcessor:
                 nonlocal ttft_logged, thinking_task, slow_network_task
                 async for chunk in self._llm.chat_stream(
                     messages, tools=tool_definitions, tool_choice="auto", model=model,
+                    max_tokens=per_call_max_tokens,
                     cancel_token=self._cancel_token,
                 ):
                     if not ttft_logged:
@@ -274,6 +285,7 @@ class StreamProcessor:
             self._audio.drain_buffers()
             full_response = await self._tool_executor.execute_tools(
                 tool_calls_acc, system_prompt, model=model, source=source,
+                conversation_session_id=conversation_session_id,
             )
 
         return full_response

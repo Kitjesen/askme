@@ -6,7 +6,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from askme.pipeline.brain_pipeline import BrainPipeline
 from askme.pipeline.hooks import PipelineHooks
 

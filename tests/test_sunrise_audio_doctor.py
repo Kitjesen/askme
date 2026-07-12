@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -199,7 +200,8 @@ def test_cli_runtime_sunrise_audio_doctor_json(monkeypatch, capsys) -> None:
     }
 
 
-def test_cli_runtime_sunrise_audio_doctor_exits_nonzero_when_degraded(monkeypatch, capsys) -> None:
+def test_cli_runtime_sunrise_audio_doctor_exits_nonzero_when_degraded(monkeypatch, caplog) -> None:
+    caplog.set_level(logging.INFO)
     monkeypatch.setattr(
         cli,
         "_run_sunrise_audio_doctor",
@@ -215,7 +217,8 @@ def test_cli_runtime_sunrise_audio_doctor_exits_nonzero_when_degraded(monkeypatc
         cli.main(["runtime", "sunrise-audio-doctor"])
 
     assert exc.value.code == 1
-    assert "sunrise-audio-doctor: degraded" in capsys.readouterr().out
+    out = caplog.text
+    assert "sunrise-audio-doctor: degraded" in out
 
 
 def _fake_runner(command: list[str], _timeout: float) -> doctor.CommandResult:

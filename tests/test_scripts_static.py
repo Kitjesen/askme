@@ -4,7 +4,6 @@ import ast
 import re
 from pathlib import Path
 
-
 SCRIPTS_ROOT = Path("scripts")
 
 SCRIPT_SOURCE_SUFFIXES = {

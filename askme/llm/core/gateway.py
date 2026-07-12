@@ -69,6 +69,7 @@ class LLMGateway(LLMBackend):
         tool_choice: str | None = None,
         model: str | None = None,
         temperature: float | None = None,
+        max_tokens: int | None = None,
         thinking: bool = False,
         cancel_token: asyncio.Event | None = None,
         context: LLMCallContext | None = None,
@@ -88,6 +89,8 @@ class LLMGateway(LLMBackend):
                 tool_choice=tool_choice,
                 temperature=temperature,
             )
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
             for model_name in self._model_chain(model):
                 last_model_name = model_name
                 self._apply_model_policy(kwargs, model_name, thinking=thinking)

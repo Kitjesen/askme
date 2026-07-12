@@ -153,7 +153,7 @@ _REACTION_RULES: list[
 ]
 # Content generation prompt template
 _CONTENT_PROMPT = (
-    "你是巡检机器人Thunder。"
+    "你是{site_name}的导览与巡检机器人{robot_name}。"
     "根据以下场景信息，"
     "用一句简短的中文回应。\n"
     "不超过30字。语气友好但专业。\n\n"
@@ -273,6 +273,8 @@ class HybridReaction(ReactionBackend):
         episodic: EpisodicMemory | None = None,
         content_model: str = "",
         content_timeout: float = 5.0,
+        robot_name: str = "现场机器人",
+        site_name: str = "当前园区",
         **kwargs: Any,
     ) -> None:
         self._llm = llm
@@ -280,6 +282,8 @@ class HybridReaction(ReactionBackend):
         self._episodic = episodic
         self._content_model = content_model
         self._content_timeout = content_timeout
+        self._robot_name = str(robot_name or "现场机器人")
+        self._site_name = str(site_name or "当前园区")
 
     async def decide(self, context: SceneContext) -> ReactionDecision:
         return evaluate_rules(context)
@@ -309,6 +313,8 @@ class HybridReaction(ReactionBackend):
                 zone = context.zone_name or "未知区域"
 
                 prompt = _CONTENT_PROMPT.format(
+                    robot_name=self._robot_name,
+                    site_name=self._site_name,
                     scene_summary=context.event.description_zh(),
                     time_str=time_str,
                     zone_name=zone,
@@ -368,6 +374,8 @@ class LLMReaction(ReactionBackend):
         episodic: EpisodicMemory | None = None,
         decision_model: str = "",
         decision_timeout: float = 8.0,
+        robot_name: str = "现场机器人",
+        site_name: str = "当前园区",
         **kwargs: Any,
     ) -> None:
         self._llm = llm
@@ -375,6 +383,8 @@ class LLMReaction(ReactionBackend):
         self._episodic = episodic
         self._decision_model = decision_model
         self._decision_timeout = decision_timeout
+        self._robot_name = str(robot_name or "现场机器人")
+        self._site_name = str(site_name or "当前园区")
         self._rule_fallback = RuleBasedReaction(
             alert_dispatcher=alert_dispatcher,
             episodic=episodic,
@@ -403,6 +413,8 @@ class LLMReaction(ReactionBackend):
 
             now = datetime.datetime.now()
             prompt = _CONTENT_PROMPT.format(
+                robot_name=self._robot_name,
+                site_name=self._site_name,
                 scene_summary=context.event.description_zh(),
                 time_str=now.strftime("%H:%M"),
                 zone_name=context.zone_name or "未知区域",

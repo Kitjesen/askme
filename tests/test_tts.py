@@ -136,7 +136,6 @@ def test_playback_loop_uses_configured_output_device(monkeypatch):
 def test_playback_loop_uses_usb_direct_transport(monkeypatch):
     """output_transport=usb_direct bypasses aplay/sounddevice playback."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     played: dict[str, int] = {}
@@ -169,7 +168,6 @@ def test_playback_loop_uses_usb_direct_transport(monkeypatch):
 def test_wait_done_waits_for_usb_direct_chunk_after_buffer_pop(monkeypatch):
     """wait_done must not return while USB direct playback is in progress."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     started = threading.Event()
@@ -238,7 +236,6 @@ def test_wait_done_times_out_while_synthesis_queue_is_busy(monkeypatch):
 def test_usb_direct_playback_coalesces_chunks_and_adds_preroll(monkeypatch):
     """MiniMax streamed chunks should become one continuous MCP01 USB play."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     played: dict[str, np.ndarray] = {}
@@ -277,7 +274,6 @@ def test_usb_direct_playback_coalesces_chunks_and_adds_preroll(monkeypatch):
 def test_usb_direct_background_prewarm_is_opt_in(monkeypatch):
     """A separate prewarm stream must not make the first speech stream clip."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     played: dict[str, np.ndarray] = {}
@@ -357,7 +353,6 @@ def test_usb_direct_background_prewarm_can_be_enabled(monkeypatch):
 def test_usb_direct_warm_playback_adds_stream_guard(monkeypatch):
     """Warm USB sessions still need a short guard for new stream start-up."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     played: dict[str, np.ndarray] = {}
@@ -394,7 +389,6 @@ def test_usb_direct_warm_playback_adds_stream_guard(monkeypatch):
 def test_usb_direct_speech_leadin_ignores_feedback_warm_state(monkeypatch):
     """A prior feedback helper must not downgrade the next speech lead-in."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     played: list[np.ndarray] = []
@@ -438,7 +432,6 @@ def test_usb_direct_speech_does_not_trust_live_stream_by_default(monkeypatch):
     import time
 
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     class FakeProc:
@@ -482,7 +475,6 @@ def test_usb_direct_speech_does_not_trust_live_stream_by_default(monkeypatch):
 def test_usb_direct_speech_onset_cushion_protects_first_audible_samples():
     """USB direct speech can prepend a low-volume sacrificial first onset."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     engine = TTSEngine(
@@ -516,7 +508,6 @@ def test_usb_direct_speech_onset_cushion_protects_first_audible_samples():
 def test_usb_direct_speech_path_inserts_cushion_between_leadin_and_speech(monkeypatch):
     """The real USB speech path sends lead-in, cushion, gap, then full speech."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     played: dict[str, np.ndarray] = {}
@@ -553,7 +544,6 @@ def test_usb_direct_speech_path_inserts_cushion_between_leadin_and_speech(monkey
 
 def test_usb_direct_speech_gain_boosts_only_speech_body(monkeypatch):
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     played: dict[str, np.ndarray] = {}
@@ -587,7 +577,6 @@ def test_usb_direct_speech_gain_boosts_only_speech_body(monkeypatch):
 def test_usb_direct_speech_leadin_can_include_wake_signal():
     """A shaped wake signal can open MCP01's speaker gate before speech."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     engine = TTSEngine(
@@ -616,7 +605,6 @@ def test_usb_direct_speech_leadin_can_include_wake_signal():
 def test_usb_direct_speech_leadin_can_be_silent_when_wake_gains_are_zero():
     """Sunrise can keep the timing guard without an audible pre-speech artifact."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     engine = TTSEngine(
@@ -643,7 +631,6 @@ def test_usb_direct_speech_leadin_can_be_silent_when_wake_gains_are_zero():
 def test_usb_direct_speech_leadin_shortens_when_stream_is_warm():
     """A trusted warm stream can use a shorter active wake guard."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     engine = TTSEngine(
@@ -671,9 +658,8 @@ def test_usb_direct_speech_leadin_shortens_when_stream_is_warm():
 
 def test_playback_loop_falls_back_to_usb_when_aplay_pipe_breaks(monkeypatch):
     """On Sunrise, ALSA can expose aplay but fail when no card exists."""
-    import numpy as np
-
     import askme.voice.tts as tts_mod
+    import numpy as np
     from askme.voice.tts import TTSEngine
 
     class _BrokenStdin:
@@ -721,7 +707,6 @@ def test_playback_loop_falls_back_to_usb_when_aplay_pipe_breaks(monkeypatch):
 def test_auto_transport_uses_usb_when_plughw_has_no_alsa_card(monkeypatch):
     """If ALSA reports no card, auto mode should not trust aplay."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     played: dict[str, int] = {}
@@ -756,7 +741,6 @@ def test_auto_transport_uses_usb_when_plughw_has_no_alsa_card(monkeypatch):
 def test_usb_direct_pcm_is_48k_stereo():
     """MCP01 direct USB helper expects 48 kHz stereo S16_LE PCM."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     engine = TTSEngine({"backend": "edge", "sample_rate": 24000})
@@ -773,7 +757,6 @@ def test_usb_direct_pcm_is_48k_stereo():
 def test_usb_direct_persistent_stream_writes_pcm_without_one_shot(monkeypatch):
     """Persistent USB mode writes to the live helper instead of reopening USB."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     class _Stdin:
@@ -826,7 +809,6 @@ def test_usb_direct_persistent_stream_writes_pcm_without_one_shot(monkeypatch):
 def test_usb_direct_persistent_stream_falls_back_to_one_shot(monkeypatch):
     """If the persistent helper fails to start, playback still has a fallback."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     played: dict[str, int] = {}
@@ -895,7 +877,6 @@ def test_usb_direct_persistent_playback_loop_can_prewarm_same_stream(monkeypatch
 def test_feedback_audio_uses_usb_direct_with_preroll(monkeypatch):
     """ACK/thinking chimes should use the same USB direct path as TTS."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     played: dict[str, np.ndarray] = {}
@@ -927,7 +908,6 @@ def test_feedback_audio_uses_usb_direct_with_preroll(monkeypatch):
 def test_feedback_audio_clears_warming_when_router_fails():
     """A failed output-session claim must not leave the DAC marked warm."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     class _FailingRouter:
@@ -960,7 +940,6 @@ def test_feedback_audio_clears_warming_when_router_fails():
 def test_feedback_audio_serializes_cold_preroll(monkeypatch):
     """Concurrent USB feedback calls should not both pay cold-DAC preroll."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     played: list[int] = []
@@ -1007,7 +986,6 @@ def test_feedback_audio_serializes_cold_preroll(monkeypatch):
 def test_feedback_audio_returns_false_when_usb_direct_inactive():
     """Non-USB transports keep the legacy chime playback path."""
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     engine = TTSEngine({"backend": "edge", "output_transport": "sounddevice"})

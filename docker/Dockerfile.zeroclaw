@@ -1,0 +1,29 @@
+# ─────────────────────────────────────────────────────────────
+# ZeroClaw — Rust Agent 内核
+# 多阶段构建：rust:1.94-slim 编译，debian:bookworm-slim 运行
+# ─────────────────────────────────────────────────────────────
+
+# ── Stage 1: Build ──────────────────────────────────────────
+FROM rust:1.84-slim AS builder
+
+ARG ZEROCLAW_VERSION=0.1.7
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN cargo install zeroclaw --version "${ZEROCLAW_VERSION}" --locked
+
+# ── Stage 2: Runtime ────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/cargo/bin/zeroclaw /usr/local/bin/zeroclaw
+
+EXPOSE 8080
+
+ENTRYPOINT ["zeroclaw", "gateway"]

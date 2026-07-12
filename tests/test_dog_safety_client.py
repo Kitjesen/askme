@@ -6,7 +6,6 @@ import time
 from unittest.mock import MagicMock, patch
 
 import requests
-
 from askme.robot.safety_client import _ESTOP_PATH, DogSafetyClient
 
 

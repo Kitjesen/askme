@@ -1,0 +1,50 @@
+# ─────────────────────────────────────────────────────────────
+# Askme — Python 语音 AI + 机器人 Agent 服务
+# 基于 python:3.11-slim
+# ─────────────────────────────────────────────────────────────
+
+FROM python:3.11-slim AS base
+
+# 系统依赖：音频、编译工具、健康检查
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libportaudio2 \
+    libsndfile1 \
+    ffmpeg \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 复制项目代码（pip install -e 需要 askme/ 包目录）
+COPY pyproject.toml ./
+COPY askme/ askme/
+
+# 安装依赖和项目本身
+RUN pip install --no-cache-dir -e ".[dev,embed]"
+
+# 模型文件通过 volume 或 COPY 注入（运行时挂载 models/）
+# COPY models/ models/
+
+# ── 创建非 root 用户 ──────────────────────────────────────
+RUN groupadd --system --gid 1001 askme \
+    && useradd --system --uid 1001 --gid askme --home-dir /home/askme \
+        --shell /sbin/nologin --comment "Askme Runtime" askme \
+    && mkdir -p /home/askme /app/data /app/models \
+    && chown -R askme:askme /app /home/askme
+
+# 复制入口脚本
+COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# ── 切换到非 root 用户 ─────────────────────────────────────
+USER askme
+
+EXPOSE 8765
+
+# ── 健康检查 ────────────────────────────────────────────────
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8765/healthz', timeout=5)" 2>/dev/null || exit 1
+
+# 默认入口：园区巡检机器人运行时
+ENTRYPOINT ["docker-entrypoint.sh"]

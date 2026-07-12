@@ -15,10 +15,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from fastapi.testclient import TestClient
-
-from askme.cognition import WorldStateService
-from askme.health_server import build_health_snapshot, create_health_app
 from askme.pipeline.field_operations import FieldOperationsService
 from askme.runtime.field_callbacks import (
     build_field_runtime_callback_sequence,
@@ -26,6 +22,10 @@ from askme.runtime.field_callbacks import (
     post_field_runtime_callback_sequence,
 )
 from askme.runtime.handoff import RuntimeHandoffService
+from fastapi.testclient import TestClient
+
+from askme.cognition import WorldStateService
+from askme.health_server import build_health_snapshot, create_health_app
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -48,6 +48,7 @@ class PromptBuilder:
         qp_memory: Any,
         memory_system: MemorySystem | None = None,
         rag_policy_templates: dict[str, str] | None = None,
+        relay_compat_mode: bool = False,
     ) -> None:
         self._base_prompt = base_prompt
         self._prompt_seed = prompt_seed
@@ -61,6 +62,7 @@ class PromptBuilder:
         self._vision = vision
         self._qp_memory = qp_memory
         self._memory_system = memory_system
+        self._relay_compat_mode = bool(relay_compat_mode)
         self._rag_policy_templates = {
             str(key).strip(): str(value).strip()
             for key, value in (rag_policy_templates or {}).items()
@@ -172,15 +174,12 @@ class PromptBuilder:
         *,
         source: str = "voice",
     ) -> list[dict[str, Any]]:
-        """Inject prompt seed and user format prefix for relay compatibility.
+        """Inject prompt seed and user format prefix.
 
-        The relay service overrides our system prompt with its own developer
-        assistant identity. To counter this:
-          1. DROP the system message when prompt_seed is present — the seed
-             establishes identity via fake user/assistant turns, which the
-             relay cannot override.
-          2. Prepend a TTS format tag to the latest user message to enforce
-             output constraints (no markdown, short, Chinese).
+        Direct providers retain the authoritative system message. Legacy relay
+        deployments can explicitly enable ``relay_compat_mode`` to drop it and
+        establish identity through seed turns when the relay overwrites system
+        messages upstream.
 
         Original conversation history is NOT modified — transformations are
         applied only to the copy sent to the LLM.
@@ -191,16 +190,13 @@ class PromptBuilder:
         if not self._prompt_seed and not self._user_prefix and not text_channel_hint:
             return messages
 
-        # When seed is present, skip system message to avoid relay conflict.
-        # The relay injects its own system prompt regardless; including ours
-        # creates competing identities. Seed messages work better alone.
-        #
-        # BUT: the dropped system prompt contained tool instructions.
-        # Inject tool awareness as a seed exchange so the LLM knows it
-        # CAN and SHOULD call tools for factual queries.
         if self._prompt_seed:
-            result = list(self._prompt_seed)
-            system_prompt = str(messages[0].get("content", "")) if messages else ""
+            system_messages = [m for m in messages if m.get("role") == "system"]
+            system_prompt = "\n".join(
+                str(message.get("content", "")) for message in system_messages
+            )
+            result = [] if self._relay_compat_mode else list(system_messages)
+            result.extend(self._prompt_seed)
 
             tool_defs = self._tools.get_definitions(
                 max_safety_level=self._general_tool_max_safety_level
@@ -269,6 +265,46 @@ class PromptBuilder:
 
         result.extend(rest)
         return result
+
+    def reconfigure(
+        self,
+        *,
+        base_prompt: str | None = None,
+        prompt_seed: list[dict[str, str]] | None = None,
+        user_prefix: str | None = None,
+        rag_policy_templates: dict[str, str] | None = None,
+        relay_compat_mode: bool | None = None,
+    ) -> dict[str, Any]:
+        """Apply prompt settings for subsequent turns without rebuilding the pipeline."""
+
+        if base_prompt is not None:
+            self._base_prompt = str(base_prompt).strip()
+        if prompt_seed is not None:
+            self._prompt_seed = [
+                dict(item) for item in prompt_seed if isinstance(item, dict)
+            ]
+        if user_prefix is not None:
+            self._user_prefix = str(user_prefix)
+        if rag_policy_templates is not None:
+            self._rag_policy_templates = {
+                str(key).strip(): str(value).strip()
+                for key, value in rag_policy_templates.items()
+                if str(key).strip() and str(value).strip()
+            }
+        if relay_compat_mode is not None:
+            self._relay_compat_mode = bool(relay_compat_mode)
+        return self.runtime_settings()
+
+    def runtime_settings(self) -> dict[str, Any]:
+        """Return the active non-secret prompt settings for the control plane."""
+
+        return {
+            "system_prompt": self._base_prompt,
+            "prompt_seed": [dict(item) for item in self._prompt_seed],
+            "user_prefix": self._user_prefix,
+            "rag_policy_templates": dict(self._rag_policy_templates),
+            "relay_compat_mode": self._relay_compat_mode,
+        }
 
     def _format_rag_policy_block(self, policy: dict[str, Any] | None) -> str:
         if not isinstance(policy, dict) or not policy:

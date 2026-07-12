@@ -20,8 +20,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
 from askme.skills.skill_model import SkillDefinition, SlotSpec
+
+from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

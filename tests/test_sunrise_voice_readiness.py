@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,30 @@ def test_readiness_can_require_cloud_asr(monkeypatch) -> None:
     assert payload["summary"]["cloud_asr_required"] is True
     assert payload["summary"]["cloud_asr_ok"] is True
     assert payload["checks"]["cloud_asr"]["status"] == "ok"
+
+
+def test_readiness_accepts_volcengine_legacy_credentials(monkeypatch) -> None:
+    monkeypatch.setattr(sunrise_readiness, "_websocket_client_available", lambda: True)
+
+    payload = sunrise_readiness.run_sunrise_voice_readiness(
+        {
+            "voice": {
+                "cloud_asr": {
+                    "provider": "volcengine",
+                    "enabled": True,
+                    "app_id": "app-test",
+                    "access_token": "token-test",
+                }
+            }
+        },
+        require_cloud_asr=True,
+        voice_health_runner=lambda _cfg: _ok("voice"),
+        audio_doctor_runner=lambda _cfg, _guard: _ok("audio"),
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["checks"]["cloud_asr"]["provider"] == "volcengine"
+    assert payload["checks"]["cloud_asr"]["credentials_present"] is True
 
 
 def test_required_cloud_asr_makes_room_loop_use_cloud(monkeypatch) -> None:
@@ -174,7 +199,7 @@ def test_cli_runtime_sunrise_voice_readiness_writes_json_out(monkeypatch, tmp_pa
     assert payload["target"] == "sunrise-voice-readiness"
 
 
-def test_cli_runtime_sunrise_voice_readiness_exits_nonzero_when_degraded(monkeypatch, capsys) -> None:
+def test_cli_runtime_sunrise_voice_readiness_exits_nonzero_when_degraded(monkeypatch, caplog) -> None:
     monkeypatch.setattr(
         cli,
         "_run_sunrise_voice_readiness",
@@ -186,11 +211,12 @@ def test_cli_runtime_sunrise_voice_readiness_exits_nonzero_when_degraded(monkeyp
         },
     )
 
+    caplog.set_level(logging.INFO)
     with pytest.raises(SystemExit) as exc:
         cli.main(["runtime", "sunrise-voice-readiness"])
 
     assert exc.value.code == 1
-    assert "sunrise-voice-readiness: degraded" in capsys.readouterr().out
+    assert "sunrise-voice-readiness: degraded" in caplog.text
 
 
 def test_room_loop_sentinel_uses_fresh_artifact_dir(monkeypatch, tmp_path: Path) -> None:

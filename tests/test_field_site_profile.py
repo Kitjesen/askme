@@ -190,6 +190,33 @@ def test_demo_field_site_profile_passes_and_exports_runtime_config() -> None:
     )
 
 
+def test_julong_site_profile_scopes_guide_and_patrol_for_commissioning() -> None:
+    profile_path = Path("deploy/site-profiles/julong-tech-e-valley.yaml")
+
+    report = build_site_profile_report(profile_path)
+
+    assert report["status"] == "passed"
+    assert report["summary"]["site_id"] == "julong-tech-e-valley"
+    assert report["summary"]["site_name"] == "聚龙科创e谷"
+    assert report["summary"]["project_id"] == "julong-guide-patrol"
+    assert report["summary"]["help_point_count"] == 1
+    assert report["summary"]["device_sources"] == {
+        "camera": 1,
+        "robot": 1,
+        "sensor": 1,
+    }
+    objects = report["field_operations_config"]["managed_objects"]
+    assert set(objects) == {"patrol_checkpoints", "visitors"}
+    assert "capability.patrol_scan" in objects["patrol_checkpoints"]["bindings"][
+        "skill_packages"
+    ]
+    assert "capability.answer_wayfinding" in objects["visitors"]["bindings"][
+        "skill_packages"
+    ]
+    zones = report["field_operations_config"]["site_map"]["zones"]
+    assert all("待现场标定" in zone["name"] for zone in zones.values())
+
+
 def test_field_site_profile_env_check_warns_for_unset_references(monkeypatch) -> None:
     monkeypatch.delenv("ASKME_DINGTALK_SECURITY_WEBHOOK", raising=False)
 
@@ -1880,6 +1907,96 @@ def test_customer_project_customer_signoff_accepts_complete_verified_evidence_re
     assert signoffs["latest"]["decision"] == "accepted"
     assert signoffs["latest"]["integrity_valid"] is True
     assert signoffs["latest"]["evidence_ref_assessment"]["valid"] is True
+
+
+def test_customer_project_accepted_signoff_still_blocks_unattended_production_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_root = tmp_path / "profiles"
+    shutil.copytree(Path("deploy/site-profiles"), profile_root)
+    detail = get_customer_project_profile(profile_root, "demo-field-ops")
+    profile_path = Path(detail["profile_path"])
+    profile = load_field_site_profile(profile_path)
+    profile["acceptance_reviews"] = [
+        {
+            "review_id": "ready-review",
+            "reviewed_at": time.time(),
+            "operator_id": "delivery.lead",
+            "decision": "accepted",
+            "reason": "Internal delivery review accepted the pilot handoff.",
+            "risk_acknowledgement": True,
+        }
+    ]
+    profile_path.write_text(
+        yaml.safe_dump(profile, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    ready_closure = _ready_customer_signoff_closure()
+    original_closure = acceptance_module.customer_project_acceptance_closure
+    monkeypatch.setattr(
+        acceptance_module,
+        "customer_project_acceptance_closure",
+        lambda *args, **kwargs: ready_closure,
+    )
+
+    accepted = acceptance_module.register_customer_project_customer_signoff(
+        profile_root,
+        "demo-field-ops",
+        _accepted_customer_signoff_payload(_complete_customer_signoff_evidence_refs()),
+        operator_id="delivery.lead",
+        reason="Customer accepts the verified pilot handoff package.",
+    )
+
+    assert accepted["accepted"] is True
+
+    monkeypatch.setattr(acceptance_module, "customer_project_acceptance_closure", original_closure)
+    ready_report = {
+        "found": True,
+        "overall_status": "ready_for_onsite_acceptance",
+        "customer_status": "ready",
+        "release_claim": "pilot acceptance only",
+        "customer": {"customer_id": "demo"},
+        "site": {"site_id": "demo-field-ops"},
+        "onsite_acceptance_evidence": ready_closure["onsite_acceptance_evidence"],
+        "site_acceptance_checklist": {
+            "overall_status": "ready",
+            "ready_count": 4,
+            "manual_check_count": 0,
+            "blocked_count": 0,
+            "customer_message": "Checklist is ready.",
+        },
+    }
+    monkeypatch.setattr(
+        acceptance_module,
+        "customer_project_acceptance_report",
+        lambda *args, **kwargs: ready_report,
+    )
+    monkeypatch.setattr(
+        acceptance_module,
+        "_customer_project_acceptance_dossier_verification",
+        lambda report: ready_closure["artifact_verification"]["acceptance_dossier"],
+    )
+    monkeypatch.setattr(
+        acceptance_module,
+        "_customer_project_latest_proposal_verification",
+        lambda profile: ready_closure["artifact_verification"]["proposal_bundle"],
+    )
+    monkeypatch.setattr(
+        acceptance_module,
+        "_customer_project_latest_audit_export",
+        lambda profile: ready_closure["artifact_verification"]["audit_export"],
+    )
+
+    closure = acceptance_module.customer_project_acceptance_closure(
+        profile_root,
+        "demo-field-ops",
+        check_env=False,
+    )
+
+    assert closure["overall_status"] == "accepted_by_customer"
+    assert "试点验收结论" in closure["customer_claim"]
+    assert "无人值守生产上线" in closure["blocked_uses"]
 
 
 def test_customer_project_customer_signoff_rejects_manual_check_onsite_refs(

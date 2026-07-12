@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from askme.interfaces.reaction import ReactionBackend
 from askme.llm.core.client import LLMClient
 from askme.ports import AudioFrontendPort
 from askme.runtime.core.module import In, Module, ModuleRegistry
@@ -69,6 +70,16 @@ class ReactionModule(Module):
             cfg.get("brain", {}).get("voice_model", ""),
         )
         content_timeout = float(reaction_cfg.get("llm_content_timeout", 5.0))
+        robot_name = str(
+            cfg.get("brain", {}).get("persona", {}).get("robot_name")
+            or cfg.get("robot", {}).get("robot_name")
+            or "现场机器人"
+        )
+        site_name = str(
+            cfg.get("brain", {}).get("persona", {}).get("customer_name")
+            or cfg.get("field_operations", {}).get("site_name")
+            or "当前园区"
+        )
 
         # Business hours config
         bh = reaction_cfg.get("business_hours", [8, 18])
@@ -76,28 +87,34 @@ class ReactionModule(Module):
         self._business_hours_end = int(bh[1]) if len(bh) > 1 else 18
 
         # Construct backend
+        engine: ReactionBackend
         if backend_name == "rules":
-            self.engine = RuleBasedReaction(
+            engine = RuleBasedReaction(
                 alert_dispatcher=alert_dispatcher,
                 episodic=episodic,
             )
         elif backend_name == "llm":
-            self.engine = LLMReaction(
+            engine = LLMReaction(
                 llm=llm,
                 alert_dispatcher=alert_dispatcher,
                 episodic=episodic,
                 decision_model=content_model,
                 decision_timeout=content_timeout,
+                robot_name=robot_name,
+                site_name=site_name,
             )
         else:
             # Default: hybrid
-            self.engine = HybridReaction(
+            engine = HybridReaction(
                 llm=llm,
                 alert_dispatcher=alert_dispatcher,
                 episodic=episodic,
                 content_model=content_model,
                 content_timeout=content_timeout,
+                robot_name=robot_name,
+                site_name=site_name,
             )
+        self.engine = engine
 
         self._backend_name = backend_name
 

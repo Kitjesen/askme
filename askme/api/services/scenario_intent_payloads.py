@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from askme.api.services.capability_package_payloads import CapabilitiesProvider
-from askme.api.services.capability_package_payloads import default_product_capability_center
-from askme.api.services.capability_package_payloads import inventory_from_capabilities_payload
+from askme.api.services.capability_package_payloads import (
+    CapabilitiesProvider,
+    default_product_capability_center,
+    inventory_from_capabilities_payload,
+)
 
 
 def capabilities_payload(provider: CapabilitiesProvider | None) -> dict[str, Any]:

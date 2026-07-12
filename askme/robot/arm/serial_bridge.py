@@ -80,7 +80,7 @@ class SerialBridge:
             try:
                 self._serial.close()
             except Exception:
-                pass
+                logger.exception("[SerialBridge] Close failed")
             self._serial = None
         self._connected = False
         logger.info("Serial bridge disconnected.")

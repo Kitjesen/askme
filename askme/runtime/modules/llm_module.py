@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any
 
 from askme.llm.core.client import LLMClient
@@ -33,6 +34,7 @@ class LLMModule(Module):
         self._llm_config = LLMConfig.from_cfg(cfg.get("brain", {}))
         self._llm_config.validate_and_warn()
         self.client = LLMClient(llm_config=self._llm_config, metrics=self.ota_metrics)
+        self._switch_lock = threading.RLock()
         self._warmup_task: asyncio.Task | None = None
         logger.info("LLMModule: built (model=%s)", self.client.model)
 
@@ -75,5 +77,58 @@ class LLMModule(Module):
     def metrics(self) -> Any:
         return self.ota_metrics
 
+    def replace_config(self, brain_cfg: dict[str, Any]) -> LLMClient:
+        """Atomically route subsequent requests to a newly configured gateway."""
+
+        next_client = self.prepare_client(brain_cfg)
+        self.commit_client(next_client)
+        return next_client
+
+    def prepare_client(self, brain_cfg: dict[str, Any]) -> LLMClient:
+        """Construct and validate a candidate without changing live routing."""
+
+        next_config = LLMConfig.from_cfg(brain_cfg)
+        errors = next_config.validate()
+        if errors:
+            raise ValueError("; ".join(errors))
+        return LLMClient(llm_config=next_config, metrics=self.ota_metrics)
+
+    def commit_client(self, next_client: LLMClient) -> None:
+        """Publish a prepared client for subsequent requests."""
+
+        with self._switch_lock:
+            self._llm_config = next_client.config
+            self.client = next_client
+        logger.info(
+            "LLMModule: hot switched provider=%s model=%s",
+            next_client.provider_name,
+            next_client.model,
+        )
+
+    async def validate_client(self, client: LLMClient, *, timeout_s: float = 10.0) -> None:
+        """Run a minimal provider probe before committing a requested switch."""
+
+        async def _probe() -> None:
+            async for _ in client.chat_stream(
+                [{"role": "user", "content": "只回复好"}],
+                max_tokens=2,
+                temperature=0.0,
+            ):
+                return
+
+        await asyncio.wait_for(_probe(), timeout=max(1.0, float(timeout_s)))
+
     def health(self) -> dict[str, Any]:
-        return {"status": "ok", "model": self.client.model}
+        return {
+            "status": "ok",
+            "provider": getattr(
+                self.client,
+                "provider_name",
+                getattr(self._llm_config, "provider", "unknown"),
+            ),
+            "model": getattr(
+                self.client,
+                "model",
+                getattr(self._llm_config, "model", "unknown"),
+            ),
+        }

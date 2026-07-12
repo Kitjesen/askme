@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from askme.runtime.profiles import (
     EDGE_ROBOT_PROFILE,
     MCP_PROFILE,

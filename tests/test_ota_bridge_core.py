@@ -7,7 +7,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 from askme.robot.ota_bridge import (
     OTABridge,
     OTABridgeAuthError,

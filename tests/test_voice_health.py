@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,37 @@ def test_voice_health_treats_empty_kws_keywords_as_disabled(monkeypatch, tmp_pat
     assert payload["checks"]["kws"]["enabled"] is False
     assert payload["health_snapshot"]["wake_word_enabled"] is False
     assert payload["health_snapshot"]["woken_up"] is True
+
+
+def test_voice_health_rejects_kws_tokens_missing_from_model(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(health_check, "_dependency_available", lambda _name: True)
+    monkeypatch.setattr(health_check, "_websocket_client_available", lambda: True)
+    config = _voice_config(tmp_path, kws_keywords=["missing @wake"])
+    _write_voice_models(tmp_path, include_kws=True)
+
+    payload = health_check.run_voice_health(config, root=tmp_path)
+
+    assert payload["status"] == "degraded"
+    assert payload["kws_ok"] is False
+    assert any("unsupported token 'missing'" in error for error in payload["errors"])
+
+
+def test_voice_health_reports_explicit_local_tts_fallback(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(health_check, "_dependency_available", lambda _name: True)
+    monkeypatch.setattr(health_check, "_websocket_client_available", lambda: True)
+    config = _voice_config(tmp_path)
+    config["voice"]["tts"].update({
+        "backend": "minimax",
+        "minimax_api_key": "",
+        "fallback_backend": "local",
+    })
+    _write_voice_models(tmp_path)
+
+    payload = health_check.run_voice_health(config, root=tmp_path)
+
+    assert payload["tts_ok"] is True
+    assert payload["checks"]["tts"]["effective_backend"] == "local"
+    assert payload["checks"]["tts"]["fallback_backend"] == "local"
 
 
 def test_websocket_client_check_rejects_legacy_websocket_package(monkeypatch) -> None:
@@ -124,7 +156,7 @@ def test_cli_runtime_voice_health_json(monkeypatch, capsys) -> None:
     assert data["hardware_required"] is True
 
 
-def test_cli_runtime_voice_health_exits_nonzero_when_degraded(monkeypatch, capsys) -> None:
+def test_cli_runtime_voice_health_exits_nonzero_when_degraded(monkeypatch, caplog) -> None:
     monkeypatch.setattr(
         cli,
         "_run_voice_health_check",
@@ -145,11 +177,12 @@ def test_cli_runtime_voice_health_exits_nonzero_when_degraded(monkeypatch, capsy
         },
     )
 
+    caplog.set_level(logging.INFO)
     with pytest.raises(SystemExit) as exc:
         cli.main(["runtime", "voice-health"])
 
     assert exc.value.code == 1
-    assert "voice-health: degraded" in capsys.readouterr().out
+    assert "voice-health: degraded" in caplog.text
 
 
 def _voice_config(tmp_path: Path, *, kws_keywords: list[str] | None = None) -> dict[str, object]:
@@ -203,6 +236,10 @@ def _write_voice_models(
             "keywords.txt",
         ):
             _write(kws_dir / filename)
+        (kws_dir / "tokens.txt").write_text(
+            "wake 1\nthunder 2\n",
+            encoding="utf-8",
+        )
 
     tts_dir = tmp_path / "models/tts/test-tts"
     for filename in ("model.onnx", "tokens.txt"):

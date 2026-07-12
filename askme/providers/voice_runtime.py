@@ -36,6 +36,11 @@ class VoiceRuntimeBridge:
         self._state_lock = threading.Lock()
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
+        self._last_status = "idle"
+        self._last_error_type = ""
+        self._last_error = ""
+        self._last_request_at: float | None = None
+        self._last_success_at: float | None = None
 
         if (self.enabled or self.text_enabled) and not self._base_url:
             logger.warning(
@@ -73,11 +78,21 @@ class VoiceRuntimeBridge:
                 max(0.0, self._circuit_open_until - now) if circuit_open else 0.0
             )
             consecutive_failures = self._consecutive_failures
+            last_status = self._last_status
+            last_error_type = self._last_error_type
+            last_error = self._last_error
+            last_request_at = self._last_request_at
+            last_success_at = self._last_success_at
         return {
             "enabled": self.enabled,
             "circuit_open": circuit_open,
             "consecutive_failures": consecutive_failures,
             "cooldown_remaining_s": cooldown_remaining,
+            "last_status": last_status,
+            "last_error_type": last_error_type,
+            "last_error": last_error,
+            "last_request_at": last_request_at,
+            "last_success_at": last_success_at,
         }
 
     def handle_voice_text(
@@ -139,6 +154,7 @@ class VoiceRuntimeBridge:
     ) -> dict[str, Any] | None:
         active = self.enabled if enabled is None else bool(enabled)
         if not active or not self._base_url:
+            self._record_bypass("disabled" if not active else "missing_base_url")
             return None
         recovery_probe = self._begin_request()
         if recovery_probe is None:
@@ -169,6 +185,9 @@ class VoiceRuntimeBridge:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
         try:
+            with self._state_lock:
+                self._last_request_at = time.time()
+                self._last_status = "requesting"
             response = requests.post(
                 f"{self._base_url}{AskmeEdgeVoiceContract.PROCESS_TURN.path()}",
                 json=payload,
@@ -188,12 +207,16 @@ class VoiceRuntimeBridge:
         except (requests.RequestException, ValueError) as exc:
             self._record_failure(exc, recovery_probe=recovery_probe)
             return None
+        except Exception as exc:
+            self._record_failure(exc, recovery_probe=recovery_probe)
+            raise
 
     def _begin_request(self) -> bool | None:
         """Return whether this request is a recovery probe, or None if bypassed."""
         now = time.monotonic()
         with self._state_lock:
             if self._circuit_open_until > now:
+                self._last_status = "circuit_open"
                 logger.info(
                     "Voice runtime bridge bypassed for %.1fs after repeated failures",
                     self._circuit_open_until - now,
@@ -210,11 +233,18 @@ class VoiceRuntimeBridge:
         with self._state_lock:
             self._consecutive_failures = 0
             self._circuit_open_until = 0.0
+            self._last_status = "ok"
+            self._last_error_type = ""
+            self._last_error = ""
+            self._last_success_at = time.time()
 
     def _record_failure(self, exc: Exception, *, recovery_probe: bool) -> None:
         with self._state_lock:
             self._consecutive_failures += 1
             failure_count = self._consecutive_failures
+            self._last_status = "failed"
+            self._last_error_type = type(exc).__name__
+            self._last_error = str(exc)[:300]
             should_open = failure_count >= self._failure_threshold
             if should_open:
                 # Use at least 0.001s so _circuit_open_until > 0 is always
@@ -243,6 +273,10 @@ class VoiceRuntimeBridge:
             self._failure_threshold,
             exc,
         )
+
+    def _record_bypass(self, reason: str) -> None:
+        with self._state_lock:
+            self._last_status = reason
 
 
 def _clean_optional(value: Any) -> str | None:

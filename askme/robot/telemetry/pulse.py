@@ -157,13 +157,14 @@ class Pulse(BusBackend):
                     for sample in samples:
                         self._on_message(topic_name, parser, sample)
                 except Exception:
-                    pass
+                    logger.exception("[Pulse] Reader poll failed")
             self._stop_event.wait(timeout=0.01)  # ~100Hz
 
     def _on_message(self, topic: str, parser: Callable, raw_msg: Any) -> None:
         try:
             data = parser(raw_msg)
         except Exception:
+            logger.exception("[Pulse] Message parse failed")
             return
 
         data["_ts"] = time.time()

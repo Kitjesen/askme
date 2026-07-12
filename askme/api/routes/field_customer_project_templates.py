@@ -10,21 +10,6 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from askme.api.schemas.customer_projects import CustomerProjectTemplateCatalogResponse
-from askme.api.schemas.customer_projects import CustomerProjectTemplateHistoryResponse
-from askme.api.schemas.customer_projects import (
-    CustomerProjectTemplateReleaseNotesExportResponse,
-)
-from askme.api.schemas.customer_projects import (
-    CustomerProjectTemplateReleaseNotesResponse,
-)
-from askme.api.schemas.customer_projects import (
-    CustomerProjectTemplateReleaseRequestMutationResponse,
-)
-from askme.api.schemas.customer_projects import (
-    CustomerProjectTemplateReleaseRequestsResponse,
-)
-from askme.api.schemas.customer_projects import CustomerProjectTemplateReleaseUpdateResponse
 from askme.api.routes.field_template_scope import (
     scope_template_catalog as _scope_template_catalog,
 )
@@ -36,6 +21,15 @@ from askme.api.routes.field_template_scope import (
 )
 from askme.api.routes.field_template_scope import (
     visible_template_ids as _visible_template_ids,
+)
+from askme.api.schemas.customer_projects import (
+    CustomerProjectTemplateCatalogResponse,
+    CustomerProjectTemplateHistoryResponse,
+    CustomerProjectTemplateReleaseNotesExportResponse,
+    CustomerProjectTemplateReleaseNotesResponse,
+    CustomerProjectTemplateReleaseRequestMutationResponse,
+    CustomerProjectTemplateReleaseRequestsResponse,
+    CustomerProjectTemplateReleaseUpdateResponse,
 )
 from askme.pipeline.field.customer_project_templates import (
     create_customer_project_template_release_request,

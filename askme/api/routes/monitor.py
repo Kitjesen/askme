@@ -72,10 +72,14 @@ def create_monitor_router(
         response_model=ConversationHistoryResponse,
         response_model_exclude_none=True,
     )
-    async def conversations() -> JSONResponse:
+    async def conversations(
+        conversation_session_id: str | None = None,
+    ) -> JSONResponse:
         """Return conversation history for the monitor UI."""
         try:
-            payload = monitor_service.conversation_history_payload()
+            payload = monitor_service.conversation_history_payload(
+                conversation_session_id=conversation_session_id,
+            )
             ConversationHistoryResponse.model_validate(payload)
             return JSONResponse(
                 payload,

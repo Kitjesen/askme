@@ -14,9 +14,9 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from askme.brain.llm_client import LLMClient
+from askme.voice.tts import TTSEngine
 
 from askme.config import get_config
-from askme.voice.tts import TTSEngine
 
 # Simulated scene sequences (what VLM would return)
 SCENARIOS = [

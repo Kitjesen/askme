@@ -50,10 +50,36 @@ def _assert_error_json(result: str, expected_code: str | None = None):
         assert data["error"]["code"] == expected_code
 
 
+@pytest.fixture()
+def allow_lab_unsafe(monkeypatch):
+    """Enable direct arm tools for tests that exercise the lab-only fallback."""
+    from askme.mcp.tools import robot_tools
+
+    monkeypatch.setattr(robot_tools, "_LAB_UNSAFE", True)
+    return robot_tools
+
+
+@pytest.mark.asyncio
+async def test_direct_robot_motion_tools_are_blocked_by_default(app_context, monkeypatch):
+    from askme.mcp.tools import robot_tools
+
+    monkeypatch.setattr(robot_tools, "_LAB_UNSAFE", False)
+    ctx = _make_ctx(app_context)
+
+    data = json.loads(await robot_tools.robot_move(100.0, 200.0, 50.0, ctx))
+
+    assert data["error"] == "unsafe_direct_arm_access_blocked"
+    assert "robot_submit_task" in data["message"]
+
+
 # ── Robot tool tests: no connection ──────────────────────────
 
 class TestRobotToolsNoConnection:
     """All robot tools should return an error when no arm_controller."""
+
+    @pytest.fixture(autouse=True)
+    def _allow_lab_unsafe(self, allow_lab_unsafe):
+        return None
 
     @pytest.mark.asyncio
     async def test_robot_move_no_controller(self, app_context):
@@ -116,6 +142,10 @@ class TestRobotToolsNoConnection:
 
 class TestRobotToolsWithMock:
     """Happy-path: robot tools with a mocked ArmController."""
+
+    @pytest.fixture(autouse=True)
+    def _allow_lab_unsafe(self, allow_lab_unsafe):
+        return None
 
     @pytest.fixture
     def robot_context(self):

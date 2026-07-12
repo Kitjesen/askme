@@ -19,8 +19,8 @@ from askme.api.schemas.space import (
     SpaceResolveDestinationResponse,
     SpaceRollbackResponse,
     SpaceRoutesResponse,
-    SpaceServicePointTriggerResponse,
     SpaceServicePointsResponse,
+    SpaceServicePointTriggerResponse,
 )
 from askme.cognition import WorldStateService
 from askme.health_server import create_health_app

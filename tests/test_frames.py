@@ -4,7 +4,6 @@ import asyncio
 
 import numpy as np
 import pytest
-
 from askme.pipeline.frames import (
     AudioRawFrame,
     CancellationToken,

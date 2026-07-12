@@ -6,13 +6,13 @@ import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from askme.pipeline.reaction_engine import (
     HybridReaction,
     LLMReaction,
     RuleBasedReaction,
     evaluate_rules,
 )
+
 from askme.schemas.events import ChangeEvent, ChangeEventType
 from askme.schemas.reaction import ReactionDecision, ReactionType, SceneContext
 
@@ -280,13 +280,20 @@ class TestHybridReaction:
     async def test_generate_content_calls_llm_when_use_llm(self):
         mock_llm = AsyncMock()
         mock_llm.chat = AsyncMock(return_value="LLM generated greeting")
-        engine = HybridReaction(llm=mock_llm, content_timeout=2.0)
+        engine = HybridReaction(
+            llm=mock_llm,
+            content_timeout=2.0,
+            robot_name="小算",
+            site_name="聚龙科创e谷",
+        )
         ctx = _ctx(person_approaching=True, person_distance_m=2.0, person_duration_s=5.0)
         decision = await engine.decide(ctx)
         assert decision.metadata.get("use_llm") is True
         content = await engine.generate_content(decision, ctx)
         assert content == "LLM generated greeting"
         mock_llm.chat.assert_called_once()
+        prompt = mock_llm.chat.call_args.args[0][0]["content"]
+        assert "聚龙科创e谷的导览与巡检机器人小算" in prompt
 
     async def test_generate_content_falls_back_on_llm_timeout(self):
         mock_llm = AsyncMock()
@@ -369,6 +376,7 @@ class TestLLMReaction:
 class TestReactionModule:
     def test_module_builds_with_empty_registry(self):
         from askme.runtime.module import ModuleRegistry
+
         from askme.runtime.modules.reaction_module import ReactionModule
 
         registry = ModuleRegistry()
@@ -379,6 +387,7 @@ class TestReactionModule:
 
     def test_module_builds_rules_backend(self):
         from askme.runtime.module import ModuleRegistry
+
         from askme.runtime.modules.reaction_module import ReactionModule
 
         registry = ModuleRegistry()
@@ -389,6 +398,7 @@ class TestReactionModule:
 
     def test_module_health(self):
         from askme.runtime.module import ModuleRegistry
+
         from askme.runtime.modules.reaction_module import ReactionModule
 
         registry = ModuleRegistry()

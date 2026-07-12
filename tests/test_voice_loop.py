@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import askme.pipeline.voice_loop as voice_loop_module
 import pytest
@@ -89,6 +90,9 @@ class _Audio:
         self._muted = False
         self._drained = 0
         self.ack_count = 0
+        self.last_turn_wake_authorized = False
+        self.last_turn_wake_source = "none"
+        self.committed_interactions = 0
 
     def listen_loop(self):
         self._calls += 1
@@ -98,6 +102,9 @@ class _Audio:
 
     def acknowledge(self) -> None:
         self.ack_count += 1
+
+    def mark_interaction_turn(self) -> None:
+        self.committed_interactions += 1
 
     def speak(self, text: str) -> None:
         self.spoken.append(text)
@@ -567,6 +574,68 @@ async def test_interaction_gate_records_bystander_speech_without_reply() -> None
 
 
 @pytest.mark.asyncio
+async def test_followup_window_does_not_admit_bystander_speech() -> None:
+    pipeline = _Pipeline()
+    audio = _Audio()
+    texts = ["这个是那些琉璃布", "exit"]
+    call_idx = 0
+
+    def _listen():
+        nonlocal call_idx
+        audio.last_turn_wake_source = (
+            "followup_window" if call_idx == 0 else "none"
+        )
+        audio.last_turn_wake_authorized = False
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(router=_Router(), pipeline=pipeline, audio=audio)
+    loop.set_address_detector(_BystanderThenCommand())  # type: ignore[arg-type]
+    loop.set_interaction_gate(
+        InteractionGate({"enabled": True, "silent_on_ambiguous": True})
+    )
+
+    await loop.run()
+
+    assert pipeline.process_calls == []
+    assert audio.committed_interactions == 1  # exit only; ambient speech did not renew wake
+    assert loop.interaction_status_snapshot()["last_decision"]["wake_source"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_expected_short_followup_answer_stays_conversational() -> None:
+    audio = _Audio()
+    pipeline = _SpeakingPipeline(audio)
+    pipeline.last_spoken_text = "需要继续吗？"
+    texts = ["对", "exit"]
+    call_idx = 0
+
+    def _listen():
+        nonlocal call_idx
+        audio.last_turn_wake_source = (
+            "followup_window" if call_idx == 0 else "none"
+        )
+        audio.last_turn_wake_authorized = False
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(router=_Router(), pipeline=pipeline, audio=audio)
+    loop.set_address_detector(_BystanderThenCommand())  # type: ignore[arg-type]
+    loop.set_interaction_gate(
+        InteractionGate({"enabled": True, "silent_on_ambiguous": True})
+    )
+
+    await loop.run()
+
+    assert pipeline.process_calls == ["对"]
+    assert audio.committed_interactions == 2
+
+
+@pytest.mark.asyncio
 async def test_interaction_gate_answers_wayfinding_even_without_wake_word() -> None:
     audio = _Audio()
     pipeline = _SpeakingPipeline(audio)
@@ -592,6 +661,49 @@ async def test_interaction_gate_answers_wayfinding_even_without_wake_word() -> N
 
     assert pipeline.process_calls == ["请问厕所在哪里"]
     assert audio.ack_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_wake_bypasses_stale_perception_refresh() -> None:
+    audio = _Audio()
+    audio.last_turn_wake_authorized = True
+    pipeline = _SpeakingPipeline(audio)
+    texts = ["你在干什么？", "exit"]
+    call_idx = 0
+    perception_calls = 0
+
+    def _listen():
+        nonlocal call_idx
+        audio.last_turn_wake_authorized = call_idx == 0
+        audio.last_turn_wake_source = "keyword" if call_idx == 0 else "none"
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        audio=audio,
+    )
+    loop.set_interaction_gate(InteractionGate({"enabled": True}))
+    def _perception():
+        nonlocal perception_calls
+        perception_calls += 1
+        if perception_calls > 1:
+            return None
+        return {
+            "source": "camera",
+            "observed_at": time.time() - 30.0,
+            "person_detected": True,
+        }
+
+    loop.set_interaction_perception_provider(_perception)
+
+    await loop.run()
+
+    assert pipeline.process_calls == ["你在干什么？"]
+    assert not any("重新确认你的位置" in text for text in audio.spoken)
 
 
 @pytest.mark.asyncio

@@ -11,16 +11,20 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from askme.api.schemas.customer_projects import CustomerProjectAcceptanceRegistryResponse
-from askme.api.schemas.customer_projects import CustomerProjectCatalogResponse
-from askme.api.schemas.customer_projects import CustomerProjectResourceCatalogResponse
-from askme.api.schemas.customer_projects import CustomerProjectWorkbenchResponse
-from askme.api.schemas.customer_projects import ManagedObjectDirectoryResponse
-from askme.api.schemas.customer_projects import SiteProfileCatalogResponse
-from askme.api.schemas.delivery_readiness import ProductLaunchReadinessResponse
-from askme.api.schemas.delivery_readiness import SolutionDeliveryReadinessResponse
 from askme.api.routes.field_template_scope import (
     scope_template_catalog as _scope_template_catalog,
+)
+from askme.api.schemas.customer_projects import (
+    CustomerProjectAcceptanceRegistryResponse,
+    CustomerProjectCatalogResponse,
+    CustomerProjectResourceCatalogResponse,
+    CustomerProjectWorkbenchResponse,
+    ManagedObjectDirectoryResponse,
+    SiteProfileCatalogResponse,
+)
+from askme.api.schemas.delivery_readiness import (
+    ProductLaunchReadinessResponse,
+    SolutionDeliveryReadinessResponse,
 )
 from askme.api.services.field_customer_project_workbench import (
     build_customer_project_workbench_payload,

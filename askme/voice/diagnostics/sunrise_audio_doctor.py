@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -16,6 +17,8 @@ import numpy as np
 
 from askme.config import get_config
 from askme.voice.output.tts import TTSEngine
+
+logger = logging.getLogger(__name__)
 
 MCP01_USB_ID = "17ef:a03b"
 DEFAULT_FIRST_TOKEN_GUARD_SECONDS = 1.5
@@ -146,43 +149,43 @@ def print_sunrise_audio_doctor_summary(payload: dict[str, Any]) -> None:
     config = checks.get("tts_config", {})
     output = checks.get("usb_output_shape", {})
 
-    print(f"sunrise-audio-doctor: {payload.get('status', 'unknown')}")  # noqa: T201
-    print(  # noqa: T201
+    logger.info(f"sunrise-audio-doctor: {payload.get('status', 'unknown')}")
+    logger.info(
         "  usb: mcp01={mcp01} lsusb-tree-audio={audio}".format(
             mcp01=_label(usb.get("mcp01_visible")),
             audio=_label(usb.get("audio_class_visible")),
         )
     )
-    print(  # noqa: T201
+    logger.info(
         "  alsa: cards={cards} ({detail})".format(
             cards=_label(asound.get("cards_visible")),
             detail=asound.get("detail", "unknown"),
         )
     )
-    print(  # noqa: T201
+    logger.info(
         "  tts: transport={transport} persistent={persistent} trust_warm={trust}".format(
             transport=config.get("output_transport", "unknown"),
             persistent=_label(config.get("usb_direct_persistent_stream")),
             trust=_label(config.get("usb_direct_trust_persistent_warm_state")),
         )
     )
-    print(  # noqa: T201
+    logger.info(
         "  first-token guard: {guard:.3f}s / min {minimum:.3f}s ({ok})".format(
             guard=float(output.get("speech_offset_seconds", 0.0) or 0.0),
             minimum=float(payload.get("guard_min_seconds", 0.0) or 0.0),
             ok=_label(output.get("first_token_guard_ok")),
         )
     )
-    print(  # noqa: T201
+    logger.info(
         "  final write: {samples} samples, shape={ok}".format(
             samples=output.get("final_samples", "unknown"),
             ok=_label(output.get("final_shape_ok")),
         )
     )
     for warning in payload.get("warnings", []):
-        print(f"  warn: {warning}")  # noqa: T201
+        logger.warning(f"  warn: {warning}")
     for error in payload.get("errors", []):
-        print(f"  error: {error}")  # noqa: T201
+        logger.error(f"  error: {error}")
 
 
 def mcp01_visible(lsusb_output: str) -> bool:
@@ -525,7 +528,7 @@ def main(argv: list[str] | None = None) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))  # noqa: T201
+        logger.info(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print_sunrise_audio_doctor_summary(payload)
     return 0 if payload.get("status") == "ok" else 1

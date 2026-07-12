@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 
 import pytest
-
 from askme.pipeline.field_ingest_adapters import normalize_field_ingest_payload
 from askme.pipeline.field_operations import FieldOperationsService
 

@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from askme.pipeline.stream_processor import StreamProcessor, _ThinkFilter
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -247,6 +246,37 @@ class TestConsumeLlmStream:
         assert tool_calls[0]["name"] == "nav"
         audio.drain_buffers.assert_called()
         audio.speak.assert_not_called()
+
+
+class TestStreamWithTools:
+    @pytest.mark.asyncio
+    async def test_forwards_conversation_session_to_tool_executor(self):
+        tool_executor = MagicMock()
+        tool_executor.execute_tools = AsyncMock(return_value="follow-up")
+        proc = _make_processor(tool_executor=tool_executor)
+        proc.consume_llm_stream = AsyncMock(
+            return_value=(
+                "",
+                {0: {"id": "tc-1", "name": "nav", "arguments": "{}"}},
+            )
+        )
+        proc._llm.chat_stream.return_value = _stream_chunks([])
+
+        result = await proc.stream_with_tools(
+            [],
+            "system",
+            source="text",
+            conversation_session_id="conv-a",
+        )
+
+        assert result == "follow-up"
+        tool_executor.execute_tools.assert_awaited_once_with(
+            {0: {"id": "tc-1", "name": "nav", "arguments": "{}"}},
+            "system",
+            model=None,
+            source="text",
+            conversation_session_id="conv-a",
+        )
 
 
 class TestSetAudio:

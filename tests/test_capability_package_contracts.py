@@ -244,6 +244,30 @@ def test_capability_package_readiness_flags_optional_manual_checks() -> None:
     ]
 
 
+def test_capability_package_ready_is_validation_not_customer_signoff() -> None:
+    manifest = CapabilityPackageManifest.from_payload(
+        {
+            "package_id": "cap-wayfinding",
+            "display_name": "Wayfinding answer",
+            "capability": "answer_wayfinding",
+            "inputs": ["visitor_query"],
+            "outputs": ["voice_answer"],
+            "customer_visible_description": "Answers visitor destination questions.",
+        }
+    )
+
+    payload = evaluate_capability_package_readiness(manifest, inventory={})
+
+    assert payload["status"] == "ready"
+    assert payload["customer_message"] == (
+        "Wayfinding answer 已满足启用前检查，可进入现场验证或试点发布评审。"
+    )
+    assert payload["enablement_decision"]["release_claim"] == (
+        "可进入现场验证或客户试点启用评审，不能声明无人值守生产上线。"
+    )
+    assert "发布流程" not in payload["customer_message"]
+
+
 def test_scenario_package_readiness_requires_declared_capability_packages() -> None:
     manifest = ScenarioPackageManifest.from_payload(
         {

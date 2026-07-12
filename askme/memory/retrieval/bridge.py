@@ -31,6 +31,7 @@ import importlib.util
 import logging
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -68,6 +69,15 @@ _BACKEND_DEPENDENCIES = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryRetrievalResult:
+    """Immutable, turn-scoped retrieval output safe to pass across async layers."""
+
+    context: str
+    evidence: list[dict[str, Any]]
+    rag: dict[str, Any]
+
+
 class MemoryBridge:
     """L4 vector memory — pluggable backend with VectorStore fallback."""
 
@@ -96,6 +106,13 @@ class MemoryBridge:
             "embed_model", "paraphrase-multilingual-MiniLM-L12-v2"
         )
         self._retrieve_timeout: float = self._mem_cfg.get("retrieve_timeout", 2.0)
+        self._backend_init_timeout: float = max(
+            0.05,
+            min(
+                float(self._mem_cfg.get("backend_init_timeout", 0.5)),
+                max(0.05, self._retrieve_timeout * 0.5),
+            ),
+        )
         self._vector_min_similarity: float = float(
             self._mem_cfg.get("vector_min_similarity", 0.5)
         )
@@ -186,6 +203,10 @@ class MemoryBridge:
         self._retrieve_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._retrieve_inflight: dict[str, asyncio.Task[str]] = {}
         self._retrieve_cache_lock = asyncio.Lock()
+        # Retrieval helpers currently build evidence through shared compatibility
+        # fields. Keep that mutation atomic until every backend returns a native
+        # structured result.
+        self._retrieve_state_lock = asyncio.Lock()
         self._retrieve_cache_hits = 0
         self._retrieve_cache_misses = 0
         self._retrieve_coalesced_count = 0
@@ -455,8 +476,8 @@ class MemoryBridge:
                     await self._robotmem.warmup()
                     logger.info("[Memory] RobotMem warmup complete.")
                     return
-            except Exception:
-                logger.debug("[Memory] RobotMem warmup failed, trying fallback.")
+            except Exception as exc:
+                logger.debug("[Memory] RobotMem warmup failed: %s, trying fallback.", exc)
 
         if self._backend == "mempalace":
             try:
@@ -465,8 +486,8 @@ class MemoryBridge:
                     await self._mempalace.warmup()
                     logger.info("[Memory] MemPalace warmup complete.")
                     return
-            except Exception:
-                logger.debug("[Memory] MemPalace warmup failed, trying fallback.")
+            except Exception as exc:
+                logger.debug("[Memory] MemPalace warmup failed: %s, trying fallback.", exc)
 
         if self._backend in ("mem0", "robotmem", "mempalace"):
             # Try Mem0 (primary for mem0 backend, fallback for robotmem)
@@ -478,8 +499,8 @@ class MemoryBridge:
                 if inited:
                     logger.info("[Memory] Mem0 warmup complete.")
                     return
-            except Exception:
-                logger.debug("[Memory] Mem0 warmup failed, trying VectorStore.")
+            except Exception as exc:
+                logger.debug("[Memory] Mem0 warmup failed: %s, trying VectorStore.", exc)
 
         # Fallback: warm up VectorStore
         store = self._ensure_store()
@@ -487,8 +508,8 @@ class MemoryBridge:
             try:
                 await asyncio.to_thread(store.search, "warmup", 1)
                 logger.info("[Memory] VectorStore warmup complete.")
-            except Exception:
-                logger.debug("[Memory] VectorStore warmup triggered model load (expected).")
+            except Exception as exc:
+                logger.debug("[Memory] VectorStore warmup triggered model load (expected): %s", exc)
 
     # ------------------------------------------------------------------
     # Public API
@@ -579,7 +600,86 @@ class MemoryBridge:
                     if self._retrieve_inflight.get(cache_key) is task:
                         self._retrieve_inflight.pop(cache_key, None)
 
+    async def retrieve_with_context(self, text: str) -> MemoryRetrievalResult:
+        """Return context and evidence captured atomically for one dialogue turn."""
+
+        if not self._enabled:
+            return MemoryRetrievalResult(
+                context="",
+                evidence=[],
+                rag={
+                    "turn_scoped": True,
+                    "enabled": False,
+                    "backend": "disabled",
+                    "configured_backend": self._configured_backend,
+                    "retrieve_ms": 0.0,
+                    "fallback_reason": "memory_disabled",
+                    "dropped_evidence": [],
+                    "answer_policy": {
+                        "state": "unavailable",
+                        "action": "refuse",
+                        "reason": "memory_disabled",
+                        "message": "Memory retrieval is disabled.",
+                    },
+                    "used_in_answer": False,
+                },
+            )
+
+        started = time.perf_counter()
+        async with self._retrieve_state_lock:
+            try:
+                context = await asyncio.wait_for(
+                    self._retrieve_with_fallbacks_unlocked(text),
+                    timeout=self._retrieve_timeout,
+                )
+                self._record_retrieve_result(
+                    context,
+                    backend=self._last_backend or self._backend,
+                    elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                )
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+                context = ""
+                self._retrieve_error_count += 1
+                self._record_retrieve_result(
+                    "",
+                    backend=self._last_backend or self._backend,
+                    elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                    fallback_reason="retrieve_timeout",
+                )
+            except Exception as exc:
+                context = ""
+                self._retrieve_error_count += 1
+                self._record_retrieve_result(
+                    "",
+                    backend=self._last_backend or self._backend,
+                    elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                    fallback_reason=type(exc).__name__,
+                )
+                logger.warning("[Memory] turn retrieval failed: %s", exc)
+
+            evidence = [dict(item) for item in self._last_evidence]
+            dropped = [dict(item) for item in self._last_dropped_evidence]
+            return MemoryRetrievalResult(
+                context=context,
+                evidence=evidence,
+                rag={
+                    "turn_scoped": True,
+                    "enabled": self._enabled,
+                    "backend": self._last_backend or self._backend,
+                    "configured_backend": self._configured_backend,
+                    "retrieve_ms": self._last_retrieve_ms,
+                    "fallback_reason": self._last_fallback_reason,
+                    "dropped_evidence": dropped,
+                    "answer_policy": self._answer_policy_snapshot(),
+                    "used_in_answer": bool(evidence),
+                },
+            )
+
     async def _retrieve_with_fallbacks(self, text: str) -> str:
+        async with self._retrieve_state_lock:
+            return await self._retrieve_with_fallbacks_unlocked(text)
+
+    async def _retrieve_with_fallbacks_unlocked(self, text: str) -> str:
         """Run backend retrieval under the public retrieve() time budget."""
         self._last_backend = None
         self._last_fallback_reason = ""
@@ -603,12 +703,12 @@ class MemoryBridge:
             try:
                 robotmem_ready = await asyncio.wait_for(
                     asyncio.to_thread(self._ensure_robotmem),
-                    timeout=self._retrieve_timeout,
+                    timeout=self._backend_init_timeout,
                 )
             except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                 logger.warning(
                     "[Memory] RobotMem init timed out (%.1fs).",
-                    self._retrieve_timeout,
+                    self._backend_init_timeout,
                 )
                 robotmem_ready = False
                 self._fallback_count += 1
@@ -649,12 +749,12 @@ class MemoryBridge:
             try:
                 mempalace_ready = await asyncio.wait_for(
                     asyncio.to_thread(self._ensure_mempalace),
-                    timeout=self._retrieve_timeout,
+                    timeout=self._backend_init_timeout,
                 )
             except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                 logger.warning(
                     "[Memory] MemPalace init timed out (%.1fs).",
-                    self._retrieve_timeout,
+                    self._backend_init_timeout,
                 )
                 mempalace_ready = False
                 self._fallback_count += 1
@@ -1035,7 +1135,7 @@ class MemoryBridge:
             return
         try:
             task.exception()
-        except Exception:
+        except (asyncio.InvalidStateError, RuntimeError):
             return
 
     def _restore_cached_retrieve(self, entry: dict[str, Any]) -> None:
@@ -1404,7 +1504,7 @@ class MemoryBridge:
         try:
             await asyncio.to_thread(store.add, content, {
                 "type": "conversation",
-                "ts": __import__("time").time(),
+                "ts": importlib.import_module("time").time(),
             })
             # Periodic save (every 10 new entries)
             if store.size % 10 == 0:

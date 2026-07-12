@@ -14,8 +14,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from askme.config import get_config
 from askme.voice.mic_input import MicInput
+
+from askme.config import get_config
 
 cfg = get_config()
 api_key = os.environ.get("DASHSCOPE_API_KEY", cfg.get("voice", {}).get("cloud_asr", {}).get("api_key", ""))

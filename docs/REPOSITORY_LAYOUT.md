@@ -3,6 +3,19 @@
 The repository root is a workspace. The product code lives in `askme/`.
 Same-level folders do not mean same-level architecture authority.
 
+Product and architecture authority lives in `docs/PRODUCT_REQUIREMENTS.md`,
+`docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md`,
+`docs/PRODUCT_ARCHITECTURE_TRACE.md`, and
+`docs/DEMAND_EVIDENCE_LEDGER.md`. This layout file only explains where code and
+documents live.
+
+Field Delivery Domain owns customer projects, field events, evidence,
+acceptance dossiers, customer signoff, and readiness gaps.
+Product/Admin/Platform/Internal surfaces expose Dashboard/API/admin workflows.
+Runtime / Safety / Hardware owns real execution, safety state, hardware
+adaptation, runtime roundtrip, takeover, and rollback.
+customer signoff != production readiness.
+
 For a new contributor, read the root `README.md` first for runnable entry
 points, then use `askme/README.md` for package ownership and
 `docs/MULTI_AGENT_WORKFLOW.md` for parallel work rules.
@@ -16,6 +29,9 @@ points, then use `askme/README.md` for package ownership and
 | `docs/` | Architecture, operations, ownership, and workflow docs. |
 | `scripts/` | Operator scripts, smoke checks, demos, benchmarks, maintenance. |
 | `deploy/` | Install files, service units, site profiles, delivery templates. |
+| `docker/` | Dockerfiles, Compose stacks, and container entrypoints. |
+| `config/` | Environment-specific config templates such as production defaults. |
+| `requirements/` | pip-tools dependency input and lock files. |
 | `prompts/` | Runtime prompt assets such as `SOUL.md`. |
 | `plans/` | Planning drafts. Keep source-of-truth docs in `docs/`. |
 | `data/` | Local runtime state, customer knowledge, captures, sessions. |
@@ -56,7 +72,7 @@ Use disjoint write scopes:
 | Provider boundary | `askme/ports/`, `askme/providers/` |
 | Robot/perception adapters | `askme/robot/`, `askme/perception/` |
 | API/MCP/tools | `askme/api/`, `askme/mcp/`, `askme/tools/` |
-| Product workflows | `askme/pipeline/field/`, field API services/routes |
+| Field Delivery Domain | `askme/pipeline/field/`, `askme/api/routes/field_*`, `askme/api/services/field_*` |
 | Docs/layout | `README.md`, `docs/` |
 | Tests | `tests/` |
 

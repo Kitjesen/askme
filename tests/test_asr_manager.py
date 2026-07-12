@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
-
 from askme.voice.asr_manager import (
     _SINGLE_CHAR_COMMANDS,
     ASRManager,
@@ -436,6 +435,35 @@ class TestSessionGuards:
         mgr.feed_cloud_only(np.zeros(160, dtype=np.int16))
 
         mocks["cloud"].feed.assert_not_called()
+
+    def test_volcengine_does_not_idle_preconnect_by_default(self):
+        mgr = _make_manager(
+            cloud_available=True,
+            config={"cloud_asr": {"provider": "volcengine"}},
+        )
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+
+        mgr.preconnect_cloud()
+
+        mocks["cloud"].start_session.assert_not_called()
+        assert mgr._cloud_active is False
+
+    def test_volcengine_idle_preconnect_can_be_explicitly_enabled(self):
+        mgr = _make_manager(
+            cloud_available=True,
+            config={
+                "cloud_asr": {
+                    "provider": "volcengine",
+                    "preconnect": True,
+                }
+            },
+        )
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+
+        mgr.preconnect_cloud()
+
+        mocks["cloud"].start_session.assert_called_once()
+        assert mgr._cloud_active is True
 
     def test_preconnected_cloud_can_feed_silence_when_enabled(self):
         mgr = _make_manager(

@@ -16,9 +16,11 @@ class TestDashboardHttp:
         assert response.status_code == 200
         assert 'id="dashboard-nav"' in response.text
         assert 'id="app-page"' in response.text
+        retired_projects = client.get("/dashboard/projects", follow_redirects=False)
+        assert retired_projects.status_code == 307
+        assert retired_projects.headers["location"] == "/dashboard"
         for page in (
             "/dashboard/conversation",
-            "/dashboard/projects",
             "/dashboard/scenarios",
             "/dashboard/field",
             "/dashboard/space",
@@ -26,6 +28,7 @@ class TestDashboardHttp:
             "/dashboard/capabilities",
             "/dashboard/voice",
             "/dashboard/delivery",
+            "/dashboard/audit",
         ):
             page_response = client.get(page)
             assert page_response.status_code == 200
@@ -33,9 +36,25 @@ class TestDashboardHttp:
 
         js_response = client.get("/dashboard/app.js")
         css_response = client.get("/dashboard/app.css")
+        voice_css_response = client.get("/dashboard/voice.css")
+        product_css_response = client.get("/dashboard/product.css")
 
         assert js_response.status_code == 200
         assert css_response.status_code == 200
+        assert voice_css_response.status_code == 200
+        assert product_css_response.status_code == 200
+        assert "/dashboard/voice.css?v=20260712-5" in response.text
+        assert "/dashboard/product.css?v=20260712-8" in response.text
+        assert "/dashboard/app.js?v=20260712-2" in response.text
+        assert 'id="nav-toggle"' in response.text
+        assert 'id="nav-drawer"' in response.text
+        assert 'id="nav-backdrop"' in response.text
+        assert "body.nav-open .nav-rail" in product_css_response.text
+        assert "body.voice-page-active .voice-command-bar" in product_css_response.text
+        assert ".voice-workbench" in voice_css_response.text
+        assert ".voice-command-title h1" in voice_css_response.text
+        assert 'class="voice-command-route"' not in js_response.text
+        assert "askme.voice / runtime" not in js_response.text
         assert "/api/governance/current-operator" in js_response.text
         assert "/api/dashboard/pages" in js_response.text
         assert "fallbackPages" in js_response.text
@@ -45,7 +64,8 @@ class TestDashboardHttp:
         assert "nav-section" in css_response.text
         assert "nav-section-title" in css_response.text
         assert "/dashboard/conversation" in js_response.text
-        assert "/dashboard/projects" in js_response.text
+        assert "/dashboard/projects" not in js_response.text
+        assert "/dashboard/projects" not in response.text
         assert "/dashboard/scenarios" in js_response.text
         assert "/dashboard/field" in js_response.text
         assert "/dashboard/space" in js_response.text
@@ -54,9 +74,9 @@ class TestDashboardHttp:
         assert "/dashboard/voice" in js_response.text
         assert "/dashboard/delivery" in js_response.text
         assert "renderOverview" in js_response.text
-        assert "机器人现场任务运营台" in js_response.text
-        assert "客户现在能验收什么" in js_response.text
-        assert "多现场交付" in js_response.text
+        assert "今天先看状态，再处理任务" in js_response.text
+        assert "dashboard-shortcuts" in js_response.text
+        assert "最近需要处理" in js_response.text
         assert "服务在线" in js_response.text
         assert "renderConversation" in js_response.text
         assert "现场上下文" in js_response.text
@@ -72,13 +92,15 @@ class TestDashboardHttp:
         assert "证据策略" in js_response.text
         assert "renderChatSpacePolicy" in js_response.text
         assert "只回答，不启动带路" in js_response.text
-        assert "renderProjects" in js_response.text
+        assert "renderProjects" not in js_response.text
         assert "renderScenarios" in js_response.text
         assert "renderField" in js_response.text
         assert "renderKnowledge" in js_response.text
         assert "renderCapabilities" in js_response.text
         assert "renderVoice" in js_response.text
         assert "renderDelivery" in js_response.text
+        assert "renderAudit" in js_response.text
+        assert "renderAuditWorkspace" in js_response.text
         assert "/api/chat" in js_response.text
         assert "/api/knowledge/preview" in js_response.text
         assert "/api/knowledge/import" in js_response.text
@@ -138,6 +160,8 @@ class TestDashboardHttp:
         assert "renderDashboardPageContracts" in js_response.text
         assert "primary_endpoint_status" in js_response.text
         assert "internal_surface_must_not_drive_customer_ui" in js_response.text
+        assert "客户说明页依赖客户可见接口" in js_response.text
+        assert "上层页面必须依赖客户可见接口" not in js_response.text
         assert "/api/blueprints" in js_response.text
         assert "/api/blueprints/park" in js_response.text
         assert "产品运行包和验收边界" in js_response.text
@@ -221,7 +245,8 @@ class TestDashboardHttp:
         assert "renderRuntimeBlueprints" in js_response.text
         assert "renderRuntimeBlueprintItem" in js_response.text
         assert "运行方案和交付状态" in js_response.text
-        assert "客户可启用能力包" in js_response.text
+        assert "客户可验证能力包" in js_response.text
+        assert "客户可启用能力包" not in js_response.text
         assert "enablement_decision" in js_response.text
         assert "release_summary" in js_response.text
         assert "生产声明" in js_response.text
@@ -250,7 +275,7 @@ class TestDashboardHttp:
         assert "知识管理" in js_response.text
         assert "导入并发布" in js_response.text
         assert "重建索引" in js_response.text
-        assert "机器人现场任务运营台" in js_response.text
+        assert "现场运行总览" in js_response.text
         assert "/api/governance/operator-directory" in js_response.text
         assert "/api/governance/identity-readiness" in js_response.text
         assert "data-identity-gateway-readiness" in js_response.text
@@ -380,9 +405,9 @@ class TestDashboardHttp:
         assert "package_delivery_gate" in js_response.text
         assert "incoming_delivery_gate" in js_response.text
         assert "project-package-delivery-gate" in css_response.text
-        assert "project-page-nav" in css_response.text
+        assert "project-page-nav" not in js_response.text
         assert "polishProjectWorkspaceCopy" in js_response.text
-        assert "data-product-workbench" in js_response.text
+        assert "data-product-workbench" not in js_response.text
         assert "renderProjectAcceptanceSnapshot" in js_response.text
         assert "customer_acceptance_snapshot" in js_response.text
         assert "data-project-acceptance-snapshot" in js_response.text
@@ -397,9 +422,7 @@ class TestDashboardHttp:
         assert "data-project-delivery-chain" in js_response.text
         assert "project-delivery-chain" in css_response.text
         assert "project-golden-path" in css_response.text
-        assert "project-workspace-explainer" in css_response.text
-        assert "客户项目不是配置文件，是交付产品" in js_response.text
-        assert "交付准入" in js_response.text
+        assert "客户项目不是配置文件，是交付产品" not in js_response.text
         assert "行业模板市场" in js_response.text
         assert "project-section-projects" in js_response.text
         assert "project-section-templates" in js_response.text
@@ -526,7 +549,7 @@ class TestDashboardHttp:
         assert "html_path" in js_response.text
         assert "Printable HTML" in js_response.text
         assert "renderCustomerProjectAcceptanceReport" in js_response.text
-        assert "客户项目与对象目录" in js_response.text
+        assert "客户项目与对象目录" not in js_response.text
         assert "项目交付包导入" in js_response.text
         assert "事件归属检查" in js_response.text
         assert "data-project-lifecycle-export" in js_response.text
@@ -731,7 +754,7 @@ class TestDashboardHttp:
         data = response.json()
         DashboardPageRegistryResponse.model_validate(data)
         assert data["ok"] is True
-        assert data["summary"]["page_count"] == 11
+        assert data["summary"]["page_count"] == 10
         assert data["summary"]["internal_page_count"] == 0
         assert data["summary"]["primary_endpoint_missing_count"] == 0
         assert data["summary"]["primary_endpoint_internal_count"] == 0
@@ -739,7 +762,7 @@ class TestDashboardHttp:
         assert data["summary"]["section_counts"] == {
             "customer": 6,
             "governance": 2,
-            "operations": 3,
+            "operations": 2,
         }
         assert data["policy"]["internal_runtime_is_not_a_customer_page"] is True
         assert data["policy"]["dashboard_shell_uses_registered_pages"] is True
@@ -753,7 +776,6 @@ class TestDashboardHttp:
         assert set(by_key) == {
             "overview",
             "conversation",
-            "projects",
             "scenarios",
             "field",
             "space",
@@ -766,7 +788,6 @@ class TestDashboardHttp:
         assert by_key["overview"]["section"] == "customer"
         assert by_key["knowledge"]["title"] == "客户知识库"
         assert by_key["knowledge"]["primary_endpoint"] == "/api/knowledge/list"
-        assert by_key["projects"]["section"] == "operations"
         assert by_key["delivery"]["section"] == "governance"
         assert by_key["audit"]["primary_endpoint"] == "/api/audit/events"
         assert all(page["primary_endpoint"] for page in data["pages"])

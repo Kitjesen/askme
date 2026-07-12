@@ -221,5 +221,5 @@ class SemanticIndex:
             try:
                 self._rm.close()
             except Exception:
-                pass
+                logger.exception("[SemanticIndex] Close failed")
             self._rm = None

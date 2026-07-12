@@ -43,10 +43,41 @@ jobs:
             https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short --maxfail=10 --durations=20
+      - name: Coverage report
+        if: always()
+        run: python -m pytest tests/ -q --tb=short --cov=askme --cov-report=term-missing --cov-report=json -m "not slow" --maxfail=10
       - name: Performance smoke benchmark
         run: |
           python scripts/benchmark_core_paths.py --quick --iterations 40 --concurrency 8 --output artifacts/perf/core_paths_latest.json
           python scripts/check_perf_thresholds.py --report artifacts/perf/core_paths_latest.json
+
+  types:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run mypy
+        run: python -m mypy askme/ --ignore-missing-imports --no-error-summary
+
+  security:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install bandit
+        run: pip install bandit
+      - name: Run bandit
+        run: bandit -r askme/ -ll -x askme/cli.py,askme/voice/diagnostics/,tests/ -f json -o artifacts/bandit-report.json
 
   smoke:
     runs-on: ubuntu-latest

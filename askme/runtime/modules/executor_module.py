@@ -1,4 +1,4 @@
-"""ExecutorModule - wraps AgentShell as a declarative module.
+"""ExecutorModule - keeps the deprecated AgentShell compat stub wired.
 
 Canonical wiring::
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class ExecutorModule(Module):
-    """Provides the autonomous agent shell to the runtime."""
+    """Provides the deprecated local agent shell compat stub to the runtime."""
 
     name = "executor"
     depends_on = ("llm", "tools", "pipeline")
@@ -65,16 +65,25 @@ class ExecutorModule(Module):
     # -- typed accessors ------------------------------------------------
     @property
     def agent_shell(self) -> AgentShell:
-        """The autonomous agent shell instance."""
+        """The deprecated local agent shell compat instance."""
         return self.shell
 
     def health(self) -> dict[str, Any]:
         shell = getattr(self, "shell", None)
         profile = getattr(shell, "_profile", None)
         last_run_summary = shell.last_run_summary() if shell is not None else {}
+        replacement = str(getattr(shell, "deprecated_replacement", "") or "")
+        deprecated = bool(replacement)
         return {
             "status": "ok",
-            "agent_shell_enabled": shell is not None,
+            "agent_shell_loaded": shell is not None,
+            "agent_shell_enabled": bool(shell is not None and not deprecated),
+            "agent_shell_status": "deprecated"
+            if deprecated
+            else "enabled"
+            if shell is not None
+            else "unavailable",
+            "agent_shell_replacement": replacement,
             "agent_model": getattr(shell, "_model", ""),
             "agent_profile": getattr(profile, "name", ""),
             "agent_profile_display": getattr(profile, "display_name", ""),

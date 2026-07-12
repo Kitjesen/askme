@@ -13,11 +13,11 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import sounddevice as sd
+from askme.voice.asr import ASREngine
+from askme.voice.mic_input import MicInput
 from scipy.signal import resample_poly
 
 from askme.config import get_config
-from askme.voice.asr import ASREngine
-from askme.voice.mic_input import MicInput
 
 cfg = get_config()
 DURATION = 6

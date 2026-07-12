@@ -1,4 +1,4 @@
-"""Skill execution gate -safety checks, context assembly, AgentShell routing."""
+"""Skill execution gate -safety checks, context assembly, and compat routing."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class SkillGate:
-    """Skill execution gate -safety checks, context assembly, AgentShell routing."""
+    """Skill execution gate -safety checks, context assembly, and compat routing."""
 
     def __init__(
         self,
@@ -100,7 +100,7 @@ class SkillGate:
                 else:
                     logger.warning("[SkillGate] Path traversal blocked for last_result.txt")
         except Exception:
-            pass
+            logger.exception("[SkillGate] Workspace result save failed")
 
         return spoken, result
 
@@ -214,7 +214,7 @@ class SkillGate:
             _skill_def is not None and _skill_def.execution == "agent_shell"
         )
         if _is_agent_shell and self._agent_shell is not None:
-            logger.info("[AgentShell] Routing agent_task to AgentShell")
+            logger.info("[AgentShell] Routing agent_task to deprecated AgentShell compat stub")
             self._audio.drain_buffers()
             self._audio.start_playback()
             try:

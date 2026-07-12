@@ -16,6 +16,28 @@ def _create_model_dir(tmp_path: Path) -> Path:
         "joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
     ):
         (model_dir / filename).write_text("stub", encoding="utf-8")
+    (model_dir / "tokens.txt").write_text(
+        "\n".join(
+            [
+                "雷霆 1",
+                "Thunder 2",
+                "你好 3",
+                "小智 4",
+                "n 5",
+                "ǐ 6",
+                "h 7",
+                "ǎo 8",
+                "x 9",
+                "i 10",
+                "q 11",
+                "ióng 12",
+                "s 13",
+                "uàn 14",
+                "iǎo 15",
+            ]
+        ),
+        encoding="utf-8",
+    )
     return model_dir
 
 
@@ -71,3 +93,31 @@ def test_kws_empty_keywords_disables(tmp_path):
 
     assert engine.available is False
     assert engine.spotter is None
+
+
+def test_kws_accepts_pinyin_tokenized_keyword(tmp_path):
+    from askme.voice.kws import KWSEngine
+
+    model_dir = _create_model_dir(tmp_path)
+    keyword = "x iǎo s uàn :2.0 #0.20 @小算"
+
+    with patch("askme.voice.kws.sherpa_onnx.KeywordSpotter") as spotter_cls:
+        engine = KWSEngine({"model_dir": str(model_dir), "keywords": [keyword]})
+
+    assert (model_dir / "keywords.txt").read_text(encoding="utf-8").strip() == keyword
+    assert engine.available is True
+    spotter_cls.assert_called_once()
+
+
+def test_kws_rejects_unsupported_tokens_before_native_init(tmp_path):
+    from askme.voice.kws import KWSEngine
+
+    model_dir = _create_model_dir(tmp_path)
+
+    with patch("askme.voice.kws.sherpa_onnx.KeywordSpotter") as spotter_cls:
+        engine = KWSEngine(
+            {"model_dir": str(model_dir), "keywords": ["unsupported @wake"]}
+        )
+
+    assert engine.available is False
+    spotter_cls.assert_not_called()

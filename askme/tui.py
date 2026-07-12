@@ -253,6 +253,7 @@ class AskmeTerminalUI:
             except asyncio.CancelledError:
                 break
             except Exception:
+                logger.exception("[TUI] Input read failed")
                 break
 
     def _handle_estop(self) -> None:
@@ -261,6 +262,7 @@ class AskmeTerminalUI:
             self._pipeline.handle_estop()
             self._append_system(f"{_C_RED}[ESTOP] 紧急停止已触发！{_C_RESET}")
         except Exception:
+            logger.exception("[TUI] ESTOP handler failed")
             self._append_system(f"{_C_RED}[ESTOP] 紧急停止（安全服务未连接）{_C_RESET}")
         self._status_text = "ESTOP"
 
@@ -437,7 +439,7 @@ class AskmeTerminalUI:
                     state_str = state.value if state else "?"
                     parts.append(f"任务:{state_str} ({len(steps)}步)")
         except Exception:
-            pass
+            logger.exception("[TUI] Context bar mission status failed")
 
         try:
             health = self._health_snapshot()
@@ -445,7 +447,7 @@ class AskmeTerminalUI:
             if lat:
                 parts.append(f"LLM:{int(lat)}ms")
         except Exception:
-            pass
+            logger.exception("[TUI] Context bar health snapshot failed")
 
         if not parts:
             parts.append(f"{_C_DIM}无活动任务{_C_RESET}")

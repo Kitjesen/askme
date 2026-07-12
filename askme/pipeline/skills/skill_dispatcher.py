@@ -215,7 +215,7 @@ class SkillDispatcher:
         )
 
         # ── Background execution for agent_task ───────────────────────────────
-        # agent_task routes to AgentShell and can run for up to 120 s.
+        # agent_task is a legacy background lane; active agent execution is MCP/ZeroClaw.
         # Running it as a background asyncio.Task keeps VoiceLoop responsive so
         # the user can issue ESTOP or "停下" at any point during execution.
         if skill_name == "agent_task":

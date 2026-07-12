@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import platform
 import threading
 import time
 import wave
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 
@@ -948,77 +951,77 @@ def run_audio_route_scan(
 
 
 def print_audio_devices_summary(payload: dict[str, Any]) -> None:
-    print(f"Audio devices: {payload.get('status', 'unknown')}")  # noqa: T201
+    logger.info(f"Audio devices: {payload.get('status', 'unknown')}")
     if payload.get("error"):
-        print(f"  error: {payload['error']}")  # noqa: T201
+        logger.error(f"  error: {payload['error']}")
         return
-    print(f"  platform: {payload.get('platform')}")  # noqa: T201
-    print(f"  default: {payload.get('default_device')}")  # noqa: T201
-    print("  input devices:")  # noqa: T201
+    logger.info(f"  platform: {payload.get('platform')}")
+    logger.info(f"  default: {payload.get('default_device')}")
+    logger.info("  input devices:")
     for device in payload.get("devices", []):
         if device.get("is_input"):
-            print(f"    [{device['index']}] {device['name']} ch={device['max_input_channels']}")  # noqa: T201
-    print("  output devices:")  # noqa: T201
+            logger.info(f"    [{device['index']}] {device['name']} ch={device['max_input_channels']}")
+    logger.info("  output devices:")
     for device in payload.get("devices", []):
         if device.get("is_output"):
-            print(f"    [{device['index']}] {device['name']} ch={device['max_output_channels']}")  # noqa: T201
-    print(f"  recommendation: {json.dumps(payload.get('recommendation', {}), ensure_ascii=False)}")  # noqa: T201
+            logger.info(f"    [{device['index']}] {device['name']} ch={device['max_output_channels']}")
+    logger.info(f"  recommendation: {json.dumps(payload.get('recommendation', {}), ensure_ascii=False)}")
 
 
 def print_audio_loopback_summary(payload: dict[str, Any]) -> None:
-    print(f"Audio loopback: {payload.get('status', 'unknown')}")  # noqa: T201
-    print(f"  input/output: {payload.get('input_device')} -> {payload.get('output_device')}")  # noqa: T201
-    print(f"  playback-ok: {payload.get('playback_ok')}")  # noqa: T201
+    logger.info(f"Audio loopback: {payload.get('status', 'unknown')}")
+    logger.info(f"  input/output: {payload.get('input_device')} -> {payload.get('output_device')}")
+    logger.info(f"  playback-ok: {payload.get('playback_ok')}")
     if payload.get("capture_method"):
-        print(f"  capture-method: {payload['capture_method']}")  # noqa: T201
+        logger.info(f"  capture-method: {payload['capture_method']}")
     if payload.get("playback_error"):
-        print(f"  playback-error: {payload['playback_error']}")  # noqa: T201
+        logger.info(f"  playback-error: {payload['playback_error']}")
     if payload.get("fallback_error"):
-        print(f"  fallback-error: {payload['fallback_error']}")  # noqa: T201
+        logger.info(f"  fallback-error: {payload['fallback_error']}")
     if payload.get("failure_reason"):
-        print(f"  failure-reason: {payload['failure_reason']}")  # noqa: T201
-    print(  # noqa: T201
+        logger.info(f"  failure-reason: {payload['failure_reason']}")
+    logger.info(
         "  capture: "
         f"peak={payload.get('peak')} rms={payload.get('rms')} "
         f"signal_ok={payload.get('signal_ok')} tone_detected={payload.get('tone_detected')} "
         f"corr={payload.get('tone_correlation')}"
     )
     if payload.get("wav_out"):
-        print(f"  wav: {payload['wav_out']}")  # noqa: T201
+        logger.info(f"  wav: {payload['wav_out']}")
 
 
 def print_windows_beep_loopback_summary(payload: dict[str, Any]) -> None:
-    print(f"Windows beep loopback: {payload.get('status', 'unknown')}")  # noqa: T201
-    print(f"  input: {payload.get('input_device')}")  # noqa: T201
-    print(  # noqa: T201
+    logger.info(f"Windows beep loopback: {payload.get('status', 'unknown')}")
+    logger.info(f"  input: {payload.get('input_device')}")
+    logger.info(
         "  playback/recording: "
         f"playback_ok={payload.get('playback_ok')} recording_ok={payload.get('recording_ok')}"
     )
     if payload.get("playback_error"):
-        print(f"  playback-error: {payload['playback_error']}")  # noqa: T201
+        logger.info(f"  playback-error: {payload['playback_error']}")
     if payload.get("record_error"):
-        print(f"  record-error: {payload['record_error']}")  # noqa: T201
+        logger.info(f"  record-error: {payload['record_error']}")
     if payload.get("failure_reason"):
-        print(f"  failure-reason: {payload['failure_reason']}")  # noqa: T201
-    print(  # noqa: T201
+        logger.info(f"  failure-reason: {payload['failure_reason']}")
+    logger.info(
         "  capture: "
         f"peak={payload.get('peak')} rms={payload.get('rms')} "
         f"signal_ok={payload.get('signal_ok')} tone_detected={payload.get('tone_detected')} "
         f"corr={payload.get('tone_correlation')}"
     )
     if payload.get("wav_out"):
-        print(f"  wav: {payload['wav_out']}")  # noqa: T201
+        logger.info(f"  wav: {payload['wav_out']}")
 
 
 def print_audio_route_scan_summary(payload: dict[str, Any]) -> None:
-    print(f"Audio route scan: {payload.get('status', 'unknown')}")  # noqa: T201
+    logger.info(f"Audio route scan: {payload.get('status', 'unknown')}")
     if payload.get("failure_reason"):
-        print(f"  failure-reason: {payload['failure_reason']}")  # noqa: T201
+        logger.info(f"  failure-reason: {payload['failure_reason']}")
     if payload.get("diagnostic_hint"):
-        print(f"  diagnostic-hint: {payload['diagnostic_hint']}")  # noqa: T201
+        logger.info(f"  diagnostic-hint: {payload['diagnostic_hint']}")
     best = payload.get("best_route") or {}
     if best:
-        print(  # noqa: T201
+        logger.info(
             "  best: "
             f"in={best.get('input_device')} out={best.get('output_device')} "
             f"sr={best.get('sample_rate')} ch={best.get('selected_input_channel')} "
@@ -1026,12 +1029,12 @@ def print_audio_route_scan_summary(payload: dict[str, Any]) -> None:
             f"status={best.get('status')}"
         )
     if payload.get("verified_config_hint"):
-        print(  # noqa: T201
+        logger.info(
             "  verified-config: "
             f"{json.dumps(payload['verified_config_hint'], ensure_ascii=False)}"
         )
     for row in payload.get("routes", [])[:8]:
-        print(  # noqa: T201
+        logger.info(
             "  route: "
             f"in={row.get('input_device')} out={row.get('output_device')} "
             f"sr={row.get('sample_rate')} ch={row.get('selected_input_channel')} "

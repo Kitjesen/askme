@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="920" viewBox="0 0 1400 920">
+  <defs>
+    <style>
+      .bg { fill: #fbfcfd; }
+      .title { font-family: "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif; font-size: 34px; font-weight: 800; fill: #17212d; }
+      .subtitle { font-family: "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif; font-size: 18px; fill: #536273; }
+      .lane-title { font-family: "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif; font-size: 19px; font-weight: 800; fill: #265a6a; }
+      .box-title { font-family: "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif; font-size: 18px; font-weight: 800; fill: #17212d; }
+      .box-text { font-family: "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif; font-size: 14px; fill: #34465a; }
+      .small { font-family: "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif; font-size: 13px; fill: #5f6f7f; }
+      .pill { fill: #f4f0e7; stroke: #d6c8aa; stroke-width: 1.2; }
+      .core { fill: #ffffff; stroke: #d7e0e6; stroke-width: 1.5; }
+      .accent { fill: #265a6a; }
+      .accent2 { fill: #b05c3c; }
+      .soft { fill: #eef6f7; stroke: #c8dce0; stroke-width: 1.2; }
+      .arrow { stroke: #7b8794; stroke-width: 2.2; fill: none; marker-end: url(#arrowhead); }
+      .feedback { stroke: #b05c3c; stroke-width: 2; fill: none; stroke-dasharray: 8 7; marker-end: url(#arrowheadAccent); }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#7b8794" />
+    </marker>
+    <marker id="arrowheadAccent" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#b05c3c" />
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1400" height="920" rx="28"/>
+  <rect class="accent" x="56" y="50" width="72" height="8" rx="4"/>
+  <rect class="accent2" x="136" y="50" width="28" height="8" rx="4"/>
+  <text class="title" x="56" y="104">人形机器人现场自然互动技术方案</text>
+  <text class="subtitle" x="56" y="137">从靠近、问候、短聊、合影到边界收束的现场互动闭环</text>
+
+  <text class="lane-title" x="60" y="190">现场输入层</text>
+  <text class="lane-title" x="60" y="325">互动判断层</text>
+  <text class="lane-title" x="60" y="500">内容与角色层</text>
+  <text class="lane-title" x="60" y="690">输出与复盘层</text>
+
+  <rect class="soft" x="190" y="165" width="250" height="92" rx="14"/>
+  <text class="box-title" x="214" y="199">人群自然输入</text>
+  <text class="box-text" x="214" y="226">靠近 / 打招呼 / 提问</text>
+  <text class="box-text" x="214" y="247">合影请求 / 逗趣 / 围观</text>
+
+  <rect class="soft" x="490" y="165" width="250" height="92" rx="14"/>
+  <text class="box-title" x="514" y="199">多模态感知</text>
+  <text class="box-text" x="514" y="226">麦克风 / ASR / VAD</text>
+  <text class="box-text" x="514" y="247">距离 / 朝向 / 声源定位</text>
+
+  <rect class="soft" x="790" y="165" width="250" height="92" rx="14"/>
+  <text class="box-title" x="814" y="199">现场状态</text>
+  <text class="box-text" x="814" y="226">待机 / 问候 / 短聊 / 合影</text>
+  <text class="box-text" x="814" y="247">噪声、人流、互动轮次</text>
+
+  <rect class="soft" x="1090" y="165" width="250" height="92" rx="14"/>
+  <text class="box-title" x="1114" y="199">客户配置</text>
+  <text class="box-text" x="1114" y="226">角色口吻 / 禁用词 / FAQ</text>
+  <text class="box-text" x="1114" y="247">语音风格 / 场景话术</text>
+
+  <path class="arrow" d="M440 211 H490"/>
+  <path class="arrow" d="M740 211 H790"/>
+  <path class="arrow" d="M1040 211 H1090"/>
+
+  <rect class="core" x="190" y="300" width="250" height="120" rx="16"/>
+  <text class="box-title" x="214" y="334">Interaction Gate</text>
+  <text class="box-text" x="214" y="362">判断该不该回应</text>
+  <text class="box-text" x="214" y="383">回应 / 澄清 / 忽略</text>
+  <text class="box-text" x="214" y="404">拒答 / 延后 / 记录</text>
+
+  <rect class="core" x="490" y="300" width="250" height="120" rx="16"/>
+  <text class="box-title" x="514" y="334">Mode Manager</text>
+  <text class="box-text" x="514" y="362">待机 / 问候 / 短聊</text>
+  <text class="box-text" x="514" y="383">问答 / 合影 / 控场</text>
+  <text class="box-text" x="514" y="404">按现场状态切换互动模式</text>
+
+  <rect class="core" x="790" y="300" width="250" height="120" rx="16"/>
+  <text class="box-title" x="814" y="334">Intent Router</text>
+  <text class="box-text" x="814" y="362">打招呼 / 能力问题</text>
+  <text class="box-text" x="814" y="383">合影请求 / 闲聊</text>
+  <text class="box-text" x="814" y="404">越界请求 / 听不清</text>
+
+  <rect class="core" x="1090" y="300" width="250" height="120" rx="16"/>
+  <text class="box-title" x="1114" y="334">Turn Policy</text>
+  <text class="box-text" x="1114" y="362">短句优先 / 2-3 轮闭环</text>
+  <text class="box-text" x="1114" y="383">先接情绪再回答内容</text>
+  <text class="box-text" x="1114" y="404">必要时自然退出</text>
+
+  <path class="arrow" d="M315 257 V300"/>
+  <path class="arrow" d="M615 257 V300"/>
+  <path class="arrow" d="M915 257 V300"/>
+  <path class="arrow" d="M1215 257 V300"/>
+  <path class="arrow" d="M440 360 H490"/>
+  <path class="arrow" d="M740 360 H790"/>
+  <path class="arrow" d="M1040 360 H1090"/>
+
+  <rect class="core" x="190" y="475" width="250" height="120" rx="16"/>
+  <text class="box-title" x="214" y="509">Persona Card</text>
+  <text class="box-text" x="214" y="537">现场身份 / 性格 / 口头禅</text>
+  <text class="box-text" x="214" y="558">可聊话题 / 禁止表达</text>
+  <text class="box-text" x="214" y="579">品牌关键词规则</text>
+
+  <rect class="core" x="490" y="475" width="250" height="120" rx="16"/>
+  <text class="box-title" x="514" y="509">Script Library</text>
+  <text class="box-text" x="514" y="537">问候 / 接话 / 追问</text>
+  <text class="box-text" x="514" y="558">冷场补救 / 多人控场</text>
+  <text class="box-text" x="514" y="579">合影和拒答话术</text>
+
+  <rect class="core" x="790" y="475" width="250" height="120" rx="16"/>
+  <text class="box-title" x="814" y="509">Knowledge &amp; Safety</text>
+  <text class="box-text" x="814" y="537">FAQ / 现场知识</text>
+  <text class="box-text" x="814" y="558">隐私 / 攻击 / 危险拒答</text>
+  <text class="box-text" x="814" y="579">不编造、不越界、不失控</text>
+
+  <rect class="core" x="1090" y="475" width="250" height="120" rx="16"/>
+  <text class="box-title" x="1114" y="509">Response Planner</text>
+  <text class="box-text" x="1114" y="537">回复文本 / 语气标签</text>
+  <text class="box-text" x="1114" y="558">动作标签 / 下一步引导</text>
+  <text class="box-text" x="1114" y="579">等待、澄清、拒答模板</text>
+
+  <path class="arrow" d="M315 420 V475"/>
+  <path class="arrow" d="M615 420 V475"/>
+  <path class="arrow" d="M915 420 V475"/>
+  <path class="arrow" d="M1215 420 V475"/>
+  <path class="arrow" d="M440 535 H490"/>
+  <path class="arrow" d="M740 535 H790"/>
+  <path class="arrow" d="M1040 535 H1090"/>
+
+  <rect class="pill" x="190" y="665" width="250" height="112" rx="16"/>
+  <text class="box-title" x="214" y="699">TTS Profile</text>
+  <text class="box-text" x="214" y="727">亲和风 / 讲解风 / 合影风</text>
+  <text class="box-text" x="214" y="748">语速、音量、情绪、停顿</text>
+
+  <rect class="pill" x="490" y="665" width="250" height="112" rx="16"/>
+  <text class="box-title" x="514" y="699">动作与表情联动</text>
+  <text class="box-text" x="514" y="727">挥手 / 转头 / 合影姿态</text>
+  <text class="box-text" x="514" y="748">根据硬件接口逐项接入</text>
+
+  <rect class="pill" x="790" y="665" width="250" height="112" rx="16"/>
+  <text class="box-title" x="814" y="699">现场输出</text>
+  <text class="box-text" x="814" y="727">语音播放 / 音效 cue</text>
+  <text class="box-text" x="814" y="748">屏幕提示 / 控制台提示</text>
+
+  <rect class="pill" x="1090" y="665" width="250" height="112" rx="16"/>
+  <text class="box-title" x="1114" y="699">复盘与调优</text>
+  <text class="box-text" x="1114" y="727">交互日志 / 失败样例</text>
+  <text class="box-text" x="1114" y="748">话术热更新 / 验收报告</text>
+
+  <path class="arrow" d="M315 595 V665"/>
+  <path class="arrow" d="M615 595 V665"/>
+  <path class="arrow" d="M915 595 V665"/>
+  <path class="arrow" d="M1215 595 V665"/>
+  <path class="arrow" d="M440 721 H490"/>
+  <path class="arrow" d="M740 721 H790"/>
+  <path class="arrow" d="M1040 721 H1090"/>
+
+  <path class="feedback" d="M1215 665 C1280 625, 1280 455, 1215 420"/>
+  <path class="feedback" d="M1215 777 C1215 845, 315 845, 315 420"/>
+  <text class="small" x="760" y="842">复盘结果回写角色、话术、FAQ 和边界规则，形成可持续迭代的现场互动包</text>
+</svg>

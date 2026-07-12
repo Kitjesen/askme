@@ -5,8 +5,9 @@ import time
 
 sys.path.insert(0, ".")
 
-from askme.config import get_config
 from askme.voice.tts import TTSEngine
+
+from askme.config import get_config
 
 cfg = get_config()
 tts = TTSEngine(cfg.get("voice", {}).get("tts", {}))

@@ -34,7 +34,7 @@ def blueprint_item_from_payload(
         from askme.blueprints import get_blueprint_spec
 
         canonical = get_blueprint_spec(requested).name
-    except Exception:
+    except (ImportError, AttributeError, KeyError):
         canonical = requested
 
     items = payload.get("items") if isinstance(payload, dict) else []

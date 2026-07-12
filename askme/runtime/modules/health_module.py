@@ -18,6 +18,8 @@ from inspect import Parameter, signature
 from pathlib import Path
 from typing import Any
 
+from askme.api.routes.health import register_health_routes
+from askme.api.services.health_service import HealthService
 from askme.config import project_root
 from askme.runtime.core.module import Module, ModuleRegistry
 
@@ -87,11 +89,136 @@ class HealthModule(Module):
         )
         self._wire_runtime_handlers(cfg, registry)
 
+        # Set up HealthService with component-level checks for K8s probes.
+        self.health_service = HealthService()
+        self._register_component_health_checks(cfg, registry)
+        register_health_routes(
+            self.server._app,
+            self.health_service,
+            routes=("ready",),  # /healthz and /health already handled by system.py
+        )
+
         logger.info(
             "HealthModule: built (enabled=%s, port=%d)",
             self.server.enabled,
             self.server.port,
         )
+
+    def _register_component_health_checks(
+        self,
+        cfg: dict[str, Any],
+        registry: ModuleRegistry,
+    ) -> None:
+        """Register component-level health checks on ``self.health_service``.
+
+        Checks are wired to the runtime's Module ``health()`` methods.  Each
+        check function is a closure that reads live state from the registry at
+        call time rather than capturing a snapshot during build.
+        """
+
+        # ── LLM ──────────────────────────────────────────────────────────
+        def _check_llm() -> dict[str, Any]:
+            llm_mod = registry.get("llm")
+            if llm_mod is None:
+                return {"status": "unhealthy", "error": "llm module not registered"}
+            health = llm_mod.health()
+            model = health.get("model", "unknown")
+            return {
+                "status": "healthy" if health.get("status") == "ok" else "degraded",
+                "model": str(model),
+            }
+
+        self.health_service.register("llm", _check_llm)
+
+        # ── Memory ────────────────────────────────────────────────────────
+        def _check_memory() -> dict[str, Any]:
+            mem_mod = registry.get("memory")
+            if mem_mod is None:
+                return {"status": "unhealthy", "error": "memory module not registered"}
+            health = mem_mod.health()
+            bridge = health.get("rag", {}) if isinstance(health.get("rag"), dict) else {}
+            backend = str(bridge.get("backend") or health.get("backend") or "unknown")
+            return {
+                "status": "healthy" if health.get("status") == "ok" else "degraded",
+                "backend": backend,
+                "conversation_len": health.get("conversation_len", 0),
+                "episodic_buffer_len": health.get("episodic_buffer_len", 0),
+            }
+
+        self.health_service.register("memory", _check_memory)
+
+        # ── TTS ──────────────────────────────────────────────────────────
+        def _check_tts() -> dict[str, Any]:
+            voice_mod = registry.get("voice")
+            if voice_mod is None:
+                return {"status": "unhealthy", "error": "voice module not registered"}
+            tts = getattr(voice_mod, "tts_provider", None)
+            if tts is None:
+                tts = self._tts_from_text_module(registry)
+            if tts is None:
+                return {"status": "degraded", "message": "TTS provider not available"}
+            voice_health = voice_mod.health()
+            audio = voice_health.get("audio") if isinstance(voice_health, dict) else None
+            tts_status = audio.get("tts") if isinstance(audio, dict) else None
+            output_ready = audio.get("output_ready") if isinstance(audio, dict) else None
+            return {
+                "status": "healthy" if output_ready is True else "degraded",
+                "provider": str(
+                    (tts_status or {}).get("backend")
+                    if isinstance(tts_status, dict)
+                    else type(tts).__name__
+                ),
+                "available": output_ready is True,
+                "details": tts_status if isinstance(tts_status, dict) else {},
+            }
+
+        self.health_service.register("tts", _check_tts)
+
+        # ── ASR ──────────────────────────────────────────────────────────
+        def _check_asr() -> dict[str, Any]:
+            voice_mod = registry.get("voice")
+            if voice_mod is None:
+                return {"status": "unhealthy", "error": "voice module not registered"}
+            asr = getattr(voice_mod, "asr_provider", None)
+            if asr is None:
+                return {"status": "degraded", "message": "ASR provider not available"}
+            voice_health = voice_mod.health()
+            audio = voice_health.get("audio") if isinstance(voice_health, dict) else None
+            asr_status = audio.get("asr") if isinstance(audio, dict) else None
+            local = asr_status.get("local") if isinstance(asr_status, dict) else None
+            available = bool(
+                local.get("available")
+                if isinstance(local, dict)
+                else audio.get("input_ready") is True
+                if isinstance(audio, dict)
+                else False
+            )
+            return {
+                "status": "healthy" if available else "degraded",
+                "provider": str(
+                    asr_status.get("provider")
+                    if isinstance(asr_status, dict)
+                    else type(asr).__name__
+                ),
+                "available": available,
+                "details": asr_status if isinstance(asr_status, dict) else {},
+            }
+
+        self.health_service.register("asr", _check_asr)
+
+    @staticmethod
+    def _tts_from_text_module(registry: ModuleRegistry) -> Any | None:
+        """Fallback: look for a TTS provider on the text module."""
+        text_mod = registry.get("text")
+        if text_mod is None:
+            return None
+        text_loop = getattr(text_mod, "text_loop", None)
+        if text_loop is None:
+            return None
+        audio = getattr(text_loop, "_audio", None)
+        if audio is None:
+            return None
+        return getattr(audio, "tts", None)
 
     def _wire_runtime_handlers(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         """Connect HTTP surfaces to built runtime modules when they exist."""
@@ -174,8 +301,15 @@ class HealthModule(Module):
                     ):
                         kwargs["runtime_policy"] = runtime_policy
                     reply = await process_turn(text, **kwargs)
-                    rag_payload = self._rag_evidence_payload(registry)
-                    self._attach_rag_to_last_assistant(registry, rag_payload)
+                    rag_payload = self._rag_evidence_payload(
+                        registry,
+                        turn_rag=self._current_turn_rag(text_loop),
+                    )
+                    self._attach_rag_to_last_assistant(
+                        registry,
+                        rag_payload,
+                        conversation_session_id=conversation_session_id,
+                    )
                     cognition_result = self._last_cognition_result(text_loop)
                     if cognition_result is not None:
                         runtime_result = await self._maybe_submit_runtime_handoff(
@@ -209,7 +343,10 @@ class HealthModule(Module):
                     }
 
                 reply = await process_turn(text)
-                rag_payload = self._rag_evidence_payload(registry)
+                rag_payload = self._rag_evidence_payload(
+                    registry,
+                    turn_rag=self._current_turn_rag(text_loop),
+                )
                 self._attach_rag_to_last_assistant(registry, rag_payload)
                 if not speak:
                     return {
@@ -241,6 +378,8 @@ class HealthModule(Module):
 
     def _voice_handler(self, registry: ModuleRegistry) -> Any | None:
         voice_mod = registry.get("voice")
+        if voice_mod is not None and hasattr(voice_mod, "system_control_payload"):
+            return voice_mod
         audio = getattr(voice_mod, "audio", None) if voice_mod else None
         return getattr(audio, "tts", None) if audio is not None else None
 
@@ -347,7 +486,32 @@ class HealthModule(Module):
             return []
         return [dict(msg) for msg in history if isinstance(msg, dict)]
 
-    def _rag_evidence_payload(self, registry: ModuleRegistry) -> dict[str, Any]:
+    @staticmethod
+    def _current_turn_rag(text_loop: Any) -> dict[str, Any] | None:
+        payload = getattr(text_loop, "current_turn_rag", None)
+        if callable(payload):
+            payload = payload()
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def _rag_evidence_payload(
+        self,
+        registry: ModuleRegistry,
+        *,
+        turn_rag: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if isinstance(turn_rag, dict):
+            evidence = turn_rag.get("evidence")
+            rag = turn_rag.get("rag")
+            if isinstance(rag, dict) and rag.get("turn_scoped") is True:
+                return {
+                    "evidence": [
+                        dict(item) for item in evidence if isinstance(item, dict)
+                    ]
+                    if isinstance(evidence, list)
+                    else [],
+                    "rag": dict(rag),
+                }
+
         mem_mod = registry.get("memory")
         bridge = getattr(mem_mod, "memory_bridge", None) if mem_mod else None
         health = {}
@@ -379,12 +543,26 @@ class HealthModule(Module):
         self,
         registry: ModuleRegistry,
         rag_payload: dict[str, Any],
+        *,
+        conversation_session_id: str | None = None,
     ) -> None:
         evidence = rag_payload.get("evidence")
         rag = rag_payload.get("rag")
         if not evidence and not rag:
             return
         conversation = self._conversation(registry)
+        update = getattr(conversation, "update_last_assistant_metadata", None)
+        if callable(update):
+            update(
+                {
+                    "evidence": evidence if isinstance(evidence, list) else [],
+                    "rag": rag if isinstance(rag, dict) else {},
+                },
+                conversation_session_id=conversation_session_id,
+            )
+            return
+        if conversation_session_id:
+            return
         history = getattr(conversation, "history", None)
         if not isinstance(history, list):
             return
@@ -710,13 +888,20 @@ class HealthModule(Module):
             return str(model)
         return str(cfg.get("brain", {}).get("model", "unknown"))
 
+    @staticmethod
+    def _agent_shell_deprecation(shell: Any | None) -> str:
+        if shell is None:
+            return ""
+        replacement = getattr(shell, "deprecated_replacement", "")
+        return str(replacement or "")
+
     def _model_routing(
         self,
         cfg: dict[str, Any],
         registry: ModuleRegistry,
         snapshot: dict[str, Any],
     ) -> dict[str, Any]:
-        """Return product-readable model routing for voice, reasoning, and AgentShell."""
+        """Return product-readable model routing for voice, reasoning, and agent entrypoints."""
 
         brain_cfg = cfg.get("brain", {}) if isinstance(cfg.get("brain"), dict) else {}
         voice_cfg = cfg.get("voice", {}) if isinstance(cfg.get("voice"), dict) else {}
@@ -736,6 +921,8 @@ class HealthModule(Module):
         executor = registry.get("executor")
         shell = getattr(executor, "shell", None) if executor else None
         agent_profile = getattr(getattr(shell, "_profile", None), "name", "field_operator")
+        agent_shell_replacement = self._agent_shell_deprecation(shell)
+        agent_shell_deprecated = bool(agent_shell_replacement)
 
         return {
             "dialogue": {
@@ -765,7 +952,14 @@ class HealthModule(Module):
                 "model": str(snapshot.get("model_name") or brain_cfg.get("model") or "unknown"),
             },
             "agent_shell": {
-                "enabled": shell is not None,
+                "loaded": shell is not None,
+                "enabled": bool(shell is not None and not agent_shell_deprecated),
+                "status": "deprecated"
+                if agent_shell_deprecated
+                else "enabled"
+                if shell is not None
+                else "unavailable",
+                "replacement": agent_shell_replacement,
                 "model": str(getattr(shell, "_model", "") or brain_cfg.get("agent_model") or "unknown"),
                 "profile": str(agent_profile or ""),
                 "timeout_seconds": getattr(shell, "_default_timeout", brain_cfg.get("agent_timeout")),
@@ -785,11 +979,20 @@ class HealthModule(Module):
             except Exception as exc:
                 logger.debug("HealthModule: agent shell skill snapshot failed: %s", exc)
         pipeline_ready = registry.get("pipeline") is not None
-        executor_ready = registry.get("executor") is not None
+        executor = registry.get("executor")
+        shell = getattr(executor, "shell", None) if executor else None
+        agent_shell_replacement = self._agent_shell_deprecation(shell)
+        executor_ready = executor is not None and not agent_shell_replacement
         return {
             "callable": bool(enabled and pipeline_ready),
             "active_skill_count": len(enabled),
             "agent_shell_callable": bool(agent_shell_skills and executor_ready),
+            "agent_shell_status": "deprecated"
+            if agent_shell_replacement
+            else "enabled"
+            if shell is not None
+            else "unavailable",
+            "agent_shell_replacement": agent_shell_replacement,
             "agent_shell_skill_count": len(agent_shell_skills),
             "agent_shell_skills": agent_shell_skills,
         }

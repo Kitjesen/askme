@@ -7,6 +7,7 @@ import time
 sys.path.insert(0, ".")
 
 from askme.blueprints.voice import voice
+
 from askme.config import get_config
 
 

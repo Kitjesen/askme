@@ -4,10 +4,11 @@ import json
 import time
 from pathlib import Path
 
-from askme.perception.interaction_provider import FileInteractionPerceptionProvider
 from askme.runtime.module import ModuleRegistry
-from askme.runtime.modules.perception_module import PerceptionModule
 from askme.voice.perception_context import InteractionPerceptionSnapshot
+
+from askme.perception.interaction_provider import FileInteractionPerceptionProvider
+from askme.runtime.modules.perception_module import PerceptionModule
 
 
 def _write(path: Path, payload: dict) -> str:

@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-
 from askme.memory.bridge import MemoryBridge
 from askme.memory.vector_store import VectorStore
 

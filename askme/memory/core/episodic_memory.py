@@ -540,7 +540,7 @@ class EpisodicMemory:
                         break
                     entries.append(content)
                     total_chars += len(content)
-            except Exception:
+            except (ValueError, AttributeError):
                 continue
 
         if not entries:
@@ -805,7 +805,7 @@ class EpisodicMemory:
                 content = f.read_text(encoding="utf-8").strip()
                 if content:
                     parts.append(content)
-            except Exception:
+            except OSError:
                 continue
         result = "\n\n".join(parts)
         self._knowledge_cache: str | None = result
@@ -821,7 +821,11 @@ class EpisodicMemory:
         response = cleaned
         start = response.find("{")
         if start < 0:
-            return None
+            summary = response.strip()
+            if not self._is_safe_plaintext_summary(summary):
+                return None
+            logger.info("Reflection returned plain text; preserving it as a summary")
+            return self._normalized_reflection({"summary": summary})
         depth = 0
         in_string = False
         escape_next = False
@@ -842,15 +846,67 @@ class EpisodicMemory:
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
+                    candidate = response[start : i + 1]
                     try:
-                        return json.loads(response[start : i + 1])
+                        return self._normalized_reflection(json.loads(candidate))
                     except (json.JSONDecodeError, ValueError):
-                        logger.warning(
-                            "Failed to parse reflection JSON: %s", response[:100]
-                        )
-                        return None
+                        repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+                        try:
+                            return self._normalized_reflection(json.loads(repaired))
+                        except (json.JSONDecodeError, ValueError):
+                            logger.warning(
+                                "Failed to parse reflection JSON: %s", response[:100]
+                            )
+                            return self._reflection_from_embedded_summary(response)
         logger.warning("Failed to parse reflection JSON: %s", response[:100])
-        return None
+        return self._reflection_from_embedded_summary(response)
+
+    @staticmethod
+    def _is_safe_plaintext_summary(text: str) -> bool:
+        """Accept only substantial Chinese prose as a JSON fallback summary."""
+        clean = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(clean) < 8:
+            return False
+        return len(re.findall(r"[\u3400-\u9fff]", clean)) >= 4
+
+    @classmethod
+    def _reflection_from_embedded_summary(
+        cls,
+        response: str,
+    ) -> dict[str, Any] | None:
+        """Salvage only a complete JSON summary string from malformed output."""
+        match = re.search(r'"summary"\s*:\s*("(?:\\.|[^"\\])*")', response)
+        if match is None:
+            return None
+        try:
+            summary = json.loads(match.group(1))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        if not cls._is_safe_plaintext_summary(str(summary)):
+            return None
+        return cls._normalized_reflection({"summary": summary})
+
+    @staticmethod
+    def _normalized_reflection(payload: Any) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        summary = str(payload.get("summary") or "").strip()
+        if not summary:
+            return None
+        return {
+            **payload,
+            "summary": summary,
+            "new_facts": payload.get("new_facts")
+            if isinstance(payload.get("new_facts"), list)
+            else [],
+            "patterns": payload.get("patterns")
+            if isinstance(payload.get("patterns"), list)
+            else [],
+            "updates": payload.get("updates")
+            if isinstance(payload.get("updates"), list)
+            else [],
+            "importance": str(payload.get("importance") or "medium"),
+        }
 
     # ── Cleanup ────────────────────────────────────────────
 

@@ -1,6 +1,11 @@
-"""Minimal local vector store with sentence-transformers embedding.
+"""Minimal local vector store with ONNX-based embedding via fastembed.
 
-Graceful degradation: works without sentence-transformers installed —
+Uses ``fastembed.TextEmbedding`` (ONNX Runtime, no PyTorch) instead of the
+heavy ``sentence_transformers`` (which pulls in torch/transformers — ~17 s
+import alone).  FastEmbed loads the same ``paraphrase-multilingual-MiniLM-L12-v2``
+model via ONNX in under a second after the initial model download.
+
+Graceful degradation: works without fastembed installed —
 ``available`` returns False and all queries return empty results.
 
 Persistence: JSON file at ``data/memory/vectors/store.json``.
@@ -21,23 +26,30 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Lazy availability check — do NOT import sentence_transformers at module level
-# because it pulls in torch/transformers which can take 30+ seconds.
-_ST_AVAILABLE: bool | None = None  # None = not yet checked
+# Lazy availability check — do NOT import fastembed at module level so the
+# embedding backend is only loaded when actually needed.
+_FE_AVAILABLE: bool | None = None  # None = not yet checked
+
+# Global model cache keyed by model name (fastembed canonical form).
+_MODEL_CACHE: dict[str, Any] = {}
+_MODEL_LOCK = threading.Lock()
+
+# fastembed canonical model name for the same architecture.
+_FASTEMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 
 def _check_st_available() -> bool:
-    """Check if sentence-transformers is importable (cached after first call)."""
-    global _ST_AVAILABLE
-    if _ST_AVAILABLE is not None:
-        return _ST_AVAILABLE
+    """Check if fastembed is importable (cached after first call)."""
+    global _FE_AVAILABLE
+    if _FE_AVAILABLE is not None:
+        return _FE_AVAILABLE
     try:
         import importlib.util
 
-        _ST_AVAILABLE = importlib.util.find_spec("sentence_transformers") is not None
-    except Exception:
-        _ST_AVAILABLE = False
-    return _ST_AVAILABLE
+        _FE_AVAILABLE = importlib.util.find_spec("fastembed") is not None
+    except ImportError:
+        _FE_AVAILABLE = False
+    return _FE_AVAILABLE
 
 
 def _top_score_indices(scores: np.ndarray, top_k: int) -> np.ndarray:
@@ -60,7 +72,11 @@ def _top_score_indices(scores: np.ndarray, top_k: int) -> np.ndarray:
 
 
 class VectorStore:
-    """Lightweight vector store using sentence-transformers + numpy cosine similarity."""
+    """Lightweight vector store using ONNX embedding + numpy cosine similarity.
+
+    Uses ``fastembed`` (ONNX Runtime) by default, falling back gracefully
+    when it is not installed.
+    """
 
     def __init__(
         self,
@@ -68,7 +84,7 @@ class VectorStore:
         store_path: str | Path | None = None,
     ) -> None:
         self._model_name = model_name
-        self._model: Any = None  # lazy-loaded SentenceTransformer
+        self._model: Any = None  # lazy-loaded TextEmbedding instance
         self._store_path = Path(store_path) if store_path else None
 
         self._texts: list[str] = []
@@ -85,7 +101,7 @@ class VectorStore:
 
     @property
     def available(self) -> bool:
-        """Whether sentence-transformers is installed and usable."""
+        """Whether the ONNX embedding backend is installed and usable."""
         return _check_st_available()
 
     @property
@@ -96,26 +112,56 @@ class VectorStore:
     # -- Model ----------------------------------------------------------------
 
     def _get_model(self) -> Any:
-        """Lazy-load the embedding model."""
-        if self._model is None:
-            if not _check_st_available():
-                raise RuntimeError("sentence-transformers is not installed")
-            from sentence_transformers import SentenceTransformer
+        """Lazy-load the ONNX embedding model via fastembed.
 
-            self._model = SentenceTransformer(self._model_name)
+        The model is cached globally so multiple VectorStore instances share
+        the same underlying ONNX session.
+        """
+        global _MODEL_CACHE
+        if self._model is not None:
+            return self._model
+
+        if not _check_st_available():
+            raise RuntimeError("fastembed is not installed (pip install fastembed)")
+
+        cache_key = _FASTEMBED_MODEL
+        with _MODEL_LOCK:
+            if cache_key not in _MODEL_CACHE:
+                # Defer the import until we actually need the model so startup
+                # stays fast when the vector store is never queried.
+                from fastembed import TextEmbedding
+
+                t0 = time.perf_counter()
+                # Product deployments use CPU for the compact embedding model.
+                # Explicit providers prevent onnxruntime-gpu from probing a
+                # partially installed CUDA stack and printing an error per boot.
+                _MODEL_CACHE[cache_key] = TextEmbedding(
+                    cache_key,
+                    providers=["CPUExecutionProvider"],
+                    cuda=False,
+                )
+                elapsed = (time.perf_counter() - t0) * 1000
+                logger.info(
+                    "[VectorStore] ONNX embedding model loaded in %.0f ms", elapsed
+                )
+            self._model = _MODEL_CACHE[cache_key]
         return self._model
 
     def _encode(self, texts: list[str]) -> np.ndarray:
-        """Encode texts to embedding vectors."""
+        """Encode texts to L2-normalised embedding vectors."""
         model = self._get_model()
-        return model.encode(texts, normalize_embeddings=True)
+        # fastembed returns List[np.ndarray]; each row is already normalised
+        embeddings = list(model.embed(texts))
+        if not embeddings:
+            return np.empty((0, 384), dtype=np.float32)
+        return np.asarray(embeddings, dtype=np.float32)
 
     # -- Public API -----------------------------------------------------------
 
     def add(self, text: str, metadata: dict[str, Any] | None = None) -> None:
         """Add a text entry with optional metadata.
 
-        No-ops when sentence-transformers is unavailable.
+        No-ops when the embedding backend is unavailable.
         """
         if not _check_st_available():
             return

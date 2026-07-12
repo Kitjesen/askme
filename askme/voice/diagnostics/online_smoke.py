@@ -1,23 +1,29 @@
-"""Online voice-provider smoke checks for MiniMax and DashScope."""
+"""Online checks for the configured LLM and optional cloud voice providers."""
 
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 
 from askme.config import get_config
 from askme.llm.core.client import LLMClient
-from askme.voice.input.cloud_asr import CloudASR
+from askme.voice.input.cloud_asr import CloudASR, cloud_asr_credentials_present
 from askme.voice.output.tts import TTSEngine
 
 
-async def _check_minimax_llm() -> dict[str, Any]:
+async def _check_llm() -> dict[str, Any]:
     started = time.perf_counter()
+    client: LLMClient | None = None
     try:
         client = LLMClient()
+        provider = client.provider_status()
         text = await client.chat(
             [
                 {"role": "system", "content": "Only reply with OK."},
@@ -29,6 +35,8 @@ async def _check_minimax_llm() -> dict[str, Any]:
             "status": "ok",
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
             "text_preview": (text or "")[:32],
+            "provider": provider.get("provider", ""),
+            "model": provider.get("model", ""),
         }
     except Exception as exc:  # pragma: no cover - network/runtime path
         return {
@@ -36,6 +44,13 @@ async def _check_minimax_llm() -> dict[str, Any]:
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
             "error": str(exc)[:300],
         }
+    finally:
+        raw_client = getattr(client, "raw_client", None) if client is not None else None
+        close = getattr(raw_client, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
 
 async def _check_minimax_tts(tts_cfg: dict[str, Any], *, text: str) -> dict[str, Any]:
@@ -73,7 +88,7 @@ async def _check_minimax_tts(tts_cfg: dict[str, Any], *, text: str) -> dict[str,
             engine.shutdown()
 
 
-def _check_dashscope_asr(cloud_cfg: dict[str, Any], *, silence_seconds: float) -> dict[str, Any]:
+def _check_cloud_asr(cloud_cfg: dict[str, Any], *, silence_seconds: float) -> dict[str, Any]:
     started = time.perf_counter()
     cloud = CloudASR(cloud_cfg)
     try:
@@ -81,23 +96,32 @@ def _check_dashscope_asr(cloud_cfg: dict[str, Any], *, silence_seconds: float) -
             return {
                 "status": "error",
                 "available": False,
-                "error": "DashScope ASR is not enabled or api_key is missing",
+                "error": "Cloud ASR is not enabled or credentials are incomplete",
             }
         if not cloud.start_session():
+            snapshot = cloud.status_snapshot()
             return {
                 "status": "error",
                 "available": True,
-                "error": getattr(cloud, "_last_session_error", "start_session failed")[:300],
+                "provider": snapshot.get("provider", ""),
+                "error": str(
+                    snapshot.get("last_error")
+                    or getattr(cloud, "_last_session_error", "start_session failed")
+                )[:300],
             }
         rate = int(cloud_cfg.get("sample_rate", 16000) or 16000)
         silence = np.zeros(max(1, int(rate * silence_seconds)), dtype="<i2")
         cloud.feed(silence.tobytes())
         transcript = cloud.finish_session(timeout=3.0)
+        snapshot = cloud.status_snapshot()
         return {
             "status": "ok",
             "available": True,
+            "provider": snapshot.get("provider", ""),
+            "resource_id": snapshot.get("resource_id", ""),
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
             "transcript_preview": transcript[:32],
+            "log_id": snapshot.get("log_id", ""),
         }
     except Exception as exc:  # pragma: no cover - network/runtime path
         try:
@@ -123,17 +147,17 @@ async def run_voice_online_smoke(
     tts_cfg = voice_cfg.get("tts", {}) if isinstance(voice_cfg, dict) else {}
     cloud_cfg = voice_cfg.get("cloud_asr", {}) if isinstance(voice_cfg, dict) else {}
     checks = {
-        "minimax_llm": await _check_minimax_llm(),
+        "llm": await _check_llm(),
         "minimax_tts": await _check_minimax_tts(tts_cfg, text=text),
-        "dashscope_asr": _check_dashscope_asr(
+        "cloud_asr": _check_cloud_asr(
             cloud_cfg,
             silence_seconds=silence_seconds,
         ),
     }
     keys_present = {
-        "minimax_llm": bool(str(cfg.get("brain", {}).get("api_key", "")).strip()),
+        "llm": bool(str(cfg.get("brain", {}).get("api_key", "")).strip()),
         "minimax_tts": bool(str(tts_cfg.get("minimax_api_key", "")).strip()),
-        "dashscope_asr": bool(str(cloud_cfg.get("api_key", "")).strip()),
+        "cloud_asr": cloud_asr_credentials_present(cloud_cfg),
     }
     status = "ok" if all(check.get("status") == "ok" for check in checks.values()) else "degraded"
     return {
@@ -149,7 +173,7 @@ def run_voice_online_smoke_sync(**kwargs: Any) -> dict[str, Any]:
 
 
 def print_voice_online_smoke_summary(payload: dict[str, Any]) -> None:
-    print(f"Voice online smoke: {payload.get('status', 'unknown')}")  # noqa: T201
+    logger.info(f"Voice online smoke: {payload.get('status', 'unknown')}")
     for name, check in payload.get("checks", {}).items():
         line = f"  {name}: {check.get('status')}"
         if check.get("latency_ms") is not None:
@@ -158,4 +182,4 @@ def print_voice_online_smoke_summary(payload: dict[str, Any]) -> None:
             line += f" samples={check.get('samples')}"
         if check.get("error"):
             line += f" error={check.get('error')}"
-        print(line)  # noqa: T201
+        logger.info(line)

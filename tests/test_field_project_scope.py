@@ -91,6 +91,39 @@ def test_payload_scope_detection_and_single_scope_defaults() -> None:
     }
 
 
+def test_multi_project_scope_uses_only_allowed_explicit_defaults() -> None:
+    auth_body = {
+        "operator_auth": {
+            "operator": {
+                "project_scope": {
+                    "customer_ids": ["demo-customer", "site-customer"],
+                    "project_ids": ["demo-project", "site-project"],
+                    "site_ids": ["demo-site", "site-a"],
+                    "default_customer_ids": ["site-customer"],
+                    "default_project_ids": ["site-project"],
+                    "default_site_ids": ["site-a"],
+                }
+            }
+        }
+    }
+    normalized = scope.operator_project_scope(auth_body)
+    payload: dict[str, str] = {}
+
+    scope.apply_single_scope_defaults(payload, normalized)
+
+    assert payload == {
+        "customer_id": "site-customer",
+        "project_id": "site-project",
+        "site_id": "site-a",
+    }
+
+    invalid_default = dict(normalized)
+    invalid_default["default_project_ids"] = ["other-project"]
+    invalid_payload: dict[str, str] = {}
+    scope.apply_single_scope_defaults(invalid_payload, invalid_default)
+    assert "project_id" not in invalid_payload
+
+
 def test_customer_project_artifact_and_resource_scope_extractors() -> None:
     package_payload = {
         "package": {

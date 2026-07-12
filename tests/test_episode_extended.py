@@ -6,7 +6,6 @@ import math
 import time
 
 import pytest
-
 from askme.memory.episode import (
     DEFAULT_STABILITY_S,
     MAX_STABILITY_S,

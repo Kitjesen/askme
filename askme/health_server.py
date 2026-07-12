@@ -261,7 +261,7 @@ def build_health_snapshot(
         from askme.robot.dog.runtime_health import get_service_summary
         snapshot["services"] = get_service_summary()
     except Exception:
-        pass
+        logger.exception("[Health] Runtime service summary fetch failed")
 
     return snapshot
 
@@ -631,6 +631,7 @@ def create_health_app(
                 delivery,
             )
         except Exception as exc:
+            logger.exception("[Health] Voice delivery record failed")
             result["voice_delivery_record"] = {
                 "recorded": False,
                 "reason": str(exc),
@@ -659,6 +660,7 @@ def create_health_app(
                 delivery,
             )
         except Exception as exc:
+            logger.exception("[Health] Runtime delivery record failed")
             result["runtime_delivery_record"] = {
                 "recorded": False,
                 "reason": str(exc),
@@ -707,6 +709,7 @@ def create_health_app(
                     {"profile_id": profile_id},
                 )
             except Exception as exc:
+                logger.exception("[Health] Voice profile set failed")
                 delivery["status"] = "profile_failed"
                 delivery["reason"] = str(exc)
                 result["voice_delivery"] = delivery
@@ -721,6 +724,7 @@ def create_health_app(
             if callable(start_playback):
                 await _maybe_await(start_playback())
         except Exception as exc:
+            logger.exception("[Health] Voice playback failed")
             delivery["status"] = "playback_failed"
             delivery["reason"] = str(exc)
         result["voice_delivery"] = delivery
@@ -761,6 +765,7 @@ def create_health_app(
         try:
             runtime_result = await _dispatch_runtime("submit_plan_payload", plan)
         except Exception as exc:
+            logger.exception("[Health] Runtime plan submission failed")
             delivery["status"] = "submission_failed"
             delivery["reason"] = str(exc)
             result["runtime_delivery"] = delivery
@@ -1096,6 +1101,21 @@ class AskmeHealthServer:
 
     async def set_voice_profile_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._dispatch_voice_handler("set_voice_profile_payload", payload)
+
+    async def system_control_payload(self) -> dict[str, Any]:
+        return await self._dispatch_voice_handler("system_control_payload")
+
+    async def switch_system_component_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._dispatch_voice_handler(
+            "switch_system_component_payload",
+            payload,
+        )
+
+    async def update_prompt_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._dispatch_voice_handler("update_prompt_payload", payload)
 
     async def runtime_context_payload(self) -> dict[str, Any]:
         return await self._dispatch_runtime_handler("context_payload")

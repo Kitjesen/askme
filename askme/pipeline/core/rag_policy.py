@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-BLOCKING_RAG_STATES = frozenset({"filtered", "stale", "conflict", "unapproved"})
+BLOCKING_RAG_STATES = frozenset(
+    {"filtered", "stale", "conflict", "unapproved", "unavailable"}
+)
 
 DEFAULT_RAG_POLICY_REPLIES = {
     "filtered": "检索到的知识没有通过可信校验，我不能直接回答。",
@@ -17,6 +19,7 @@ DEFAULT_RAG_POLICY_REPLIES = {
     "conflict": "相关知识存在冲突，我不能直接给出确定答案。请管理员先确认知识库。",
     "unapproved": "相关知识还没有通过审批，我不能把它作为正式答案。",
     "no_evidence": "我这里没有可靠依据，不能直接回答。请补充位置或让管理员上传知识。",
+    "unavailable": "知识检索当前不可用，我不能在没有依据的情况下回答。请稍后重试。",
 }
 
 

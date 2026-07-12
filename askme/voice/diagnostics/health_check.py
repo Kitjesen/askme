@@ -5,11 +5,15 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any
 
 from askme.config import get_config, project_root
+
+logger = logging.getLogger(__name__)
+
 from askme.voice.diagnostics.minimax_hybrid import check_minimax_hybrid_voice_brain
 
 _ASR_DEFAULT_DIR = "models/asr/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
@@ -157,20 +161,20 @@ def run_voice_health(
 
 def print_voice_health_summary(payload: dict[str, Any]) -> None:
     """Print a compact human-readable health summary."""
-    print(f"voice-health: {payload.get('status', 'unknown')}")  # noqa: T201
-    print(f"  config: {_label(payload.get('config_ok'))}")  # noqa: T201
-    print(f"  models: {_label(payload.get('models_ok'))}")  # noqa: T201
-    print(f"  asr: {_label(payload.get('asr_ok'))}")  # noqa: T201
-    print(f"  vad: {_label(payload.get('vad_ok'))}")  # noqa: T201
-    print(f"  kws: {_label(payload.get('kws_ok'))}")  # noqa: T201
-    print(f"  tts: {_label(payload.get('tts_ok'))}")  # noqa: T201
-    print(f"  runtime_bridge: {_label(payload.get('runtime_bridge_ok'))}")  # noqa: T201
-    print(f"  voice_brain: {_label(payload.get('voice_brain_ok', True))}")  # noqa: T201
-    print(f"  health_snapshot: {_label(payload.get('health_snapshot_ok'))}")  # noqa: T201
+    logger.info(f"voice-health: {payload.get('status', 'unknown')}")
+    logger.info(f"  config: {_label(payload.get('config_ok'))}")
+    logger.info(f"  models: {_label(payload.get('models_ok'))}")
+    logger.info(f"  asr: {_label(payload.get('asr_ok'))}")
+    logger.info(f"  vad: {_label(payload.get('vad_ok'))}")
+    logger.info(f"  kws: {_label(payload.get('kws_ok'))}")
+    logger.info(f"  tts: {_label(payload.get('tts_ok'))}")
+    logger.info(f"  runtime_bridge: {_label(payload.get('runtime_bridge_ok'))}")
+    logger.info(f"  voice_brain: {_label(payload.get('voice_brain_ok', True))}")
+    logger.info(f"  health_snapshot: {_label(payload.get('health_snapshot_ok'))}")
     for warning in payload.get("warnings", []):
-        print(f"  warn: {warning}")  # noqa: T201
+        logger.warning(f"  warn: {warning}")
     for error in payload.get("errors", []):
-        print(f"  error: {error}")  # noqa: T201
+        logger.error(f"  error: {error}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -187,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     payload = run_voice_health(live=args.live)
     if args.json:
-        print(json.dumps(payload, indent=2, ensure_ascii=False))  # noqa: T201
+        logger.info(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print_voice_health_summary(payload)
     return 0 if payload["status"] == "ok" else 1
@@ -238,6 +242,8 @@ def _check_vad(cfg: dict[str, Any], root: Path, deps: dict[str, bool]) -> dict[s
 
 
 def _check_kws(cfg: dict[str, Any], root: Path, deps: dict[str, bool]) -> dict[str, Any]:
+    from askme.voice.input.kws import normalize_keyword_line, validate_keyword_lines
+
     keywords = [str(keyword).strip() for keyword in cfg.get("keywords", []) if str(keyword).strip()]
     enabled = bool(keywords)
     model_dir = _resolve_path(root, cfg.get("model_dir", _KWS_DEFAULT_DIR))
@@ -256,6 +262,12 @@ def _check_kws(cfg: dict[str, Any], root: Path, deps: dict[str, bool]) -> dict[s
         errors = [f"KWS missing {name}: {path}" for name, path in missing.items()]
         if not deps["sherpa_onnx"]:
             errors.append("KWS dependency missing: sherpa_onnx")
+        if "tokens" not in missing:
+            normalized = [normalize_keyword_line(keyword) for keyword in keywords]
+            errors.extend(
+                f"KWS keyword configuration invalid: {error}"
+                for error in validate_keyword_lines(normalized, paths["tokens"])
+            )
     else:
         warnings.append("KWS is disabled because voice.kws.keywords is empty")
     return {
@@ -282,13 +294,18 @@ def _check_tts(cfg: dict[str, Any], root: Path, deps: dict[str, bool]) -> dict[s
     )
     local_model_ok = not local_missing and deps["sherpa_onnx"]
     minimax_key = str(cfg.get("minimax_api_key", "")).strip()
+    fallback_backend = str(cfg.get("fallback_backend", "edge")).strip().lower()
+    if fallback_backend not in {"local", "edge"}:
+        fallback_backend = "edge"
     backend = requested_backend
     warnings: list[str] = []
     errors: list[str] = []
 
     if backend == "minimax" and not minimax_key:
-        backend = "edge"
-        warnings.append("MiniMax TTS API key is empty; runtime will fall back to edge")
+        backend = "local" if fallback_backend == "local" and local_model_ok else "edge"
+        warnings.append(
+            f"MiniMax TTS API key is empty; runtime will fall back to {backend}"
+        )
     if backend == "local" and not local_model_ok:
         backend = "edge"
         warnings.append("local TTS model is incomplete; runtime will fall back to edge")
@@ -308,6 +325,7 @@ def _check_tts(cfg: dict[str, Any], root: Path, deps: dict[str, bool]) -> dict[s
         "model_ok": local_model_ok or backend in {"edge", "minimax"},
         "requested_backend": requested_backend,
         "effective_backend": backend,
+        "fallback_backend": fallback_backend,
         "dependency_ok": {
             "sherpa_onnx": deps["sherpa_onnx"],
             "edge_tts": deps["edge_tts"],

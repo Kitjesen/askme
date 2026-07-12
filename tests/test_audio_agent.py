@@ -3,12 +3,12 @@ barge-in hold, agent state transitions, mute/unmute, volume/speed delegation."""
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-
 from askme.voice.audio_agent import (
     _BARGE_IN_HOLD_S,
     _CONFIRMATION_WORDS,
@@ -46,6 +46,53 @@ def _make_agent(voice_mode: bool = False, **voice_overrides) -> AudioAgent:
     metrics.mark_voice_input = MagicMock()
     metrics.mark_voice_error = MagicMock()
     return AudioAgent(config, voice_mode=voice_mode, metrics=metrics)
+
+
+def test_wake_word_wait_records_microphone_frames() -> None:
+    agent = object.__new__(AudioAgent)
+    agent.stop_event = threading.Event()
+    agent._record_input_observation = MagicMock()
+    agent._refresh_voice_metrics = MagicMock()
+    agent.kws_stream = MagicMock()
+    agent.kws = MagicMock()
+    agent.kws.spotter.is_ready.return_value = False
+    agent.kws.spotter.get_result.return_value = ""
+
+    samples = np.array([0.25, -0.5], dtype=np.float32)
+    mic = MagicMock()
+    mic.sample_rate = 16000
+
+    def read_chunk() -> np.ndarray:
+        agent.stop_event.set()
+        return samples
+
+    mic.read_chunk.side_effect = read_chunk
+
+    assert agent._wait_for_wake_word_mic(mic) is False
+    agent._record_input_observation.assert_called_once_with(
+        peak=16384,
+        rms=12952.69,
+        vad_state="wake_word",
+        gate_state="open",
+    )
+
+
+def test_asr_result_does_not_renew_followup_window_before_admission() -> None:
+    agent = object.__new__(AudioAgent)
+    agent._turn_traces = MagicMock()
+    agent.audio_queue = MagicMock()
+    agent._metrics = MagicMock()
+    agent._clear_input_failure = MagicMock()
+    agent._refresh_voice_metrics = MagicMock()
+    agent._asr_mgr = MagicMock()
+    agent._last_interaction_time = 123.0
+    agent._agent_state = AgentState.LISTENING
+
+    assert agent._accept_result("旁人聊天", asr_source="cloud") == "旁人聊天"
+    assert agent._last_interaction_time == 123.0
+
+    agent.mark_interaction_turn()
+    assert agent._last_interaction_time > 123.0
 
 
 # ---------------------------------------------------------------------------

@@ -149,12 +149,24 @@ def blueprint_readiness(
             "commands": list(spec.validation_commands),
         },
     ]
+    runtime_profile = _runtime_profile_evidence(spec, cfg)
+    if runtime_profile["applies"]:
+        gates.append({
+            "gate_id": "runtime_profile",
+            "status": runtime_profile["status"],
+            "message": runtime_profile["message"],
+            "profile": runtime_profile["profile"],
+            "allowed_for_site_validation": runtime_profile["allowed_for_site_validation"],
+        })
     if not inspection["valid"]:
         status = "blocked"
         claim = "运行模块契约修复前不能交付。"
     elif missing_config:
         status = "configuration_incomplete"
         claim = "可以作为产品包介绍，但补齐必需配置前不能部署。"
+    elif runtime_profile["status"] == "fail":
+        status = "runtime_profile_not_site_ready"
+        claim = runtime_profile["message"]
     else:
         status = "ready_for_validation"
         claim = "可进入实验室或现场验证；生产可用声明仍需要真实服务和硬件证据。"
@@ -165,6 +177,7 @@ def blueprint_readiness(
         "product_stage": spec.product_stage,
         "production_ready": False,
         "customer_claim": claim,
+        "runtime_profile": runtime_profile,
         "missing_config": missing_config,
         "config_evidence": config_evidence,
         "external_services": list(spec.external_services),
@@ -427,6 +440,8 @@ def _delivery_package_status(readiness: dict[str, Any]) -> str:
         return "ready_for_site_validation"
     if status == "configuration_incomplete":
         return "missing_configuration"
+    if status == "runtime_profile_not_site_ready":
+        return "demo_or_shadow_only"
     if status == "blocked":
         return "blocked"
     return "needs_review"
@@ -437,6 +452,11 @@ def _release_boundary(package_status: str, product_stage: str) -> str:
         return (
             "可用于实验室或客户试点验证。真实凭证、硬件、场景证据和客户验收记录"
             "齐备前，不能声明无人值守生产运行。"
+        )
+    if package_status == "demo_or_shadow_only":
+        return (
+            "当前 runtime profile 只支持演示、仿真或影子验证；切换到受控 lab/prod "
+            "profile 并完成现场证据前，不能声明客户现场验证通过。"
         )
     if package_status == "missing_configuration":
         return (
@@ -449,6 +469,8 @@ def _release_boundary(package_status: str, product_stage: str) -> str:
 def _delivery_customer_status(package_status: str) -> str:
     if package_status == "ready_for_site_validation":
         return "可进入现场验证"
+    if package_status == "demo_or_shadow_only":
+        return "仅可演示或影子验证"
     if package_status == "missing_configuration":
         return "运行配置未补齐"
     if package_status == "blocked":
@@ -463,6 +485,8 @@ def _delivery_customer_next_step(
     missing = readiness.get("missing_config") or []
     if missing:
         return "补齐运行配置：" + "、".join(str(item) for item in missing)
+    if package_status == "demo_or_shadow_only":
+        return "切换 runtime_handoff.profile 到 lab 或 prod 后再进入客户现场验证。"
     if package_status == "ready_for_site_validation":
         return "运行现场验证用例，并归档客户可查证据。"
     if package_status == "blocked":
@@ -480,6 +504,12 @@ def _delivery_actions(
             "补齐运行配置：" + "、".join(str(item) for item in missing),
             "完成外部服务凭证配置和冒烟测试。",
             "重新生成蓝图交付包并复核验收边界。",
+        ]
+    if package_status == "demo_or_shadow_only":
+        return [
+            "将 runtime_handoff.profile 切换为 lab 或 prod。",
+            "确认对应 profile 已显式启用并绑定真实机器人运行边界。",
+            "重新运行现场验证命令并归档证据。",
         ]
     if package_status == "ready_for_site_validation":
         return [
@@ -580,3 +610,53 @@ def _scenario_id(blueprint: str, scenario: str) -> str:
     safe = "".join(ch.lower() if ch.isalnum() else "-" for ch in scenario)
     safe = "-".join(part for part in safe.split("-") if part)
     return f"{blueprint}.{safe[:48]}"
+
+
+def _runtime_profile_evidence(spec: BlueprintSpec, config: dict[str, Any]) -> dict[str, Any]:
+    """Return product evidence for whether the selected runtime profile can support site validation."""
+    allowed = ("lab", "prod")
+    applies = _requires_site_runtime_profile(spec)
+    profile = str(_config_path_value(config, "runtime_handoff.profile") or "").strip()
+    if not applies:
+        return {
+            "applies": False,
+            "status": "not_applicable",
+            "profile": profile,
+            "allowed_for_site_validation": [],
+            "message": "该蓝图不需要物理现场 runtime profile 门禁。",
+        }
+    if profile in allowed:
+        return {
+            "applies": True,
+            "status": "pass",
+            "profile": profile,
+            "allowed_for_site_validation": list(allowed),
+            "message": f"runtime_handoff.profile={profile} 可进入受控客户现场验证。",
+        }
+    shown = profile or "missing"
+    return {
+        "applies": True,
+        "status": "fail",
+        "profile": profile,
+        "allowed_for_site_validation": list(allowed),
+        "message": (
+            f"runtime_handoff.profile={shown} 只适合本地演示、仿真或影子验证；"
+            "客户现场验证需要 lab 或 prod profile。"
+        ),
+    }
+
+
+def _requires_site_runtime_profile(spec: BlueprintSpec) -> bool:
+    return (
+        "robot_control" in spec.required_config
+        or "customer_pilot_site" in spec.deployment_targets
+    )
+
+
+def _config_path_value(config: dict[str, Any], path: str) -> Any:
+    current: Any = config
+    for segment in path.split("."):
+        if not isinstance(current, dict) or segment not in current:
+            return None
+        current = current[segment]
+    return current

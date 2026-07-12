@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from askme.runtime.mission import MissionService
+from askme.runtime.module import Module, ModuleRegistry, Runtime
+
 from askme.cognition import (
     ActivePerceptionResolver,
     CognitivePlanner,
     WorkingMemory,
     WorldStateService,
 )
-from askme.runtime.mission import MissionService
-from askme.runtime.module import Module, ModuleRegistry, Runtime
 from askme.runtime.modules import CognitionModule, MemoryModule, MissionModule
 
 

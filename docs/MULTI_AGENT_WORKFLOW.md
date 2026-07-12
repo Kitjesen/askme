@@ -3,6 +3,12 @@
 This project can be advanced by several agents at once, but only if each agent
 owns a clear module boundary and the lead agent integrates the result.
 
+Before lane assignment, read `docs/PRODUCT_REQUIREMENTS.md`,
+`docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md`,
+`docs/PRODUCT_ARCHITECTURE_TRACE.md`, and `docs/DEMAND_EVIDENCE_LEDGER.md`.
+Field Delivery Domain work must preserve Product/Admin/Platform/Internal vs
+Runtime / Safety / Hardware ownership; customer signoff != production readiness.
+
 ## Lead Agent Responsibilities
 
 - Pick the work lane before spawning agents.
@@ -22,8 +28,9 @@ slice.
 | Runtime / blueprints | `askme/runtime`, `askme/blueprints` | `pytest tests/test_runtime_modules.py tests/test_all_modules.py tests/test_blueprints_catalog.py tests/test_blueprint_api_payloads.py -q` |
 | Voice gateway / interaction | `askme/voice_gateway`, `askme/robot_interaction` | `pytest tests/test_voice_loop.py tests/test_text_loop.py tests/test_voice_runtime_bridge.py tests/test_interaction_gate.py tests/test_contract_voice_gate.py -q` |
 | API / MCP / tools | `askme/api`, `askme/mcp`, `askme/tools` | `pytest tests/test_api_route_dependency_injection.py tests/test_mcp_tools.py tests/test_mcp_memory_tools.py tests/test_mcp_misc_resources.py tests/test_builtin_tools.py tests/test_tool_registry.py -q` |
+| CLI surface | `askme/cli`, compatibility facade `askme/cli.py` | `pytest tests/test_cli.py tests/test_cli_helpers.py tests/test_cli_agent_speak.py -q` |
 | Providers / ports | `askme/providers`, `askme/ports` | `pytest tests/test_six_layer_package_boundaries.py tests/test_register_defaults.py tests/test_registry.py tests/test_robot_tools_ext.py tests/test_arm_controller.py -q` |
-| Product workflows | `askme/pipeline/field`, `askme/api/routes/field_*`, `askme/api/services/field_*` | `pytest tests/test_field_operations.py tests/test_field_ingest_adapters.py tests/test_field_contracts.py tests/test_dashboard_customer_project_contract.py -q` |
+| Field Delivery Domain | `askme/pipeline/field`, `askme/api/routes/field_*`, `askme/api/services/field_*` | `pytest tests/test_field_operations.py tests/test_field_ingest_adapters.py tests/test_field_contracts.py tests/test_dashboard_customer_project_contract.py tests/test_field_customer_project_acceptance_routes.py -q` |
 | Memory / RAG | `askme/memory`, `askme/api/routes/memory.py`, `askme/api/services/knowledge_route_payloads.py` | `pytest tests/test_memory_bridge.py tests/test_memory_importer.py tests/test_memory_system.py tests/test_knowledge_route_payloads.py -q` |
 | Migration compatibility | `askme/compat`, package `__init__.py` facades | `pytest tests/test_package_migration_compat.py tests/test_six_layer_package_boundaries.py -q` |
 | Test hardening | `tests` only | `pytest tests/test_six_layer_package_boundaries.py tests/test_package_migration_compat.py -q` plus the lane-specific target under change |
@@ -50,7 +57,7 @@ If two workers need one of these files, stop and merge through the lead.
 
 ```text
 You are Agent <N>.
-Working directory: D:\inovxio\tools\askme.
+Working directory: <repo-root>.
 Write scope: <exact files or directories>.
 Do not modify: <explicit exclusions>.
 Goal: <bounded outcome>.

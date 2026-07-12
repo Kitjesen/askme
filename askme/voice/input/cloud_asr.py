@@ -30,6 +30,28 @@ _WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 _DEFAULT_MODEL = "paraformer-realtime-v2"
 
 
+def cloud_asr_credentials_present(config: dict[str, Any] | None) -> bool:
+    """Return whether the configured cloud provider has usable credentials."""
+    cfg = config or {}
+    provider = str(cfg.get("provider", "dashscope")).strip().lower()
+
+    def _configured(value: Any) -> bool:
+        text = str(value or "").strip()
+        return bool(text) and not text.startswith("${")
+
+    if provider in {
+        "volcengine",
+        "doubao",
+        "seed_asr",
+        "volcengine_seed_asr",
+    }:
+        return _configured(cfg.get("api_key")) or (
+            _configured(cfg.get("app_id"))
+            and _configured(cfg.get("access_token"))
+        )
+    return _configured(cfg.get("api_key"))
+
+
 class CloudASR(ASRBackend):
     """Alibaba DashScope Paraformer real-time ASR via WebSocket.
 
@@ -41,6 +63,23 @@ class CloudASR(ASRBackend):
         sample_rate: int        - Audio sample rate (default 16000)
         language_hints: list    - Language hints (default ["zh", "en"])
     """
+
+    def __new__(
+        cls,
+        config: dict[str, Any] | None = None,
+    ) -> CloudASR | ASRBackend:
+        """Dispatch non-DashScope providers without changing legacy callers."""
+        provider = str((config or {}).get("provider", "dashscope")).strip().lower()
+        if cls is CloudASR and provider in {
+            "volcengine",
+            "doubao",
+            "seed_asr",
+            "volcengine_seed_asr",
+        }:
+            from .volcengine_asr import VolcengineASR
+
+            return VolcengineASR(config)
+        return super().__new__(cls)
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = config or {}

@@ -10,12 +10,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from askme.cognition import WorldStateService  # noqa: E402
-from askme.runtime.handoff import RuntimeHandoffService  # noqa: E402
+from askme.runtime.task.handoff import RuntimeHandoffService  # noqa: E402
 from scripts.eval.evaluate_robot_scenarios import (  # noqa: E402
     DEFAULT_REPORT_PATH as DEFAULT_SCENARIO_REPORT_PATH,
     evaluate_scenarios,

@@ -5,10 +5,10 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from askme.skills.skill_model import SkillDefinition
 
 from askme.pipeline.proactive.base import ProactiveContext, ProactiveResult
 from askme.pipeline.proactive.confirm_agent import ConfirmationAgent
-from askme.skills.skill_model import SkillDefinition
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

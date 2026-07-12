@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from askme.skills.skill_model import SkillDefinition
+
 from askme.pipeline.proactive.base import ProactiveContext
 from askme.pipeline.proactive.confirm_agent import ConfirmationAgent
 from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
 from askme.pipeline.proactive.slot_agent import SlotCollectorAgent
 from askme.pipeline.proactive.slot_utils import slot_present
-from askme.skills.skill_model import SkillDefinition
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

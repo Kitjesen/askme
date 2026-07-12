@@ -1,7 +1,8 @@
 """Detect whether speech is addressed to the robot or is casual bystander chat.
 
 Pure rule-based, 0ms latency. No LLM dependency.
-Falls back to "addressed" (safe default — better to respond than to miss a command).
+The uncertainty policy is configurable so public deployments can prefer silence
+while supervised deployments preserve the legacy respond-on-uncertain behavior.
 
 Supports "name activation" — when the robot's name is detected, a 30-second
 window opens where ALL subsequent speech is treated as addressed. This gives
@@ -18,8 +19,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Robot names / identifiers — if present, definitely talking to us
-_ROBOT_NAMES = frozenset([
+# Default robot names / identifiers — deployments can replace these via config.
+_DEFAULT_ROBOT_NAMES = frozenset([
     "thunder", "雷霆", "机器人", "小雷", "机器狗", "巡检",
 ])
 
@@ -63,15 +64,36 @@ class AddressDetector:
     Config keys (under ``voice.address_detection``)::
 
         enabled: bool  - Enable/disable (default False)
+        names: list[str]  - Robot names that activate direct-address mode
+        uncertain_policy: "addressed" | "ignore"
+        allow_pronoun_address: bool
+        name_window_allows_ambiguous: bool
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = config or {}
         self.enabled: bool = bool(cfg.get("enabled", False))
+        configured_names = cfg.get("names")
+        if configured_names is None:
+            self._robot_names = _DEFAULT_ROBOT_NAMES
+        else:
+            if isinstance(configured_names, str):
+                configured_names = [configured_names]
+            self._robot_names = frozenset(
+                str(name).strip().lower()
+                for name in configured_names
+                if str(name).strip()
+            )
         # Name activation window: after hearing robot name, treat all speech
         # as addressed for this many seconds (natural "呼名+对话" pattern)
         self._name_window: float = float(cfg.get("name_window", 30.0))
         self._name_activated_until: float = 0.0  # monotonic deadline
+        policy = str(cfg.get("uncertain_policy", "addressed")).strip().lower()
+        self._uncertain_is_addressed = policy not in {"ignore", "silent", "reject"}
+        self._allow_pronoun_address = bool(cfg.get("allow_pronoun_address", True))
+        self._name_window_allows_ambiguous = bool(
+            cfg.get("name_window_allows_ambiguous", True)
+        )
 
     def is_addressed(self, text: str) -> bool:
         """Check if *text* is addressed to the robot.
@@ -86,25 +108,30 @@ class AddressDetector:
         if not text_lower:
             return False
 
-        # Rule 0: Name activation window — if robot name was recently heard,
-        # treat everything as addressed (natural "Thunder, 检查温度" then
-        # follow-up "再看看那边" without repeating the name)
-        if time.monotonic() < self._name_activated_until:
+        now = time.monotonic()
+        name_window_active = now < self._name_activated_until
+
+        # Legacy deployments can let a recent explicit name authorize ambiguous
+        # follow-ups. Public deployments disable this and rely on the turn gate.
+        if name_window_active and self._name_window_allows_ambiguous:
             logger.debug("[Address] YES: name window active (%.0fs left)",
-                         self._name_activated_until - time.monotonic())
+                         self._name_activated_until - now)
             return True
 
         # Rule 1: Robot name mentioned → definitely addressed + activate window
-        for name in _ROBOT_NAMES:
+        for name in self._robot_names:
             if name in text_lower:
-                self._name_activated_until = time.monotonic() + self._name_window
+                if self._name_window > 0:
+                    self._name_activated_until = now + self._name_window
                 logger.info("[Address] YES: robot name '%s' → window open %.0fs",
                             name, self._name_window)
                 return True
 
         # Rule 2: Direct address pronoun "你/您" → likely addressed
         for p in _ADDRESS_PRONOUNS:
-            if p in text_lower:
+            if p in text_lower and (
+                self._allow_pronoun_address or name_window_active
+            ):
                 logger.debug("[Address] YES: pronoun '%s' found", p)
                 return True
 
@@ -130,11 +157,16 @@ class AddressDetector:
             logger.info("[Address] NO: casual signals (%d) found in '%s'", casual_count, text[:30])
             return False
 
-        # Rule 7: Very short text (<=4 chars) with no signals → ambiguous, default addressed
+        # Rule 7: Very short text (<=4 chars) with no signals is ambiguous.
         if len(text_lower) <= 4:
-            logger.debug("[Address] YES: short text, default addressed")
-            return True
+            logger.debug(
+                "[Address] %s: short text, uncertainty policy",
+                "YES" if self._uncertain_is_addressed else "NO",
+            )
+            return self._uncertain_is_addressed
 
-        # Default: addressed (safe — better to respond than miss a command)
-        logger.debug("[Address] YES: default (uncertain)")
-        return True
+        logger.debug(
+            "[Address] %s: default uncertainty policy",
+            "YES" if self._uncertain_is_addressed else "NO",
+        )
+        return self._uncertain_is_addressed

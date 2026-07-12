@@ -161,7 +161,7 @@ def test_resource_governance_notification_service_is_leaf_and_route_imports_serv
 
 
 class FakeDispatcher:
-    instances: list["FakeDispatcher"] = []
+    instances: list[FakeDispatcher] = []
 
     def __init__(
         self,

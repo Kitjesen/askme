@@ -1,9 +1,8 @@
-"""Neutral product-facing entry point for autonomous agent execution."""
+"""DEPRECATED — neutral product-facing entry point (replaced by ZeroClaw MCP Agent)."""
 
 from __future__ import annotations
 
 from .thunder_agent_shell import ThunderAgentShell
-
 
 AgentShell = ThunderAgentShell
 

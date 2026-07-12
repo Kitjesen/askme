@@ -174,6 +174,13 @@ class MemoryModule(Module):
         """Unified memory system."""
         return self._memory_system
 
+    def replace_llm(self, llm: LLMClient) -> None:
+        """Route future summaries and reflections to a replacement LLM client."""
+
+        self._session_memory.set_llm(llm)
+        self._episodic._llm = llm
+        self._memory_system._llm = llm
+
     async def start(self) -> None:
         """Warm memory backends after runtime start without delaying readiness."""
         if self._warmup_task is None or self._warmup_task.done():

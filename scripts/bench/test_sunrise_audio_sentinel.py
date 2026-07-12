@@ -24,11 +24,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from askme.config import get_config
 from askme.voice.asr import ASREngine
 from askme.voice.cloud_asr import CloudASR
 from askme.voice.mic_input import MicInput
 from askme.voice.tts import TTSEngine
+
+from askme.config import get_config
 
 _DIGIT_ALIASES = {
     "0": "\u96f6",

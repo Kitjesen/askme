@@ -139,7 +139,7 @@ class SessionMemory:
                     break
                 summaries.append(entry)
                 total_chars += len(entry)
-            except Exception:
+            except (ValueError, AttributeError):
                 continue
 
         if not summaries:

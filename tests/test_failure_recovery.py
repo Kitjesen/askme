@@ -18,14 +18,14 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from askme.pipeline.skill_dispatcher import SkillDispatcher
+from askme.skills.skill_model import SkillDefinition, SlotSpec
 
 from askme.pipeline.proactive.base import ProactiveContext
 from askme.pipeline.proactive.clarification_agent import ClarificationPlannerAgent
 from askme.pipeline.proactive.confirm_agent import ConfirmationAgent
 from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
 from askme.pipeline.proactive.slot_agent import SlotCollectorAgent
-from askme.pipeline.skill_dispatcher import SkillDispatcher
-from askme.skills.skill_model import SkillDefinition, SlotSpec
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

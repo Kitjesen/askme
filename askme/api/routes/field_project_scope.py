@@ -6,6 +6,13 @@ from typing import Any
 
 DEFAULT_DELIVERY_NAMESPACE = "default"
 _SCOPE_FIELDS = ("tenant_id", "delivery_namespace", "customer_id", "project_id", "site_id")
+_SCOPE_LIST_KEYS = (
+    "tenant_ids",
+    "delivery_namespaces",
+    "customer_ids",
+    "project_ids",
+    "site_ids",
+)
 
 
 def clean_scope_values(values: Any) -> list[str]:
@@ -23,13 +30,13 @@ def operator_project_scope(auth_body: dict[str, Any]) -> dict[str, list[str]]:
     scope = operator.get("project_scope") if isinstance(operator, dict) else {}
     if not isinstance(scope, dict) or scope.get("unrestricted"):
         return {}
-    return {
-        "tenant_ids": clean_scope_values(scope.get("tenant_ids")),
-        "delivery_namespaces": clean_scope_values(scope.get("delivery_namespaces")),
-        "customer_ids": clean_scope_values(scope.get("customer_ids")),
-        "project_ids": clean_scope_values(scope.get("project_ids")),
-        "site_ids": clean_scope_values(scope.get("site_ids")),
-    }
+    normalized = {key: clean_scope_values(scope.get(key)) for key in _SCOPE_LIST_KEYS}
+    for key in _SCOPE_LIST_KEYS:
+        default_key = f"default_{key}"
+        values = clean_scope_values(scope.get(default_key))
+        if values:
+            normalized[default_key] = values
+    return normalized
 
 
 def scope_allows(scope: dict[str, list[str]], item: dict[str, Any]) -> bool:
@@ -101,9 +108,14 @@ def apply_single_scope_defaults(payload: dict[str, Any], scope: dict[str, list[s
         ("site_id", "site_ids"),
     ):
         allowed = scope.get(scope_key) or []
-        if "*" in allowed or len(allowed) != 1:
-            continue
-        payload.setdefault(payload_key, allowed[0])
+        configured_default = scope.get(f"default_{scope_key}") or []
+        if len(configured_default) == 1:
+            default_value = configured_default[0]
+            if not allowed or "*" in allowed or default_value in allowed:
+                payload.setdefault(payload_key, default_value)
+                continue
+        if "*" not in allowed and len(allowed) == 1:
+            payload.setdefault(payload_key, allowed[0])
 
 
 def scope_item_from_event_detail(payload: dict[str, Any]) -> dict[str, Any]:

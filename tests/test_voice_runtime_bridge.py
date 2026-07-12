@@ -226,6 +226,9 @@ def test_voice_runtime_bridge_returns_none_on_invalid_json(monkeypatch) -> None:
     )
 
     assert bridge.handle_voice_text("status") is None
+    snapshot = bridge.status_snapshot()
+    assert snapshot["last_status"] == "failed"
+    assert snapshot["last_error_type"] == "ValueError"
 
 
 def test_voice_runtime_bridge_reraises_unexpected_post_bug(monkeypatch) -> None:
@@ -269,6 +272,9 @@ def test_voice_runtime_bridge_opens_circuit_after_repeated_failures(monkeypatch)
     assert bridge.handle_voice_text("second") is None
     assert bridge.handle_voice_text("third") is None
     assert captured["calls"] == 2
+    snapshot = bridge.status_snapshot()
+    assert snapshot["last_status"] == "circuit_open"
+    assert snapshot["last_error_type"] == "Timeout"
 
 
 def test_voice_runtime_bridge_recovers_after_cooldown(monkeypatch) -> None:
@@ -313,3 +319,6 @@ def test_voice_runtime_bridge_recovers_after_cooldown(monkeypatch) -> None:
     current_time["value"] = 106.5
     assert bridge.handle_voice_text("fourth") == {"handled": True, "turn": {"spoken_reply": "ok"}}
     assert captured["calls"] == 3
+    snapshot = bridge.status_snapshot()
+    assert snapshot["last_status"] == "ok"
+    assert snapshot["last_error_type"] == ""

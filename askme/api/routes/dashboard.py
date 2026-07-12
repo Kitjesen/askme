@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
 from askme.api.schemas.monitor import DashboardPageRegistryResponse
 from askme.api.services.dashboard_pages import dashboard_pages_payload
@@ -52,6 +52,8 @@ def register_dashboard_routes(
     async def dashboard_asset(asset_path: str) -> Response:
         """Serve dashboard pages and assets without mixing them into one HTML file."""
         clean_path = asset_path.strip("/")
+        if clean_path == "projects":
+            return RedirectResponse(url="/dashboard", status_code=307)
         if not clean_path or clean_path in dashboard_pages:
             return Response(content=dashboard_html, media_type="text/html")
         resolved = (dashboard_asset_dir / clean_path).resolve()

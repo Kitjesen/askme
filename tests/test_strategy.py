@@ -3,7 +3,6 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from askme.memory.strategy import StrategyGenerator
 
 

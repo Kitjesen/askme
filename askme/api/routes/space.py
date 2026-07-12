@@ -23,8 +23,8 @@ from askme.api.schemas.space import (
     SpaceResolveDestinationResponse,
     SpaceRollbackResponse,
     SpaceRoutesResponse,
-    SpaceServicePointTriggerResponse,
     SpaceServicePointsResponse,
+    SpaceServicePointTriggerResponse,
 )
 
 SpaceDispatch = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]

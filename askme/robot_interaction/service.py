@@ -25,7 +25,7 @@ class RobotInteractionService:
         voice_triggers: dict[str, str] | None = None,
         safety_checker: Any | None = None,
         policy: RoutingPolicy | None = None,
-    ) -> "RobotInteractionService":
+    ) -> RobotInteractionService:
         router = IntentRouter(
             voice_triggers=voice_triggers,
             safety_checker=safety_checker,

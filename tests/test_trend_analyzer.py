@@ -3,7 +3,6 @@
 import time
 
 import pytest
-
 from askme.memory.episode import Episode
 from askme.memory.trend_analyzer import Trend, TrendAnalyzer
 

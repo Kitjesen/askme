@@ -55,8 +55,9 @@ def demo_single(text: str, backend: str = "local") -> None:
 
 def demo_stream(backend: str = "local") -> None:
     """Simulate streaming LLM output with sentence splitting and immediate TTS."""
-    from askme.config import get_section
     from askme.voice.stream_splitter import StreamSplitter
+
+    from askme.config import get_section
 
     tts_config = get_section("voice").get("tts", {})
     if backend:

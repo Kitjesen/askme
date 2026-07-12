@@ -8,6 +8,21 @@ version = "4.1.0"
 description = "Voice AI Assistant with Skills, Robot Control, and Memory"
 requires-python = ">=3.10"
 license = {text = "MIT"}
+authors = [
+    {name = "Shanghai Inovxio Technology Co., Ltd."},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Manufacturing",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Human Machine Interfaces",
+]
 dependencies = [
     "openai>=1.0.0",
     "sounddevice>=0.4.6",
@@ -32,6 +47,7 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.1.0",
     "ruff>=0.3.0",
+    "mypy>=1.0.0",
 ]
 robot = [
     "pyserial>=3.5",
@@ -50,17 +66,23 @@ vision = [
     "qp-perception>=0.1.0",
 ]
 embed = [
-    "sentence-transformers>=2.7.0",
+    "fastembed>=0.4.0",
 ]
 
 [project.scripts]
-askme = "askme.__main__:main"
+askme = "askme.cli:main"
 askme-mcp = "askme.mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/Kitjesen/askme"
+Repository = "https://github.com/Kitjesen/askme"
+Issues = "https://github.com/Kitjesen/askme/issues"
 
 [tool.setuptools.packages.find]
 include = ["askme*"]
 
 [tool.ruff]
+exclude = ["archive/", ".tmp/", "data/pytest-tmp/", ".venv*/"]
 line-length = 100
 target-version = "py311"
 
@@ -83,6 +105,12 @@ ignore = [
 "askme/robot/telemetry/pulse.py" = ["F401"]
 "askme/runtime/modules/telegram_module.py" = ["F401"]
 
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -94,3 +122,33 @@ markers = [
     "e2e: end-to-end workflow tests",
     "benchmark: benchmark/regression threshold tests",
 ]
+
+[tool.coverage.run]
+source = ["askme"]
+omit = ["askme/cli.py", "*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.coverage.html]
+directory = "artifacts/coverage_html"
+
+[tool.mypy]
+python_version = "3.11"
+# 宽松起步 — 逐步收紧
+ignore_missing_imports = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+warn_return_any = false
+warn_unused_ignores = false
+# 至少检查这些
+warn_no_return = true
+warn_redundant_casts = true

@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-from askme.robot_interaction import IntentRouter, IntentType
 from askme.skills.skill_manager import SkillManager
 from askme.tools.skill_tools import CreateSkillTool
+
+from askme.robot_interaction import IntentRouter, IntentType
 
 
 @pytest.fixture()

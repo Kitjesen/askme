@@ -197,8 +197,9 @@ def transcribe_generated_audio(
 
 
 def route_skill_text(text: str, *, expected_skill: str | None = None) -> dict[str, Any]:
-    from askme.robot_interaction import IntentRouter, IntentType
     from askme.skills.skill_manager import SkillManager
+
+    from askme.robot_interaction import IntentRouter, IntentType
 
     manager = SkillManager(project_dir=ROOT)
     manager.load()

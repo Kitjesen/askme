@@ -1028,6 +1028,7 @@ class TestHealthModule:
                 self.shell._default_timeout = 120.0
                 self.shell._iteration_limit = 5
                 self.shell._profile.name = "field_operator"
+                self.shell.deprecated_replacement = "ZeroClaw MCP Agent"
 
             def health(self):
                 return {"status": "ok"}
@@ -1087,9 +1088,17 @@ class TestHealthModule:
         assert snapshot["model_routing"]["dialogue"]["llm_model"] == "MiniMax-M2.7-highspeed"
         assert snapshot["model_routing"]["dialogue"]["asr_model"] == "paraformer-realtime-v2"
         assert snapshot["model_routing"]["dialogue"]["tts_model"] == "speech-2.8-turbo"
+        assert snapshot["model_routing"]["agent_shell"]["loaded"] is True
+        assert snapshot["model_routing"]["agent_shell"]["enabled"] is False
+        assert snapshot["model_routing"]["agent_shell"]["status"] == "deprecated"
+        assert snapshot["model_routing"]["agent_shell"]["replacement"] == "ZeroClaw MCP Agent"
         assert snapshot["model_routing"]["agent_shell"]["model"] == "MiniMax-M2.7-highspeed"
         assert snapshot["skill_callability"]["callable"] is True
-        assert snapshot["skill_callability"]["agent_shell_callable"] is True
+        assert snapshot["skill_callability"]["agent_shell_callable"] is False
+        assert snapshot["skill_callability"]["agent_shell_status"] == "deprecated"
+        assert (
+            snapshot["skill_callability"]["agent_shell_replacement"] == "ZeroClaw MCP Agent"
+        )
         assert snapshot["skill_callability"]["agent_shell_skills"] == ["agent_task"]
 
     def test_runtime_health_provider_exposes_rag_trust_report(self, tmp_path):
@@ -1314,6 +1323,17 @@ class TestHealthModule:
                     return "reply"
 
                 self.text_loop.process_turn = _process_turn
+                self.text_loop.current_turn_rag = {
+                    "evidence": [{"record_id": "turn-rec", "text": "turn fact"}],
+                    "rag": {
+                        "turn_scoped": True,
+                        "answer_policy": {
+                            "state": "grounded",
+                            "action": "answer_with_evidence",
+                        },
+                        "used_in_answer": True,
+                    },
+                }
                 self.text_loop._audio = MagicMock()
                 self.text_loop._audio.is_busy = False
                 self.text_loop._audio.wait_speaking_done.return_value = True
@@ -1411,8 +1431,15 @@ class TestHealthModule:
         )
         assert chat_payload["reply"] == "reply"
         assert chat_payload["spoken"] is True
-        assert chat_payload["evidence"] == []
-        assert chat_payload["rag"]["used_in_answer"] is False
+        assert chat_payload["evidence"][0]["record_id"] == "turn-rec"
+        assert chat_payload["rag"]["used_in_answer"] is True
+        memory_mod.conversation.update_last_assistant_metadata.assert_called_once_with(
+            {
+                "evidence": chat_payload["evidence"],
+                "rag": chat_payload["rag"],
+            },
+            conversation_session_id="conv-1",
+        )
         assert text_mod.process_turn_calls == [{
             "text": "hello",
             "speak": True,

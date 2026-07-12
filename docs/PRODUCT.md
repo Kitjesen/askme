@@ -1,30 +1,38 @@
 # AskMe 产品手册
 
-版本：V0.8 试点交付版  
-适用对象：客户决策人、现场运营、安保/保洁主管、交付工程师、售前销售、研发测试  
-产品定位：面向园区、厂区、仓储、景区等场景的“机器人现场任务与智能交互平台”
+版本：V4.1.0
+适用对象：客户决策人、现场运营、安保/保洁主管、交付工程师、售前销售、研发测试
+产品定位：机器人方案商/集成商交付中台，面向多客户现场项目的现场运营交付中台
+产品需求主干见 `docs/PRODUCT_REQUIREMENTS.md`。
+高级软件架构蓝图见 `docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md`。
+R1-R7 需求到架构追踪见 `docs/PRODUCT_ARCHITECTURE_TRACE.md`。
+需求证据台账见 `docs/DEMAND_EVIDENCE_LEDGER.md`。
+试点验收包产品面契约见 `docs/PILOT_ACCEPTANCE_DOSSIER_PRODUCT_SURFACE.md`。
+上线准入清单见 `docs/SITE_LAUNCH_READINESS_CHECKLIST.md`。
 
 ## 1. 产品概览
 
-AskMe 不是一个普通聊天框，也不是机器人底层控制系统。它是部署在机器人和客户现场系统之间的“任务大脑与交互入口”。
+AskMe 不是一个普通聊天框，也不是机器人底层控制系统。它是部署在方案商交付团队、客户现场系统、现场运营证据和机器人运行时之间的现场运营交付中台。
 
-用户可以通过中文语音或文本表达需求，例如“巡检 A 区”“带我去咖啡店”“垃圾桶满了”“前面有人挡路”。系统会判断这句话是普通问询、现场事件、巡检任务、知识问答，还是需要拒绝或二次确认。对于可执行任务，AskMe 会生成结构化任务，经过安全预检、权限判断、运行调度，再进入演示、仿真、实验室或真实机器人运行链路。
+用户可以通过中文语音或文本表达需求，例如“巡检 A 区”“带我去咖啡店”“垃圾桶满了”“前面有人挡路”。系统会判断这句话是普通问询、现场事件、巡检任务、知识问答，还是需要拒绝或二次确认。对于可执行任务，AskMe 会生成结构化任务和交付证据，进入 Field Delivery Domain，再经过 SafetyPreflight、runtime arbiter 和 Runtime / Safety / Hardware 边界交接，最后进入演示、仿真、实验室或真实机器人运行链路。
 
-一句话价值：AskMe 让机器人从“只能执行固定路线的设备”，升级为“能听懂现场需求、按规则执行任务、能留痕、可验收、可复制交付的现场服务终端”。
+一句话价值：AskMe 帮助机器人方案商/集成商把一次性 Demo 变成可复制、可验收、可审计的 Demo-to-pilot 交付闭环，并沉淀 acceptance dossier；customer signoff != production readiness。
 
 ## 2. 产品边界
 
-AskMe 的核心原则是：大模型不直接控制硬件。
+AskMe 的核心原则是：大模型不直接控制硬件，产品交付签收不等于生产上线。
 
 大模型负责理解、规划、解释和对话；任务仲裁、安全预检、技能包、运行时和机器人控制系统负责真正执行。这样做的目的是避免“听错一句话就直接让机器人动作”的风险。
+
+AskMe 不替代底盘控制。Product/Admin/Platform/Internal 表面负责客户项目、对象目录、场景验收、知识、审计和 Dashboard/API；Runtime / Safety / Hardware 仍拥有真实执行、急停、安全状态和硬件适配事实。
 
 当前版本适合以下交付口径：
 
 - 客户演示：展示语音交互、事件处置、知识问答、空间问路、任务流转和审计记录。
 - 试点项目：围绕有限服务点、有限点位、有限路线、有限异常类型做现场试点。
-- 生产上线：需要补齐客户身份系统、真实硬件运行链路、现场传感器、机器人控制适配、正式验收用例和安全责任边界后才能承诺。
+- 生产上线评审：需要补齐客户身份系统、真实硬件运行链路、现场传感器、机器人控制适配、正式验收用例和安全责任边界后才能进入生产 readiness 评审；客户签收不等于生产上线。
 
-不建议把当前版本描述为“完全无人值守生产系统”。更准确的说法是：AskMe 已具备产品化试点交付骨架和多个核心功能闭环，生产上线需要按客户现场继续接入和验收。
+不承诺无人值守生产上线。更准确的说法是：AskMe 已具备产品化试点交付骨架、场景验收入口和多个核心功能闭环，生产上线需要按客户现场继续接入、联调、验收和安全评审。
 
 ## 3. 典型客户与场景
 
@@ -416,6 +424,8 @@ AskMe 的产品数据建议分为以下几类：
 
 生产上线前必须进一步确认：
 
+完整 checklist 见 `docs/SITE_LAUNCH_READINESS_CHECKLIST.md`。
+
 - 企业账号和 SSO/IAM 是否接入。
 - RBAC 是否覆盖所有高风险操作。
 - 真实机器人控制链路是否通过现场测试。
@@ -475,18 +485,19 @@ AskMe 的权限策略应按客户项目和风险等级设计。
 
 推荐说法：
 
-- “AskMe 是机器人现场任务与智能交互平台。”
+- “AskMe 是机器人方案商/集成商的现场运营交付中台。”
 - “它能把语音、知识、现场事件、空间地图和机器人任务连接起来。”
-- “当前版本适合做客户试点和场景共创，生产上线需要按现场硬件和安全要求完成验收。”
+- “当前版本适合做客户试点、场景共创和 Demo-to-pilot 交付闭环，生产上线需要按现场硬件和安全要求完成验收。”
 - “系统回答会尽量基于已审批知识，并展示证据，避免乱答。”
 - “游客问路和管理员任务是两条不同链路，不会因为游客随便一句话就触发机器人执行。”
+- “客户签收会进入 acceptance dossier，但 customer signoff != production readiness。”
 
 避免说法：
 
 - “机器人可以随便聊天，什么都能答。”
 - “大模型可以直接控制机器人。”
 - “不用现场配置，任何园区拿来就能跑。”
-- “现在已经可以完全无人值守生产上线。”
+- “现在所有客户现场都可以直接生产上线。”
 - “视觉、语音、导航在所有现场都能百分百准确。”
 
 ## 13. 常见问题
@@ -541,6 +552,8 @@ AskMe 不替代机器人底盘系统。底盘系统负责运动控制、避障�
 AskMe is now treated as a repeatable solution product, not a one-off park demo.
 The delivery source of truth is still a validated site profile, but the profile
 now has a customer/project/object boundary:
+The P0 customer definition, Demo-to-pilot workflow, and architecture constraints
+are tracked in `docs/SOLUTION_PROVIDER_ICP.md`.
 
 - `customer`: customer id, customer name, industry, project id, and delivery model.
 - `site`: site id, site name, map version, zones, devices, thresholds, and responder groups.
@@ -617,7 +630,7 @@ Current implementation:
   approval-gated rollback to a previous registry revision. Rollback requires an
   unrestricted delivery approver because it can affect multiple customer
   projects.
-- `/dashboard/projects` includes a delivery resource registry form that writes
+- `/dashboard/delivery` includes a delivery resource registry form that writes
   the shared registry instead of editing individual project YAML. Delivery
   users can register reusable vision models, sensor protocols, skill packages,
   and acceptance tests, optionally scope them to a project, then bind those
@@ -630,7 +643,7 @@ Current implementation:
   registered IDs as safe.
 - Delivery resource governance requests now carry an explicit review SLA:
   `sla_target_s`, `due_at`, `review_sla.state`, remaining/overdue seconds, and
-  escalation policy. `/dashboard/projects` can show active, due-soon, and
+  escalation policy. `/dashboard/delivery` can show active, due-soon, and
   overdue requests, and `/api/field/delivery-resource-governance-requests`
   supports `overdue_only=true` so delivery owners can operate the queue instead
   of treating it as a passive audit log.
@@ -711,7 +724,7 @@ Current implementation:
   customer project, even if the device payload claims that object id. This is
   required for solution-provider deployments where templates and capability
   packages are reused across many customer sites.
-- `/dashboard/projects` includes a customer-readable Managed Object Directory
+- `/dashboard/delivery` includes a customer-readable Managed Object Directory
   summary for solution delivery teams: total objects, deliverable objects,
   manual-check objects, blocked objects, acceptance-test count, scoped-object
   count, per-object resource/acceptance checks, and JSON/CSV exports for all or
@@ -738,9 +751,10 @@ Current implementation:
 - Rehearsal evidence now has an explicit product boundary. `dry_run` can never
   register onsite acceptance evidence. A confirmed `shadow_post` may register a
   `device_ingest` receipt only as `evidence_tier=acceptance_candidate` with
-  `production_eligible=false`; it remains `manual_check` unless trusted device
-  signature and runtime completion evidence are present. Dashboard shows this
-  as an acceptance candidate, not production go-live proof.
+  `production_eligible=false` and `status=manual_check`; trusted device
+  signature and runtime completion are eligibility facts for delivery review,
+  not automatic onsite acceptance. Dashboard shows this as an acceptance
+  candidate, not customer signoff or production go-live proof.
 - `GET /api/field/customer-projects/{identifier}/acceptance-report` returns a customer-readable
   delivery gate report with site profile, managed-object evidence, credential, and onsite
   acceptance boundaries. The report now also embeds a compact field-readiness snapshot
@@ -842,18 +856,22 @@ Current implementation:
   project can only claim customer acceptance after an accepted signoff with risk
   acknowledgement is archived; otherwise it stays in internal manual check or
   ready-for-customer-signoff state.
+- Even after `accepted_by_customer`, the closure keeps `blocked_uses` for
+  unattended production launch and out-of-scope acceptance claims. Customer
+  signoff proves the reviewed project/pilot scope; it is not a blanket
+  production go-live approval.
 - Acceptance dossiers and their manifests now carry customer signoff history,
   the latest signoff decision, signoff count, signoff payload hash, credential
   hash, and integrity result so exported handoff packages can show whether the
   project is only internally ready or actually accepted by the customer.
-- `/dashboard/projects` is the product-facing console for customer projects, managed
+- `/dashboard/delivery` is the product-facing console for customer projects, managed
   objects, import dry-run, export feedback, and project-scoped event filtering.
-- `/dashboard/projects` now exposes a customer-project workspace navigation so
+- `/dashboard/delivery` exposes customer-project workspace navigation so
   delivery users can jump between project catalog, template market, object
   directory, import/export, acceptance evidence, resource bindings, event scope,
   template release governance, and multi-site rollout instead of reading one long
   mixed control panel.
-- `/dashboard/projects` now adds a customer-readable solution-provider workbench
+- `/dashboard/delivery` adds a customer-readable solution-provider workbench
   strip above the technical panels. It explains the five delivery surfaces:
   customer project catalog, industry template market, managed-object directory,
   delivery resources, and package delivery gate, with status badges from the
@@ -863,7 +881,7 @@ Current implementation:
   object directory -> delivery resources -> package delivery gate. This gives
   customers and delivery leads one readable route through the product instead of
   forcing them to infer readiness from separate API panels.
-- `/dashboard/projects` now includes a template release governance board with
+- `/dashboard/delivery` includes a template release governance board with
   pending, approved, and rejected counts plus a central review queue. Product
   owners can see which reusable templates are waiting for a second approver
   before they appear in customer-facing release notes.
@@ -871,7 +889,7 @@ Current implementation:
   proposal bundles, and acceptance dossiers into distinct verification inputs.
   Proposal and dossier exports now refill their own verifier text boxes instead
   of overwriting the project import payload.
-- The managed-object editor in `/dashboard/projects` now edits the full customer
+- The managed-object editor in `/dashboard/delivery` edits the full customer
   object delivery contract: object labels, scenario scope, zone/device source,
   responder group, required evidence, vision models, sensor protocols, skill
   packages, and acceptance-test references. It no longer silently leaves vision
@@ -1028,7 +1046,7 @@ Next product step:
   `delivery_namespaces` from the local operator directory or trusted IAM
   headers. The default dashboard operator is scoped to the demo project's
   `default/default` delivery space.
-- `/dashboard/projects` now shows tenant and delivery namespace in customer
+- `/dashboard/delivery` shows tenant and delivery namespace in customer
   project cards, package export results, and package import dry-run results.
   Import dry-run also renders `collision_candidates` so delivery teams can see
   same-name projects in other namespaces before writing anything.
@@ -1057,7 +1075,7 @@ Next product step:
   `product_status`, `template_id`, `release_channel`, and `owner`. Filtered
   responses recompute template, tenant, industry, publish-state, product-state,
   and managed-object counts for the visible template set.
-- `/dashboard/projects` now renders those industry templates as a template
+- `/dashboard/delivery` renders those industry templates as a template
   market. Delivery can inspect customer fit, default object coverage, runtime
   bindings, acceptance status, and the rollout checklist, then select a
   template directly into the customer-project creation form.
@@ -1074,7 +1092,7 @@ Next product step:
   This turns each project into a delivery checklist covering customer scope,
   managed objects, runtime bindings, site map/devices, responder credentials,
   acceptance evidence, and handoff package status.
-- `/dashboard/projects` now shows that delivery workflow inside each customer
+- `/dashboard/delivery` shows that delivery workflow inside each customer
   project card, so delivery can answer "what is still blocking handoff" without
   reading YAML or acceptance JSON.
 - Acceptance reports and exported acceptance dossiers now carry the same
@@ -1087,12 +1105,12 @@ Next product step:
   the printable HTML shows "上线准入" with customer-readable status, release
   claim, next step, and gate evidence. Any tampering with this readiness section
   is caught by the dossier/proposal payload hash verification.
-- `/dashboard/projects` now includes a customer-project metadata editor for
+- `/dashboard/delivery` includes a customer-project metadata editor for
   customer-facing fields such as customer name, industry, project name, site
   name, and object-scope note. The editor loads the full site profile before
   saving, so updating labels does not drop zones, devices, responder groups, or
   managed objects.
-- `/dashboard/projects` now includes a Managed Object Directory. Delivery teams
+- `/dashboard/delivery` includes a Managed Object Directory. Delivery teams
   can browse every customer-visible object with its project scope, responder
   group, vision model bindings, sensor protocols, skill packages, and acceptance
   tests, then load an object directly into the quick editor without copying
@@ -1119,7 +1137,7 @@ Next product step:
 - Customer project detail now has an acceptance-report API and UI action. The report separates local object evidence from missing deployment credentials and onsite acceptance proof, so the product does not overclaim production readiness.
 - Acceptance reports now include field readiness gates and evidence report paths for scenario evaluation, ingest smoke, voice smoke, notification smoke, and runtime roundtrip. A project is blocked when high-risk audit review or live-field evidence gates are unresolved, even if managed-object acceptance tests are linked.
 - Customer projects can now export an acceptance dossier JSON file and a printable HTML dossier. The dossier records the same acceptance report plus an evidence inventory with SHA-256 hashes for every linked smoke/readiness artifact. If `ASKME_CUSTOMER_ACCEPTANCE_DOSSIER_HMAC_SECRET` is configured, the manifest is HMAC-signed.
-- Dashboard navigation now separates customer projects into `/dashboard/projects` instead of burying the workflow in delivery diagnostics.
+- Dashboard navigation keeps customer-project operations inside `/dashboard/delivery` so the top-level product map stays focused.
 - The customer project page now exposes package import dry-run, managed-object quick edit, and project/object event-scope checks.
 - The customer project page now exposes lifecycle operations for package export, project archive, and managed-object delete with explicit UI confirmation and server-side permission checks.
 - The dashboard overview page now uses customer-readable Chinese for the first-screen product status, delivery gate, scenario coverage, and multi-site rollout summary.
@@ -1197,6 +1215,7 @@ askme 是面向机器人现场任务的自然语言入口。它不是普通聊�
 
 - TaskHandoff、SafetyPreflight、TaskRun、RuntimeEvent、TaskReport 已有 fake/sim/shadow 基础。
 - RuntimeArbiterClient 是 contract-only，external/lab 默认禁用，不直接触碰硬件。
+- 客户现场验证必须使用 `lab` 或 `prod` runtime profile；`fake`、`sim`、`shadow` 只能用于演示、仿真或影子验证，不能作为现场验收证据。
 - Dashboard runtime 控制动作会记录 `operator_id`、`reason`、`risk_acknowledgement`。
 
 ### 评测证据
@@ -1215,7 +1234,7 @@ askme 是面向机器人现场任务的自然语言入口。它不是普通聊�
 - 审批通过后还必须分配到客户/园区 `Skill Package`，同一套产品可针对不同项目启用不同能力。
 - `Skill Package` 已升级为客户项目发布单元，支持版本快照、pilot/prod 发布通道、灰度比例和回滚。
 - 灰度比例为 `0%` 时，该能力包内技能不会进入可触发状态；回滚会生成新的版本记录，保留谁在何时回滚到哪个版本。
-- 支持项目级、用户级和 managed Agent Profile Markdown 配置，字段包含工具 allow/deny、可派生子 agent、预加载 skills、MCP server、hooks、模型、最大轮次、超时、隔离方式、记忆范围和风险等级。
+- 支持项目级、用户级和 managed Agent Profile Markdown 配置，字段包含工具 allow/deny、可派生子 agent、预加载 skills、MCP server、hooks、模型、最大轮次、超时、隔离方式、记忆范围和风险等级；这些字段是治理、审计和 ZeroClaw/MCP 接入策略，不表示 Askme 本地仍提供可调用的 ReAct executor。
 - Agent Profile 的 hooks 已支持产品级声明式拦截：`PreToolUse` 可在工具调用前拒绝，`PostToolUse` 可在结果返回前阻断敏感输出；系统不会执行任意 shell hook。
 - `create_skill` 工具统一走 `SkillManager.create_generated_skill_draft`，所以语音/文本 Agent、Dashboard 候选生成和后端 API 都进入同一套待审批、禁用、校验、审计流程。
 - 首批园区场景技能已从 planned 落成 built-in：`report_fall_unrecoverable`、`report_stuck`、`report_motor_fault`、`detect_night_intruder`、`detect_illegal_parking`、`detect_fire_smoke`、`inspect_trash_bin`、`offer_wayfinding_help`、`escort_visitor`。这些技能通过 `field_event_trigger` 进入 FieldOperationsService，生成事件、按策略通知、归档和审计，而不是只返回聊天文案。
@@ -1283,7 +1302,7 @@ askme 不可以：
 
 ## 15. 产品路线和近期打磨方向（2026-05-16）
 
-AskMe 的产品方向明确为：面向方案商的多客户现场机器人任务平台，而不是单一项目的机器人聊天框。核心价值是把园区、厂区、仓储、景区等现场对象，统一变成可配置、可调用、可验收、可审计的能力包。
+AskMe 的产品方向明确为：面向机器人方案商/集成商的现场运营交付中台，而不是单一项目的机器人聊天框。核心价值是把园区、厂区、仓储、景区等现场对象，统一变成可配置、可调用、可验收、可审计的交付能力包。
 
 近期路线按四层推进：
 
@@ -1294,10 +1313,10 @@ AskMe 的产品方向明确为：面向方案商的多客户现场机器人任�
 
 本阶段产品判断：
 
-- 面向客户讲“现场任务平台”和“场景验收”，少讲 fake/sim/runtime 这类内部词。
+- 面向客户讲“现场运营交付中台”和“场景验收”，少讲 fake/sim/runtime 这类内部词。
 - 面向交付讲“模板、对象、资源绑定、验收证据和未完成项”。
 - 面向研发讲“场景入口、技能调用、事件闭环、审计证据和安全边界”。
-- 面向销售只承诺可演示、可试点、可按现场验收扩展，不能承诺未接硬件的无人值守生产上线。
+- 面向销售只承诺可演示、可试点、可按现场验收扩展，不承诺无人值守生产上线。
 
 本次已经落地的细节打磨：
 

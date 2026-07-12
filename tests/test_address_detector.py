@@ -7,8 +7,22 @@ import time
 from askme.voice.address_detector import AddressDetector
 
 
-def _make_detector(enabled: bool = True, name_window: float = 30.0) -> AddressDetector:
-    return AddressDetector(config={"enabled": enabled, "name_window": name_window})
+def _make_detector(
+    enabled: bool = True,
+    name_window: float = 30.0,
+    names: list[str] | None = None,
+    uncertain_policy: str = "addressed",
+    allow_pronoun_address: bool = True,
+) -> AddressDetector:
+    config: dict[str, object] = {
+        "enabled": enabled,
+        "name_window": name_window,
+        "uncertain_policy": uncertain_policy,
+        "allow_pronoun_address": allow_pronoun_address,
+    }
+    if names is not None:
+        config["names"] = names
+    return AddressDetector(config=config)
 
 
 class TestDisabled:
@@ -32,6 +46,17 @@ class TestEmptyText:
 
 
 class TestRobotName:
+    def test_deployment_name_xiaosuan_activates_window(self):
+        det = _make_detector(names=["小算"])
+
+        assert det.is_addressed("小算，带我去导览点") is True
+        assert det._name_activated_until > time.monotonic()
+
+    def test_configured_names_replace_legacy_names(self):
+        det = _make_detector(names=["小算"])
+
+        assert det.is_addressed("雷霆，晚上去吃饭吗") is False
+
     def test_exact_name_thunder(self):
         det = _make_detector()
         assert det.is_addressed("thunder 你好") is True
@@ -150,6 +175,11 @@ class TestShortText:
         # "走吧" is a casual signal
         assert det.is_addressed("走吧") is False
 
+    def test_strict_mode_ignores_short_ambiguous_text(self):
+        det = _make_detector(uncertain_policy="ignore")
+
+        assert det.is_addressed("嗯好吧") is False
+
 
 class TestDefaultFallback:
     def test_unknown_long_text_defaults_addressed(self):
@@ -163,3 +193,25 @@ class TestDefaultFallback:
         det = _make_detector()
         result = det.is_addressed("hello")
         assert isinstance(result, bool)
+
+    def test_strict_mode_ignores_unknown_long_text(self):
+        det = _make_detector(uncertain_policy="ignore")
+
+        assert det.is_addressed("这个是那些琉璃布") is False
+
+    def test_strict_mode_does_not_treat_pronoun_as_robot_address(self):
+        det = _make_detector(
+            uncertain_policy="ignore",
+            allow_pronoun_address=False,
+        )
+
+        assert det.is_addressed("为你想的，为了") is False
+
+    def test_strict_mode_still_accepts_explicit_robot_name(self):
+        det = _make_detector(
+            names=["小算"],
+            uncertain_policy="ignore",
+            allow_pronoun_address=False,
+        )
+
+        assert det.is_addressed("小算，带我去大厅") is True

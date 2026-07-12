@@ -4,8 +4,10 @@ import ast
 from pathlib import Path
 from typing import Any
 
-from askme.api.schemas.customer_projects import CustomerProjectWorkbenchResponse
-from askme.api.schemas.customer_projects import ManagedObjectDirectoryResponse
+from askme.api.schemas.customer_projects import (
+    CustomerProjectWorkbenchResponse,
+    ManagedObjectDirectoryResponse,
+)
 from askme.api.services.field_customer_project_workbench import (
     build_customer_project_workbench_payload,
     customer_project_runtime_blueprint_binding,

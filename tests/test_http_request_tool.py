@@ -6,7 +6,6 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from askme.tools.builtin_tools import HttpRequestTool
 
 

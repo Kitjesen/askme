@@ -8,7 +8,11 @@ import pytest
 
 from askme.robot_interaction import AddressDetector, InteractionGate
 from askme.runtime.core.module import ModuleRegistry
-from askme.runtime.modules.voice_module import VoiceModule
+from askme.runtime.modules.voice_module import (
+    VoiceModule,
+    _build_mission_context_provider,
+    _voice_product_readiness,
+)
 from askme.runtime.modules.voice_stack import (
     build_runtime_voice_stack,
     runtime_voice_stack_from_module,
@@ -139,6 +143,9 @@ def test_voice_module_injects_runtime_stack_gate_components(monkeypatch) -> None
         def set_interaction_perception_provider(self, provider):
             captured["perception_provider"] = provider
 
+        def set_mission_context_provider(self, provider):
+            captured["mission_context_provider"] = provider
+
         def interaction_status_snapshot(self):
             return {}
 
@@ -167,6 +174,7 @@ def test_voice_module_injects_runtime_stack_gate_components(monkeypatch) -> None
     assert mod.interaction_gate is interaction_gate
     assert captured["address_detector"] is address_detector
     assert captured["interaction_gate"] is interaction_gate
+    assert callable(captured["mission_context_provider"])
     assert captured["voice_loop_kwargs"] == {
         "router": stack.router,
         "pipeline": None,
@@ -175,6 +183,65 @@ def test_voice_module_injects_runtime_stack_gate_components(monkeypatch) -> None
         "dispatcher": None,
         "audio_router": stack.audio_router,
     }
+
+
+def test_mission_context_provider_maps_runtime_and_safety_state() -> None:
+    active_run = SimpleNamespace(current_state="paused")
+    runtime_service = SimpleNamespace(
+        run_service=SimpleNamespace(active_run=lambda: active_run),
+    )
+    modules = {
+        "runtime_handoff": SimpleNamespace(runtime_handoff_service=runtime_service),
+        "safety": SimpleNamespace(health=lambda: {"estop_active": False}),
+    }
+    registry = SimpleNamespace(get=lambda name: modules.get(name))
+    provider = _build_mission_context_provider(
+        {"voice": {"interaction_gate": {"default_actor_role": "supervisor"}}},
+        registry,
+    )
+
+    assert provider() == {
+        "mission_mode": "paused",
+        "actor_role": "supervisor",
+        "source": "runtime_handoff",
+        "runtime_state": "paused",
+    }
+
+    modules["safety"] = SimpleNamespace(health=lambda: {"estop_active": True})
+    assert provider()["mission_mode"] == "emergency"
+    assert provider()["source"] == "safety"
+
+
+def test_voice_product_readiness_requires_configured_wake_word() -> None:
+    snapshot = _voice_product_readiness(
+        {
+            "pipeline_ok": True,
+            "input_ready": True,
+            "output_ready": True,
+            "wake_word_enabled": False,
+        },
+        {"enabled": False, "circuit_open": False},
+        {"product_readiness": {"require_wake_word": True}},
+    )
+
+    assert snapshot["ready"] is False
+    assert snapshot["blockers"] == ["wake_word_not_ready"]
+
+
+def test_voice_product_readiness_can_require_runtime_bridge() -> None:
+    snapshot = _voice_product_readiness(
+        {
+            "pipeline_ok": True,
+            "input_ready": True,
+            "output_ready": True,
+            "wake_word_enabled": True,
+        },
+        {"enabled": False, "circuit_open": False},
+        {"product_readiness": {"require_runtime_bridge": True}},
+    )
+
+    assert snapshot["ready"] is False
+    assert snapshot["blockers"] == ["runtime_bridge_not_ready"]
 
 
 def test_runtime_voice_stack_wraps_legacy_raw_bridge_with_gateway() -> None:

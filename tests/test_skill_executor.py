@@ -5,7 +5,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-
 from askme.skills.skill_executor import SkillExecutor
 from askme.skills.skill_model import SkillDefinition
 from askme.tools.tool_registry import BaseTool, ToolRegistry

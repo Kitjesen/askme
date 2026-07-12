@@ -20,8 +20,8 @@ from askme.api.routes._request_validation import (
 from askme.api.schemas.skills import (
     GeneratedSkillPreviewResponse,
     GeneratedSkillReviewResponse,
-    GeneratedSkillValidationResponse,
     GeneratedSkillsResponse,
+    GeneratedSkillValidationResponse,
     SkillGrowthBacklogResponse,
     SkillGrowthDraftResponse,
     SkillGrowthMutationResponse,

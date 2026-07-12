@@ -35,6 +35,7 @@ class StreamProcessorProtocol(Protocol):
         system_prompt: str,
         model: str | None = None,
         source: str = "voice",
+        conversation_session_id: str | None = None,
     ) -> str:
         """Stream LLM response, speak sentences via TTS, handle tool calls."""
         ...

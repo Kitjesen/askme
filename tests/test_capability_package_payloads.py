@@ -16,8 +16,8 @@ from askme.api.services.capability_package_payloads import (
     package_catalog_summary,
     package_readiness_contract,
     package_release_summary,
-    readiness_kind,
     readiness_inventory,
+    readiness_kind,
 )
 
 
@@ -69,8 +69,10 @@ def test_package_readiness_contract_is_customer_safe() -> None:
     contract = package_readiness_contract()
 
     assert contract["endpoint"] == "/api/capability-packages/readiness"
-    assert contract["purpose"] == "评估能力包或场景包是否可以在客户现场启用。"
+    assert contract["purpose"] == "评估能力包或场景包是否可以进入客户现场启用前验证。"
+    assert contract["customer_statuses"]["ready"] == "可进入现场验证或试点发布评审。"
     assert contract["customer_statuses"]["blocked"] == "缺少依赖时不能面向客户启用。"
+    assert "发布流程" not in str(contract)
 
 
 def test_readiness_kind_normalizes_aliases_and_manifest_shape() -> None:

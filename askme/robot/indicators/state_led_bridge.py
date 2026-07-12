@@ -78,7 +78,7 @@ class StateLedBridge:
                 if self._safety.is_estop_active():
                     return LedStateKind.ESTOP
             except Exception:
-                pass  # treat safety read failure as non-ESTOP
+                logger.exception("[LED] Safety read failed, treating as non-ESTOP")
 
         agent_state = self._audio.state
 

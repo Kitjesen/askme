@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
 DEFAULT_BUILTIN_COMMANDS: frozenset[str] = frozenset({
@@ -83,7 +83,7 @@ class RoutingPolicy:
 
     builtin_commands: Iterable[str] = DEFAULT_BUILTIN_COMMANDS
     estop_keywords: Iterable[str] = DEFAULT_ESTOP_KEYWORDS
-    quick_replies: Mapping[str, str] = DEFAULT_QUICK_REPLIES
+    quick_replies: Mapping[str, str] = field(default_factory=lambda: DEFAULT_QUICK_REPLIES)
     min_trigger_length: int = 2
     negation_prefixes: Iterable[str] = DEFAULT_NEGATION_PREFIXES
     question_suffixes: Iterable[str] = DEFAULT_QUESTION_SUFFIXES

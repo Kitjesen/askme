@@ -1,25 +1,4 @@
-# Core
-openai>=1.0.0
-pyyaml>=6.0
-python-dotenv>=1.0.0
-requests>=2.31.0
-numpy>=1.26.0
-colorama>=0.4.6
-
-# Voice
-sounddevice>=0.4.6
-soundfile>=0.12.1
-sherpa-onnx>=1.10.0
-miniaudio>=1.61
-websocket-client>=1.8.0
-
-# Embedding server
-sentence-transformers>=2.2.2
-uvicorn>=0.23.0
-fastapi>=0.103.0
-
-# Memory
-mempalace>=3.3.5,<4
-
-# Telegram Bot (optional, for TelegramModule)
-# python-telegram-bot>=20.0
+# All runtime dependencies are declared in pyproject.toml [project.dependencies].
+# This file exists so `pip install -r requirements.txt` installs the editable
+# package from the project metadata.
+-e .

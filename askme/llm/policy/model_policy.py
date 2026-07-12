@@ -36,6 +36,8 @@ class ModelPolicy:
     def extra_body_for_model(model: str, *, thinking: bool) -> dict[str, Any] | None:
         """Return provider-specific request body extensions."""
 
+        if _is_deepseek_v4(model):
+            return {"thinking": {"type": "enabled" if thinking else "disabled"}}
         if thinking:
             return None
         if _is_minimax_family(model):
@@ -45,3 +47,7 @@ class ModelPolicy:
 
 def _is_minimax_family(model: str) -> bool:
     return str(model or "").lower().startswith("minimax")
+
+
+def _is_deepseek_v4(model: str) -> bool:
+    return str(model or "").lower().startswith("deepseek-v4-")

@@ -24,8 +24,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from askme.health_server import build_health_snapshot, create_health_app
 from askme.pipeline.field_operations import FieldOperationsService, sign_field_device_payload
+
+from askme.health_server import build_health_snapshot, create_health_app
 
 DEFAULT_OUTPUT_DIR = Path("artifacts/field_operations/live-demo")
 DEFAULT_SITE_PROFILE = Path("deploy/site-profiles/park-demo.yaml")

@@ -91,6 +91,18 @@ class ASRManager:
         # Cloud ASR (optional)
         cloud_config = config.get("cloud_asr", {}) or {}
         self._cloud = CloudASR(cloud_config)
+        cloud_provider = str(cloud_config.get("provider", "dashscope")).strip().lower()
+        self._cloud_preconnect: bool = bool(
+            cloud_config.get(
+                "preconnect",
+                cloud_provider not in {
+                    "volcengine",
+                    "doubao",
+                    "seed_asr",
+                    "volcengine_seed_asr",
+                },
+            )
+        )
         self._cloud_active: bool = False
         self._cloud_finish_timeout: float = float(
             cloud_config.get("finish_timeout", 8.0)
@@ -111,7 +123,7 @@ class ASRManager:
         Called at listen-start so the connection is warm when speech arrives.
         Audio fed before start_session() is silently accepted by the cloud.
         """
-        if self._cloud.available and not self._cloud_active:
+        if self._cloud_preconnect and self._cloud.available and not self._cloud_active:
             self._cloud_active = self._cloud.start_session()
 
     def start_session(self) -> None:
@@ -277,6 +289,11 @@ class ASRManager:
 
     def reset(self) -> None:
         """Reset ASR streams for next utterance."""
+        if self._cloud_active:
+            try:
+                self._cloud.cancel_session()
+            except Exception as exc:
+                logger.debug("Cloud ASR cancel during reset failed: %s", exc)
         self._recognition_active = False
         self._cloud_active = False
         self._start_time = 0.0
@@ -312,6 +329,7 @@ class ASRManager:
             "provider": "cloud+local" if cloud_available else "local",
             "recognition_active": self._recognition_active,
             "cloud_active": self._cloud_active,
+            "cloud_preconnect": self._cloud_preconnect,
             "elapsed_ms": elapsed_ms,
             "local": {
                 "provider": "sherpa_onnx",

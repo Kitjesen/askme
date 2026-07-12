@@ -20,8 +20,9 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from askme.config import project_root
 from askme.memory.bridge import MemoryBridge
+
+from askme.config import project_root
 
 
 def build_config(args: argparse.Namespace) -> dict[str, Any]:

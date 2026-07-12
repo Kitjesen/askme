@@ -55,20 +55,6 @@ LEGACY_FACADES: tuple[LegacyFacade, ...] = (
         reason="Address detection is robot interaction policy, not audio input.",
     ),
     LegacyFacade(
-        legacy_path="askme.voice.interaction.interaction_gate",
-        canonical_path="askme.robot_interaction.interaction_gate",
-        new_code_import="askme.robot_interaction.InteractionGate",
-        owner="robot_interaction",
-        reason="Interaction gate policy lives in the robot interaction layer.",
-    ),
-    LegacyFacade(
-        legacy_path="askme.voice.interaction.perception_context",
-        canonical_path="askme.robot_interaction.perception_context",
-        new_code_import="askme.robot_interaction.InteractionPerceptionSnapshot",
-        owner="robot_interaction",
-        reason="Turn perception context is consumed by robot interaction decisions.",
-    ),
-    LegacyFacade(
         legacy_path="askme.interaction.intent_router",
         canonical_path="askme.robot_interaction.intent_router",
         new_code_import="askme.robot_interaction.IntentRouter",

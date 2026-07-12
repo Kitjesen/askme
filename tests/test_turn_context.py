@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from askme.pipeline.hooks import PipelineHooks, ToolCallRecord
 from askme.pipeline.protocols import TurnContext
 

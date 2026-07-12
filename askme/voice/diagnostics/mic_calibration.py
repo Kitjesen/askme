@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_RUNTIME_URL = "http://127.0.0.1:8765"
 
@@ -111,23 +114,23 @@ def collect_runtime_mic_calibration(
 def print_mic_calibration_summary(payload: dict[str, Any]) -> None:
     """Print a compact human-readable calibration summary."""
     summary = payload.get("summary", {})
-    print(f"runtime-mic-calibration: {payload.get('status', 'unknown')}")  # noqa: T201
-    print(f"  server: {payload.get('server', '')}")  # noqa: T201
-    print(f"  samples: {payload.get('sample_count', 0)}")  # noqa: T201
-    print(  # noqa: T201
+    logger.info(f"runtime-mic-calibration: {payload.get('status', 'unknown')}")
+    logger.info(f"  server: {payload.get('server', '')}")
+    logger.info(f"  samples: {payload.get('sample_count', 0)}")
+    logger.info(
         "  mic: "
         f"open={summary.get('mic_open')} "
         f"transport={summary.get('transport')} "
         f"device={summary.get('device')}"
     )
-    print(  # noqa: T201
+    logger.info(
         "  peak: "
         f"max={summary.get('observed_peak_max')} "
         f"p95={summary.get('observed_peak_p95')} "
         f"gate={summary.get('noise_gate_peak')} "
         f"recommended_gate={summary.get('recommended_noise_gate_peak')}"
     )
-    print(  # noqa: T201
+    logger.info(
         "  state: "
         f"gate={summary.get('gate_state')} "
         f"vad={summary.get('vad_state')} "
@@ -135,11 +138,11 @@ def print_mic_calibration_summary(payload: dict[str, Any]) -> None:
     )
     recommendation = summary.get("recommendation")
     if recommendation:
-        print(f"  recommendation: {recommendation}")  # noqa: T201
+        logger.info(f"  recommendation: {recommendation}")
     for warning in payload.get("warnings", []):
-        print(f"  warning: {warning}")  # noqa: T201
+        logger.warning(f"  warning: {warning}")
     for error in payload.get("errors", []):
-        print(f"  error: {error}")  # noqa: T201
+        logger.error(f"  error: {error}")
 
 
 def write_mic_calibration_json(payload: dict[str, Any], path: str | Path) -> None:

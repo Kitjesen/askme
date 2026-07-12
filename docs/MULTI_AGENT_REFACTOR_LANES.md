@@ -4,6 +4,12 @@ Use this playbook when several agents refactor the repo in one round. The lead
 agent assigns one lane per worker, reserves shared files, and owns final
 integration.
 
+Before selecting a lane, read `docs/PRODUCT_REQUIREMENTS.md`,
+`docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md`,
+`docs/PRODUCT_ARCHITECTURE_TRACE.md`, and `docs/DEMAND_EVIDENCE_LEDGER.md`.
+Field Delivery Domain work must preserve Product/Admin/Platform/Internal vs
+Runtime / Safety / Hardware ownership; customer signoff != production readiness.
+
 ## Lane Map
 
 | Lane | Owns | Allowed write scope | Required tests |
@@ -13,7 +19,7 @@ integration.
 | 3. Cognition | Cognitive planning, world state, working memory, perception sync contracts | `askme/cognition` | `tests/test_six_layer_package_boundaries.py` plus any cognition-specific tests touched by the change |
 | 4. Providers / robot | Provider registry/factories, concrete adapters, robot-facing implementation behind ports | `askme/providers`, `askme/robot` | `tests/test_register_defaults.py`, `tests/test_registry.py`, `tests/test_robot_tools_ext.py`, `tests/test_arm_controller.py`, `tests/test_six_layer_package_boundaries.py` |
 | 5. Tools / API / MCP | FastAPI surface, MCP resources/tools, builtin tool registry and dispatch glue | `askme/api`, `askme/mcp`, `askme/tools` | `tests/test_api_route_dependency_injection.py`, `tests/test_mcp_tools.py`, `tests/test_mcp_memory_tools.py`, `tests/test_mcp_misc_resources.py`, `tests/test_builtin_tools.py`, `tests/test_tool_registry.py` |
-| 6. Boundary / test hardening | Boundary assertions, compatibility coverage, tests that lock refactor behavior | `tests` only unless the lead explicitly reserves a boundary doc or facade | `tests/test_six_layer_package_boundaries.py`, `tests/test_package_migration_compat.py`, plus the lane-specific target under change |
+| 6. Field Delivery Domain / boundary hardening | Field/customer-project delivery rules, acceptance evidence, compatibility coverage, and tests that lock refactor behavior | `askme/pipeline/field`, `askme/api/routes/field_*`, `askme/api/services/field_*`, `tests` | `tests/test_field_operations.py`, `tests/test_field_ingest_adapters.py`, `tests/test_field_contracts.py`, `tests/test_dashboard_customer_project_contract.py`, `tests/test_field_customer_project_acceptance_routes.py`, `tests/test_six_layer_package_boundaries.py`, `tests/test_package_migration_compat.py` |
 
 ## Boundary Rules
 

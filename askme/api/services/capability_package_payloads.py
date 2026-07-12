@@ -36,7 +36,7 @@ def default_product_capability_center() -> dict[str, Any]:
         manager = SkillManager()
         manager.load()
         center = manager.get_capability_center()
-    except Exception:
+    except (ImportError, TypeError, AttributeError):
         return {}
     return center if isinstance(center, dict) else {}
 
@@ -47,7 +47,7 @@ def package_readiness_contract() -> dict[str, Any]:
     return {
         "endpoint": "/api/capability-packages/readiness",
         "method": "POST",
-        "purpose": "评估能力包或场景包是否可以在客户现场启用。",
+        "purpose": "评估能力包或场景包是否可以进入客户现场启用前验证。",
         "accepted_kinds": ["capability_package", "scenario_package"],
         "required_payload": {
             "kind": "capability_package | scenario_package",
@@ -55,7 +55,7 @@ def package_readiness_contract() -> dict[str, Any]:
             "inventory": "Optional PackageRuntimeInventory; omitted means derive from runtime capability snapshot.",
         },
         "customer_statuses": {
-            "ready": "可进入现场验证或发布流程。",
+            "ready": "可进入现场验证或试点发布评审。",
             "manual_check": "客户启用前需要人工验收确认。",
             "blocked": "缺少依赖时不能面向客户启用。",
         },
@@ -163,7 +163,7 @@ def readiness_inventory(
         return PackageRuntimeInventory()
     try:
         payload = provider()
-    except Exception:
+    except (TypeError, AttributeError):
         return PackageRuntimeInventory()
     if not isinstance(payload, dict):
         return PackageRuntimeInventory()

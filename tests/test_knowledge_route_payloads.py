@@ -22,8 +22,8 @@ from askme.api.services.knowledge_route_payloads import (
     invalid_request_payload,
     knowledge_update_permission,
     memory_route_failure,
-    validate_payload,
     validate_memory_dispatch_payload,
+    validate_payload,
     validation_error_message,
 )
 

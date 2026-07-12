@@ -29,7 +29,13 @@ class TestGovernanceHttp:
         dashboard_operator = next(
             operator for operator in payload["operators"] if operator["operator_id"] == "dashboard.operator"
         )
-        assert dashboard_operator["project_scope"]["project_ids"] == ["demo-field-ops"]
+        assert dashboard_operator["project_scope"]["project_ids"] == [
+            "demo-field-ops",
+            "julong-guide-patrol",
+        ]
+        assert dashboard_operator["project_scope"]["default_project_ids"] == [
+            "julong-guide-patrol"
+        ]
         assert payload["sso"]["configured"] is False
         assert payload["sso"]["trusted_identity_headers_enabled"] is False
         assert any(

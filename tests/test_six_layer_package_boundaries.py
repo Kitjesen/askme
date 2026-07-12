@@ -388,7 +388,7 @@ def test_runtime_and_pipeline_use_ports_for_provider_backed_capabilities() -> No
         repo_root / "askme" / "runtime" / "modules" / "reaction_module.py",
         repo_root / "askme" / "runtime" / "modules" / "text_module.py",
         repo_root / "askme" / "runtime" / "modules" / "voice_module.py",
-        repo_root / "askme" / "agent_shell" / "thunder_agent_shell.py",
+        # thunder_agent_shell.py removed — replaced by ZeroClaw MCP Agent
         repo_root / "askme" / "pipeline" / "channels" / "text_loop.py",
         repo_root / "askme" / "pipeline" / "channels" / "voice_loop.py",
         repo_root / "askme" / "pipeline" / "core" / "brain_pipeline.py",
@@ -715,7 +715,7 @@ def test_mcp_voice_and_perception_wiring_use_provider_boundary() -> None:
 
 def test_cli_voice_entry_points_use_provider_boundary() -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    path = repo_root / "askme" / "cli.py"
+    cli_root = repo_root / "askme" / "cli"
     forbidden = {
         "askme.voice.orchestration.audio_agent",
         "askme.voice.output.tts",
@@ -723,18 +723,19 @@ def test_cli_voice_entry_points_use_provider_boundary() -> None:
     provider_imports: set[str] = set()
     violations: list[str] = []
 
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            module_name = node.module or ""
-            if module_name in forbidden:
-                violations.append(f"{path.relative_to(repo_root)} imports {module_name}")
-            if module_name == "askme.providers":
-                provider_imports.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name in forbidden:
-                    violations.append(f"{path.relative_to(repo_root)} imports {alias.name}")
+    for path in sorted(cli_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module_name = node.module or ""
+                if module_name in forbidden:
+                    violations.append(f"{path.relative_to(repo_root)} imports {module_name}")
+                if module_name == "askme.providers":
+                    provider_imports.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in forbidden:
+                        violations.append(f"{path.relative_to(repo_root)} imports {alias.name}")
 
     assert violations == []
     assert {"build_audio_frontend", "build_tts_provider"} <= provider_imports

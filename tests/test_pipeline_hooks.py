@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-
 from askme.pipeline.hooks import (
     _PROCEED,
     PipelineHooks,

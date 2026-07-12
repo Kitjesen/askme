@@ -6,6 +6,10 @@ const pageKicker = document.getElementById("page-kicker");
 const pageDescription = document.getElementById("page-description");
 const globalStatusDot = document.getElementById("global-status-dot");
 const globalStatusText = document.getElementById("global-status-text");
+const navDrawer = document.getElementById("nav-drawer");
+const navToggle = document.getElementById("nav-toggle");
+const navClose = document.getElementById("nav-close");
+const navBackdrop = document.getElementById("nav-backdrop");
 const ENDPOINTS = {
   chat: "/api/chat",
   governance: "/api/governance/operator-directory",
@@ -23,6 +27,9 @@ const ENDPOINTS = {
   knowledgeUpdate: "/api/knowledge/update",
   memorySearch: "/api/memory/search",
   memoryHealth: "/api/memory/health",
+  voiceSystem: "/api/voice/system",
+  voiceSystemSwitch: "/api/voice/system/switch",
+  voiceSystemPrompt: "/api/voice/system/prompt",
   spaceHealth: "/api/space/health",
   spacePoints: "/api/space/points",
   spaceServicePoints: "/api/space/service-points",
@@ -98,15 +105,14 @@ const KNOWLEDGE_CATEGORIES = [
 ];
 
 const fallbackPages = [
-  { path: "/dashboard", key: "overview", label: "总览", hint: "功能地图", title: "现场任务平台", kicker: "产品总览", desc: "给客户和交付团队看的功能地图：语音入口、客户项目、现场事件、知识库、能力中心和交付检查分开验收。" },
+  { path: "/dashboard", key: "overview", label: "总览", hint: "运行状态", title: "现场运行总览", kicker: "运行总览", desc: "集中查看对话链路、现场事件、园区场景和交付门禁。" },
   { path: "/dashboard/conversation", key: "conversation", label: "对话", hint: "语音文本", title: "语音和文本对话", kicker: "真实交互", desc: "用于输入任务、问路、知识问答和安全确认。回答需要展示证据、任务状态和拒答原因。" },
-  { path: "/dashboard/projects", key: "projects", label: "客户项目", hint: "对象目录", title: "客户项目与对象目录", kicker: "方案商交付", desc: "为每个客户项目维护园区、厂区、仓储或景区对象目录，并绑定视觉模型、传感器协议、技能包、验收用例和交付包。" },
   { path: "/dashboard/scenarios", key: "scenarios", label: "场景验收", hint: "客户能看懂", title: "场景验收矩阵", kicker: "产品页", desc: "把问路、带路、违停、烟火、垃圾桶、陌生人、机器人故障、恶意挡路和人群聚集逐条展示成客户能验收的业务能力。" },
   { path: "/dashboard/field", key: "field", label: "现场事件", hint: "安防巡检", title: "现场事件处置", kicker: "园区场景", desc: "覆盖摔倒、卡住、陌生人拍照、违停、烟雾火灾、垃圾桶满溢、人群聚集、游客问路和带路。" },
   { path: "/dashboard/space", key: "space", label: "空间认知", hint: "问路带路", title: "园区空间认知", kicker: "访客服务", desc: "管理园区点位、别名、问询服务点和带路路线，模拟访客停留后的主动问候、目的地解析和带路决策。" },
   { path: "/dashboard/knowledge", key: "knowledge", label: "知识库", hint: "上传审批", title: "知识管理", kicker: "可审计回答", desc: "上传、预览、审批、检索和重建索引。过期、冲突或未审批知识不能直接进入回答。" },
   { path: "/dashboard/capabilities", key: "capabilities", label: "能力中心", hint: "技能增长", title: "机器人能力中心", kicker: "客户可见能力", desc: "按巡检、异常处置、安防、访客服务、空间认知和在线增长展示机器人当前能做什么、缺什么、哪些能力需要审批。" },
-  { path: "/dashboard/voice", key: "voice", label: "语音音色", hint: "播报策略", title: "语音音色和实时链路", kicker: "声音系统", desc: "按巡检、访客、安防、紧急告警、夜间低扰等场景切换音色和提示音，并查看端到端延迟。" },
+  { path: "/dashboard/voice", key: "voice", label: "语音系统", hint: "模型与记忆", title: "小算语音系统", kicker: "运行控制台", desc: "管理 ASR、LLM、TTS、Prompt、记忆和音频链路，在线切换模型并追踪运行缺口。" },
   { path: "/dashboard/delivery", key: "delivery", label: "交付检查", hint: "可验收", title: "交付检查", kicker: "上线门禁", desc: "把演示、试点、真实硬件和外部通知的缺口拆成清晰门禁，避免把实验室能力说成生产上线。" },
   { path: "/dashboard/audit", key: "audit", label: "审计", hint: "证据包", title: "审计证据包", kicker: "交付证据", desc: "查看客户可读的事件证据、复核状态、导出历史和交付声明边界。" },
 ];
@@ -171,6 +177,8 @@ let selectedGeneratedSkillPreview = null;
 let selectedAgentProfilePreview = null;
 let auditRecordCache = [];
 let selectedAuditReview = null;
+let voiceControlSnapshot = null;
+let voiceConsoleTab = localStorage.getItem("askme.voice.console_tab") || "overview";
 let latestSpaceGuidePayload = null;
 let conversationSpaceContext = {
   servicePoints: [],
@@ -282,7 +290,17 @@ function renderNav(activePage) {
   nav.innerHTML = renderedSections.join("");
 }
 
+function setNavigationOpen(open) {
+  const next = Boolean(open);
+  document.body.classList.toggle("nav-open", next);
+  navToggle?.setAttribute("aria-expanded", String(next));
+  navDrawer?.setAttribute("aria-hidden", String(!next));
+  navBackdrop?.setAttribute("tabindex", next ? "0" : "-1");
+  if (next) navClose?.focus();
+}
+
 function routeTo(path) {
+  setNavigationOpen(false);
   history.pushState({}, "", path);
   render();
 }
@@ -512,64 +530,90 @@ async function refreshGlobalStatus() {
 }
 
 async function renderOverview() {
-  const [eventsPayload, scenariosPayload, readiness, notification, siteProfiles, customerProjects, apiSurfaces, dashboardPages] = await Promise.all([
+  const [eventsPayload, scenariosPayload, readiness, notification, siteProfiles] = await Promise.all([
     getJson("/api/field/events?limit=6&needs_attention=true", { events: [] }),
     getJson("/api/field/scenarios", { scenarios: [] }),
     getJson("/api/field/readiness", {}),
     getJson("/api/field/notification-preflight?status_as_200=true", {}),
     getJson(ENDPOINTS.fieldSiteProfiles, { sites: [], summary: {} }),
-    getJson(ENDPOINTS.fieldCustomerProjects, { projects: [], customers: [], summary: {} }),
-    getJson(ENDPOINTS.apiSurfaces, { surfaces: [], policy: {} }),
-    getJson(ENDPOINTS.dashboardPages, { pages: [], summary: {}, policy: {} }),
   ]);
   const events = eventsPayload.events || eventsPayload.items || [];
   const scenarios = scenariosPayload.scenarios || scenariosPayload.items || [];
-  const projectSummary = customerProjects.summary || {};
+  const siteSummary = siteProfiles.summary || {};
+  const voiceReady = health.voice_pipeline_status?.pipeline_ok === true;
+  const notificationReady = notification.ready === true || notification.status === "ready";
+  const siteCount = Number(siteSummary.site_count || 0);
+  const configuredSites = Number(siteSummary.configured_count || 0);
+  const signals = [
+    {
+      label: "对话链路",
+      value: voiceReady ? "在线" : "需检查",
+      detail: health.model_name || health.components?.llm?.model || "等待模型状态",
+      cls: voiceReady ? "ok" : "warn",
+    },
+    {
+      label: "通知链路",
+      value: notificationReady ? "可用" : "待配置",
+      detail: notificationReady ? "现场事件可以按规则通知" : ((notification.blockers || [])[0] || "检查通知配置"),
+      cls: notificationReady ? "ok" : "warn",
+    },
+    {
+      label: "现场档案",
+      value: `${configuredSites}/${siteCount}`,
+      detail: siteCount && configuredSites === siteCount ? "现场配置完整" : "仍有现场配置待补齐",
+      cls: siteCount && configuredSites === siteCount ? "ok" : "warn",
+    },
+    {
+      label: "交付门禁",
+      value: readiness.status || "unknown",
+      detail: (readiness.blockers || [])[0] || "当前没有已知阻塞项",
+      cls: statusClass(readiness.status) || "warn",
+    },
+  ];
   app.innerHTML = `
-    <section class="ops-hero">
-      <div>
-        <p class="page-kicker">客户验收视角</p>
-        <h2>机器人现场任务运营台</h2>
-        <p>客户需要一眼看懂：当前服务哪些项目，覆盖哪些场景，有没有待处理事件，通知链路是否可用，以及这套系统现在能不能进入试点或交付验收。</p>
-        <p class="muted-line">客户验收视角：现场任务、客户项目、知识库、语音配置和交付检查。</p>
+    <section class="dashboard-overview">
+      <div class="dashboard-overview-copy">
+        <p class="page-kicker">当前状态</p>
+        <h2>今天先看状态，再处理任务</h2>
+        <p>对话、事件、场景和交付门禁集中在这一页。需要深入处理时，再进入对应工作区。</p>
       </div>
-      <div class="ops-summary">
-        <div><b>${esc(events.length)}</b><span>待关注事件</span></div>
-        <div><b>${esc(scenarios.length || 8)}</b><span>覆盖场景</span></div>
-        <div><b>${esc(projectSummary.project_count ?? 0)}</b><span>客户项目</span></div>
-        <div><b>${esc(readiness.status || "unknown")}</b><span>交付门禁</span></div>
-      </div>
-    </section>
-    ${renderCustomerInterfacePrinciples()}
-    ${renderApiSurfaceMap(apiSurfaces)}
-    ${renderDashboardPageContracts(dashboardPages)}
-    <section class="grid three">
-      ${renderOperatorCard()}
-      ${renderIdentityGatewayCard()}
-      ${renderReadinessCard(readiness, notification)}
-      ${renderSiteProfileSummaryCard(siteProfiles)}
-      <div class="card">
-        <h2>客户现在能验收什么</h2>
-        <div class="metric"><b>现场事件</b><span>场景、地点、风险、状态</span></div>
-        <div class="metric"><b>证据链路</b><span>照片、传感器、运行记录</span></div>
-        <div class="metric"><b>处置闭环</b><span>通知对象、负责人、下一步</span></div>
-        <div class="metric"><b>项目边界</b><span>${esc(projectSummary.customer_count ?? 0)} 个客户 / ${esc(projectSummary.managed_object_type_count ?? 0)} 类对象</span></div>
+      <div class="dashboard-metrics" aria-label="关键运行指标">
+        <div class="dashboard-metric"><span>待处理事件</span><strong>${esc(events.length)}</strong></div>
+        <div class="dashboard-metric"><span>覆盖场景</span><strong>${esc(scenarios.length || 8)}</strong></div>
+        <div class="dashboard-metric"><span>语音链路</span><strong>${voiceReady ? "在线" : "检查"}</strong></div>
+        <div class="dashboard-metric"><span>交付门禁</span><strong>${esc(readiness.status || "unknown")}</strong></div>
       </div>
     </section>
-    <section class="grid two">
-      <div class="card">
-        <h2>场景覆盖</h2>
-        <div class="scenario-lanes">
-          ${renderScenarioLanes(scenarios)}
+    <section class="dashboard-shortcuts" aria-label="常用入口">
+      <button type="button" class="dashboard-shortcut" data-route="/dashboard/conversation"><strong>开始对话</strong><small>语音与文本任务</small></button>
+      <button type="button" class="dashboard-shortcut" data-route="/dashboard/field"><strong>处理事件</strong><small>查看证据与处置状态</small></button>
+      <button type="button" class="dashboard-shortcut" data-route="/dashboard/voice"><strong>语音设置</strong><small>模型、Prompt 与记忆</small></button>
+      <button type="button" class="dashboard-shortcut" data-route="/dashboard/delivery"><strong>交付检查</strong><small>门禁、缺口与验收</small></button>
+    </section>
+    <section class="dashboard-columns">
+      <article class="dashboard-panel">
+        <header class="dashboard-panel-head">
+          <div><p class="page-kicker">任务队列</p><h2>最近需要处理</h2></div>
+          <button type="button" class="mini-button" data-route="/dashboard/field">全部事件</button>
+        </header>
+        <div class="dashboard-event-list">${renderCustomerEvents(events.slice(0, 4))}</div>
+      </article>
+      <article class="dashboard-panel">
+        <header class="dashboard-panel-head">
+          <div><p class="page-kicker">运行门禁</p><h2>服务状态</h2></div>
+          <button type="button" class="mini-button" data-route="/dashboard/delivery">查看门禁</button>
+        </header>
+        <div class="dashboard-status-list">
+          ${signals.map((signal) => `
+            <div class="dashboard-status-row">
+              <div><strong>${esc(signal.label)}</strong><span>${esc(signal.detail)}</span></div>
+              ${badge(signal.value, signal.cls)}
+            </div>
+          `).join("")}
         </div>
-      </div>
-      <div class="card">
-        <h2>最近需要处理</h2>
-        <div class="table-list">${renderCustomerEvents(events)}</div>
-      </div>
+      </article>
     </section>
   `;
-  wireOperatorControls();
 }
 
 function renderCustomerInterfacePrinciples() {
@@ -624,7 +668,7 @@ function renderApiSurfaceMap(payload = {}) {
         <div>
           <p class="page-kicker">产品接口边界</p>
           <h2>客户页面只看产品能力，交付和内部调试分层管理</h2>
-          <p>上层页面必须依赖客户可见接口；审批、审计和机器人底层回调不能混进客户说明里。</p>
+          <p>客户说明页依赖客户可见接口；治理页显式使用审批和审计接口，机器人底层回调不能混进客户说明里。</p>
         </div>
         ${badge(policy.internal_surface_must_not_drive_customer_ui ? "边界已启用" : "待检查", policy.internal_surface_must_not_drive_customer_ui ? "ok" : "warn")}
       </div>
@@ -2390,47 +2434,517 @@ function wireSpaceControls() {
 }
 
 async function renderVoice() {
-  const profiles = await getJson("/api/voice/profiles", { profiles: [] });
-  const voice = health.voice_pipeline_status || {};
-  const latency = voice.voice_turn?.latency_summary || {};
+  const [system, profiles] = await Promise.all([
+    getJson(ENDPOINTS.voiceSystem, null),
+    getJson("/api/voice/profiles", { profiles: [] }),
+  ]);
+  voiceControlSnapshot = system || voiceSystemFallback(profiles);
+  voiceControlSnapshot.profiles = profiles;
+  const ready = voiceControlSnapshot.status === "ready";
   app.innerHTML = `
-    <section class="voice-state">
-      <div class="card">
-        <h2>当前语音状态</h2>
-        <div class="wave">${Array.from({ length: 22 }).map(() => "<i></i>").join("")}</div>
-        <div class="metric"><b>是否可对话</b><span>${esc(voice.interaction?.can_talk ? "可以说话" : voice.interaction?.hint || "未知")}</span></div>
-        <div class="metric"><b>ASR</b><span>${esc(voice.asr?.provider || "cloud+local")}</span></div>
-        <div class="metric"><b>TTS</b><span>${esc(voice.tts?.backend || voice.tts_backend || "-")}</span></div>
+    <section class="voice-console" data-voice-console>
+      ${renderVoiceCommandBar(voiceControlSnapshot)}
+      <div class="voice-workbench-switcher">
+        <nav class="voice-console-tabs" role="tablist" aria-label="语音系统管理">
+          ${[
+            ["overview", "系统总览"],
+            ["models", "模型路由"],
+            ["prompt", "Prompt"],
+            ["memory", "记忆管理"],
+            ["audio", "音频与准入"],
+          ].map(([key, label]) => `<button type="button" role="tab" aria-selected="${voiceConsoleTab === key}" class="${voiceConsoleTab === key ? "active" : ""}" data-voice-tab="${key}"><span aria-hidden="true"></span>${label}</button>`).join("")}
+        </nav>
       </div>
-      <div class="card">
-        <h2>音色选择</h2>
-        <div class="knowledge-form">
-          <select id="voice-profile-select">${(profiles.profiles || []).map((p) => `<option value="${esc(p.profile_id)}">${esc(p.label)} / ${esc(p.category || "general")}</option>`).join("")}</select>
-          <div class="panel-actions">
-            <button id="voice-apply" class="primary-button">应用音色</button>
-            <button id="voice-sample" class="ghost-button">播放样例</button>
-          </div>
-        </div>
-      </div>
-    </section>
-    <section class="card">
-      <h2>端到端延迟证据</h2>
-      <div class="grid four">
-        ${["asr_final_ms", "llm_ttft_ms", "tts_first_audio_ms", "playback_start_ms"].map((key) => {
-          const bucket = latency.buckets?.[key] || {};
-          return `<div class="metric"><b>${esc(key)}</b><span>${esc(bucket.latest_ms ?? "-")} ms</span></div>`;
-        }).join("")}
-      </div>
+      <section class="voice-workbench" aria-label="语音系统工作区">
+        <header class="voice-workbench-chrome">
+          <span class="voice-window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="voice-workbench-state ${ready ? "ready" : "warn"}">${ready ? "LIVE CONFIG" : "CHECK REQUIRED"}</span>
+        </header>
+        <div id="voice-console-view">${renderVoiceConsoleView(voiceControlSnapshot, voiceConsoleTab)}</div>
+      </section>
     </section>
   `;
-  document.getElementById("voice-apply").addEventListener("click", () => applyVoice(false));
-  document.getElementById("voice-sample").addEventListener("click", () => applyVoice(true));
+  wireVoiceConsole();
 }
 
 async function applyVoice(speakSample) {
   const select = document.getElementById("voice-profile-select");
+  if (!select) return;
   const response = await postJson("/api/voice/profile", { profile_id: select.value, speak_sample: speakSample });
-  alert(response.ok ? "音色已应用" : (response.payload.error || "音色切换失败"));
+  setVoiceActionStatus(response.ok ? "音色已应用" : (response.payload.error || "音色切换失败"), response.ok ? "ok" : "err");
+  if (response.ok) await renderVoice();
+}
+
+function voiceSystemFallback(profiles = {}) {
+  const voice = health.voice_pipeline_status || {};
+  return {
+    status: voice.pipeline_ok ? "ready" : "degraded",
+    runtime: {
+      llm: {
+        provider: health.model_routing?.dialogue?.llm_provider || "unknown",
+        model: health.model_name || health.model_routing?.dialogue?.llm_model || "unknown",
+      },
+      asr: voice.asr || {},
+      tts: voice.tts || {},
+      interaction: voice.interaction || {},
+      latency: voice.voice_turn?.latency_summary || {},
+      audio: {
+        input_ready: voice.input_ready,
+        output_ready: voice.output_ready,
+        input: voice.input || {},
+        media: voice.media || {},
+      },
+    },
+    catalog: {},
+    prompt: {},
+    memory: {},
+    issues: [{ id: "control_api", severity: "high", label: "运行时控制 API 暂不可用" }],
+    resolved_issues: [],
+    profiles,
+  };
+}
+
+function renderVoiceCommandBar(snapshot) {
+  const runtime = snapshot.runtime || {};
+  const ready = snapshot.status === "ready";
+  return `
+    <header class="voice-command-bar">
+      <div class="voice-command-brand">
+        <div class="voice-status-chip">
+          <span class="voice-live-dot ${ready ? "ok" : "warn"}" aria-hidden="true"></span>
+          <span>${ready ? "语音链路在线" : "存在待处理项"}</span>
+          <b>聚龙科创 e 谷</b>
+        </div>
+        <div class="voice-command-title">
+          <div>
+            <h1>小算语音系统<br><span>真实对话，持续在线</span></h1>
+          </div>
+        </div>
+      </div>
+      <div class="voice-command-actions">
+        <button type="button" class="primary-button" data-route="/dashboard/conversation">测试真实对话 <span aria-hidden="true">↗</span></button>
+        <button type="button" class="ghost-button" data-voice-refresh>刷新运行状态 <span aria-hidden="true">↻</span></button>
+      </div>
+    </header>
+    <div id="voice-action-status" class="voice-action-status" role="status" aria-live="polite"></div>
+  `;
+}
+
+function renderVoiceConsoleView(snapshot, tab) {
+  if (tab === "models") return renderVoiceModels(snapshot);
+  if (tab === "prompt") return renderVoicePrompt(snapshot);
+  if (tab === "memory") return renderVoiceMemory(snapshot);
+  if (tab === "audio") return renderVoiceAudio(snapshot);
+  return renderVoiceOverview(snapshot);
+}
+
+function renderVoiceOverview(snapshot) {
+  const runtime = snapshot.runtime || {};
+  const llm = runtime.llm || {};
+  const asr = runtime.asr?.cloud || runtime.asr || {};
+  const tts = runtime.tts || {};
+  const memory = snapshot.memory || {};
+  const prompt = snapshot.prompt || {};
+  const latency = runtime.latency || {};
+  const interaction = runtime.interaction || {};
+  const admission = interaction.last_decision || {};
+  const strictAdmission = interaction.policy?.mode === "strict_public_site";
+  const audioInput = runtime.audio?.input || {};
+  const inputPeak = Number(audioInput.last_peak || 0);
+  const hasInputSnapshot = Number.isFinite(inputPeak) && inputPeak > 0;
+  const peakScale = hasInputSnapshot ? Math.max(0.25, Math.min(1, Math.sqrt(inputPeak / 12000))) : 0;
+  const vadState = audioInput.vad_state || runtime.vad?.state || "idle";
+  const waveformBars = Array.from({ length: 38 }).map((_, index) => {
+    const baseHeight = 18 + ((index * 17) % 64);
+    const height = hasInputSnapshot ? Math.max(5, Math.round(baseHeight * peakScale)) : 4;
+    return `<i style="--h:${height}%"></i>`;
+  }).join("");
+  const stages = [
+    ["唤醒", "小算", runtime.kws?.enabled !== false],
+    ["语音转文字", voiceProviderLabel(asr.provider || "local", "asr"), asr.available !== false],
+    ["对话准入", admission.action || (strictAdmission ? "严格门控" : "宽松门控"), strictAdmission],
+    ["对话模型", llm.model || "未配置", Boolean(llm.model)],
+    ["语音合成", voiceProviderLabel(tts.backend || "未配置", "tts"), Boolean(tts.backend)],
+    ["记忆", voiceProviderLabel(memory.current_backend || memory.selected_backend || "vector", "memory"), memory.ready !== false],
+  ];
+  return `
+    <section class="voice-stage-strip" aria-label="实时语音链路">
+      ${stages.map(([label, value, ok], index) => `
+        <article class="voice-stage ${ok ? "ok" : "warn"}">
+          <span>${String(index + 1).padStart(2, "0")}</span>
+          <div><small>${esc(label)}</small><strong>${esc(value)}</strong></div>
+        </article>
+      `).join("")}
+    </section>
+    <div class="voice-overview-grid">
+      <section class="voice-panel voice-latency-panel">
+        <div class="voice-panel-head"><div><p>实时性能</p><h3>端到端延迟</h3></div>${badge(runtime.audio?.input_ready && runtime.audio?.output_ready ? "音频就绪" : "检查音频", runtime.audio?.input_ready && runtime.audio?.output_ready ? "ok" : "warn")}</div>
+        <div class="voice-latency-grid">
+          ${[
+            ["ASR 完成", "asr_final_ms"],
+            ["模型首字", "llm_ttft_ms"],
+            ["TTS 首帧", "tts_first_audio_ms"],
+            ["开始播放", "playback_start_ms"],
+          ].map(([label, key]) => {
+            const bucket = latency.buckets?.[key] || {};
+            return `<div><span>${esc(label)}</span><b>${esc(bucket.latest_ms ?? "-")}</b><small>ms</small></div>`;
+          }).join("")}
+        </div>
+        <div class="voice-waveform ${hasInputSnapshot ? "has-signal" : "idle"}" role="img" aria-label="最近麦克风峰值 ${esc(hasInputSnapshot ? inputPeak : "无数据")}，VAD ${esc(vadState)}">
+          <span><b>MIC SNAPSHOT</b>${esc(hasInputSnapshot ? inputPeak : "NO SIGNAL")} · ${esc(vadState)}</span>
+          <div>${waveformBars}</div>
+        </div>
+      </section>
+      <section class="voice-panel">
+        <div class="voice-panel-head"><div><p>上下文</p><h3>Prompt 与记忆</h3></div></div>
+        <dl class="voice-definition-list">
+          <div><dt>角色</dt><dd>${esc(snapshot.prompt?.persona?.role || "导览与巡检机器人")}</dd></div>
+          <div><dt>System</dt><dd>${prompt.relay_compat_mode ? "中继兼容" : "完整保留"}</dd></div>
+          <div><dt>记忆后端</dt><dd>${esc(memory.current_backend || memory.selected_backend || "-")}</dd></div>
+          <div><dt>可回答知识</dt><dd>${esc(memory.counts?.prompt_eligible ?? 0)} 条</dd></div>
+          <div><dt>对话准入</dt><dd>${strictAdmission ? "严格现场模式" : "宽松模式"}</dd></div>
+        </dl>
+      </section>
+    </div>
+    ${renderVoiceIssues(snapshot)}
+  `;
+}
+
+function renderVoiceIssues(snapshot) {
+  const issues = Array.isArray(snapshot.issues) ? snapshot.issues : [];
+  const resolved = Array.isArray(snapshot.resolved_issues) ? snapshot.resolved_issues : [];
+  return `
+    <section class="voice-health-board">
+      <div class="voice-panel-head"><div><p>运行质量</p><h3>缺口与修复</h3></div>${badge(issues.length ? `${issues.length} 项待处理` : "无阻断项", issues.length ? "warn" : "ok")}</div>
+      <div class="voice-health-columns">
+        <div>
+          <h4>当前待处理</h4>
+          ${issues.length ? issues.map((item) => `<div class="voice-health-row ${esc(item.severity || "warn")}"><span></span><div><strong>${esc(item.label || item.id)}</strong><small>${esc(item.id || "runtime")}</small></div></div>`).join("") : `<div class="voice-empty-state">当前没有检测到阻断对话的问题。</div>`}
+        </div>
+        <div>
+          <h4>本轮已收紧</h4>
+          ${resolved.map((item) => `<div class="voice-health-row resolved"><span></span><div><strong>${esc(item.label)}</strong><small>${esc(item.id)}</small></div></div>`).join("")}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderVoiceModels(snapshot) {
+  const runtime = snapshot.runtime || {};
+  const catalog = snapshot.catalog || {};
+  return `
+    <section class="voice-model-intro">
+      <div><p>在线热切换</p><h3>模型路由控制</h3><span>新请求使用新模型，正在处理的对话保持原实例。切换前先验证服务可用性。</span></div>
+      ${badge("无需重启", "ok")}
+    </section>
+    <div class="voice-model-grid">
+      ${renderVoiceModelCard("llm", "对话模型", runtime.llm || {}, catalog.llm || [])}
+      ${renderVoiceModelCard("asr", "语音识别", runtime.asr?.cloud || runtime.asr || {}, catalog.asr || [])}
+      ${renderVoiceModelCard("tts", "语音合成", runtime.tts || {}, catalog.tts || [])}
+    </div>
+    <section class="voice-switch-contract">
+      <div><strong>切换语义</strong><span>LLM 原子发布；ASR 在下一监听周期生效；TTS 播放中时排队到播报结束。</span></div>
+      <div><strong>密钥边界</strong><span>控制台只选择已配置 provider，不读取、返回或保存 API Key。</span></div>
+      <div><strong>失败处理</strong><span>验证失败时保留当前模型，错误直接显示在本页。</span></div>
+    </section>
+  `;
+}
+
+function renderVoiceModelCard(component, title, active, entries) {
+  const providerKey = component === "tts" ? "backend" : "provider";
+  const activeProvider = voiceCanonicalProvider(
+    component,
+    active[providerKey] || (component === "asr" && active.available === false ? "local" : ""),
+  );
+  const activeModel = String(active.model || active.minimax?.model || (component === "tts" ? active.minimax?.model : ""));
+  const normalizedEntries = entries.length ? entries : [{ [providerKey]: activeProvider || "unknown", models: [activeModel], credential_ready: true }];
+  return `
+    <article class="voice-model-card" data-model-card="${component}">
+      <div class="voice-model-card-head"><div><small>${esc(component.toUpperCase())}</small><h3>${esc(title)}</h3></div><span class="voice-model-state">LIVE</span></div>
+      <div class="voice-current-model"><span>当前运行</span><strong>${esc(activeModel || activeProvider || "未配置")}</strong><small>${esc(voiceProviderLabel(activeProvider || "-", component))}</small></div>
+      <div class="voice-model-fields">
+        <label>Provider
+          <select data-voice-provider="${component}">
+            ${normalizedEntries.map((entry) => {
+              const value = entry[providerKey] || entry.provider || entry.backend || "";
+              return `<option value="${esc(value)}" ${value === activeProvider ? "selected" : ""} ${entry.credential_ready === false ? "disabled" : ""}>${esc(voiceProviderLabel(value, component))}${entry.credential_ready === false ? " · 未配置密钥" : ""}</option>`;
+            }).join("")}
+          </select>
+        </label>
+        <label>Model
+          <select data-voice-model="${component}">${voiceModelOptions(normalizedEntries, activeProvider, activeModel, providerKey)}</select>
+        </label>
+        ${component === "tts" ? `<label>Voice ID<input data-voice-id value="${esc(active.minimax?.voice_id || "male-qn-qingse")}" autocomplete="off"></label>` : ""}
+      </div>
+      <button type="button" class="primary-button" data-voice-switch="${component}">验证并切换</button>
+    </article>
+  `;
+}
+
+function voiceModelOptions(entries, provider, activeModel, providerKey) {
+  const entry = entries.find((item) => String(item[providerKey] || item.provider || item.backend || "") === String(provider)) || entries[0] || {};
+  const models = Array.isArray(entry.models) ? entry.models.filter(Boolean) : [];
+  if (activeModel && !models.includes(activeModel)) models.unshift(activeModel);
+  if (!models.length) models.push(provider === "local" ? "sherpa-onnx" : "default");
+  return models.map((model) => `<option value="${esc(model)}" ${model === activeModel ? "selected" : ""}>${esc(model)}</option>`).join("");
+}
+
+function voiceCanonicalProvider(component, value) {
+  const key = String(value || "").trim().toLowerCase();
+  if (component === "asr" && ["volcengine_seed_asr", "doubao", "cloud+local"].includes(key)) return "volcengine";
+  return key;
+}
+
+function voiceProviderLabel(value, component = "") {
+  const key = String(value || "").trim().toLowerCase();
+  if (key === "minimax") return component === "tts" ? "MiniMax Speech 2.8" : "MiniMax";
+  if (key === "local") {
+    if (component === "asr") return "Sherpa-ONNX 离线 ASR";
+    if (component === "tts") return "本地离线 TTS";
+    return "本地离线";
+  }
+  return ({
+    volcengine_seed_asr: "火山 Seed ASR 2.0",
+    volcengine: "火山 Seed ASR 2.0",
+    doubao: "火山 Seed ASR 2.0",
+    vector: "本地向量库",
+    edge: "Microsoft Edge TTS",
+    deepseek: "DeepSeek",
+  })[key] || String(value || "-");
+}
+
+function renderVoicePrompt(snapshot) {
+  const prompt = snapshot.prompt || {};
+  const persona = prompt.persona || {};
+  return `
+    <div class="voice-prompt-layout">
+      <section class="voice-panel voice-prompt-editor">
+        <div class="voice-panel-head"><div><p>运行时上下文</p><h3>System Prompt</h3></div>${badge(prompt.relay_compat_mode ? "旧中继兼容" : "直连模式", prompt.relay_compat_mode ? "warn" : "ok")}</div>
+        <textarea id="voice-system-prompt" spellcheck="false">${esc(prompt.system_prompt || "")}</textarea>
+        <label class="voice-inline-toggle"><input id="voice-relay-compat" type="checkbox" ${prompt.relay_compat_mode ? "checked" : ""}><span>旧中继兼容模式</span><small>仅在上游覆盖 system 消息时启用</small></label>
+        <label class="voice-field-label">用户前缀<input id="voice-user-prefix" value="${esc(prompt.user_prefix || "")}" placeholder="留空使用角色默认约束"></label>
+        <div class="panel-actions"><button id="voice-save-prompt" class="primary-button">保存 Prompt</button><button id="voice-reset-prompt" class="ghost-button">按角色重新生成</button></div>
+      </section>
+      <section class="voice-panel voice-persona-editor">
+        <div class="voice-panel-head"><div><p>角色配置</p><h3>小算</h3></div></div>
+        <div class="voice-persona-form">
+          <label>机器人名称<input id="voice-persona-name" value="${esc(persona.robot_name || "小算")}"></label>
+          <label>业务角色<input id="voice-persona-role" value="${esc(persona.role || "导览与巡检机器人")}"></label>
+          <label>服务对象<input id="voice-persona-audience" value="${esc(persona.operator_audience || "园区访客、物业运营和巡检人员")}"></label>
+          <label>说话风格<textarea id="voice-persona-style">${esc(persona.speaking_style || "中文口语，友好专业，路线说明和巡检汇报简洁明确")}</textarea></label>
+          <label>最长回复字符<input id="voice-persona-limit" type="number" min="20" max="500" value="${esc(persona.max_reply_chars || 80)}"></label>
+        </div>
+        <button id="voice-apply-persona" class="primary-button">应用角色配置</button>
+      </section>
+    </div>
+  `;
+}
+
+function renderVoiceMemory(snapshot) {
+  const memory = snapshot.memory || {};
+  const counts = memory.counts || {};
+  const warnings = Array.isArray(memory.warnings) ? memory.warnings : [];
+  const strategy = memory.memory_strategy || {};
+  return `
+    <section class="voice-memory-hero ${memory.ready ? "ready" : "warn"}">
+      <div><p>Memory layer</p><h3>${esc(memory.customer_status || "记忆状态读取中")}</h3><span>${esc(memory.customer_next_step || "检查知识索引和检索后端。")}</span></div>
+      <div class="voice-memory-score"><b>${esc(counts.prompt_eligible ?? 0)}</b><span>可用于回答</span></div>
+    </section>
+    <div class="voice-memory-layout">
+      <section class="voice-panel">
+        <div class="voice-panel-head"><div><p>四层记忆</p><h3>存储与检索</h3></div>${badge(memory.current_backend || memory.selected_backend || "-", memory.ready ? "ok" : "warn")}</div>
+        <div class="voice-memory-layers">
+          ${[
+            ["L1", "短期对话", "最近 40 条消息", "conversation_history.json"],
+            ["L2", "会话摘要", "跨轮次上下文", "data/sessions"],
+            ["L3", "情景记忆", "事件、摘要、反思", "data/memory"],
+            ["L4", "园区知识", `${counts.vector_size ?? 0} 条向量记录`, memory.current_backend || memory.selected_backend || "vector"],
+          ].map(([level, title, desc, meta]) => `<div><b>${level}</b><span><strong>${esc(title)}</strong><small>${esc(desc)}</small></span><code>${esc(meta)}</code></div>`).join("")}
+        </div>
+        <div class="panel-actions"><button class="ghost-button" data-route="/dashboard/knowledge">管理园区知识</button></div>
+      </section>
+      <section class="voice-panel voice-memory-test">
+        <div class="voice-panel-head"><div><p>检索验证</p><h3>测试机器人记得什么</h3></div></div>
+        <div class="voice-memory-search"><input id="voice-memory-query" value="聚龙科创e谷有哪些导览和巡检能力？"><button id="voice-memory-search" class="primary-button">检索</button></div>
+        <div id="voice-memory-result" class="voice-memory-result">输入问题后查看实际证据、后端和回答策略。</div>
+      </section>
+    </div>
+    <section class="voice-memory-governance">
+      <div><strong>客户知识</strong><span>${esc(strategy.customer_knowledge?.backend || memory.configured_backend || "vector")}</span><small>可进入回答 Prompt</small></div>
+      <div><strong>行为记忆</strong><span>${esc(strategy.robot_behavior_memory?.backend || "robotmem")}</span><small>${strategy.robot_behavior_memory?.enabled ? "已启用" : "独立保留，当前未启用"}</small></div>
+      <div><strong>待复核</strong><span>${esc(counts.needs_review ?? 0)}</span><small>不会进入客户回答</small></div>
+      <div><strong>运行提示</strong><span>${esc(warnings.length)}</span><small>${esc(warnings[0] || "无记忆告警")}</small></div>
+    </section>
+  `;
+}
+
+function renderVoiceAudio(snapshot) {
+  const runtime = snapshot.runtime || {};
+  const audio = runtime.audio || {};
+  const input = audio.input || {};
+  const media = audio.media || {};
+  const profiles = snapshot.profiles || {};
+  const activeProfile = profiles.active_profile || runtime.tts?.minimax?.active_profile || "";
+  const interaction = runtime.interaction || {};
+  const decision = interaction.last_decision || {};
+  const policy = interaction.policy || {};
+  return `
+    <div class="voice-audio-grid">
+      <section class="voice-panel">
+        <div class="voice-panel-head"><div><p>Windows I/O</p><h3>音频设备</h3></div>${badge(audio.input_ready && audio.output_ready ? "就绪" : "检查", audio.input_ready && audio.output_ready ? "ok" : "warn")}</div>
+        <dl class="voice-definition-list">
+          <div><dt>输入传输</dt><dd>${esc(media.input_transport || "sounddevice")}</dd></div>
+          <div><dt>输出传输</dt><dd>${esc(media.output_transport || "sounddevice")}</dd></div>
+          <div><dt>输入峰值</dt><dd>${esc(input.last_peak ?? "-")}</dd></div>
+          <div><dt>VAD 状态</dt><dd>${esc(input.vad_state || runtime.vad?.state || "idle")}</dd></div>
+          <div><dt>输入门控</dt><dd>${esc(input.gate_state || "open")}</dd></div>
+          <div><dt>ASR 超时</dt><dd>${esc(input.asr_timeouts ?? 0)}</dd></div>
+        </dl>
+      </section>
+      <section class="voice-panel">
+        <div class="voice-panel-head"><div><p>TTS profile</p><h3>音色与场景</h3></div>${badge(activeProfile || "默认", "ok")}</div>
+        <label class="voice-field-label">音色档案<select id="voice-profile-select">${(profiles.profiles || []).map((profile) => `<option value="${esc(profile.profile_id)}" ${profile.profile_id === activeProfile ? "selected" : ""}>${esc(profile.label)} · ${esc(profile.category || "general")}</option>`).join("")}</select></label>
+        <div class="panel-actions"><button id="voice-apply" class="primary-button">应用音色</button><button id="voice-sample" class="ghost-button">播放样例</button></div>
+      </section>
+      <section class="voice-panel voice-admission-panel">
+        <div class="voice-panel-head"><div><p>Turn admission</p><h3>对话准入</h3></div>${badge(policy.mode === "strict_public_site" ? "严格现场" : "宽松", policy.mode === "strict_public_site" ? "ok" : "warn")}</div>
+        <dl class="voice-definition-list voice-admission-list">
+          <div><dt>最近决策</dt><dd>${esc(decision.action || "尚无语音轮次")}</dd></div>
+          <div><dt>决策原因</dt><dd>${esc(decision.reason || "-")}</dd></div>
+          <div><dt>授权来源</dt><dd>${esc(decision.wake_source || interaction.wake_source || "none")}</dd></div>
+          <div><dt>明确称呼</dt><dd>${decision.addressed_by_text ? "是" : "否"}</dd></div>
+          <div><dt>等待短答</dt><dd>${decision.awaiting_confirmation ? "是" : "否"}</dd></div>
+          <div><dt>追问窗口</dt><dd>${esc(interaction.wake_timeout_remaining_s ?? 0)} 秒</dd></div>
+        </dl>
+      </section>
+    </div>
+    <section class="voice-audio-contract">
+      <span><b>唤醒词</b>小算</span><span><b>采样率</b>${esc(runtime.tts?.sample_rate || 44100)} Hz</span><span><b>云 ASR 预连接</b>${runtime.asr?.cloud_preconnect ? "开启" : "按需连接"}</span><span><b>模糊语音</b>${policy.silent_on_ambiguous ? "静默忽略" : "允许追问"}</span>
+    </section>
+  `;
+}
+
+function wireVoiceConsole() {
+  document.querySelectorAll("[data-voice-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      voiceConsoleTab = button.dataset.voiceTab || "overview";
+      localStorage.setItem("askme.voice.console_tab", voiceConsoleTab);
+      document.querySelectorAll("[data-voice-tab]").forEach((item) => {
+        const active = item.dataset.voiceTab === voiceConsoleTab;
+        item.classList.toggle("active", active);
+        item.setAttribute("aria-selected", String(active));
+      });
+      const view = document.getElementById("voice-console-view");
+      if (view) view.innerHTML = renderVoiceConsoleView(voiceControlSnapshot || {}, voiceConsoleTab);
+      wireVoiceConsoleView();
+    });
+  });
+  document.querySelector("[data-voice-refresh]")?.addEventListener("click", renderVoice);
+  document.querySelectorAll("[data-route]").forEach((button) => button.addEventListener("click", () => routeTo(button.dataset.route)));
+  wireVoiceConsoleView();
+}
+
+function wireVoiceConsoleView() {
+  document.querySelectorAll("[data-voice-provider]").forEach((select) => {
+    select.addEventListener("change", () => syncVoiceModelOptions(select.dataset.voiceProvider, select.value));
+  });
+  document.querySelectorAll("[data-voice-switch]").forEach((button) => {
+    button.addEventListener("click", () => switchVoiceComponent(button.dataset.voiceSwitch, button));
+  });
+  document.getElementById("voice-save-prompt")?.addEventListener("click", saveVoicePrompt);
+  document.getElementById("voice-reset-prompt")?.addEventListener("click", resetVoicePrompt);
+  document.getElementById("voice-apply-persona")?.addEventListener("click", applyVoicePersona);
+  document.getElementById("voice-memory-search")?.addEventListener("click", searchVoiceMemory);
+  document.getElementById("voice-apply")?.addEventListener("click", () => applyVoice(false));
+  document.getElementById("voice-sample")?.addEventListener("click", () => applyVoice(true));
+  document.querySelectorAll("[data-route]").forEach((button) => button.addEventListener("click", () => routeTo(button.dataset.route)));
+}
+
+function syncVoiceModelOptions(component, provider) {
+  const catalog = voiceControlSnapshot?.catalog?.[component] || [];
+  const providerKey = component === "tts" ? "backend" : "provider";
+  const select = document.querySelector(`[data-voice-model="${component}"]`);
+  if (select) select.innerHTML = voiceModelOptions(catalog, provider, "", providerKey);
+}
+
+async function switchVoiceComponent(component, button) {
+  const provider = document.querySelector(`[data-voice-provider="${component}"]`)?.value || "";
+  const model = document.querySelector(`[data-voice-model="${component}"]`)?.value || "";
+  const body = { component, model, validate: component === "llm" };
+  if (component === "tts") {
+    body.backend = provider;
+    body.voice_id = document.querySelector("[data-voice-id]")?.value || "";
+  } else {
+    body.provider = provider;
+  }
+  button.disabled = true;
+  setVoiceActionStatus(component === "llm" ? "正在验证新模型连接..." : "正在切换运行组件...", "pending");
+  const response = await postJson(ENDPOINTS.voiceSystemSwitch, body);
+  button.disabled = false;
+  if (!response.ok) {
+    setVoiceActionStatus(response.payload?.error || response.payload?.reason || "切换失败，当前模型保持不变", "err");
+    return;
+  }
+  const state = response.payload?.state || "active";
+  setVoiceActionStatus(state === "pending" ? "切换已排队，将在当前语音轮次结束后生效" : "切换成功，新请求已使用新配置", state === "pending" ? "warn" : "ok");
+  await renderVoice();
+}
+
+async function saveVoicePrompt() {
+  const response = await postJson(ENDPOINTS.voiceSystemPrompt, {
+    system_prompt: document.getElementById("voice-system-prompt")?.value || "",
+    user_prefix: document.getElementById("voice-user-prefix")?.value || "",
+    relay_compat_mode: Boolean(document.getElementById("voice-relay-compat")?.checked),
+  });
+  setVoiceActionStatus(response.ok ? "Prompt 已在线更新" : response.payload?.error || "Prompt 更新失败", response.ok ? "ok" : "err");
+  if (response.ok) await renderVoice();
+}
+
+async function resetVoicePrompt() {
+  const response = await postJson(ENDPOINTS.voiceSystemPrompt, { regenerate_persona: true });
+  setVoiceActionStatus(response.ok ? "已按角色配置重新生成 Prompt" : response.payload?.error || "重置失败", response.ok ? "ok" : "err");
+  if (response.ok) await renderVoice();
+}
+
+async function applyVoicePersona() {
+  const response = await postJson(ENDPOINTS.voiceSystemPrompt, {
+    persona: {
+      robot_name: document.getElementById("voice-persona-name")?.value || "小算",
+      role: document.getElementById("voice-persona-role")?.value || "导览与巡检机器人",
+      operator_audience: document.getElementById("voice-persona-audience")?.value || "",
+      speaking_style: document.getElementById("voice-persona-style")?.value || "",
+      max_reply_chars: Number(document.getElementById("voice-persona-limit")?.value || 80),
+    },
+  });
+  setVoiceActionStatus(response.ok ? "角色与 Prompt 已在线更新" : response.payload?.error || "角色更新失败", response.ok ? "ok" : "err");
+  if (response.ok) await renderVoice();
+}
+
+async function searchVoiceMemory() {
+  const query = document.getElementById("voice-memory-query")?.value?.trim();
+  if (!query) return;
+  const result = document.getElementById("voice-memory-result");
+  if (result) result.innerHTML = `<span class="voice-inline-loading">正在检索实际记忆...</span>`;
+  const response = await postJson(ENDPOINTS.memorySearch, { query, top_k: 5 });
+  if (!result) return;
+  if (!response.ok) {
+    result.innerHTML = `<strong>检索失败</strong><span>${esc(response.payload?.error || response.payload?.message || "记忆服务不可用")}</span>`;
+    return;
+  }
+  const payload = response.payload || {};
+  const evidence = payload.evidence || payload.results || [];
+  result.innerHTML = `
+    <div class="voice-memory-result-head"><strong>${evidence.length} 条证据</strong>${badge(payload.rag?.backend || "-", evidence.length ? "ok" : "warn")}</div>
+    ${evidence.length ? evidence.map((item) => `<article><p>${esc(item.text || item.content || item.memory || "")}</p><small>${esc(item.source || item.backend || "memory")} · ${esc(item.score ?? "-")}</small></article>`).join("") : `<div class="voice-empty-state">没有检索到可用于回答的已审批证据。</div>`}
+  `;
+}
+
+function setVoiceActionStatus(message, state = "") {
+  const target = document.getElementById("voice-action-status");
+  if (!target) return;
+  target.className = `voice-action-status ${state}`;
+  target.textContent = message || "";
 }
 
 function renderKnowledgeCategoryPicker() {
@@ -3286,14 +3800,14 @@ async function renderCapabilities() {
     <section class="card">
       <div class="section-title-row">
         <div>
-          <h2>客户可启用能力包</h2>
-          <p>把底层技能整理成客户可验收的能力范围，展示启用状态、缺失依赖和下一步动作。</p>
+          <h2>客户可验证能力包</h2>
+          <p>把底层技能整理成客户可验收的能力范围，展示验证状态、缺失依赖和下一步动作。</p>
         </div>
         ${badge(`${packageSummary.ready_count ?? 0} 就绪 / ${(packageSummary.capability_package_count ?? 0) + (packageSummary.scenario_package_count ?? 0)} 个能力包`, (packageSummary.blocked_count ?? 0) ? "warn" : "ok")}
       </div>
       <div class="grid four">
         <div class="metric"><b>${esc(releaseSummary.controlled_demo_allowed_count ?? 0)}</b><span>受控演示</span></div>
-        <div class="metric"><b>${esc(releaseSummary.customer_pilot_allowed_count ?? 0)}</b><span>客户试点</span></div>
+        <div class="metric"><b>${esc(releaseSummary.customer_pilot_allowed_count ?? 0)}</b><span>试点验证</span></div>
         <div class="metric ${Number(releaseSummary.production_claim_allowed_count || 0) ? "ok" : "warn"}"><b>${esc(releaseSummary.production_claim_allowed_count ?? 0)}</b><span>生产声明</span></div>
         <div class="metric"><b>${esc((releaseSummary.blocked_count ?? 0) + (releaseSummary.manual_acceptance_required_count ?? 0))}</b><span>阻断/待复核</span></div>
       </div>
@@ -4280,6 +4794,78 @@ function renderBlueprintReadinessItemClean(item = {}) {
   `;
 }
 
+function renderAuditWorkspace(audit, auditWindow, customerProjects, retry, exportsPayload, standalone = false) {
+  const records = Array.isArray(audit?.records) ? audit.records : [];
+  const reviewCount = records.filter((item) => item.requires_review === true || item.review_required === true).length;
+  const exports = Array.isArray(exportsPayload?.exports) ? exportsPayload.exports : [];
+  const standaloneHero = standalone ? `
+    <section class="audit-console-hero">
+      <div>
+        <p class="page-kicker">证据工作区</p>
+        <h2>事件、复核与交付证据</h2>
+        <p>按时间、客户项目和现场对象筛选审计记录，处理待复核项，并生成可交付的证据包。</p>
+      </div>
+      <div class="audit-console-metrics">
+        <div><b>${esc(audit?.filtered_total ?? audit?.count ?? records.length)}</b><span>当前记录</span></div>
+        <div><b>${esc(reviewCount)}</b><span>待复核</span></div>
+        <div><b>${esc(exports.length)}</b><span>导出历史</span></div>
+        <div><b>${esc(retry?.pending ?? 0)}</b><span>待投递</span></div>
+      </div>
+    </section>
+  ` : "";
+  return `
+    ${standaloneHero}
+    <section class="card audit-console-card">
+      <div class="section-title-row">
+        <div>
+          <h2>统一审计</h2>
+          <p>汇总现场处置、技能增长和运行控制，用于客户验收和事后追溯。</p>
+        </div>
+        ${badge(`${audit?.filtered_total ?? audit?.count ?? 0} 条`)}
+      </div>
+      ${renderAuditWindowControls(auditWindow, customerProjects)}
+      ${renderAuditProductSummary(audit)}
+      ${renderAuditReviewIntegrity(audit)}
+      ${renderAuditSourceHealth(audit)}
+      ${renderAuditExportHistory(exportsPayload)}
+      <div id="audit-review-panel">${selectedAuditReview ? renderAuditReviewPanel(selectedAuditReview) : ""}</div>
+      ${renderUnifiedAudit(audit)}
+      ${renderAuditRetryStatus(retry)}
+      <div class="panel-actions">
+        <button class="ghost-button" data-audit-retry>重试失败投递</button>
+        <button data-audit-export="local">生成审计包</button>
+        <button class="ghost-button" data-audit-export="deliver">生成并投递</button>
+      </div>
+    </section>
+  `;
+}
+
+async function renderAudit() {
+  const auditWindow = getAuditWindow();
+  const canExportAudit = currentOperatorPermissions().includes("audit:export");
+  const auditPath = `${ENDPOINTS.auditEvents}?actor_id=${encodeURIComponent(operatorId())}&limit=40${auditWindowToQuery(auditWindow)}`;
+  const retryPath = `${ENDPOINTS.auditExportRetry}?actor_id=${encodeURIComponent(operatorId())}&limit=8`;
+  const reviewsPath = `${ENDPOINTS.auditReviews}?actor_id=${encodeURIComponent(operatorId())}&limit=100`;
+  const exportsPath = `${ENDPOINTS.auditExports}?actor_id=${encodeURIComponent(operatorId())}&limit=8`;
+  const [customerProjects, audit, retry, reviews, exportsPayload] = await Promise.all([
+    getJson(`${ENDPOINTS.fieldCustomerProjects}?check_env=false`, { projects: [], customers: [], summary: {} }),
+    getJson(auditPath, { records: [], summary: {} }),
+    canExportAudit ? getJson(retryPath, { pending: 0, invalid: 0, items: [] }) : Promise.resolve({ pending: 0, invalid: 0, items: [], skipped: "audit_export_permission_required" }),
+    getJson(reviewsPath, { records: [] }),
+    canExportAudit ? getJson(exportsPath, { exports: [] }) : Promise.resolve({ exports: [], skipped: "audit_export_permission_required" }),
+  ]);
+  auditRecordCache = auditRecordsForReview(audit, reviews);
+  if (selectedAuditReview?.record_id && !auditRecordCache.some((item) => item.record_id === selectedAuditReview.record_id)) {
+    selectedAuditReview = null;
+  }
+  app.innerHTML = renderAuditWorkspace(audit, auditWindow, customerProjects, retry, exportsPayload, true);
+  wireAuditWindowControls();
+  wireAuditReviewOpenControls();
+  wireAuditReviewPanelControls();
+  wireAuditExportControls();
+  wireAuditRetryControls();
+}
+
 async function renderDelivery() {
   const auditWindow = getAuditWindow();
   const canExportAudit = currentOperatorPermissions().includes("audit:export");
@@ -4353,28 +4939,7 @@ async function renderDelivery() {
       <div class="metric"><b>活跃任务</b><span>${esc(runtime.active_run ? "有" : "无")}</span></div>
       <div class="metric"><b>硬件下发</b><span>${esc(runtime.hardware_dispatch ? "允许" : "未允许")}</span></div>
     </section>
-    <section class="card">
-      <div class="section-title-row">
-        <div>
-          <h2>统一审计</h2>
-          <p>汇总现场处置、技能增长和运行控制，用于客户验收和事后追溯。</p>
-        </div>
-        ${badge(`${audit.filtered_total ?? audit.count ?? 0} 条`)}
-      </div>
-      ${renderAuditWindowControls(auditWindow, customerProjects)}
-      ${renderAuditProductSummary(audit)}
-      ${renderAuditReviewIntegrity(audit)}
-      ${renderAuditSourceHealth(audit)}
-      ${renderAuditExportHistory(exportsPayload)}
-      <div id="audit-review-panel">${selectedAuditReview ? renderAuditReviewPanel(selectedAuditReview) : ""}</div>
-      ${renderUnifiedAudit(audit)}
-      ${renderAuditRetryStatus(retry)}
-      <div class="panel-actions">
-        <button class="ghost-button" data-audit-retry>重试失败投递</button>
-        <button data-audit-export="local">生成审计包</button>
-        <button class="ghost-button" data-audit-export="deliver">生成并投递</button>
-      </div>
-    </section>
+    ${renderAuditWorkspace(audit, auditWindow, customerProjects, retry, exportsPayload)}
     <section class="card"><h2>原始门禁证据</h2><div class="mono">${esc(JSON.stringify(readiness, null, 2))}</div></section>
   `;
   wireAuditWindowControls();
@@ -4436,92 +5001,6 @@ function renderDeviceOnboarding(payload = {}) {
       ` : ""}
     </section>
   `;
-}
-
-async function renderProjects() {
-  const projectQuery = customerProjectFilterQuery();
-  const templateQuery = customerProjectTemplateFilterQuery();
-  const [
-    projectWorkbench,
-    solutionDeliveryReadiness,
-    productLaunchReadiness,
-    customerProjects,
-    managedObjectDirectory,
-    projectTemplates,
-    releaseRequests,
-    releaseNotes,
-    acceptanceRegistry,
-    resourceCatalog,
-    siteProfiles,
-  ] = await Promise.all([
-    getJson(`${ENDPOINTS.fieldCustomerProjectWorkbench}?${projectQuery}`, { delivery_surfaces: [], overall_status: "unknown" }),
-    getJson(`${ENDPOINTS.fieldSolutionDeliveryReadiness}?check_env=true`, { gates: [], summary: {} }),
-    getJson(`${ENDPOINTS.fieldProductLaunchReadiness}?check_env=true&${projectQuery}`, { gates: [], summary: {} }),
-    getJson(`${ENDPOINTS.fieldCustomerProjects}?${projectQuery}`, { projects: [], customers: [], summary: {} }),
-    getJson(`${ENDPOINTS.fieldCustomerProjectManagedObjectDirectory}?${projectQuery}`, { objects: [], summary: {} }),
-    getJson(`${ENDPOINTS.fieldCustomerProjectTemplates}?${templateQuery}`, { templates: [], summary: {} }),
-    getJson(ENDPOINTS.fieldCustomerProjectTemplateReleaseRequests, { requests: [], summary: {}, request_count: 0 }),
-    getJson(ENDPOINTS.fieldCustomerProjectTemplateReleaseNotes, { notes: [], summary: {} }),
-    getJson(ENDPOINTS.fieldCustomerProjectAcceptanceRegistry, { references: [], consumers: [], summary: {} }),
-    getJson(ENDPOINTS.fieldCustomerProjectResourceCatalog, { resources: [], consumers: [], summary: {} }),
-    getJson(`${ENDPOINTS.fieldSiteProfiles}?check_env=true`, { sites: [], summary: {} }),
-  ]);
-  app.innerHTML = `
-    <section class="project-hero">
-      <div>
-        <h2>客户项目不是配置文件，是交付产品</h2>
-        <p>每个客户可以有不同的园区、对象、场景、设备、通知组和验收用例。这里用于交付团队复制项目、维护对象目录、导入导出交付包，并检查事件是否正确归属到客户项目。</p>
-      </div>
-      <div class="project-hero-metrics">
-        <div><b>${esc(customerProjects.summary?.tenant_count ?? 0)}</b><span>客户空间</span></div>
-        <div><b>${esc(customerProjects.summary?.delivery_namespace_count ?? 0)}</b><span>交付空间</span></div>
-        <div><b>${esc(customerProjects.summary?.customer_count ?? 0)}</b><span>客户</span></div>
-        <div><b>${esc(customerProjects.summary?.project_count ?? 0)}</b><span>项目</span></div>
-        <div><b>${esc(customerProjects.summary?.managed_object_type_count ?? 0)}</b><span>对象类型</span></div>
-        <div><b>${esc(projectTemplates.summary?.template_count ?? 0)}</b><span>行业模板</span></div>
-      </div>
-    </section>
-    <nav class="project-page-nav" aria-label="客户项目功能导航">
-      <a href="#project-section-acceptance-summary">验收摘要</a>
-      <a href="#project-section-readiness">交付门禁</a>
-      <a href="#project-section-projects">项目目录</a>
-      <a href="#project-section-templates">模板市场</a>
-      <a href="#project-section-template-governance">模板发布</a>
-      <a href="#project-section-objects">对象目录</a>
-      <a href="#project-section-package">导入导出</a>
-      <a href="#project-section-acceptance">验收证据</a>
-      <a href="#project-section-resources">资源绑定</a>
-      <a href="#project-section-events">事件归属</a>
-      <a href="#project-section-sites">多现场</a>
-    </nav>
-    ${renderProjectAcceptanceSnapshot(projectWorkbench, productLaunchReadiness)}
-    ${renderProjectGoldenPathWorkbench(projectWorkbench)}
-    ${renderSolutionDeliveryReadiness(solutionDeliveryReadiness)}
-    <div class="project-console-grid">
-      <div>
-        ${renderCustomerProjectCatalog(customerProjects, resourceCatalog, managedObjectDirectory)}
-        ${renderProjectPackageImportPanel()}
-      </div>
-      <div>
-        ${renderProjectScopedEventPanel(customerProjects)}
-        ${renderProjectResourceCatalogSummary(resourceCatalog, customerProjects)}
-        ${renderAcceptanceRegistrySummary(acceptanceRegistry)}
-        ${renderSiteProfileCatalog(siteProfiles)}
-      </div>
-    </div>
-    ${renderTemplateReleaseGovernance(releaseRequests)}
-    ${renderTemplateReleaseNotes(releaseNotes)}
-    ${renderIndustryTemplateCatalog(projectTemplates)}
-  `;
-  polishProjectWorkspaceCopy({
-    solutionDeliveryReadiness,
-    projectWorkbench,
-    customerProjects,
-    managedObjectDirectory,
-    projectTemplates,
-    resourceCatalog,
-  });
-  wireProjectConsoleControls();
 }
 
 function renderProjectAcceptanceSnapshot(workbench = {}, launch = {}) {
@@ -4740,63 +5219,6 @@ function polishProjectWorkspaceCopy(context = {}) {
   ].forEach((label, index) => {
     if (metrics[index]) metrics[index].textContent = label;
   });
-  const navLabels = [
-    "交付总览",
-    "项目目录",
-    "模板市场",
-    "模板发布",
-    "对象目录",
-    "导入导出",
-    "验收证据",
-    "资源绑定",
-    "事件归属",
-    "多现场",
-  ];
-  app.querySelectorAll(".project-page-nav a").forEach((item, index) => {
-    if (navLabels[index]) item.textContent = navLabels[index];
-  });
-  setText(".project-hero h2", "客户项目不是配置文件，是交付产品");
-  setText(
-    ".project-hero p",
-    "面向不同园区、厂区、仓储和景区客户，维护项目边界、对象目录、行业模板、交付资源、验收证据和可复用交付包。交付团队可以在这里判断一个项目是否能复制、能演示、能验收、能交给客户。",
-  );
-  const hero = app.querySelector(".project-hero");
-  if (hero && !app.querySelector("[data-product-workbench]")) {
-    const readinessStatus = context.solutionDeliveryReadiness?.overall_status || "unknown";
-    const projectStatus = context.customerProjects?.summary?.delivery_acceptance_gate_status || "unknown";
-    const objectStatus = context.managedObjectDirectory?.summary?.overall_status || "unknown";
-    const templateStatus = context.projectTemplates?.summary?.overall_status || "unknown";
-    const resourceStatus = context.resourceCatalog?.summary?.overall_status || "unknown";
-    hero.insertAdjacentHTML("afterend", `
-      <section class="project-workspace-explainer" data-product-workbench>
-        <div class="project-workspace-card ${acceptanceGateClass(projectStatus)}">
-          <strong>客户项目目录</strong>
-          <span>一套客户、一套现场、一套对象边界，避免方案商交付时串项目。</span>
-          ${badge(projectStatus, acceptanceGateClass(projectStatus))}
-        </div>
-        <div class="project-workspace-card ${acceptanceGateClass(templateStatus)}">
-          <strong>行业模板市场</strong>
-          <span>沉淀工厂、园区、仓储、景区模板，新客户从模板复制而不是从零开发。</span>
-          ${badge(templateStatus, acceptanceGateClass(templateStatus))}
-        </div>
-        <div class="project-workspace-card ${acceptanceGateClass(objectStatus)}">
-          <strong>对象目录</strong>
-          <span>把车辆、烟火、垃圾桶、游客、设备等对象绑定到模型、传感器、技能和验收用例。</span>
-          ${badge(objectStatus, acceptanceGateClass(objectStatus))}
-        </div>
-        <div class="project-workspace-card ${acceptanceGateClass(resourceStatus)}">
-          <strong>交付资源</strong>
-          <span>检查视觉模型、传感器协议、技能包、验收脚本是否是可追溯资源。</span>
-          ${badge(resourceStatus, acceptanceGateClass(resourceStatus))}
-        </div>
-        <div class="project-workspace-card ${acceptanceGateClass(readinessStatus)}">
-          <strong>交付准入</strong>
-          <span>导出和导入交付包前，先判断是否可交付、需复核或必须阻断。</span>
-          ${badge(readinessStatus, acceptanceGateClass(readinessStatus))}
-        </div>
-      </section>
-    `);
-  }
   setText("#project-section-readiness h2", "客户交付总览");
   setText("#project-section-projects h2", "客户项目目录");
   setText("#project-section-package h2", "项目交付包导入导出");
@@ -5367,14 +5789,14 @@ async function applyCustomerProjectFilters() {
       localStorage.removeItem(storageKey);
     }
   });
-  await renderProjects();
+  await refreshProjectSurface();
 }
 
 async function clearCustomerProjectFilters() {
   CUSTOMER_PROJECT_FILTER_KEYS.forEach((key) => {
     localStorage.removeItem(`askme.customer_project_filter.${key}`);
   });
-  await renderProjects();
+  await refreshProjectSurface();
 }
 
 async function applyCustomerProjectTemplateFilters() {
@@ -5396,14 +5818,14 @@ async function applyCustomerProjectTemplateFilters() {
       localStorage.removeItem(storageKey);
     }
   });
-  await renderProjects();
+  await refreshProjectSurface();
 }
 
 async function clearCustomerProjectTemplateFilters() {
   CUSTOMER_PROJECT_TEMPLATE_FILTER_KEYS.forEach((key) => {
     localStorage.removeItem(`askme.customer_project_template_filter.${key}`);
   });
-  await renderProjects();
+  await refreshProjectSurface();
 }
 
 function templateReleaseResultEl(templateId) {
@@ -5434,7 +5856,7 @@ async function updateTemplateRelease(templateId, publishStatus) {
   );
   if (resultEl) resultEl.innerHTML = renderTemplateReleaseResult(response.payload, response.ok);
   if (response.ok) {
-    await renderProjects();
+    await refreshProjectSurface();
     const refreshedEl = templateReleaseResultEl(templateId);
     if (refreshedEl) refreshedEl.innerHTML = renderTemplateReleaseResult(response.payload, response.ok);
   }
@@ -5552,7 +5974,7 @@ async function reviewTemplateReleaseRequest(requestId, decision, templateId = ""
   if (resultEl) resultEl.innerHTML = renderTemplateReleaseReviewResult(response.payload, response.ok);
   if (governanceResult) governanceResult.innerHTML = renderTemplateReleaseReviewResult(response.payload, response.ok);
   if (response.ok) {
-    await renderProjects();
+    await refreshProjectSurface();
     const refreshedEl = templateReleaseResultEl(templateId || response.payload?.request?.template_id || "");
     if (refreshedEl) refreshedEl.innerHTML = renderTemplateReleaseReviewResult(response.payload, response.ok);
     const refreshedGovernanceResult = templateReleaseGovernanceResultEl();
@@ -5847,7 +6269,7 @@ async function importCustomerProjectPackage(dryRun = true) {
     };
     const response = await postJson(ENDPOINTS.fieldCustomerProjectImport, body);
     if (resultEl) resultEl.innerHTML = renderProjectImportResult(response.payload, response.ok, dryRun);
-    if (response.ok && !dryRun) await renderProjects();
+    if (response.ok && !dryRun) await refreshProjectSurface();
   } catch (error) {
     if (resultEl) {
       resultEl.innerHTML = `<div class="mini-list-empty">项目交付包解析失败：${esc(error.message)}</div>`;
@@ -7138,10 +7560,6 @@ function renderProjectAcceptanceEvidence(objects = []) {
 }
 
 async function refreshProjectSurface() {
-  if (currentPage().key === "projects") {
-    await renderProjects();
-    return;
-  }
   await renderDelivery();
 }
 
@@ -10075,24 +10493,35 @@ function wireAuditRetryControls() {
 async function render() {
   await refreshGlobalStatus();
   const page = currentPage();
+  document.body.classList.toggle("voice-page-active", page.key === "voice");
+  document.body.dataset.page = page.key;
   setHeader(page);
   renderNav(page);
   if (page.key === "overview") await renderOverview();
   if (page.key === "conversation") renderConversation();
-  if (page.key === "projects") await renderProjects();
   if (page.key === "scenarios") await renderScenarios();
   if (page.key === "field") await renderField();
   if (page.key === "space") await renderSpace();
   if (page.key === "knowledge") renderKnowledge();
   if (page.key === "capabilities") await renderCapabilities();
   if (page.key === "voice") await renderVoice();
-  if (page.key === "delivery" || page.key === "audit") await renderDelivery();
+  if (page.key === "delivery") await renderDelivery();
+  if (page.key === "audit") await renderAudit();
   document.querySelectorAll("[data-route]").forEach((button) => {
     button.addEventListener("click", () => routeTo(button.dataset.route));
   });
 }
 
 window.addEventListener("popstate", render);
+navToggle?.addEventListener("click", () => setNavigationOpen(!document.body.classList.contains("nav-open")));
+navClose?.addEventListener("click", () => setNavigationOpen(false));
+navBackdrop?.addEventListener("click", () => setNavigationOpen(false));
+nav?.addEventListener("click", (event) => {
+  if (event.target.closest("a")) setNavigationOpen(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") setNavigationOpen(false);
+});
 setInterval(() => {
   refreshGlobalStatus();
   if (currentPage().key === "conversation") pollLive();

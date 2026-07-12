@@ -152,7 +152,7 @@ class BrainPipeline:
 
     Delegates to three sub-components:
       - StreamProcessor: LLM streaming + think filter + TTS piping
-      - SkillGate: skill execution + safety gates + AgentShell routing
+      - SkillGate: skill execution + safety gates + legacy compat routing
       - TurnExecutor: full turn orchestration + memory + reflection
     """
 
@@ -198,6 +198,7 @@ class BrainPipeline:
         memory_system: MemorySystem | None = None,
         qp_memory: Any = None,
         rag_policy_templates: dict[str, str] | None = None,
+        relay_compat_mode: bool = False,
         # Decoupled sub-component injection (Protocol types)
         # Pass pre-built instances for testing or custom implementations.
         # When None (default) the components are constructed from the raw args above.
@@ -258,6 +259,7 @@ class BrainPipeline:
                 qp_memory=qp_memory,
                 memory_system=memory_system,
                 rag_policy_templates=rag_policy_templates,
+                relay_compat_mode=relay_compat_mode,
             )
 
             # StreamProcessor (LLM streaming + TTS)
@@ -341,8 +343,40 @@ class BrainPipeline:
     def last_spoken_text(self) -> str:
         return self._turn_executor.last_spoken_text or self._skill_gate.last_spoken_text
 
+    @property
+    def current_turn_rag(self) -> dict[str, Any] | None:
+        return self._turn_executor.current_turn_rag
+
+    def clear_turn_context(self) -> None:
+        self._turn_executor.clear_turn_context()
+
+    def replace_llm(self, llm: Any, *, voice_model: str | None = None) -> None:
+        """Route subsequent pipeline work to a replacement LLM gateway."""
+
+        if hasattr(self._stream_processor, "_llm"):
+            self._stream_processor._llm = llm
+        if hasattr(self._turn_executor, "_llm"):
+            self._turn_executor._llm = llm
+        if voice_model is not None:
+            if hasattr(self._stream_processor, "_voice_model"):
+                self._stream_processor._voice_model = voice_model
+            if hasattr(self._turn_executor, "_voice_model"):
+                self._turn_executor._voice_model = voice_model
+
+    def update_prompt(self, **settings: Any) -> dict[str, Any]:
+        """Apply prompt settings to subsequent turns."""
+
+        if self._prompt_builder is None:
+            raise RuntimeError("prompt builder is not available")
+        return self._prompt_builder.reconfigure(**settings)
+
+    def prompt_settings(self) -> dict[str, Any]:
+        if self._prompt_builder is None:
+            return {}
+        return self._prompt_builder.runtime_settings()
+
     async def process(
-        self, user_text: str, *, memory_task: asyncio.Task[str] | None = None,
+        self, user_text: str, *, memory_task: asyncio.Task[Any] | None = None,
         source: str = "voice",
         conversation_session_id: str | None = None,
     ) -> str:
@@ -372,7 +406,7 @@ class BrainPipeline:
     def start_idle_reflection(self, idle_seconds: float = 300.0) -> asyncio.Task[None] | None:
         return self._turn_executor.start_idle_reflection(idle_seconds)
 
-    def start_memory_prefetch(self, user_text: str) -> asyncio.Task[str]:
+    def start_memory_prefetch(self, user_text: str) -> asyncio.Task[Any]:
         return self._turn_executor.start_memory_prefetch(user_text)
 
     async def shutdown(self) -> None:

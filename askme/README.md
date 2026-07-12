@@ -4,6 +4,21 @@
 move these directories into category folders unless the import migration is
 planned and compatibility facades are in place.
 
+## Product And Architecture Spine
+
+Before changing package ownership, read the PRD and architecture spine:
+`docs/PRODUCT_REQUIREMENTS.md`, `docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md`,
+`docs/PRODUCT_ARCHITECTURE_TRACE.md`, and `docs/DEMAND_EVIDENCE_LEDGER.md`.
+This package map is not the product authority by itself.
+
+AskMe is the field delivery center for robot solution providers/integrators.
+Field Delivery Domain owns customer projects, field events, evidence,
+acceptance dossiers, customer signoff, and readiness gaps.
+Product/Admin/Platform/Internal surfaces expose Dashboard/API/admin workflows
+around those facts. Runtime / Safety / Hardware owns real execution, safety
+state, hardware adaptation, runtime roundtrip, takeover, and rollback.
+customer signoff != production readiness.
+
 ## Product Composition
 
 These decide what product is being assembled and how it runs.
@@ -25,6 +40,17 @@ These map to the voice gateway and robot interaction layers.
 | `pipeline/` | active | Turn orchestration, skill routing, field workflows, reactions. |
 | `cognition/` | active | World state, planning, perception sync, task context. |
 
+## Field Delivery Domain
+
+This is the product-domain core for the 现场运营交付中台.
+`pipeline/field` owns customer projects, managed objects, site profiles, field
+events, delivery resources, acceptance dossiers, onsite evidence, customer
+signoff, and readiness gates. Field HTTP routes and services under
+`api/routes/field_*` and `api/services/field_*` are transport surfaces around
+that domain; Dashboard assets in `static/` render the resulting contracts but
+do not own acceptance or production-readiness rules. Route/service changes in
+this lane must preserve the `docs/PRODUCT_ARCHITECTURE_TRACE.md` mapping.
+
 ## Capabilities And Tools
 
 These expose what the system can do.
@@ -33,7 +59,7 @@ These expose what the system can do.
 | --- | --- | --- |
 | `skills/` | active | Customer-visible skills, capability packages, governance. |
 | `tools/` | active | Callable tool implementations for runtime, MCP, and agents. |
-| `agent_shell/` | active | Agent profile and local agent shell runtime. |
+| `agent_shell/` | governance + compat | Agent Profile registry, declarative hooks, and the deprecated local AgentShell compatibility facade. Active agent decisions belong to ZeroClaw/MCP plus TaskHandoff. |
 
 ## Contracts And Boundaries
 
@@ -59,6 +85,7 @@ These are lower-layer adapters and concrete implementations.
 | `llm/` | active edge | LLM provider access, gateway, routing policy, streaming, audit. |
 | `memory/` | active edge | Knowledge, evidence, retrieval, memory stores and backends. |
 | `space/` | active data model | Spatial places, routes, and park-space semantics. |
+| `errors/` | active cross-cutting | Enterprise error taxonomy, codes, severity, and structured responses. |
 
 ## External Surfaces
 
@@ -67,9 +94,13 @@ These expose product capabilities to outside clients or operators.
 | Folder | Status | Owns |
 | --- | --- | --- |
 | `api/` | active surface | HTTP routes, services, schemas, route composition. |
+| `cli/` | active surface | Operator CLI parser, command dispatch, diagnostics, and script-facing entrypoints. |
 | `mcp/` | active surface | MCP server, tools, resources. |
 | `static/` | active surface | Dashboard static HTML/CSS/JS assets. |
 | `audit/` | active surface | Audit query, review, and export helpers. |
+
+`askme/cli.py` remains a compatibility facade; new CLI implementation belongs
+under `askme/cli/`.
 
 ## Registries, Assets, And Compatibility
 

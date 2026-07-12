@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import socket
 import subprocess
@@ -20,6 +21,8 @@ from askme.voice.diagnostics.sunrise_readiness import (
     DEFAULT_ROOM_LOOP_EXPECT_PREFIX,
     DEFAULT_ROOM_LOOP_TEXT,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_HEALTH_URL = "http://127.0.0.1:8765"
 DEFAULT_CHANGE_EVENT_FILE = "/tmp/askme_events.jsonl"
@@ -300,16 +303,16 @@ def collect_s100p_readiness_bundle(
 
 def print_s100p_readiness_bundle_summary(payload: dict[str, Any]) -> None:
     """Print a compact operator-facing bundle summary."""
-    print(f"s100p-readiness-bundle: {payload.get('status', 'unknown')}")  # noqa: T201
-    print(f"  bundle-dir: {payload.get('bundle_dir', '')}")  # noqa: T201
+    logger.info(f"s100p-readiness-bundle: {payload.get('status', 'unknown')}")
+    logger.info(f"  bundle-dir: {payload.get('bundle_dir', '')}")
     for step in payload.get("steps", []):
         marker = "ok" if step.get("ok") else "degraded"
         requirement = step.get("requirement") or _requirement_label(bool(step.get("required")))
-        print(f"  {marker}: {step.get('name', 'unknown')} ({requirement})")  # noqa: T201
+        logger.info(f"  {marker}: {step.get('name', 'unknown')} ({requirement})")
     for warning in payload.get("warnings", []):
-        print(f"  warn: {warning}")  # noqa: T201
+        logger.warning(f"  warn: {warning}")
     for error in payload.get("errors", []):
-        print(f"  error: {error}")  # noqa: T201
+        logger.error(f"  error: {error}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -387,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
         command_timeout=args.command_timeout,
     )
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))  # noqa: T201
+        logger.info(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print_s100p_readiness_bundle_summary(payload)
     return 0 if payload.get("status") == "ok" else 1

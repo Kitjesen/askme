@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-
 from askme.voice.vad_controller import VADController, VADEvent
 
 

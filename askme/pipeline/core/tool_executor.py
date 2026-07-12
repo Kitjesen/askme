@@ -66,6 +66,7 @@ class ToolExecutor:
         system_prompt: str,
         model: str | None = None,
         source: str = "voice",
+        conversation_session_id: str | None = None,
     ) -> str:
         """Execute accumulated tool calls and get follow-up LLM response.
 
@@ -161,10 +162,22 @@ class ToolExecutor:
             # the tool will be re-executed after operator confirmation.
             return approval_response
 
-        self._conversation.add_tool_exchange(tool_call_objs, tool_results)
+        if conversation_session_id is None:
+            self._conversation.add_tool_exchange(tool_call_objs, tool_results)
+            conversation_messages = self._conversation.get_messages(system_prompt)
+        else:
+            self._conversation.add_tool_exchange(
+                tool_call_objs,
+                tool_results,
+                conversation_session_id=conversation_session_id,
+            )
+            conversation_messages = self._conversation.get_messages(
+                system_prompt,
+                conversation_session_id=conversation_session_id,
+            )
 
         follow_msgs = self._prompt_builder.prepare_messages(
-            self._conversation.get_messages(system_prompt),
+            conversation_messages,
             source=source,
         )
         return await self._stream_and_speak(follow_msgs, model=model, source=source)

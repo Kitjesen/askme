@@ -21,10 +21,11 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from askme.health_server import build_health_snapshot, create_health_app
 from askme.pipeline.field_operations import FieldOperationsService
 from askme.skills.skill_manager import SkillManager
 from askme.voice.tts import TTSEngine
+
+from askme.health_server import build_health_snapshot, create_health_app
 
 _ONE_PIXEL_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753"

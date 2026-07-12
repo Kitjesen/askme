@@ -105,6 +105,8 @@ class TestHealthServer:
         )
         assert data["readiness"]["policy"]["internal_surface_must_not_be_customer_visible"] is True
         assert "内部机器人控制接口不会驱动客户 UI" in data["readiness"]["release_claim"]
+        assert "产品页只调用客户可见接口" not in data["readiness"]["release_claim"]
+        assert "按页面和权限使用客户、治理和平台接口" in data["readiness"]["release_claim"]
         inventory = data["route_inventory"]
         assert inventory["policy"]["route_modules_are_contract_source"] is True
         assert inventory["summary"]["total_route_count"] >= 200

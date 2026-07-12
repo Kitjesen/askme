@@ -1,57 +1,42 @@
-"""Agent shell — Claude Agent SDK wrapper for agentic task execution.
+"""DEPRECATED — agentic shell (replaced by ZeroClaw MCP Agent).
 
-Gives the field robot the same "write code, execute, debug, iterate"
-capability that Claude Code has. Unlike skills (fixed prompt + max 5 LLM
-turns), the agent shell lets Claude autonomously decide the tool sequence
-and iterate until the task is done.
+This module previously contained a full Python-based ReAct loop (~827 lines)
+that has been superseded by the ZeroClaw MCP Agent.  ZeroClaw is now the
+single agent decision-maker for the Askme runtime; Askme no longer maintains
+two separate ReAct loops.
 
-Architecture:
-    VoiceLoop/TextLoop
-        → SkillDispatcher.handle_general("agent_task")
-            → AgentShell.run_task(user_text)
-                → Agentic loop: LLM ↔ tools until stop_reason="end_turn"
-                    → BrainPipeline._audio.speak() for progress
+The ThunderAgentShell class below is a minimal compat stub that logs a
+deprecation warning on construction and returns error messages from
+run_task().  Import sites should migrate to ZeroClaw MCP calls.
+
+Retained for reference / compat:
+  - ThunderAgentShell       — class stub with deprecation warning
+  - AgentShell              — alias in agent_shell.py (unchanged)
+  - _build_agent_system_prompt — prompt template (stateless utility)
+  - _SPAWN_AGENT_SCHEMA     — inline schema constant
+  - _MAX_DEPTH, _MAX_ITERATIONS — module-level constants
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import os
-import re
-import time
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-from uuid import uuid4
+from typing import Any
 
 from askme.agent_shell.agent_hooks import AgentHookRunner
 from askme.agent_shell.agent_profile import AgentProfile, AgentProfileRegistry
 
-if TYPE_CHECKING:
-    from askme.llm.core.client import LLMClient
-    from askme.ports import AudioFrontendPort
-    from askme.tools.core.tool_registry import ToolRegistry
-
 logger = logging.getLogger(__name__)
 
-# Tools exposed to the agentic loop — subset of full tool registry.
-# Excludes voice-control tools (mute/unmute) and dispatch_skill
-# (to avoid nested skill-in-skill recursion).
-_DEFAULT_AGENT_MODEL = "MiniMax-M2.7-highspeed"  # fast + stable + reasoning, no relay dependency
+# ── Constants (kept for compat) ────────────────────────────────────────────────
+
+_DEFAULT_AGENT_MODEL = "MiniMax-M2.7-highspeed"
 _MAX_ITERATIONS = 5
 _DEFAULT_TIMEOUT = 120.0
-_MAX_DEPTH = 1  # max sub-agent nesting depth (0=root, 1=child, children cannot spawn)
-# Keep the original task message + last N to cap prompt size (prevents TTFT blowup
-# on later iterations and avoids memory pressure on Sunrise's constrained RAM).
-_MAX_MESSAGES = 20
-_MAX_RUN_HISTORY = 100
-_MAX_SUMMARY_TOOLS = 50
-_TOOL_TIMEOUT_SECONDS = 35.0
+_MAX_DEPTH = 1
 _SENSITIVE_KEYS = ("authorization", "api_key", "apikey", "bearer", "password", "secret", "token")
 
-# Inline schema for spawn_agent — not registered in ToolRegistry to avoid shared-state mutation
 _SPAWN_AGENT_SCHEMA: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -59,23 +44,13 @@ _SPAWN_AGENT_SCHEMA: dict[str, Any] = {
         "description": (
             "启动子 Agent 自主完成一个专注的子任务（最多嵌套1层）。"
             "子 Agent 拥有独立执行上下文和工具权限，完成后返回结果字符串。"
-            "适用场景：可独立完成的局部任务，如'写一个函数'、'查某API文档'、'分析某文件内容'。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "agent_type": {
-                    "type": "string",
-                    "description": "子 Agent 类型，例如 knowledge_curator、wayfinding_guide、safety_reviewer、skill_growth_manager",
-                },
-                "task": {
-                    "type": "string",
-                    "description": "子 Agent 要完成的具体任务，要写清楚目标和约束",
-                },
-                "context": {
-                    "type": "string",
-                    "description": "给子 Agent 的额外上下文（可选），如相关文件路径、已知信息等",
-                },
+                "agent_type": {"type": "string", "description": "子 Agent 类型"},
+                "task": {"type": "string", "description": "子 Agent 要完成的具体任务"},
+                "context": {"type": "string", "description": "给子 Agent 的额外上下文（可选）"},
             },
             "required": ["task"],
         },
@@ -83,7 +58,11 @@ _SPAWN_AGENT_SCHEMA: dict[str, Any] = {
 }
 
 
+# ── Prompt template (kept for compat) ──────────────────────────────────────────
+
+
 def _build_agent_system_prompt(workspace: Path, profile: AgentProfile | None = None) -> str:
+    """Build the system prompt for the agentic loop (DEPRECATED compat)."""
     profile_block = ""
     if profile is not None:
         profile_block = (
@@ -91,61 +70,62 @@ def _build_agent_system_prompt(workspace: Path, profile: AgentProfile | None = N
             f"职责: {profile.description}\n"
             f"专属指令: {profile.instructions}\n\n"
             f"Agent model policy: {profile.model}; permission mode: {profile.permission_mode}\n"
-            f"Max turns: {profile.max_iterations or _MAX_ITERATIONS}; timeout: {profile.timeout_seconds or _DEFAULT_TIMEOUT}s\n"
+            f"Max turns: {profile.max_iterations or _MAX_ITERATIONS}; "
+            f"timeout: {profile.timeout_seconds or _DEFAULT_TIMEOUT}s\n"
             f"Preloaded skills: {', '.join(profile.preloaded_skills) or 'none'}\n"
-            f"MCP servers: {', '.join(profile.mcp_servers) or 'none'}; hooks: {', '.join(profile.hooks.keys()) or 'none'}\n"
+            f"MCP servers: {', '.join(profile.mcp_servers) or 'none'}; "
+            f"hooks: {', '.join(profile.hooks.keys()) or 'none'}\n"
             f"Effort: {profile.effort or 'inherit'}; isolation: {profile.isolation or 'none'}\n"
             f"Memory scope: {profile.memory_scope or 'none'}\n\n"
         )
     return (
-        profile_block +
-        "你是现场机器人上运行的自主执行 Agent，拥有真实的执行能力。\n"
-        "你可以运行 shell 命令、读写文件、搜索网络、调用机器人 API、发送 HTTP 请求。\n\n"
-        f"工作区：{workspace}（所有文件操作默认在此目录内）\n\n"
-        "【工具使用指南】\n"
-        "  bash         — shell 命令执行，支持 python/pip/curl 等；超时 30s\n"
-        "  write_file   — 写文件到工作区；path 用相对路径（如 result.py）\n"
-        "  edit_file    — 精确替换文件内容（old_string → new_string）；old_string 必须唯一\n"
-        "  read_file    — 读取文件；path 为绝对路径\n"
-        "  web_search   — 搜索网络获取摘要和链接；技术查询建议加版本号（如 'asyncio Python 3.10'）\n"
-        "  web_fetch    — 抓取指定网页完整内容；web_search 找到 URL 后用此工具深读\n"
-        "  http_request — 调用 REST API（机器人写操作请用 safety-gated robot_api/move_robot）\n"
-        "  robot_api    — 机器人运行时快捷接口：\n"
-        "                 service=telemetry  GET /api/v1/health → 电量/温度/IMU\n"
-        "                 service=safety     GET /api/v1/safety/modes/estop → 急停状态\n"
-        "                 service=control    POST /api/v1/control/commands {cmd,params} → 运动指令\n"
-        "                 service=nav        GET /api/v1/missions → 导航任务列表\n"
-        "                 service=arbiter    GET /api/v1/missions → 任务编排状态\n"
-        "                 service=arm        GET /api/v1/arm/state → 机械臂状态\n"
-        "                 service=ops        GET /api/v1/ops/logs → 运维日志\n"
-        "  spawn_agent  — 启动子 Agent 执行独立子任务（最多嵌套1层）；适合可并行的局部工作\n"
-        "  speak_progress — 主动向用户播报进度（不阻塞执行）\n"
-        "  create_skill — 把当前解决方案固化为新语音技能（写 SKILL.md + 热加载）\n\n"
-        "【执行原则】\n"
-        "1. 行动优先：直接用工具做，不要先说'我将会...'再做\n"
-        "2. 搜索后深读：web_search 拿到链接 → web_fetch 读全文 → 再综合回答\n"
-        "3. 验证每步：bash/http_request 执行后检查输出，失败时换策略（最多3次重试）\n"
-        "4. 并行子任务：多个独立子任务用 spawn_agent 并行处理，节省时间\n"
-        "5. 进度播报：超过15秒的操作前用 speak_progress 告知用户在做什么\n"
-        "6. 保存结果：有价值的输出写入工作区文件（write_file），避免丢失\n"
-        "7. 固化方案：如果任务会重复执行，用 create_skill 固化为语音技能\n"
-        "8. 口语回复：最终回复用简洁中文口语，说清楚'做了什么+结果是什么'，不用 markdown"
+        profile_block
+        + "你是现场机器人上运行的自主执行 Agent，拥有真实的执行能力。\n"
+        + "你可以运行 shell 命令、读写文件、搜索网络、调用机器人 API、发送 HTTP 请求。\n\n"
+        + f"工作区：{workspace}（所有文件操作默认在此目录内）\n\n"
+        + "【工具使用指南】\n"
+        + "  bash         — shell 命令执行，支持 python/pip/curl 等；超时 30s\n"
+        + "  write_file   — 写文件到工作区；path 用相对路径（如 result.py）\n"
+        + "  edit_file    — 精确替换文件内容（old_string → new_string）\n"
+        + "  read_file    — 读取文件；path 为绝对路径\n"
+        + "  web_search   — 搜索网络获取摘要和链接\n"
+        + "  web_fetch    — 抓取指定网页完整内容\n"
+        + "  http_request — 调用 REST API\n"
+        + "  robot_api    — 机器人运行时快捷接口\n"
+        + "  spawn_agent  — 启动子 Agent 执行独立子任务（最多嵌套1层）\n"
+        + "  speak_progress — 主动向用户播报进度（不阻塞执行）\n"
+        + "  create_skill — 把当前解决方案固化为新语音技能\n\n"
+        + "【执行原则】\n"
+        + "1. 行动优先：直接用工具做，不要先说'我将会...'再做\n"
+        + "2. 搜索后深读：web_search 拿到链接 → web_fetch 读全文 → 再综合回答\n"
+        + "3. 验证每步：bash/http_request 执行后检查输出，失败时换策略\n"
+        + "4. 并行子任务：多个独立子任务用 spawn_agent 并行处理\n"
+        + "5. 进度播报：超过15秒的操作前用 speak_progress 告知用户在做什么\n"
+        + "6. 保存结果：有价值的输出写入工作区文件（write_file），避免丢失\n"
+        + "7. 固化方案：如果任务会重复执行，用 create_skill 固化为语音技能\n"
+        + "8. 口语回复：最终回复用简洁中文口语，说清楚'做了什么+结果是什么'"
     )
 
 
-class ThunderAgentShell:
-    """Agentic execution shell for a field robot.
+# ── Deprecation-stub class ─────────────────────────────────────────────────────
 
-    Wraps the LLM client in an autonomous tool-use loop that continues
-    until the model emits stop_reason='end_turn' (task complete) or
-    the iteration/timeout limit is reached.
+
+class ThunderAgentShell:
+    """DEPRECATED: Agentic execution shell — replaced by ZeroClaw MCP Agent.
+
+    Previously wrapped the LLM client in an autonomous tool-use ReAct loop.
+    That functionality now lives in the ZeroClaw MCP Agent, which is the
+    single agent decision-maker for the Askme runtime.
     """
+
+    execution_status = "deprecated"
+    deprecated_replacement = "ZeroClaw MCP Agent"
 
     def __init__(
         self,
-        llm_client: LLMClient,
-        tool_registry: ToolRegistry,
-        audio: AudioFrontendPort | None,
+        llm_client: Any,
+        tool_registry: Any,
+        audio: Any,
         *,
         model: str | None = None,
         workspace: Path | None = None,
@@ -163,22 +143,26 @@ class ThunderAgentShell:
         self._profile = self._profile_registry.get(agent_profile)
         self._hook_runner = AgentHookRunner(self._profile.hooks)
         profile_model = "" if self._profile.model in {"", "inherit"} else self._profile.model
-        self._model = os.environ.get("AGENT_MODEL") or model or profile_model or _DEFAULT_AGENT_MODEL
+        self._model = (
+            os.environ.get("AGENT_MODEL") or model or profile_model or _DEFAULT_AGENT_MODEL
+        )
         self._iteration_limit = self._profile.max_iterations or _MAX_ITERATIONS
         self._default_timeout = float(
-            os.environ.get(
-                "AGENT_TIMEOUT",
-                self._profile.timeout_seconds or _DEFAULT_TIMEOUT,
-            )
+            os.environ.get("AGENT_TIMEOUT", self._profile.timeout_seconds or _DEFAULT_TIMEOUT)
         )
-        # Current action string — updated during tool execution so the heartbeat
-        # can report what the agent is doing instead of a generic message.
         self._current_action = ""
         self._active_run_summary: dict[str, Any] | None = None
         self._last_run_summary: dict[str, Any] = {}
 
+        logger.warning(
+            "[AgentShell] ThunderAgentShell is DEPRECATED. Use ZeroClaw MCP Agent instead. (%s)",
+            agent_profile,
+        )
+
+    # -- Public compat interface ------------------------------------------------
+
     def set_audio(self, audio: Any) -> None:
-        """Late-bind AudioAgent (set by VoiceModule after build)."""
+        """Late-bind AudioAgent (no-op in stub)."""
         self._audio = audio
 
     async def run_task(
@@ -188,122 +172,27 @@ class ThunderAgentShell:
         context: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> str:
-        """Run an agentic task loop until completion or timeout.
-
-        Returns the final assistant text response.
-        """
-        logger.info("[AgentShell] Starting task: %s", task[:80])
-        self._workspace.mkdir(parents=True, exist_ok=True)
-
-        # Read allowed tools + voice labels from registry (not hardcoded)
-        inherited_tools = self._tools.get_agent_allowed_names()
-        self._allowed_tools = self._profile.resolve_tools(inherited_tools)
-        self._voice_labels = self._tools.get_voice_labels()
-
-        self._did_stream_tts = False
-        self._streamed_tts_text = ""
-
-        # Announce start (only for root agent; child agents are silent)
-        if self._audio is not None:
-            self._audio.speak("好的，我来处理一下。")
-
-        # Reset action tracker so heartbeat starts clean for each new task
-        self._current_action = ""
-
-        # Heartbeat: speak every 30s so the user knows we're still working.
-        # Reads self._current_action set by _run_agent_loop so the message
-        # reflects what the agent is actually doing ("第3步正在搜索网络，请稍候")
-        # rather than cycling through generic placeholder strings.
-        _hb_count = 0
-
-        async def _heartbeat() -> None:
-            nonlocal _hb_count
-            await asyncio.sleep(30.0)
-            while True:
-                try:
-                    action = self._current_action
-                    if action:
-                        msg = f"{action}，请稍候..."
-                    else:
-                        msg = "还在处理中，请稍候..." if _hb_count % 2 == 0 else "任务进行中，马上好..."
-                    _hb_count += 1
-                    self._audio.speak(msg)
-                    logger.info("[AgentShell] Heartbeat: %s", msg)
-                    await asyncio.sleep(30.0)
-                except asyncio.CancelledError:
-                    break
-
-        heartbeat_task: asyncio.Task[None] | None = None
-        if self._audio is not None:
-            heartbeat_task = asyncio.create_task(_heartbeat())
-
-        system_prompt = _build_agent_system_prompt(self._workspace, self._profile)
-
-        # Build context string
-        ctx_parts = [f"任务：{task}"]
-        if context:
-            for k, v in context.items():
-                if v:
-                    ctx_parts.append(f"{k}: {v}")
-        user_message = "\n".join(ctx_parts)
-
-        messages: list[dict[str, Any]] = [
-            {"role": "user", "content": user_message},
-        ]
-
-        # Get tool definitions for allowed tools only
-        tool_definitions = self._tools.get_definitions(
-            allowed_names=self._allowed_tools,
-            max_safety_level="dangerous",
+        """Run an agentic task loop (DEPRECATED — returns error message)."""
+        logger.warning(
+            "[AgentShell] run_task() is DEPRECATED. Migrate to ZeroClaw MCP. Task not executed: %s",
+            task[:80],
         )
-        # Inject spawn_agent inline schema (not in registry) when nesting allows it
-        if self._depth < _MAX_DEPTH and "spawn_agent" in self._allowed_tools:
-            tool_definitions = list(tool_definitions) + [_SPAWN_AGENT_SCHEMA]
-        logger.info(
-            "[AgentShell] Tools available (%d): %s",
-            len(tool_definitions),
-            [td.get("function", {}).get("name") for td in tool_definitions],
+        return (
+            "[DEPRECATED] AgentShell.run_task() has been replaced by "
+            "ZeroClaw MCP Agent. Task not executed."
         )
-
-        effective_timeout = float(timeout or self._default_timeout)
-        run_summary = self._start_run_summary(
-            task=task,
-            timeout_seconds=effective_timeout,
-            allowed_tools=self._allowed_tools,
-            tool_definitions=tool_definitions,
-        )
-        self._active_run_summary = run_summary
-        final_response = ""
-        status = "completed"
-        try:
-            final_response = await asyncio.wait_for(
-                self._run_agent_loop(messages, tool_definitions, system_prompt),
-                timeout=effective_timeout,
-            )
-        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
-            logger.warning("[AgentShell] Task timed out after %.0fs", effective_timeout)
-            final_response = f"任务执行超时（{int(effective_timeout)}秒），已停止。"
-            status = "timeout"
-        except Exception as exc:
-            logger.error("[AgentShell] Task failed: %s", exc)
-            final_response = f"任务执行出错：{exc}"
-            status = "failed"
-            run_summary["error"] = str(exc)
-        finally:
-            if heartbeat_task is not None:
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
-            self._finish_run_summary(run_summary, status=status, final_response=final_response)
-            self._active_run_summary = None
-
-        return final_response or "任务已完成。"
 
     def last_run_summary(self) -> dict[str, Any]:
-        """Return the latest product-readable run summary."""
+        """Return the latest product-readable run summary (stub returns empty)."""
         return dict(self._last_run_summary)
+
+    # -- Internal helpers kept to avoid AttributeError on downstream access -----
+
+    async def _execute_tool(self, tc: dict[str, str]) -> str:
+        return "[DEPRECATED] AgentShell tools disabled."
+
+    async def _spawn_child_agent(self, args_json: str) -> str:
+        return "[DEPRECATED] AgentShell sub-agent spawning disabled."
 
     async def _run_agent_loop(
         self,
@@ -311,111 +200,7 @@ class ThunderAgentShell:
         tool_definitions: list[dict[str, Any]],
         system_prompt: str,
     ) -> str:
-        """Inner agentic loop — separated for asyncio.wait_for compatibility (Python 3.10+)."""
-        final_response = ""
-        iterations = 0
-
-        while iterations < self._iteration_limit:
-            iterations += 1
-            if self._active_run_summary is not None:
-                self._active_run_summary["iteration_count"] = iterations
-            logger.info("[AgentShell] Iteration %d/%d", iterations, self._iteration_limit)
-
-            response_text, tool_calls = await self._call_llm(
-                messages, tool_definitions, system_prompt
-            )
-
-            if response_text:
-                final_response = response_text
-
-            if not tool_calls:
-                self._did_stream_tts = bool(self._streamed_tts_text)
-                logger.info(
-                    "[AgentShell] Task complete after %d iterations (streamed_tts=%s)",
-                    iterations, self._did_stream_tts,
-                )
-                break
-
-            # Announce the first tool call so user knows what's happening.
-            # Show step number from iteration 2 onward so user can gauge progress.
-            # Also update _current_action so the heartbeat can report context
-            # ("第3步正在搜索网络，请稍候") instead of a generic message.
-            if tool_calls:
-                first_name = tool_calls[0].get("name", "")
-                label = self._voice_labels.get(first_name)
-                if label:
-                    step_prefix = f"第{iterations}步，" if iterations > 1 else ""
-                    self._current_action = f"{step_prefix}正在{label}"
-                    if self._audio is not None:
-                        self._audio.speak(f"{step_prefix}正在{label}...")
-                else:
-                    # speak_progress or unknown tool — clear action text so
-                    # the heartbeat falls back to a generic message.
-                    self._current_action = ""
-
-            # Execute tool calls in parallel (asyncio.gather preserves order).
-            # return_exceptions=True: single tool failure stays isolated — the other
-            # tools' results are still usable and LLM can decide how to recover.
-            raw_results = await asyncio.gather(
-                *[self._execute_tool(tc) for tc in tool_calls],
-                return_exceptions=True,
-            )
-            tool_call_objs = []
-            tool_results = []
-            for tc, result in zip(tool_calls, raw_results):
-                if isinstance(result, BaseException):
-                    result = f"[Error] 工具 {tc.get('name', '?')} 执行异常: {result}"
-                result = str(result)
-                tool_call_objs.append({
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": tc["arguments"],
-                    },
-                })
-                tool_results.append({
-                    "tool_call_id": tc["id"],
-                    "content": result,
-                })
-                logger.info("[AgentShell] Tool %s → %s", tc["name"], result[:100])
-
-            assistant_msg: dict[str, Any] = {
-                "role": "assistant",
-                "tool_calls": tool_call_objs,
-            }
-            if response_text:
-                assistant_msg["content"] = response_text
-            messages.append(assistant_msg)
-
-            for tr in tool_results:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tr["tool_call_id"],
-                    "content": tr["content"],
-                })
-
-            # Sliding window: cap messages to avoid prompt blowup on later iterations.
-            # Always keep messages[0] (the original user task) so the LLM never loses
-            # the goal, then keep the most recent (_MAX_MESSAGES - 1) entries.
-            if len(messages) > _MAX_MESSAGES:
-                tail = messages[-(_MAX_MESSAGES - 1):]
-                # Drop orphaned tool-result messages at the head of the tail.
-                # They refer to tool_call_ids from an assistant message that was
-                # trimmed away; sending them to the LLM causes a 400 Bad Request.
-                while tail and tail[0].get("role") == "tool":
-                    tail = tail[1:]
-                messages = [messages[0]] + tail
-                logger.debug(
-                    "[AgentShell] Messages trimmed to %d (sliding window)", len(messages)
-                )
-
-        else:
-            logger.warning("[AgentShell] Reached max iterations (%d)", self._iteration_limit)
-            if not final_response:
-                final_response = f"任务执行中，已完成 {self._iteration_limit} 步操作。"
-
-        return final_response
+        return "[DEPRECATED] AgentShell loop disabled."
 
     async def _call_llm(
         self,
@@ -423,402 +208,18 @@ class ThunderAgentShell:
         tool_definitions: list[dict[str, Any]],
         system_prompt: str,
     ) -> tuple[str, list[dict[str, Any]]]:
-        """Call LLM with tools, collect full response and tool calls.
+        return "", []
 
-        Retries up to 2 times with exponential backoff so a single relay
-        hiccup at iteration 15 does not kill an entire 20-step task.
-        CancelledError is never retried — it propagates immediately.
-
-        Returns (response_text, tool_calls_list).
-        """
-        _MAX_RETRIES = 2
-        _RETRY_BASE_DELAY = 0.5  # seconds; doubles on each attempt
-
-        full_messages = [{"role": "system", "content": system_prompt}] + messages
-        last_exc: Exception | None = None
-
-        for attempt in range(_MAX_RETRIES + 1):
-            if attempt > 0:
-                delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                logger.warning(
-                    "[AgentShell] LLM retry %d/%d after %.1fs: %s",
-                    attempt, _MAX_RETRIES, delay, last_exc,
-                )
-                await asyncio.sleep(delay)
-
-            response_text = ""
-            tool_calls_acc: dict[int, dict[str, str]] = {}
-            self._streamed_tts_text = ""  # tracks what was already sent to TTS
-
-            try:
-                async for chunk in self._llm.chat_stream(
-                    full_messages,
-                    tools=tool_definitions,
-                    tool_choice="auto",
-                    model=self._model,
-                ):
-                    delta = chunk.choices[0].delta
-
-                    if delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            idx = tc.index
-                            if idx not in tool_calls_acc:
-                                tool_calls_acc[idx] = {
-                                    "id": "",
-                                    "name": "",
-                                    "arguments": "",
-                                }
-                            if tc.id:
-                                tool_calls_acc[idx]["id"] = tc.id
-                            if tc.function:
-                                if tc.function.name:
-                                    tool_calls_acc[idx]["name"] = tc.function.name
-                                if tc.function.arguments:
-                                    tool_calls_acc[idx]["arguments"] += tc.function.arguments
-
-                    if delta.content:
-                        response_text += delta.content
-                        # Stream text to TTS in real-time (only final turn,
-                        # when no tool calls are being accumulated).
-                        # Sentence boundaries trigger immediate TTS speak.
-                        if (
-                            self._audio is not None
-                            and not tool_calls_acc
-                            and len(response_text) > 0
-                        ):
-                            last_char = response_text[-1]
-                            if last_char in "。！？\n；，、":
-                                # Skip if we're inside a <think> block
-                                in_think = response_text.count("<think>") > response_text.count("</think>")
-                                if not in_think:
-                                    from askme.pipeline.core.utils import strip_think_blocks
-                                    clean = strip_think_blocks(response_text).strip()
-                                    if clean and clean != self._streamed_tts_text:
-                                        new_part = clean[len(self._streamed_tts_text):]
-                                        if new_part.strip():
-                                            self._audio.speak(new_part.strip())
-                                        self._streamed_tts_text = clean
-
-                tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else []
-
-                return response_text, tool_calls
-
-            except asyncio.CancelledError:
-                raise  # never retry cancellation
-            except Exception as exc:
-                last_exc = exc
-                logger.error(
-                    "[AgentShell] LLM call failed (attempt %d/%d): %s",
-                    attempt + 1, _MAX_RETRIES + 1, exc,
-                )
-
-        raise last_exc  # type: ignore[misc]
-
-    async def _execute_tool(self, tc: dict[str, str]) -> str:
-        """Execute a single tool call, return string result."""
-        name = tc.get("name", "")
-        args_json = tc.get("arguments", "{}")
-        started = time.perf_counter()
-        logger.info("[AgentShell] Executing tool: %s(%s)", name, _redact_text(args_json)[:80])
-
-        preflight = self._hook_runner.before_tool(tool_name=name, arguments=args_json)
-        if preflight.blocked:
-            logger.warning(
-                "[AgentShell] PreToolUse hook blocked %s: %s",
-                name,
-                preflight.reason,
-            )
-            result = preflight.error_text()
-            self._record_tool_summary(
-                name=name,
-                arguments=args_json,
-                result=result,
-                status="blocked_pre_tool",
-                started=started,
-            )
-            return result
-
-        # spawn_agent is handled inline (not registered in ToolRegistry)
-        if name == "spawn_agent":
-            result = await self._spawn_child_agent(args_json)
-            postflight = self._hook_runner.after_tool(
-                tool_name=name,
-                arguments=args_json,
-                result=result,
-            )
-            if postflight.blocked:
-                result = postflight.error_text()
-                status = "blocked_post_tool"
-            else:
-                status = "ok"
-            self._record_tool_summary(
-                name=name,
-                arguments=args_json,
-                result=result,
-                status=status,
-                started=started,
-            )
-            return result
-
-        try:
-            result = await asyncio.to_thread(
-                self._tools.execute,
-                name,
-                args_json,
-                allowed_names=self._allowed_tools,
-                max_safety_level="dangerous",
-            )
-            result_text = str(result)
-            postflight = self._hook_runner.after_tool(
-                tool_name=name,
-                arguments=args_json,
-                result=result_text,
-            )
-            if postflight.blocked:
-                logger.warning(
-                    "[AgentShell] PostToolUse hook blocked %s result: %s",
-                    name,
-                    postflight.reason,
-                )
-                result_text = postflight.error_text()
-                self._record_tool_summary(
-                    name=name,
-                    arguments=args_json,
-                    result=result_text,
-                    status="blocked_post_tool",
-                    started=started,
-                )
-                return result_text
-            self._record_tool_summary(
-                name=name,
-                arguments=args_json,
-                result=result_text,
-                status="ok",
-                started=started,
-            )
-            return result_text
-        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
-            result = f"[Error] 工具 {name} 执行超时（{int(_TOOL_TIMEOUT_SECONDS)}s）"
-            self._record_tool_summary(
-                name=name,
-                arguments=args_json,
-                result=result,
-                status="timeout",
-                started=started,
-            )
-            return result
-        except Exception as exc:
-            result = f"[Error] {exc}"
-            self._record_tool_summary(
-                name=name,
-                arguments=args_json,
-                result=result,
-                status="error",
-                started=started,
-            )
-            return result
-
-    def _start_run_summary(
-        self,
-        *,
-        task: str,
-        timeout_seconds: float,
-        allowed_tools: set[str],
-        tool_definitions: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        tool_names = [
-            str(definition.get("function", {}).get("name") or "")
-            for definition in tool_definitions
-            if definition.get("function", {}).get("name")
-        ]
-        return {
-            "run_id": f"agent-run-{uuid4().hex[:12]}",
-            "status": "running",
-            "started_at": _utc_now(),
-            "finished_at": "",
-            "duration_ms": 0.0,
-            "task_preview": _preview(task, limit=240),
-            "profile": self._profile.name,
-            "profile_display": self._profile.display_name,
-            "model": self._model,
-            "depth": self._depth,
-            "workspace": str(self._workspace),
-            "timeout_seconds": timeout_seconds,
-            "max_iterations": self._iteration_limit,
-            "iteration_count": 0,
-            "allowed_tool_count": len(allowed_tools),
-            "tool_definition_count": len(tool_names),
-            "tool_definitions": sorted(tool_names),
-            "tool_call_count": 0,
-            "tools_used": [],
-            "tools": [],
-            "_started_monotonic": time.perf_counter(),
-        }
+    def _start_run_summary(self, **kwargs: Any) -> dict[str, Any]:
+        return {}
 
     def _finish_run_summary(
-        self,
-        summary: dict[str, Any],
-        *,
-        status: str,
-        final_response: str,
+        self, summary: dict[str, Any], *, status: str, final_response: str
     ) -> None:
-        started = float(summary.pop("_started_monotonic", time.perf_counter()) or time.perf_counter())
-        summary["status"] = status
-        summary["finished_at"] = _utc_now()
-        summary["duration_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
-        summary["final_response_preview"] = _preview(_redact_text(final_response), limit=500)
-        self._last_run_summary = dict(summary)
-        self._persist_run_summary(summary)
+        pass
 
-    def _record_tool_summary(
-        self,
-        *,
-        name: str,
-        arguments: str,
-        result: str,
-        status: str,
-        started: float,
-    ) -> None:
-        summary = self._active_run_summary
-        if summary is None:
-            return
-        event = {
-            "name": name or "unknown",
-            "status": status,
-            "duration_ms": round((time.perf_counter() - started) * 1000.0, 3),
-            "arguments_preview": _preview(_redact_text(arguments), limit=300),
-            "result_preview": _preview(_redact_text(result), limit=300),
-        }
-        tools = summary.setdefault("tools", [])
-        if isinstance(tools, list) and len(tools) < _MAX_SUMMARY_TOOLS:
-            tools.append(event)
-        used = set(summary.get("tools_used") or [])
-        used.add(event["name"])
-        summary["tools_used"] = sorted(used)
-        summary["tool_call_count"] = int(summary.get("tool_call_count") or 0) + 1
+    def _record_tool_summary(self, **kwargs: Any) -> None:
+        pass
 
     def _persist_run_summary(self, summary: dict[str, Any]) -> None:
-        try:
-            self._workspace.mkdir(parents=True, exist_ok=True)
-            last_path = self._workspace / "last_agent_run.json"
-            history_path = self._workspace / "agent_runs.jsonl"
-            serializable = dict(summary)
-            serializable["last_run_path"] = str(last_path)
-            last_path.write_text(
-                json.dumps(serializable, ensure_ascii=False, sort_keys=True, indent=2),
-                encoding="utf-8",
-                newline="\n",
-            )
-            history = _bounded_history(history_path, limit=_MAX_RUN_HISTORY - 1)
-            history.append(json.dumps(serializable, ensure_ascii=False, sort_keys=True))
-            history_path.write_text("\n".join(history) + "\n", encoding="utf-8", newline="\n")
-        except OSError as exc:
-            logger.warning("[AgentShell] Failed to persist run summary: %s", exc)
-
-    async def _spawn_child_agent(self, args_json: str) -> str:
-        """Spawn a child agent shell to handle a focused sub-task."""
-        if self._depth >= _MAX_DEPTH:
-            return f"[Error] 已达最大子 Agent 嵌套深度（{_MAX_DEPTH}层），无法再 spawn。"
-        if not hasattr(self, "_allowed_tools"):
-            inherited_tools = self._tools.get_agent_allowed_names()
-            self._allowed_tools = self._profile.resolve_tools(set(inherited_tools or ()))
-        if "spawn_agent" not in getattr(self, "_allowed_tools", set()):
-            return "[Error] 当前 Agent Profile 不允许启动子 Agent。"
-
-        try:
-            args = json.loads(args_json)
-        except Exception:
-            return "[Error] spawn_agent: 参数 JSON 解析失败"
-
-        task = args.get("task", "").strip()
-        if not task:
-            return "[Error] spawn_agent: task 不能为空"
-        default_child_type = (
-            self._profile.spawnable_profiles[0]
-            if self._profile.spawnable_profiles else "field_operator"
-        )
-        agent_type = str(args.get("agent_type") or default_child_type).strip()
-        if self._profile.spawnable_profiles and agent_type not in self._profile.spawnable_profiles:
-            allowed = ", ".join(self._profile.spawnable_profiles)
-            return f"[Error] 当前 Agent Profile 只允许启动这些子 Agent：{allowed}"
-
-        context_str = args.get("context", "").strip()
-        ctx = {"上下文": context_str} if context_str else None
-
-        logger.info(
-            "[AgentShell] Spawning child agent type=%s (depth=%d): %s",
-            agent_type,
-            self._depth + 1,
-            task[:60],
-        )
-        child = ThunderAgentShell(
-            llm_client=self._llm,
-            tool_registry=self._tools,
-            audio=None,  # child agents are silent
-            model=self._model,
-            workspace=self._workspace,
-            agent_profile=agent_type,
-            _depth=self._depth + 1,
-        )
-        try:
-            result = await child.run_task(task, context=ctx)
-            return f"[子任务完成]\n{result}"
-        except Exception as exc:
-            return f"[子任务失败] {exc}"
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def _preview(value: Any, *, limit: int) -> str:
-    text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 3)] + "..."
-
-
-def _redact_text(value: Any) -> str:
-    text = str(value or "")
-    try:
-        payload = json.loads(text)
-    except (TypeError, ValueError):
-        return _redact_raw_text(text)
-    return json.dumps(_redact_payload(payload), ensure_ascii=False, sort_keys=True)
-
-
-def _redact_payload(value: Any) -> Any:
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            text_key = str(key).lower()
-            if any(sensitive in text_key for sensitive in _SENSITIVE_KEYS):
-                redacted[key] = "***"
-            else:
-                redacted[key] = _redact_payload(item)
-        return redacted
-    if isinstance(value, list):
-        return [_redact_payload(item) for item in value]
-    return value
-
-
-def _redact_raw_text(text: str) -> str:
-    redacted = text
-    for key in _SENSITIVE_KEYS:
-        redacted = _redact_assignment(redacted, key)
-    return redacted
-
-
-def _redact_assignment(text: str, key: str) -> str:
-    pattern = re.compile(rf"({re.escape(key)}\s*[=:]\s*)([^\s,&;]+)", re.IGNORECASE)
-    return pattern.sub(r"\1***", text)
-
-
-def _bounded_history(path: Path, *, limit: int) -> list[str]:
-    if limit <= 0 or not path.is_file():
-        return []
-    try:
-        lines = [line for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
-    except OSError:
-        return []
-    return lines[-limit:]
+        pass

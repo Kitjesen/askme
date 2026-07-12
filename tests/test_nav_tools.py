@@ -17,7 +17,6 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from askme.tools.builtin_tools import NavDispatchTool, NavStatusTool
 from askme.tools.move_tool import MoveRobotTool
 

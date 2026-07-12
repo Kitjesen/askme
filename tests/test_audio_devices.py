@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 from askme.voice import audio_devices
@@ -375,7 +377,8 @@ def test_audio_route_scan_handles_invalid_float_samples(monkeypatch):
 # ── print_windows_beep_loopback_summary ──────────────────────────────────
 
 class TestPrintWindowsBeepLoopbackSummary:
-    def test_prints_status_ok(self, capsys):
+    def test_prints_status_ok(self, caplog):
+        caplog.set_level(logging.INFO)
         audio_devices.print_windows_beep_loopback_summary({
             "status": "ok",
             "input_device": 0,
@@ -389,10 +392,11 @@ class TestPrintWindowsBeepLoopbackSummary:
             "tone_detected": True,
             "tone_correlation": 0.85,
         })
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "ok" in out
 
-    def test_prints_degraded_with_errors(self, capsys):
+    def test_prints_degraded_with_errors(self, caplog):
+        caplog.set_level(logging.INFO)
         audio_devices.print_windows_beep_loopback_summary({
             "status": "degraded",
             "input_device": 1,
@@ -406,12 +410,13 @@ class TestPrintWindowsBeepLoopbackSummary:
             "tone_detected": False,
             "tone_correlation": 0.01,
         })
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "degraded" in out
         assert "beep failed" in out
         assert "beep_playback_failed" in out
 
-    def test_prints_record_error(self, capsys):
+    def test_prints_record_error(self, caplog):
+        caplog.set_level(logging.INFO)
         audio_devices.print_windows_beep_loopback_summary({
             "status": "degraded",
             "input_device": 0,
@@ -425,7 +430,7 @@ class TestPrintWindowsBeepLoopbackSummary:
             "tone_detected": False,
             "tone_correlation": 0.0,
         })
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "record-error" in out
         assert "stream timeout" in out
 
@@ -553,11 +558,12 @@ class TestRouteSampleRates:
 # ── print_audio_route_scan_summary ─────────────────────────────────────
 
 class TestPrintAudioRouteScanSummary:
-    """capsys tests for print_audio_route_scan_summary."""
+    """caplog tests for print_audio_route_scan_summary."""
 
-    def test_empty_payload(self, capsys):
+    def test_empty_payload(self, caplog):
+        caplog.set_level(logging.INFO)
         audio_devices.print_audio_route_scan_summary({})
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "Audio route scan: unknown" in out
         # No failure_reason, diagnostic_hint, best_route, verified_config_hint, routes
         assert "failure-reason" not in out
@@ -566,7 +572,8 @@ class TestPrintAudioRouteScanSummary:
         assert "verified-config" not in out
         assert "route:" not in out
 
-    def test_best_route_present(self, capsys):
+    def test_best_route_present(self, caplog):
+        caplog.set_level(logging.INFO)
         audio_devices.print_audio_route_scan_summary({
             "status": "ok",
             "best_route": {
@@ -579,7 +586,7 @@ class TestPrintAudioRouteScanSummary:
                 "status": "ok",
             },
         })
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "Audio route scan: ok" in out
         assert "best:" in out
         assert "in=0" in out
@@ -590,7 +597,8 @@ class TestPrintAudioRouteScanSummary:
         assert "corr=0.85" in out
         assert "status=ok" in out
 
-    def test_failure_reason_and_diagnostic_hint(self, capsys):
+    def test_failure_reason_and_diagnostic_hint(self, caplog):
+        caplog.set_level(logging.INFO)
         audio_devices.print_audio_route_scan_summary({
             "status": "degraded",
             "failure_reason": "no_audio_route_captured_test_signal",
@@ -599,12 +607,13 @@ class TestPrintAudioRouteScanSummary:
                 "check_windows_input_permission_device_mute_and_selected_array_channel"
             ),
         })
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "Audio route scan: degraded" in out
         assert "failure-reason: no_audio_route_captured_test_signal" in out
         assert "diagnostic-hint: audio_playback_works_but_microphone_captures_silence" in out
 
-    def test_verified_config_hint(self, capsys):
+    def test_verified_config_hint(self, caplog):
+        caplog.set_level(logging.INFO)
         audio_devices.print_audio_route_scan_summary({
             "status": "ok",
             "best_route": {
@@ -625,12 +634,13 @@ class TestPrintAudioRouteScanSummary:
                 "voice.tts.output_transport": "sounddevice",
             },
         })
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "verified-config:" in out
         assert '"voice.input_device": 0' in out
         assert '"voice.tts.output_device": 1' in out
 
-    def test_mixed_route_states(self, capsys):
+    def test_mixed_route_states(self, caplog):
+        caplog.set_level(logging.INFO)
         audio_devices.print_audio_route_scan_summary({
             "status": "degraded",
             "failure_reason": "no_audio_route_captured_test_signal",
@@ -666,7 +676,7 @@ class TestPrintAudioRouteScanSummary:
                 },
             ],
         })
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "Audio route scan: degraded" in out
         assert "failure-reason: no_audio_route_captured_test_signal" in out
         assert "diagnostic-hint: microphone_captured_silence" in out

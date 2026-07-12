@@ -290,6 +290,7 @@ class MicInput:
                 proc.terminate()
                 proc.wait(timeout=1.0)
             except Exception:
+                logger.exception("[MicInput] USB proc terminate failed, trying kill")
                 try:
                     proc.kill()
                 except Exception as exc:
@@ -425,7 +426,7 @@ class MicInput:
         if self._device is not None:
             try:
                 device_info = sd.query_devices(self._device, kind="input")
-            except Exception:
+            except OSError:
                 return False
             if isinstance(device_info, dict):
                 return int(device_info.get("max_input_channels", 0) or 0) >= required_channels
@@ -433,7 +434,7 @@ class MicInput:
 
         try:
             devices = sd.query_devices()
-        except Exception:
+        except OSError:
             return False
 
         if isinstance(devices, dict):
@@ -443,7 +444,7 @@ class MicInput:
                 int(device.get("max_input_channels", 0) or 0) >= required_channels
                 for device in devices
             )
-        except Exception:
+        except TypeError:
             return False
 
     def _mcp01_visible(self) -> bool:
@@ -458,7 +459,7 @@ class MicInput:
                 text=True,
                 timeout=3,
             )
-        except Exception:
+        except (OSError, subprocess.TimeoutExpired):
             return False
         return result.returncode == 0 and "17ef:a03b" in result.stdout.lower()
 

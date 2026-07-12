@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -114,6 +115,23 @@ class ConversationManager:
         history.append(message)
         self._trim(conversation_session_id=conversation_session_id)
         self._save()
+
+    def update_last_assistant_metadata(
+        self,
+        metadata: dict[str, Any],
+        *,
+        conversation_session_id: str | None = None,
+    ) -> bool:
+        """Attach metadata to the latest assistant message in one session."""
+
+        history = self._history_for(conversation_session_id)
+        for message in reversed(history):
+            if message.get("role") != "assistant":
+                continue
+            message.update(deepcopy(metadata))
+            self._save()
+            return True
+        return False
 
     def add_tool_exchange(
         self,
@@ -378,7 +396,7 @@ class ConversationManager:
                 with open(self._history_file, encoding="utf-8") as fh:
                     raw = json.load(fh)
                 self._load_state(raw)
-        except Exception:
+        except (OSError, ValueError, TypeError):
             self.history = []
             self._session_histories = {}
 

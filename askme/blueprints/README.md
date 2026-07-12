@@ -123,6 +123,12 @@ Blueprint readiness is deliberately stricter than YAML existence:
   required configuration.
 - Service maps with only empty values do not satisfy required configuration.
 - A service with `enabled: false` does not satisfy required configuration.
+- Physical customer-site blueprints such as `edge_robot` must use
+  `runtime_handoff.profile=lab` or `runtime_handoff.profile=prod` before they
+  can be reported as ready for customer site validation.
+- `fake`, `sim`, and `shadow` profiles are useful for local demos, CI,
+  simulation, and shadow validation, but they must not be used as onsite
+  customer acceptance evidence.
 - External services still require manual smoke evidence before production
   claims, even when static readiness passes.
 

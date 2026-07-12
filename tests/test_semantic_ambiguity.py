@@ -12,9 +12,10 @@ What we're verifying here is NOT just pass/fail, but:
 
 from __future__ import annotations
 
+from askme.skills.skill_model import SkillDefinition, SlotSpec
+
 from askme.pipeline.proactive.base import ProactiveContext
 from askme.pipeline.proactive.clarification_agent import ClarificationPlannerAgent
-from askme.skills.skill_model import SkillDefinition, SlotSpec
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 

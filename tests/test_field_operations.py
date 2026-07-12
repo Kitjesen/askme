@@ -9,6 +9,12 @@ import time
 from pathlib import Path
 
 import pytest
+from askme.pipeline.field_operations import FieldOperationsService, sign_field_device_payload
+from askme.runtime.field_callbacks import build_field_runtime_callback_sequence
+from askme.runtime.handoff import RuntimeHandoffService
+from fastapi.testclient import TestClient
+
+import askme.health_server as health_server
 from askme.api.schemas.field_events import (
     FieldActionAuditIntegrityResponse,
     FieldDeviceOnboardingResponse,
@@ -25,12 +31,6 @@ from askme.api.schemas.field_events import (
     FieldScenarioAcceptanceResponse,
     FieldScenarioCatalogResponse,
 )
-from askme.pipeline.field_operations import FieldOperationsService, sign_field_device_payload
-from askme.runtime.field_callbacks import build_field_runtime_callback_sequence
-from askme.runtime.handoff import RuntimeHandoffService
-from fastapi.testclient import TestClient
-
-import askme.health_server as health_server
 from askme.cognition import WorldStateService
 from askme.health_server import (
     build_health_snapshot,

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
-
-import pytest
 
 from askme.runtime.diagnostics.dialogue_smoke import (
     _all_run_check,
@@ -353,7 +352,11 @@ class TestBuildChecks:
         return {
             "reply": "The test id is TOKEN999",
             "evidence": [{"text": "Thunder test id is TOKEN999", "metadata": {}}],
-            "rag": {"enabled": True, "last_retrieved_items": 1},
+            "rag": {
+                "enabled": True,
+                "turn_scoped": True,
+                "used_in_answer": True,
+            },
         }
 
     def test_all_pass_for_valid_data(self):
@@ -414,6 +417,22 @@ class TestBuildChecks:
         )
         assert checks["chat_reply_contains_token"] is True  # always True when not required
 
+    def test_chat_rag_rejects_shared_backend_health_snapshot(self):
+        payload = self._base_payload()
+        payload["rag"] = {"enabled": True, "last_retrieved_items": 1}
+
+        checks = _build_checks(
+            token="TOKEN999",
+            import_payload={"imported": 1, "errors": False},
+            direct_context="context with TOKEN999",
+            direct_health={"available": True},
+            chat_payload=payload,
+            failure_reason="",
+            require_reply_token=True,
+        )
+
+        assert checks["chat_payload_has_rag"] is False
+
 
 # ── _write_report ────────────────────────────────────────────────────────
 
@@ -439,7 +458,8 @@ class TestWriteMemorySeed:
 # ── print_dialogue_smoke_summary ─────────────────────────────────────────
 
 class TestPrintDialogueSmokeSummary:
-    def test_prints_status_and_token(self, capsys):
+    def test_prints_status_and_token(self, caplog):
+        caplog.set_level(logging.INFO)
         payload = {
             "status": "passed",
             "token": "MY-TOKEN",
@@ -449,11 +469,12 @@ class TestPrintDialogueSmokeSummary:
             "paths": {"output_dir": "/tmp"},
         }
         print_dialogue_smoke_summary(payload)
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "passed" in out
         assert "MY-TOKEN" in out
 
-    def test_prints_failure_reason(self, capsys):
+    def test_prints_failure_reason(self, caplog):
+        caplog.set_level(logging.INFO)
         payload = {
             "status": "failed",
             "token": "X",
@@ -463,11 +484,12 @@ class TestPrintDialogueSmokeSummary:
             "paths": {"output_dir": "/tmp"},
         }
         print_dialogue_smoke_summary(payload)
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "failed" in out
         assert "timeout" in out
 
-    def test_truncates_long_reply(self, capsys):
+    def test_truncates_long_reply(self, caplog):
+        caplog.set_level(logging.INFO)
         payload = {
             "status": "passed",
             "token": "X",
@@ -477,15 +499,15 @@ class TestPrintDialogueSmokeSummary:
             "paths": {"output_dir": "/tmp"},
         }
         print_dialogue_smoke_summary(payload)
-        out = capsys.readouterr().out
-        reply_line = [l for l in out.splitlines() if "reply:" in l][0]
-        assert len(reply_line) < 200  # reply truncated to 160
+        reply_msg = [r for r in caplog.records if "reply:" in r.getMessage()][0]
+        assert len(reply_msg.getMessage()) < 200  # reply truncated to 160
 
 
 # ── print_dialogue_burst_summary ─────────────────────────────────────────
 
 class TestPrintDialogueBurstSummary:
-    def test_prints_counts_and_timing(self, capsys):
+    def test_prints_counts_and_timing(self, caplog):
+        caplog.set_level(logging.INFO)
         payload = {
             "status": "passed",
             "counts": {"passed": 5, "total": 6, "fake": 5, "real": 1},
@@ -495,12 +517,13 @@ class TestPrintDialogueBurstSummary:
             "paths": {"report": "/tmp/report.json"},
         }
         print_dialogue_burst_summary(payload)
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "passed" in out
         assert "5/6" in out
         assert "fake=5" in out
 
-    def test_prints_failure_reason(self, capsys):
+    def test_prints_failure_reason(self, caplog):
+        caplog.set_level(logging.INFO)
         payload = {
             "status": "failed",
             "counts": {"passed": 0, "total": 1, "fake": 0, "real": 1},
@@ -510,6 +533,6 @@ class TestPrintDialogueBurstSummary:
             "paths": {"report": "/tmp"},
         }
         print_dialogue_burst_summary(payload)
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "failed" in out
         assert "expected_run_count" in out

@@ -53,3 +53,51 @@ def test_sync_sunrise_never_pushes_remote_secrets_or_device_config() -> None:
     assert "$LOCAL_DIR/prompts/SOUL.md" in sync
     assert "$REMOTE_DIR/prompts/SOUL.md" in sync
     assert "config.yaml" not in "pyproject.toml requirements.txt README.md"
+
+
+def test_deploy_surface_documents_assets_and_keeps_helpers_portable() -> None:
+    readme = read("deploy/README.md")
+    quickstart_sh = read("deploy/quickstart.sh")
+    quickstart_bat = read("deploy/quickstart.bat")
+
+    for token in (
+        "`askme.service`",
+        "`install.sh`",
+        "`quickstart.sh`",
+        "`quickstart.bat`",
+        "`site-profiles/`",
+        "`customer-project-templates/`",
+        "`delivery-resources/`",
+        "`security/`",
+    ):
+        assert token in readme
+
+    assert "docker/docker-compose.yml" in quickstart_sh
+    assert "docker\\docker-compose.yml" in quickstart_bat
+    assert "D:\\inovxio" not in quickstart_bat
+    assert "%~dp0.." in quickstart_bat
+
+
+def test_docker_surface_documents_compose_entrypoints() -> None:
+    readme = read("docker/README.md")
+
+    for token in (
+        "`docker-compose.yml`",
+        "`docker-compose.prod.yml`",
+        "`Dockerfile.askme`",
+        "`Dockerfile.zeroclaw`",
+        "`docker-entrypoint.sh`",
+        "docker compose --env-file docker/.env -f docker/docker-compose.yml up -d",
+    ):
+        assert token in readme
+
+
+def test_deployment_guide_uses_repo_root_docker_env_and_compose_file() -> None:
+    guide = read("docs/DEPLOYMENT.md")
+
+    assert "cp docker/.env.example docker/.env" in guide
+    assert "vi docker/.env" in guide
+    assert "--env-file docker/.env" in guide
+    assert "-f docker/docker-compose.yml" in guide
+    assert "--env-file .env" not in guide
+    assert "cp .env .env.backup" not in guide

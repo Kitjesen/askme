@@ -7,7 +7,6 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from askme.memory.bridge import MemoryBridge
 from askme.memory.mempalace_backend import MemPalaceBackend
 

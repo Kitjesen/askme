@@ -53,7 +53,11 @@ class MonitorService:
         messages = self._conversation_provider()
         return {"messages": messages, "count": len(messages)}
 
-    def conversation_history_payload(self) -> dict[str, Any]:
+    def conversation_history_payload(
+        self,
+        *,
+        conversation_session_id: str | None = None,
+    ) -> dict[str, Any]:
         """Return persisted conversation history from configured storage."""
         cfg = self._config_provider()
         conversation_cfg = cfg.get("conversation", {}) if isinstance(cfg, dict) else {}
@@ -69,7 +73,31 @@ class MonitorService:
             history = json.loads(history_file.read_text(encoding="utf-8"))
         else:
             history = []
-        return {"messages": history, "count": len(history)}
+
+        if isinstance(history, list):
+            return {"messages": history, "count": len(history)}
+
+        sessions = history.get("sessions") if isinstance(history, dict) else None
+        if not isinstance(sessions, dict):
+            return {"messages": [], "count": 0}
+
+        session_id = str(conversation_session_id or "").strip()
+        messages = sessions.get(session_id, [])
+        if not isinstance(messages, list):
+            messages = []
+        available_session_ids = sorted(
+            str(candidate)
+            for candidate, candidate_messages in sessions.items()
+            if str(candidate) and isinstance(candidate_messages, list)
+        )
+        payload: dict[str, Any] = {
+            "messages": messages,
+            "count": len(messages),
+            "available_session_ids": available_session_ids,
+        }
+        if session_id:
+            payload["conversation_session_id"] = session_id
+        return payload
 
     def _perception_payload(self, now: float) -> dict[str, Any]:
         perception: dict[str, Any] = {}

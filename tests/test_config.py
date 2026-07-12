@@ -1,9 +1,11 @@
 """Tests for askme.config module."""
 
+import os
 from pathlib import Path
 
-from askme.config import get_config, get_section, project_root
+import pytest
 
+from askme.config import get_config, get_section, project_root
 
 CONFIG_PATH = Path("config.yaml")
 
@@ -30,13 +32,45 @@ class TestGetConfig:
         sr = cfg.get("voice", {}).get("tts", {}).get("sample_rate")
         assert isinstance(sr, (int, float))
 
-    def test_customer_knowledge_uses_mempalace_with_vector_fallback(self):
-        """Product default should use MemPalace for customer RAG, not robot behavior memory."""
+    @pytest.mark.skipif(os.name != "nt", reason="Windows audio override")
+    def test_windows_audio_profile_uses_verified_realtek_route(self):
+        cfg = get_config(reload=True)
+        voice = cfg["voice"]
+
+        assert voice["input_device"] == 1
+        assert voice["input_transport"] == "sounddevice"
+        assert voice["mic_native_rate"] == 44100
+        assert voice["mic_channels"] == 1
+        assert voice["tts"]["output_device"] == 3
+        assert voice["tts"]["output_transport"] == "sounddevice"
+
+    def test_julong_deployment_identity_and_scope(self):
+        cfg = get_config(reload=True)
+
+        assert cfg["brain"]["persona"]["robot_name"] == "小算"
+        assert cfg["brain"]["persona"]["customer_name"] == "聚龙科创e谷"
+        assert cfg["voice"]["address_detection"]["names"] == ["小算"]
+        assert cfg["voice"]["interaction_gate"]["wake_terms"] == ["小算", "机器人"]
+        assert cfg["voice"]["kws"]["keywords"] == [
+            "x iǎo s uàn :2.0 #0.20 @小算"
+        ]
+        assert Path(cfg["field_operations"]["site_profile_path"]) == (
+            project_root()
+            / "deploy"
+            / "site-profiles"
+            / "julong-tech-e-valley.yaml"
+        )
+        assert cfg["field_operations"]["robot_name"] == "小算"
+        assert cfg["space_cognition"]["park_id"] == "julong-tech-e-valley"
+        assert cfg["space_cognition"]["routes"] == []
+
+    def test_customer_knowledge_uses_inspectable_vector_backend_by_default(self):
+        """Product default stays local and inspectable; optional memory SDKs are not blockers."""
         cfg = get_config(reload=True)
         memory = cfg.get("memory", {})
 
-        assert memory["backend"] == "mempalace"
-        assert memory["customer_knowledge_backend"] == "mempalace"
+        assert memory["backend"] == "vector"
+        assert memory["customer_knowledge_backend"] == "vector"
         assert memory["mempalace_fallback_backend"] == "vector"
         assert memory["auto_backend_order"][:2] == ["mempalace", "vector"]
         assert memory["robot_behavior_memory_backend"] == "robotmem"
@@ -91,8 +125,12 @@ class TestGetConfig:
         profiles = cfg["voice"]["tts"]["voice_profiles"]
         assert profiles["patrol_default"]["label"] == "巡检播报"
         assert profiles["visitor_friendly"]["label"] == "游客服务"
-        assert cfg["field_operations"]["site_map"]["zones"]["guide-01"]["name"] == "游客中心路引点"
-        assert cfg["field_operations"]["site_map"]["zones"]["north-window-01"]["name"] == "北侧一层窗户"
+        assert "待现场标定" in cfg["field_operations"]["site_map"]["zones"][
+            "julong-guide-01"
+        ]["name"]
+        assert cfg["field_operations"]["site_map"]["zones"]["julong-patrol-01"][
+            "type"
+        ] == "patrol_checkpoint"
         assert "确认执行" in cfg["tools"]["confirmation_phrases"]
         assert "取消执行" in cfg["tools"]["rejection_phrases"]
 

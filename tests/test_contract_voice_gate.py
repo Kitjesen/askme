@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from askme.voice.interaction_gate import InteractionAction, InteractionGate
+from askme.voice.perception_context import InteractionPerceptionSnapshot
+
 from askme.contracts import (
     RobotActionType,
     interaction_decision_to_action_decision,
 )
-from askme.voice.interaction_gate import InteractionAction, InteractionGate
-from askme.voice.perception_context import InteractionPerceptionSnapshot
 
 
 def test_bystander_speech_records_without_brain_continuation() -> None:

@@ -1,8 +1,9 @@
 """Tests for the typed slot analyst: vague detection + slot analysis."""
 
 
-from askme.pipeline.proactive.slot_analyst import analyze_slots, is_vague
 from askme.skills.skill_model import SkillDefinition, SlotSpec
+
+from askme.pipeline.proactive.slot_analyst import analyze_slots, is_vague
 
 # ── is_vague ─────────────────────────────────────────────────────────────────
 

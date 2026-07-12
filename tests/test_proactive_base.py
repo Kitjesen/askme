@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from askme.skills.skill_model import SkillDefinition
 
 from askme.pipeline.proactive.base import (
     ESTOP_SIGNALS,
@@ -14,7 +15,6 @@ from askme.pipeline.proactive.base import (
     ask_and_listen,
 )
 from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
-from askme.skills.skill_model import SkillDefinition
 
 # ── ProactiveResult ───────────────────────────────────────────────────────────
 

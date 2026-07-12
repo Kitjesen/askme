@@ -27,10 +27,9 @@ async def main():
 
     cfg.get_config = patched
 
-    from openai import AsyncOpenAI
-
     from askme.memory.episodic_memory import EpisodicMemory
     from askme.memory.semantic_index import SemanticIndex
+    from openai import AsyncOpenAI
 
     # LLM client
     client = AsyncOpenAI(

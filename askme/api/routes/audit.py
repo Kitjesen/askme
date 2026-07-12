@@ -9,14 +9,16 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from askme.api.schemas.audit import AuditEventsResponse
-from askme.api.schemas.audit import AuditExportResponse
-from askme.api.schemas.audit import AuditExportRetryResponse
-from askme.api.schemas.audit import AuditExportRetryStatusResponse
-from askme.api.schemas.audit import AuditExportsResponse
-from askme.api.schemas.audit import AuditReviewSubmitResponse
-from askme.api.schemas.audit import AuditReviewsResponse
-from askme.api.schemas.audit import SkillAuditResponse
+from askme.api.schemas.audit import (
+    AuditEventsResponse,
+    AuditExportResponse,
+    AuditExportRetryResponse,
+    AuditExportRetryStatusResponse,
+    AuditExportsResponse,
+    AuditReviewsResponse,
+    AuditReviewSubmitResponse,
+    SkillAuditResponse,
+)
 from askme.audit import AuditExportService, AuditQueryService, AuditReviewService
 from askme.skills.governance.audit import SkillAuditLog
 
@@ -156,7 +158,7 @@ def register_audit_routes(
             )
             return JSONResponse(payload.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
-            logger.error("Skill audit endpoint failed: %s", exc)
+            logger.exception("Skill audit endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.get(
@@ -221,7 +223,7 @@ def register_audit_routes(
             response = AuditEventsResponse.model_validate(payload)
             return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
-            logger.error("Unified audit endpoint failed: %s", exc)
+            logger.exception("Unified audit endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.get(
@@ -244,7 +246,7 @@ def register_audit_routes(
             response = AuditReviewsResponse.model_validate(payload)
             return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
-            logger.error("Unified audit review list failed: %s", exc)
+            logger.exception("Unified audit review list failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.post(
@@ -287,7 +289,7 @@ def register_audit_routes(
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=_CORS_HEADERS)
         except Exception as exc:
-            logger.error("Unified audit review submit failed: %s", exc)
+            logger.exception("Unified audit review submit failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.get(
@@ -310,7 +312,7 @@ def register_audit_routes(
             response = AuditExportRetryStatusResponse.model_validate(payload)
             return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
-            logger.error("Unified audit export retry status failed: %s", exc)
+            logger.exception("Unified audit export retry status failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.get(
@@ -333,7 +335,7 @@ def register_audit_routes(
             response = AuditExportsResponse.model_validate(payload)
             return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
-            logger.error("Unified audit export list failed: %s", exc)
+            logger.exception("Unified audit export list failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.post(
@@ -357,7 +359,7 @@ def register_audit_routes(
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=_CORS_HEADERS)
         except Exception as exc:
-            logger.error("Unified audit export retry delivery failed: %s", exc)
+            logger.exception("Unified audit export retry delivery failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.post(
@@ -415,7 +417,7 @@ def register_audit_routes(
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=_CORS_HEADERS)
         except Exception as exc:
-            logger.error("Unified audit export endpoint failed: %s", exc)
+            logger.exception("Unified audit export endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
 

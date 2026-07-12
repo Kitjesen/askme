@@ -1,5 +1,4 @@
 import pytest
-
 from askme.runtime.field_callbacks import (
     build_field_runtime_callback_payload,
     build_field_runtime_callback_sequence,

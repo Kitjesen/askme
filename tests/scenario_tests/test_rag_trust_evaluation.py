@@ -4,8 +4,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from askme.memory.catalog import KnowledgeCatalog
+
 from scripts.eval.evaluate_rag_trust_scenarios import evaluate_scenarios, write_report
 
 

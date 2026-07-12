@@ -17,30 +17,40 @@ app:
 brain:
   # Provider names: minimax, doubao, dashscope, deepseek, zhipu,
   # openai_compatible, openai, fake.  Endpoint/key remain config-owned.
-  provider: minimax
-  api_key: ${MINIMAX_API_KEY}
-  base_url: https://api.minimax.chat/v1
-  model: MiniMax-M2.7-highspeed
-  # Lightweight model for real-time voice turns (lower TTFT)
-  voice_model: MiniMax-M2.7-highspeed
+  #
+  # DeepSeek V4 Flash is the verified low-latency primary for text and voice.
+  # Keep provider credentials in .env; never commit them here.
+  provider: deepseek
+  api_key: ${DEEPSEEK_API_KEY}
+  base_url: ${DEEPSEEK_BASE_URL}
+  model: deepseek-v4-flash
+  # For testing other providers (OpenAI-compatible), just change the three above.
+  # Doubao/Volcengine:  base_url = https://ark.cn-beijing.volces.com/api/v3
+  # DeepSeek:           base_url = https://api.deepseek.com/v1
+  # DashScope:          base_url = https://dashscope.aliyuncs.com/compatible-mode/v1
+  # Voice turns run with thinking disabled by the model policy for lower TTFT.
+  voice_model: deepseek-v4-flash
   persona:
-    robot_name: 现场机器人
-    product_name: 现场任务平台
-    customer_name: 梵木创艺园
-    operator_audience: 园区运营人员、安保和交付工程师
-    role: 园区巡检与服务机器狗
-    # Keep blank unless the customer explicitly wants a displayed ownership label.
+    robot_name: 小算
+    product_name: 聚龙科创e谷智能服务系统
+    customer_name: 聚龙科创e谷
+    operator_audience: 园区访客、物业运营和巡检人员
+    role: 导览与巡检机器人
     ownership_label: ""
-    speaking_style: 中文口语，简洁汇报，像现场值班员
+    speaking_style: 中文口语，友好专业，路线说明和巡检汇报简洁明确
     max_reply_chars: 80
-  # Max tokens for a single completion (0 = model default)
-  max_tokens: 0
+  # Max tokens for a single completion (0 = model default).
+  # Text/admin turns can use up to this cap; voice turns use voice_max_tokens below.
+  max_tokens: 200
+  # Voice turns need short replies — cap tokens tightly to keep TTFT low.
+  voice_max_tokens: 50
   temperature: 0.7
-  # Resilience: timeout, retry, model fallback
-  timeout: 30.0
-  max_retries: 2
+  # Resilience: timeout, retry, model fallback.
+  # Voice turns need fast-fail; keep timeout tight and retries low.
+  timeout: 10.0
+  max_retries: 1
   fallback_models:
-    - MiniMax-M2.5-highspeed
+    - deepseek-v4-pro
   # MiniMax LLM (OpenAI-compatible, 100 tps)
   minimax_api_key: ${MINIMAX_API_KEY}
   minimax_base_url: https://api.minimax.chat/v1
@@ -53,6 +63,9 @@ brain:
   prompt_seed: []
   # Optional user prefix override. Leave blank to generate from persona.
   user_prefix: ""
+  # Direct cloud providers preserve the system prompt. Enable only for legacy
+  # relay deployments that overwrite upstream system messages.
+  relay_compat_mode: false
   # Product-facing reply templates when RAG/memory cannot safely support an answer.
   rag_policy_templates:
     no_evidence: "我这里没有可靠依据，不能直接回答。请补充位置，或让管理员上传知识。"
@@ -77,9 +90,10 @@ memory:
   # Do not mix customer evidence with robot behavior memory.
   enabled: true
   # Customer knowledge backend: "vector" or "mempalace".
-  # Default to MemPalace for customer knowledge when installed; keep vector as local fallback.
-  backend: mempalace
-  customer_knowledge_backend: mempalace
+  # Keep the inspectable local vector backend as the production default.
+  # MemPalace remains available as an optional backend from the control plane.
+  backend: vector
+  customer_knowledge_backend: vector
   # RobotMem is reserved for robot long-term behavior memory, not customer RAG evidence.
   robot_behavior_memory_backend: robotmem
   robot_behavior_memory_enabled: false
@@ -91,13 +105,17 @@ memory:
   vector_min_similarity: 0.5
   # Timeout (seconds) for embedding server reachability check
   health_check_timeout: 1
-  # Timeout (seconds) for retrieval calls
-  retrieve_timeout: 3.0
+  # Timeout (seconds) for retrieval calls.
+  # Tight for voice turns so memory stall does not block the pipeline.
+  retrieve_timeout: 1.5
+  # Provider initialization gets only part of the total turn budget so a
+  # missing optional backend cannot consume the vector fallback window.
+  backend_init_timeout: 0.4
   # Short-lived exact-query cache for repeated dashboard/voice turns.
-  # Set ttl to 0 to disable. Empty retrievals are not cached by default.
-  retrieve_cache_ttl_s: 1.0
+  # Set ttl to 0 to disable. Cache empty results to avoid re-search churn.
+  retrieve_cache_ttl_s: 15.0
   retrieve_cache_max_entries: 128
-  retrieve_cache_empty_results: false
+  retrieve_cache_empty_results: true
   retrieve_method: rag
   user_id: user_1
   # RobotMem settings (used when backend: robotmem)
@@ -141,6 +159,28 @@ conversation:
 # Voice: ASR / VAD / KWS / TTS
 # ----------------------------------------------------------
 voice:
+  # Non-secret live selections persisted by the management console.
+  control_state_path: data/voice/system_control.json
+  product_readiness:
+    # Unattended product deployments must not treat ambient speech as a turn.
+    require_wake_word: true
+    # Local conversation remains available when the robot runtime is absent.
+    # Enable this in robot-integrated deployment overlays.
+    require_runtime_bridge: false
+  # KWS can be skipped briefly for a natural answer to the assistant's last
+  # question. This is a weak listening window, not permission to reply.
+  wake_timeout: 8.0
+  # Host-specific device routing. These values are applied only on Windows;
+  # Linux robot deployments continue to use the generic settings below.
+  platform_overrides:
+    windows:
+      input_device: 1
+      input_transport: sounddevice
+      mic_native_rate: 44100
+      mic_channels: 1
+      tts:
+        output_device: 3
+        output_transport: sounddevice
   # Input device index for microphone (see startup log for available devices)
   # null = system default. On sunrise: 0 = HK-MIC (hw:0,0), 1 = MCP01 (hw:1,0, mic dead)
   # On Windows: null uses system default mic (Realtek). Set to specific index if needed.
@@ -162,6 +202,7 @@ voice:
     sample_rate: 16000
     feature_dim: 80
     num_threads: 2
+    provider: cpu
     # Endpoint detection silence thresholds (seconds)
     # rule1: long silence after short utterance, rule2: normal speech
     # Lowered from 1.6 to 0.6; industrial commands are short, so 1.6s delay is unacceptable.
@@ -176,6 +217,8 @@ voice:
     # The MIC's low SNR means VAD must be sensitive. Noise triggers are handled by
     # the _NOISE_UTTERANCES filter + address_detector instead.
     threshold: 0.5
+    provider: cpu
+    num_threads: 1
     # 0.3s: restored original value. The alternating-zero-chunk issue was
     # caused by soxr ResampleStream, now fixed by switching to scipy.
     min_silence_duration: 0.3
@@ -202,34 +245,77 @@ voice:
   # user barge-in. Set lower only after a real separate user mic is verified.
   echo_gate_peak: 30000
 
-  # Cloud ASR: Alibaba DashScope Paraformer real-time.
-  # Much higher accuracy than local sherpa-onnx (CER 1.68% vs ~15%).
-  # Falls back to local ASR when API key not set or network fails.
+  # Cloud ASR primary with local sherpa-onnx fallback.
   cloud_asr:
+    provider: volcengine
     enabled: true
-    api_key: ${DASHSCOPE_API_KEY}
-    model: paraformer-realtime-v2
+    # Volcengine's legacy console authenticates this WebSocket with APP ID and
+    # Access Token. Secret Key is not part of the streaming ASR protocol.
+    app_id: ${VOLCENGINE_ASR_APP_ID}
+    access_token: ${VOLCENGINE_ASR_ACCESS_TOKEN}
+    resource_id: ${VOLCENGINE_ASR_RESOURCE_ID}
+    endpoint: wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
+    model: bigmodel
     sample_rate: 16000
-    language_hints: ["zh", "en"]
+    bits: 16
+    channels: 1
+    chunk_ms: 200
+    enable_nonstream: true
+    enable_itn: true
+    enable_punc: true
+    enable_ddc: false
+    show_utterances: true
+    end_window_size: 800
+    user_id: askme-voice
+    device_id: xiaosuan-1
+    hotwords: [小算, 聚龙科创e谷, 导览, 巡检]
     # Wait long enough for final/interim result events on hardware room-loop clips.
     finish_timeout: 8.0
     # Do not stream pre-speech silence/noise into a warm cloud session by default.
     feed_silence: false
+    # Volcengine closes idle sessions that receive no packet. Connect only
+    # after VAD detects speech to avoid provider error 45000081.
+    preconnect: false
 
   # Address detection: filter out bystander chat (not talking to robot).
   # When enabled, casual speech like "走走，去吃饭" is silently ignored.
-  # Safe default: uncertain -> respond, so real commands are not missed.
+  # Public-site policy: uncertain speech stays silent until the user says 小算.
   address_detection:
     enabled: true
+    names: [小算]
+    name_window: 0
+    name_window_allows_ambiguous: false
+    allow_pronoun_address: false
+    uncertain_policy: ignore
 
   # Interaction gate: separates ambient speech from intentional human-robot
   # interaction before ASR transcripts enter LLM/task planning.
   interaction_gate:
     enabled: true
+    wake_terms: [小算, 机器人]
+    allow_unaddressed_public_help: false
+    allow_unaddressed_robot_tasks: false
+    silent_on_ambiguous: true
     min_asr_confidence: 0.45
     max_perception_age_s: 2.0
     max_interaction_distance_m: 4.0
     sound_angle_tolerance_deg: 35.0
+    # Mission voice mode. Idle preserves the normal assistant behavior.
+    # Runtime/control surfaces can switch this to mission_active, paused,
+    # emergency, review, or setup before each turn.
+    default_mission_mode: idle
+    default_actor_role: operator
+    mission_modes:
+      setup:
+        reply: "\u6b63\u5728\u914d\u7f6e\u4e2d\uff0c\u8bf7\u7531\u64cd\u4f5c\u5458\u5b8c\u6210\u8bbe\u7f6e\u3002"
+      mission_active:
+        reply: "\u5de1\u68c0\u4e2d\uff0c\u53ea\u63a5\u53d7\u4efb\u52a1\u76f8\u5173\u6307\u4ee4\u3002"
+      paused:
+        reply: "\u4efb\u52a1\u5df2\u6682\u505c\uff0c\u53ea\u63a5\u53d7\u7ee7\u7eed\u3001\u505c\u6b62\u3001\u72b6\u6001\u67e5\u8be2\u6216\u5b89\u5168\u76f8\u5173\u6307\u4ee4\u3002"
+      emergency:
+        reply: "\u6025\u505c\u72b6\u6001\uff0c\u53ea\u63a5\u53d7\u5b89\u5168\u76f8\u5173\u6307\u4ee4\u3002"
+      review:
+        reply: "\u4efb\u52a1\u5df2\u7ed3\u675f\uff0c\u53ef\u4ee5\u67e5\u770b\u7ed3\u679c\u6216\u62a5\u544a\u3002"
 
   # Audio input filter: DC removal + high-pass before VAD/ASR.
   # Removes low-frequency noise (motor hum, HVAC, ground loop).
@@ -259,16 +345,27 @@ voice:
   kws:
     model_dir: models/kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01
     num_threads: 1
+    provider: cpu
     # Wake words (must be Chinese for wenetspeech model)
-    # Set empty to disable KWS (always-on listening mode for testing)
-    keywords: []
+    # Product mode requires an explicit wake word to avoid ambient-speech turns.
+    # Use an empty list only for supervised microphone testing.
+    keywords:
+      # This KWS model uses pinyin initials/finals as tokens. Text after @ is
+      # the label returned by sherpa-onnx. The per-keyword boost/threshold is
+      # calibrated for this short two-syllable wake word and must be rechecked
+      # with positive and ambient-negative samples at the deployment site.
+      - "x iǎo s uàn :2.0 #0.20 @小算"
 
   tts:
     # Backend: "local" | "edge" | "minimax"
     # "local"   = sherpa-onnx, low latency, offline, fixed voice.
     # "edge"    = Microsoft Edge TTS, requires network, richer voices.
     # "minimax" = MiniMax streaming TTS, low latency, supports voice clones and emotion tuning.
+    # MiniMax is the cloud-primary product path; local remains the offline
+    # fallback when the provider is unavailable or out of balance.
     backend: minimax
+    # Keep speech available when a cloud provider is out of balance or offline.
+    fallback_backend: local
     # Local backend settings (MeloTTS: 44100Hz, natural Chinese)
     model_dir: models/tts/vits-melo-tts-zh_en
     num_threads: 4
@@ -292,7 +389,8 @@ voice:
     minimax_tts_model: speech-2.8-turbo
     minimax_voice_id: male-qn-qingse
     minimax_sample_rate: 32000
-    minimax_audio_format: mp3
+    # PCM for low-latency streaming; mp3 forces full-download-before-play
+    minimax_audio_format: pcm
     # Voice tuning (MiniMax)
     # speed: 0.5-2.0 (default 1.0), vol: 0-10 (default 1.0), pitch: -12 to 12 semitones (default 0)
     minimax_speed: 1.0
@@ -399,7 +497,8 @@ voice:
     usb_direct_speech_onset_cushion_gain: 0.0
     usb_direct_speech_onset_gap_seconds: 0.0
     usb_direct_stream_guard_seconds: 0.0
-    usb_direct_coalesce_timeout: 8.0
+    # Lower coalesce timeout for live dialogue responsiveness
+    usb_direct_coalesce_timeout: 0.5
 
 # ----------------------------------------------------------
 # Vision: qp-perception (YOLO detection + tracking)
@@ -420,6 +519,7 @@ vision:
 # ----------------------------------------------------------
 robot:
   enabled: false
+  robot_name: 小算
   policy_model_path: models/policy/policy_pose0111.onnx
   obs_dim: 285
   action_dim: 16
@@ -559,12 +659,13 @@ ota:
   device:
     product: inovxio-dog
     tags:
-      - thunder
+      - xiaosuan
       - askme
       - edge-ai
+      - julong-tech-e-valley
     serial_number: ""
-    robot_id: ""
-    site_id: ""
+    robot_id: xiaosuan-1
+    site_id: julong-tech-e-valley
 
 # ----------------------------------------------------------
 # Field operations: raw sensor/camera/robot event -> alert workflow
@@ -578,9 +679,9 @@ field_operations:
   # Optional customer site profile. When present, field operations loads map,
   # devices, responder groups, and scenario thresholds from this file first;
   # explicit values below still override it.
-  site_profile_path: deploy/site-profiles/park-demo.yaml
-  robot_id: robot-1
-  robot_name: 现场机器人
+  site_profile_path: deploy/site-profiles/julong-tech-e-valley.yaml
+  robot_id: xiaosuan-1
+  robot_name: 小算
   # Enable only for low-risk visitor/facility service wording. P0 alerts still
   # use fixed, audited templates.
   llm_narrative_enabled: false
@@ -696,6 +797,7 @@ field_operations:
         - skill:review
         - voice:profile:read
         - voice:profile:update
+        - voice:system:update
       product_owner:
         - audit:read
         - field:project:read
@@ -711,9 +813,16 @@ field_operations:
       project_scope:
         tenant_ids: [default]
         delivery_namespaces: [default]
-        customer_ids: [demo-customer]
-        project_ids: [demo-field-ops]
-        site_ids: [inovx-demo-park]
+        customer_ids: [demo-customer, julong-tech-e-valley]
+        project_ids: [demo-field-ops, julong-guide-patrol]
+        site_ids: [inovx-demo-park, julong-tech-e-valley]
+        # Resolve unscoped dashboard writes to the active on-site deployment.
+        # These defaults must also appear in the corresponding allowlists above.
+        default_tenant_ids: [default]
+        default_delivery_namespaces: [default]
+        default_customer_ids: [julong-tech-e-valley]
+        default_project_ids: [julong-guide-patrol]
+        default_site_ids: [julong-tech-e-valley]
     guard-1:
       roles: [operator]
     security-1:
@@ -732,36 +841,41 @@ field_operations:
       roles: [admin]
   site_map:
     zones:
-      main-road-1:
-        name: B区主通道
-        location: B区主通道
+      julong-main-entrance:
+        name: 聚龙科创e谷主入口通道（待现场标定）
+        location: 聚龙科创e谷主入口（待现场标定）
         type: main_channel
         parking_allowed: false
-      guide-01:
-        name: 游客中心路引点
-        location: 游客中心门口
+        commissioning_status: pending_site_survey
+      julong-guide-01:
+        name: 聚龙科创e谷导览服务点（待现场标定）
+        location: 聚龙科创e谷访客接待区域（待现场标定）
         type: help_point
-        help_point_id: guide-01
-      north-window-01:
-        name: 北侧一层窗户
-        location: 北侧一层窗户
-        type: window
+        help_point_id: julong-guide-01
+        commissioning_status: pending_site_survey
+      julong-patrol-01:
+        name: 聚龙科创e谷巡检检查点01（待现场标定）
+        location: 聚龙科创e谷巡检路线（待现场标定）
+        type: patrol_checkpoint
+        commissioning_status: pending_site_survey
 
 # ----------------------------------------------------------
 # Park space cognition: semantic points, service points, and guide routes.
 # This is the product-facing layer for controlled visitor wayfinding.
 # ----------------------------------------------------------
 space_cognition:
-  park_id: fanmu-chuangyi
-  map_id: fanmu-phase-1
-  store_path: data/space/space-catalog.json
+  park_id: julong-tech-e-valley
+  map_id: julong-commissioning
+  # Keep this deployment isolated from the legacy demo map. The first on-site
+  # survey should replace the placeholder origin and add approved destinations.
+  store_path: data/space/julong-tech-e-valley.json
   points:
-    - point_id: sp-west-gate
-      park_id: fanmu-chuangyi
-      map_id: fanmu-phase-1
-      point_name: 西门问询点
+    - point_id: sp-julong-guide-01
+      park_id: julong-tech-e-valley
+      map_id: julong-commissioning
+      point_name: 聚龙科创e谷导览服务点（待现场标定）
       point_type: service
-      aliases: [西门, 西门口, 主入口, 问询点]
+      aliases: [聚龙科创e谷, 主入口, 导览点, 问询点]
       x: 0
       y: 0
       z: 0
@@ -769,80 +883,19 @@ space_cognition:
       guide_mode: voice
       accessibility: robot_stop_only
       enabled: true
-    - point_id: poi-fanmu-coffee
-      park_id: fanmu-chuangyi
-      map_id: fanmu-phase-1
-      point_name: 梵木咖啡
-      point_type: restaurant
-      aliases: [咖啡店, 咖啡馆, 喝咖啡的地方, 咖啡]
-      building: 2号楼
-      floor: 一层
-      x: 80
-      y: 20
-      z: 0
-      yaw: 90
-      guide_mode: escort
-      accessibility: robot_passable
-      opening_hours: site_business_hours
-      enabled: true
-    - point_id: poi-restroom-3f1
-      park_id: fanmu-chuangyi
-      map_id: fanmu-phase-1
-      point_name: 3号楼一层卫生间
-      point_type: restroom
-      aliases: [厕所, 卫生间, 洗手间, 最近厕所]
-      building: 3号楼
-      floor: 一层
-      x: 45
-      y: 5
-      z: 0
-      yaw: 0
-      guide_mode: voice
-      accessibility: indoor_voice_only
-      enabled: true
-    - point_id: poi-parking-east
-      park_id: fanmu-chuangyi
-      map_id: fanmu-phase-1
-      point_name: 东侧停车区
-      point_type: parking
-      aliases: [停车场, 停车区, 停车的地方, 车位]
-      x: 120
-      y: -30
-      z: 0
-      yaw: 0
-      guide_mode: voice
-      accessibility: road_voice_only
-      enabled: true
   service_points:
-    - service_point_id: guide-west-gate
-      park_id: fanmu-chuangyi
-      map_id: fanmu-phase-1
-      point_id: sp-west-gate
-      service_point_name: 西门问询服务点
+    - service_point_id: julong-guide-01
+      park_id: julong-tech-e-valley
+      map_id: julong-commissioning
+      point_id: sp-julong-guide-01
+      service_point_name: 聚龙科创e谷导览服务点（待现场标定）
       dwell_seconds: 3
-      idle_prompt: 请站在问询牌前，我可以帮你指路。
-      greeting_prompt: 你好，请问需要指路吗？
+      idle_prompt: 我是小算，可以为你提供园区导览和巡检服务。
+      greeting_prompt: 你好，我是小算。请问需要导览吗？
       supported_intents: [wayfinding, escort]
       enabled: true
-  routes:
-    - route_id: route-west-gate-to-coffee
-      from_point_id: sp-west-gate
-      to_point_id: poi-fanmu-coffee
-      instructions: 梵木咖啡在2号楼一层。从西门沿主通道向前约80米，看到主通道后右转，沿左侧商铺继续前进即可到达。
-      guide_mode: escort
-      distance_m: 95
-      robot_passable: true
-      risk_notes: [人流密集时降低速度, 转角处语音提醒访客跟随]
-      enabled: true
-    - route_id: route-west-gate-to-restroom
-      from_point_id: sp-west-gate
-      to_point_id: poi-restroom-3f1
-      instructions: 最近的卫生间在3号楼一层。从这里沿主通道向前走约45米，看到3号楼入口后进入一层右侧即可到达。
-      guide_mode: voice
-      distance_m: 50
-      robot_passable: false
-      risk_notes: [室内区域首期只语音指路]
-      enabled: true
+  # Real destinations and routes must come from the on-site map survey.
+  routes: []
 # ----------------------------------------------------------
 # Perception provider contracts: external algorithms -> InteractionGate
 # ----------------------------------------------------------
@@ -947,8 +1000,8 @@ runtime:
     channel: voice
     text_session_id: askme-local-text
     text_channel: text
-    robot_id: ""
-    site_id: ""
+    robot_id: xiaosuan-1
+    site_id: julong-tech-e-valley
     submit: true
     timeout: 2.0
     failure_threshold: 2

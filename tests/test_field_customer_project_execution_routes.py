@@ -4,6 +4,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from askme.api.routes.field_customer_project_execution import (
+    _rehearsal_onsite_evidence_candidate,
+)
 from askme.health_server import create_health_app
 from tests.support.field_route_app import field_route_test_app as _field_route_test_app
 from tests.support.health_snapshots import runtime_snapshot as _runtime_snapshot
@@ -154,3 +157,31 @@ def test_customer_project_object_rehearsal_uses_project_scope_over_payload_spoof
         "site_id": "inovx-demo-park",
     }
     assert payload["normalized"]["project_scope"] == payload["raw_payload"]["project_scope"]
+
+
+def test_shadow_post_rehearsal_evidence_stays_manual_check_even_when_trusted() -> None:
+    registration = _rehearsal_onsite_evidence_candidate(
+        mode="shadow_post",
+        plan={"object_id": "vehicles", "display_name": "车辆违停"},
+        normalized={
+            "managed_object_id": "vehicles",
+            "device_trust": {"signature_verified": True},
+        },
+        ingest_result={
+            "accepted": True,
+            "event": {
+                "event_id": "evt-1",
+                "runtime_delivery": {"status": "completed", "run_id": "run-1"},
+            },
+        },
+        operator_id="supervisor-1",
+    )
+
+    assert registration["accepted"] is True
+    assert registration["status"] == "manual_check"
+    assert registration["evidence"]["status"] == "manual_check"
+    assert registration["evidence"]["evidence_tier"] == "acceptance_candidate"
+    assert registration["production_eligible"] is False
+    assert registration["evidence"]["production_eligible"] is False
+    assert registration["eligibility"]["signature_verified"] is True
+    assert registration["eligibility"]["runtime_completed"] is True

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from inspect import isawaitable
+from contextvars import ContextVar
+from copy import deepcopy
+from inspect import isawaitable, iscoroutinefunction
 from typing import TYPE_CHECKING, Any
 
 from askme.pipeline.core.hooks import PipelineHooks
@@ -90,6 +92,10 @@ class TurnExecutor:
 
         self._qp_turn_count = 0
         self._last_spoken_text: str = ""
+        self._turn_rag_context: ContextVar[dict[str, Any] | None] = ContextVar(
+            f"askme_turn_rag_{id(self)}",
+            default=None,
+        )
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         # Semaphore initialized eagerly here so concurrent calls to process()
         # before the first turn completes don't each create their own semaphore.
@@ -101,6 +107,17 @@ class TurnExecutor:
     def last_spoken_text(self) -> str:
         """The most recent text spoken via TTS. Used by repeat_last skill."""
         return self._last_spoken_text
+
+    @property
+    def current_turn_rag(self) -> dict[str, Any] | None:
+        """Return RAG evidence for the current async turn, never another request."""
+
+        payload = self._turn_rag_context.get()
+        return deepcopy(payload) if isinstance(payload, dict) else None
+
+    def clear_turn_context(self) -> None:
+        """Clear task-local turn metadata before a non-LLM routing path."""
+        self._turn_rag_context.set(None)
 
     def set_audio(self, audio: Any) -> None:
         """Late-bind AudioAgent (set by VoiceModule/TextModule after build)."""
@@ -147,16 +164,20 @@ class TurnExecutor:
 
         return asyncio.create_task(_idle_reflect())
 
-    def start_memory_prefetch(self, user_text: str) -> asyncio.Task[str]:
+    def start_memory_prefetch(self, user_text: str) -> asyncio.Task[Any]:
         """Start memory retrieval as a background task. Call ASAP after ASR returns."""
+        retrieve_with_context = getattr(self._memory, "retrieve_with_context", None)
+        if iscoroutinefunction(retrieve_with_context):
+            return asyncio.create_task(retrieve_with_context(user_text))
         return asyncio.create_task(self._memory.retrieve(user_text))
 
     async def process(
-        self, user_text: str, *, memory_task: asyncio.Task[str] | None = None,
+        self, user_text: str, *, memory_task: asyncio.Task[Any] | None = None,
         source: str = "voice",
         conversation_session_id: str | None = None,
     ) -> str:
         """Run the full brain pipeline for *user_text*. Returns assistant reply."""
+        self._turn_rag_context.set(None)
         session_scope = str(conversation_session_id or "").strip() or None
         # Set structured log context for this turn so all log records carry
         # the trace ID and source without manual argument threading.
@@ -201,15 +222,20 @@ class TurnExecutor:
             )
 
         if not memory_task:
-            memory_task = asyncio.create_task(self._memory.retrieve(user_text))
+            memory_task = self.start_memory_prefetch(user_text)
         vision_task = self._start_vision_capture()
 
         try:
             with _tracer.span("memory_retrieve"):
-                context_str = await memory_task
+                retrieval = await memory_task
+            context_str, turn_rag = self._coerce_memory_retrieval(retrieval)
+            if turn_rag is not None:
+                self._turn_rag_context.set(turn_rag)
         except Exception as _me:
             logger.warning("[TurnExecutor] Memory retrieve failed: %s", _me)
             context_str = ""
+            turn_rag = self._unavailable_memory_context(_me)
+            self._turn_rag_context.set(turn_rag)
 
         scene_desc = ""
         if vision_task:
@@ -224,7 +250,9 @@ class TurnExecutor:
         if scene_desc:
             self._log_episode("perception", scene_desc)
 
-        rag_policy = await self._memory_answer_policy()
+        rag_policy = self._turn_answer_policy(turn_rag)
+        if rag_policy is None:
+            rag_policy = await self._memory_answer_policy()
         system_prompt = self._prompt_builder.build_system_prompt(
             context_str,
             scene_desc=scene_desc,
@@ -239,6 +267,7 @@ class TurnExecutor:
             self._add_assistant_message(
                 forced_rag_reply,
                 conversation_session_id=session_scope,
+                **self._assistant_rag_metadata(),
             )
             self._last_spoken_text = forced_rag_reply
             if self._hooks:
@@ -288,6 +317,7 @@ class TurnExecutor:
                 full_response = await self._stream_processor.stream_with_tools(
                     messages, system_prompt, model=self._voice_model,
                     source=source,
+                    conversation_session_id=session_scope,
                 )
             if full_response.lstrip().startswith(self._SILENT_MARKER):
                 logger.info("[SILENT] Not addressed to robot, suppressing output")
@@ -303,6 +333,7 @@ class TurnExecutor:
             self._add_assistant_message(
                 full_response,
                 conversation_session_id=session_scope,
+                **self._assistant_rag_metadata(),
             )
             self._last_spoken_text = full_response
 
@@ -414,6 +445,59 @@ class TurnExecutor:
         policy = snapshot.get("last_answer_policy")
         return policy if isinstance(policy, dict) else None
 
+    @staticmethod
+    def _coerce_memory_retrieval(
+        retrieval: Any,
+    ) -> tuple[str, dict[str, Any] | None]:
+        context = getattr(retrieval, "context", None)
+        evidence = getattr(retrieval, "evidence", None)
+        rag = getattr(retrieval, "rag", None)
+        if isinstance(context, str) and isinstance(evidence, list) and isinstance(rag, dict):
+            return context, {
+                "evidence": [dict(item) for item in evidence if isinstance(item, dict)],
+                "rag": deepcopy(rag),
+            }
+        return str(retrieval or ""), None
+
+    @staticmethod
+    def _unavailable_memory_context(exc: Exception) -> dict[str, Any]:
+        reason = type(exc).__name__
+        return {
+            "evidence": [],
+            "rag": {
+                "turn_scoped": True,
+                "enabled": True,
+                "fallback_reason": reason,
+                "dropped_evidence": [],
+                "used_in_answer": False,
+                "answer_policy": {
+                    "state": "unavailable",
+                    "action": "refuse",
+                    "reason": reason,
+                    "message": "Memory retrieval failed for this turn.",
+                },
+            },
+        }
+
+    @staticmethod
+    def _turn_answer_policy(
+        turn_rag: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        rag = turn_rag.get("rag") if isinstance(turn_rag, dict) else None
+        policy = rag.get("answer_policy") if isinstance(rag, dict) else None
+        return policy if isinstance(policy, dict) else None
+
+    def _assistant_rag_metadata(self) -> dict[str, Any]:
+        turn_rag = self.current_turn_rag
+        if not isinstance(turn_rag, dict):
+            return {}
+        evidence = turn_rag.get("evidence")
+        rag = turn_rag.get("rag")
+        return {
+            "evidence": evidence if isinstance(evidence, list) else [],
+            "rag": rag if isinstance(rag, dict) else {},
+        }
+
     def _history_for_session(
         self,
         conversation_session_id: str | None,
@@ -446,13 +530,21 @@ class TurnExecutor:
         content: str,
         *,
         conversation_session_id: str | None,
+        evidence: list[dict[str, Any]] | None = None,
+        rag: dict[str, Any] | None = None,
     ) -> None:
+        metadata: dict[str, Any] = {}
+        if evidence is not None:
+            metadata["evidence"] = evidence
+        if rag is not None:
+            metadata["rag"] = rag
         if conversation_session_id is None:
-            self._conversation.add_assistant_message(content)
+            self._conversation.add_assistant_message(content, **metadata)
             return
         self._conversation.add_assistant_message(
             content,
             conversation_session_id=conversation_session_id,
+            **metadata,
         )
 
     def _get_messages(

@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-
 CUSTOMER_VISIBLE_PATHS = [
     Path("README.md"),
     Path("config.yaml"),
@@ -169,7 +168,10 @@ def test_customer_visible_text_has_no_hardcoded_robot_brand() -> None:
 
 
 def test_generated_customer_blueprint_payload_has_clean_text() -> None:
-    from askme.blueprints import blueprint_delivery_package, catalog_payload
+    from askme.api.routes.field_customer_project_execution import (
+        _object_rehearsal_boundary,
+        _rehearsal_onsite_evidence_rejection,
+    )
     from askme.api.services.capability_package_payloads import (
         capability_package_catalog,
         package_readiness_contract,
@@ -178,10 +180,7 @@ def test_generated_customer_blueprint_payload_has_clean_text() -> None:
     from askme.api.services.field_customer_project_workbench import (
         build_customer_project_workbench_payload,
     )
-    from askme.api.routes.field_customer_project_execution import (
-        _object_rehearsal_boundary,
-        _rehearsal_onsite_evidence_rejection,
-    )
+    from askme.blueprints import blueprint_delivery_package, catalog_payload
 
     ready_config = {
         "voice": {},

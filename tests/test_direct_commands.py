@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-
 from askme.robot.direct_commands import get_command, list_commands
 
 

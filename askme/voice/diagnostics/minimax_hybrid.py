@@ -17,12 +17,15 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from askme.voice.input.cloud_asr import cloud_asr_credentials_present
+
 _MINIMAX_MODEL_PREFIX = "minimax"
 _MINIMAX_BASE_HINTS = ("minimax", "hailuo")
 _SUPPORTED_ASR_PROVIDERS = {
     "dashscope_paraformer",
     "qwen_asr_realtime",
     "tencent_asr_realtime",
+    "volcengine_seed_asr",
 }
 _DIRECT_CONTROL_RE = re.compile(
     r"\b("
@@ -280,19 +283,31 @@ def _check_realtime_asr(
             f"voice_brain.asr_provider={plan.asr_provider!r} is not a known domestic realtime ASR provider"
         )
     enabled = bool(cloud_asr_cfg.get("enabled", False))
-    api_key = str(cloud_asr_cfg.get("api_key", "")).strip()
+    credentials_present = cloud_asr_credentials_present(cloud_asr_cfg)
+    configured_provider = str(
+        cloud_asr_cfg.get("provider", plan.asr_provider)
+    ).strip().lower()
     websocket_ok = bool(deps.get("websocket_client", False))
     if not enabled:
         errors.append("voice.cloud_asr.enabled must be true for minimax_hybrid")
-    if not api_key:
-        errors.append("voice.cloud_asr.api_key is empty")
+    if not credentials_present:
+        if configured_provider in {
+            "volcengine",
+            "doubao",
+            "seed_asr",
+            "volcengine_seed_asr",
+        }:
+            errors.append("voice.cloud_asr Volcengine credentials are incomplete")
+        else:
+            errors.append("voice.cloud_asr.api_key is empty")
     if not websocket_ok:
         errors.append("Cloud ASR dependency missing: websocket-client")
     return {
         "ok": not errors,
         "provider": plan.asr_provider,
         "cloud_asr_enabled": enabled,
-        "api_key_configured": bool(api_key),
+        "api_key_configured": credentials_present,
+        "credentials_configured": credentials_present,
         "websocket_client": websocket_ok,
         "errors": errors,
         "warnings": warnings,

@@ -73,9 +73,9 @@ def build_patrol_report(ts: float, detected: str) -> str:
 
 async def run(video_path: str) -> None:
     from askme.brain.vision_bridge import VisionBridge
+    from askme.voice.tts import TTSEngine
 
     from askme.config import get_config
-    from askme.voice.tts import TTSEngine
 
     cfg = get_config()
     brain = cfg.get("brain", {})

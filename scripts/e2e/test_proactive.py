@@ -11,9 +11,9 @@ if sys.platform == "win32":
 
 from askme.brain.llm_client import LLMClient
 from askme.brain.vision_bridge import VisionBridge
+from askme.voice.tts import TTSEngine
 
 from askme.config import get_config
-from askme.voice.tts import TTSEngine
 
 
 async def main():

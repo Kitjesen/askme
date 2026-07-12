@@ -25,6 +25,7 @@ _LAZY_EXPORTS = {
     "VADEngine": ("askme.voice.input.vad", "VADEngine"),
     "VADController": ("askme.voice.input.vad_controller", "VADController"),
     "VADEvent": ("askme.voice.input.vad_controller", "VADEvent"),
+    "VolcengineASR": ("askme.voice.input.volcengine_asr", "VolcengineASR"),
 }
 
 __all__ = sorted(_LAZY_EXPORTS)

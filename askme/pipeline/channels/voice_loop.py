@@ -12,7 +12,7 @@ from askme.contracts.adapters import (
     interaction_decision_to_action_decision,
     perception_snapshot_to_input,
 )
-from askme.pipeline.channels.runtime_bridge_calls import try_handle_runtime_bridge_turn
+from askme.pipeline.channels.runtime_bridge_calls import try_runtime_bridge_turn
 from askme.pipeline.core.trace import get_tracer
 from askme.ports import AudioFrontendPort, AudioRouterPort, VoiceTurnBridgePort
 from askme.robot_interaction import attach_intent_route_trace
@@ -43,6 +43,12 @@ class InteractionGateProtocol(Protocol):
         *,
         addressed: bool = True,
         perception: InteractionPerceptionSnapshot | dict[str, Any] | None = None,
+        mission_mode: str | None = None,
+        actor_role: str | None = None,
+        wake_authorized: bool = False,
+        wake_source: str = "none",
+        followup_active: bool = False,
+        awaiting_confirmation: bool = False,
     ) -> InteractionDecision:
         """Decide whether a voice turn should continue to the brain."""
 
@@ -59,6 +65,12 @@ class _DefaultInteractionGate:
         *,
         addressed: bool = True,
         perception: InteractionPerceptionSnapshot | dict[str, Any] | None = None,
+        mission_mode: str | None = None,
+        actor_role: str | None = None,
+        wake_authorized: bool = False,
+        wake_source: str = "none",
+        followup_active: bool = False,
+        awaiting_confirmation: bool = False,
     ) -> InteractionDecision:
         return InteractionDecision(InteractionAction.RESPOND, "gate_disabled", 1.0)
 
@@ -105,10 +117,13 @@ class VoiceLoop:
         self._address_detector: AddressDetectorProtocol = _DefaultAddressDetector()
         self._interaction_gate: InteractionGateProtocol = _DefaultInteractionGate()
         self._interaction_perception_provider: Callable[[], Any] | None = None
+        self._mission_context_provider: Callable[[], Any] | None = None
         self._last_interaction_decision: dict[str, Any] | None = None
         self._last_interaction_perception: dict[str, Any] | None = None
+        self._last_mission_context: dict[str, Any] | None = None
         self._last_input_contract: dict[str, Any] | None = None
         self._last_action_contract: dict[str, Any] | None = None
+        self._last_runtime_bridge_status: dict[str, Any] | None = None
         self._conversation_session_id: str | None = None
         self._degraded_conversation_session_id: str | None = None
 
@@ -123,6 +138,10 @@ class VoiceLoop:
     def set_interaction_perception_provider(self, provider: Callable[[], Any] | None) -> None:
         """Wire a best-effort provider for vision/audio-source/pose context."""
         self._interaction_perception_provider = provider
+
+    def set_mission_context_provider(self, provider: Callable[[], Any] | None) -> None:
+        """Wire the runtime-owned mission and actor state for voice admission."""
+        self._mission_context_provider = provider
 
     async def run(self) -> None:
         """Block until Ctrl+C or too many consecutive errors."""
@@ -182,18 +201,41 @@ class VoiceLoop:
                         continue
 
                 # Interaction gate: separate ambient speech from real user turns.
-                addressed = self._address_detector.is_addressed(user_text)
+                addressed_by_text = self._address_detector.is_addressed(user_text)
+                wake_authorized = bool(
+                    getattr(self._audio, "last_turn_wake_authorized", False)
+                )
+                wake_source = str(
+                    getattr(self._audio, "last_turn_wake_source", "none") or "none"
+                ).strip().lower()
+                if wake_authorized and wake_source == "none":
+                    wake_source = "keyword"
+                followup_active = wake_source == "followup_window"
+                addressed = addressed_by_text or wake_authorized
                 perception_snapshot = self._get_interaction_perception()
+                mission_context = self._get_mission_context()
                 gate_decision = self._interaction_gate.evaluate(
                     user_text,
                     addressed=addressed,
                     perception=perception_snapshot,
+                    mission_mode=_clean_optional_text(mission_context.get("mission_mode")),
+                    actor_role=_clean_optional_text(mission_context.get("actor_role")),
+                    wake_authorized=wake_authorized,
+                    wake_source=wake_source,
+                    followup_active=followup_active,
+                    awaiting_confirmation=bool(self._audio.awaiting_confirmation),
                 )
                 self._last_interaction_decision = _decision_to_dict(
                     gate_decision,
                     addressed=addressed,
+                    addressed_by_text=addressed_by_text,
+                    wake_authorized=wake_authorized,
+                    wake_source=wake_source,
+                    followup_active=followup_active,
+                    awaiting_confirmation=bool(self._audio.awaiting_confirmation),
                 )
                 self._last_interaction_perception = _snapshot_to_dict(perception_snapshot)
+                self._last_mission_context = dict(mission_context)
                 input_contract = perception_snapshot_to_input(
                     perception_snapshot,
                     transcript=user_text,
@@ -212,18 +254,35 @@ class VoiceLoop:
                     "reason": gate_decision.reason,
                     "confidence": gate_decision.confidence,
                     "addressed": addressed,
+                    "addressed_by_text": addressed_by_text,
+                    "wake_authorized": wake_authorized,
+                    "wake_source": wake_source,
+                    "followup_active": followup_active,
+                    "awaiting_confirmation": bool(self._audio.awaiting_confirmation),
                     "perception": self._last_interaction_perception,
+                    "mission_context": self._last_mission_context,
                 }
                 _trace.metadata["product_contract"] = {
                     "perception_input": self._last_input_contract,
                     "action_decision": self._last_action_contract,
                 }
+                logger.info(
+                    "InteractionGate: action=%s reason=%s confidence=%.2f "
+                    "wake_source=%s addressed=%s",
+                    gate_decision.action.value,
+                    gate_decision.reason,
+                    gate_decision.confidence,
+                    wake_source,
+                    addressed,
+                )
                 if gate_decision.action in (
                     InteractionAction.IGNORE,
                     InteractionAction.RECORD_ONLY,
                 ):
                     self._record_environment_speech(user_text, gate_decision)
                     continue
+
+                self._mark_interaction_turn()
                 if gate_decision.action in (
                     InteractionAction.CLARIFY,
                     InteractionAction.DEFER,
@@ -620,6 +679,11 @@ class VoiceLoop:
                 ),
             )
 
+    def _mark_interaction_turn(self) -> None:
+        marker = getattr(self._audio, "mark_interaction_turn", None)
+        if callable(marker):
+            marker()
+
     def _get_interaction_perception(self) -> InteractionPerceptionSnapshot | dict[str, Any] | None:
         if self._interaction_perception_provider is None:
             return None
@@ -629,12 +693,24 @@ class VoiceLoop:
             logger.debug("Interaction perception provider failed: %s", exc)
             return InteractionPerceptionSnapshot.unknown("provider_error")
 
+    def _get_mission_context(self) -> dict[str, Any]:
+        if self._mission_context_provider is None:
+            return {}
+        try:
+            payload = self._mission_context_provider()
+        except Exception as exc:
+            logger.warning("VoiceLoop: mission context provider failed: %s", exc)
+            return {"source": "provider_error"}
+        return dict(payload) if isinstance(payload, dict) else {}
+
     def interaction_status_snapshot(self) -> dict[str, Any]:
         return {
             "last_decision": dict(self._last_interaction_decision or {}),
             "last_perception": dict(self._last_interaction_perception or {}),
+            "mission_context": dict(self._last_mission_context or {}),
             "last_input_contract": dict(self._last_input_contract or {}),
             "last_action_contract": dict(self._last_action_contract or {}),
+            "runtime_bridge": dict(self._last_runtime_bridge_status or {}),
         }
 
     def _classify_audio_error(self, exc: BaseException) -> Any:
@@ -652,7 +728,7 @@ class VoiceLoop:
 
         conversation_session_id = self._conversation_session_for()
         try:
-            return await try_handle_runtime_bridge_turn(
+            outcome = await try_runtime_bridge_turn(
                 self._voice_runtime_bridge.handle_voice_text,
                 user_text,
                 conversation_session_id=conversation_session_id,
@@ -661,9 +737,36 @@ class VoiceLoop:
                 on_spoken_reply=self._audio.speak_and_wait,
                 label="Voice",
             )
+            status = self._runtime_bridge_snapshot()
+            status.update({
+                "handled": outcome.handled,
+                "local_fallback": not outcome.handled,
+            })
+            self._last_runtime_bridge_status = status
+            return outcome.handled
         except Exception as exc:
             logger.warning("VoiceLoop: runtime bridge failed, falling back locally: %s", exc)
+            self._last_runtime_bridge_status = {
+                **self._runtime_bridge_snapshot(),
+                "handled": False,
+                "local_fallback": True,
+                "last_status": "exception",
+                "last_error_type": type(exc).__name__,
+            }
             return False
+
+    def _runtime_bridge_snapshot(self) -> dict[str, Any]:
+        status = getattr(self._voice_runtime_bridge, "status_snapshot", None)
+        if not callable(status):
+            return {}
+        try:
+            payload = status()
+        except Exception as exc:
+            return {
+                "last_status": "status_unavailable",
+                "last_error_type": type(exc).__name__,
+            }
+        return dict(payload) if isinstance(payload, dict) else {}
 
     def _conversation_session_for(self) -> str | None:
         if self._conversation_session_id and self._cached_session_is_active(
@@ -716,6 +819,9 @@ class VoiceLoop:
                 user_text=user_text,
                 assistant_text=str(assistant_text or ""),
                 channel="voice",
+                metadata={
+                    "runtime_bridge": dict(self._last_runtime_bridge_status or {}),
+                },
             )
         except Exception as exc:
             logger.debug("VoiceLoop: local gateway turn record failed: %s", exc)
@@ -735,14 +841,29 @@ def _decision_to_dict(
     decision: InteractionDecision,
     *,
     addressed: bool,
+    addressed_by_text: bool,
+    wake_authorized: bool,
+    wake_source: str,
+    followup_active: bool,
+    awaiting_confirmation: bool,
 ) -> dict[str, Any]:
     return {
         "action": decision.action.value,
         "reason": decision.reason,
         "confidence": decision.confidence,
         "addressed": addressed,
+        "addressed_by_text": addressed_by_text,
+        "wake_authorized": wake_authorized,
+        "wake_source": wake_source,
+        "followup_active": followup_active,
+        "awaiting_confirmation": awaiting_confirmation,
         "should_record_environment": decision.should_record_environment,
     }
+
+
+def _clean_optional_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _snapshot_to_dict(snapshot: Any) -> dict[str, Any]:

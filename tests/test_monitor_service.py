@@ -117,3 +117,28 @@ def test_conversation_history_payload_returns_empty_for_missing_file(tmp_path: P
     ).conversation_history_payload()
 
     assert payload == {"messages": [], "count": 0}
+
+
+def test_conversation_history_payload_reads_session_scoped_state(tmp_path: Path) -> None:
+    state = {
+        "sessions": {
+            "": [{"role": "assistant", "content": "default"}],
+            "conv-a": [{"role": "user", "content": "hello a"}],
+            "conv-b": [{"role": "user", "content": "hello b"}],
+        }
+    }
+    (tmp_path / "history.json").write_text(json.dumps(state), encoding="utf-8")
+    service = _service(
+        tmp_path,
+        config={"conversation": {"history_file": "history.json"}},
+    )
+
+    default_payload = service.conversation_history_payload()
+    scoped_payload = service.conversation_history_payload(
+        conversation_session_id="conv-a"
+    )
+
+    assert default_payload["messages"] == state["sessions"][""]
+    assert default_payload["available_session_ids"] == ["conv-a", "conv-b"]
+    assert scoped_payload["messages"] == state["sessions"]["conv-a"]
+    assert scoped_payload["conversation_session_id"] == "conv-a"

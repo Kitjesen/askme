@@ -135,7 +135,7 @@ def register_capability_routes(
             response = RuntimeCapabilitiesResponse.model_validate(payload)
             return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
-            logger.error("Capabilities endpoint failed: %s", exc)
+            logger.exception("Capabilities endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.get(
@@ -174,7 +174,7 @@ def register_capability_routes(
             )
             return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
-            logger.error("Capability center endpoint failed: %s", exc)
+            logger.exception("Capability center endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.get(
@@ -216,7 +216,7 @@ def register_capability_routes(
             )
             return JSONResponse(response.model_dump(mode="python"), headers=_NO_STORE_HEADERS)
         except Exception as exc:
-            logger.error("Capability package catalog endpoint failed: %s", exc)
+            logger.exception("Capability package catalog endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.options("/api/capability-packages", include_in_schema=False)
@@ -326,7 +326,7 @@ def register_capability_routes(
                 headers=_NO_STORE_HEADERS,
             )
         except Exception as exc:
-            logger.error("Scenario intent catalog endpoint failed: %s", exc)
+            logger.exception("Scenario intent catalog endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.post(
@@ -369,7 +369,7 @@ def register_capability_routes(
                 space_dispatch=space_dispatch,
             )
         except Exception as exc:
-            logger.error("Scenario intent preview endpoint failed: %s", exc)
+            logger.exception("Scenario intent preview endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
         response = ScenarioIntentPreviewResponse.model_validate(
             {
@@ -431,7 +431,7 @@ def register_capability_routes(
                 headers=_NO_STORE_HEADERS,
             )
         except Exception as exc:
-            logger.error("Blueprint catalog endpoint failed: %s", exc)
+            logger.exception("Blueprint catalog endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.options("/api/blueprints/{blueprint_name}/delivery-package", include_in_schema=False)
@@ -497,7 +497,7 @@ def register_capability_routes(
                 headers=_NO_STORE_HEADERS,
             )
         except Exception as exc:
-            logger.error("Blueprint delivery package endpoint failed: %s", exc)
+            logger.exception("Blueprint delivery package endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
 
     @app.options("/api/blueprints/{blueprint_name}", include_in_schema=False)
@@ -551,5 +551,5 @@ def register_capability_routes(
                 headers=_NO_STORE_HEADERS,
             )
         except Exception as exc:
-            logger.error("Blueprint detail endpoint failed: %s", exc)
+            logger.exception("Blueprint detail endpoint failed")
             return JSONResponse({"error": str(exc)}, status_code=500, headers=_CORS_HEADERS)
