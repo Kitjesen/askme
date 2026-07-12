@@ -59,7 +59,7 @@ class PipelineModule(Module):
     """Provides the BrainPipeline to the runtime."""
 
     name = "pipeline"
-    depends_on = ("llm", "memory", "tools")
+    depends_on = ("llm", "memory", "tools", "perception")
     provides = ("pipeline",)
 
     pipeline: Out[BrainPipeline]
@@ -95,7 +95,15 @@ class PipelineModule(Module):
         memory_system = _from(mem_mod, "memory_system")
         tools = _from(tools_mod, "registry")
         dog_safety = _from(safety_mod, "client")
+        # Depending on runtime auto-wiring, this input is either the
+        # PerceptionModule (which exposes ``vision_bridge``) or the VisionPort
+        # itself.  Preserve the actual port in the latter case so TurnExecutor
+        # can capture frames and call the configured VLM.
         vision = _from(perception_mod, "vision_bridge")
+        if vision is None and callable(
+            getattr(perception_mod, "describe_scene_with_question", None)
+        ):
+            vision = perception_mod
         dog_control = _from(control_mod, "client")
 
         brain_cfg = cfg.get("brain", {})

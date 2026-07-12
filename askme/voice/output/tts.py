@@ -110,6 +110,12 @@ class TTSEngine(TTSBackend):
     _RE_LIST = re.compile(r'^[-*]\s+', flags=re.MULTILINE)
     _RE_IMG = re.compile(r'!\[.*?\]\(.*?\)')
     _RE_LINK = re.compile(r'\[(.+?)\]\(.*?\)')
+    _INTERNAL_TEXT_MARKERS = (
+        "[SILENT]",
+        "DSML",
+        "<TOOL_CALL",
+        "TOOL_CALLS>",
+    )
 
     def __init__(self, config: dict[str, Any], *, audio_router: AudioRouter | None = None) -> None:
         self._backend: str = config.get("backend", "local")
@@ -125,6 +131,12 @@ class TTSEngine(TTSBackend):
         self._sample_rate: int = int(config.get("sample_rate", 24000))
         self._output_device: int | str | None = config.get("output_device")
         self._output_transport: str = str(config.get("output_transport", "auto")).lower()
+        self._tts_text_coalesce_seconds: float = max(
+            0.0, float(config.get("text_coalesce_seconds", 0.0))
+        )
+        self._tts_text_coalesce_max_chars: int = max(
+            1, int(config.get("text_coalesce_max_chars", 160))
+        )
 
         # Local backend config
         self._model_dir: str = config.get("model_dir", "models/tts/vits-melo-tts-zh_en")
@@ -179,6 +191,21 @@ class TTSEngine(TTSBackend):
         )
         self._minimax_onset_threshold: float = float(
             config.get("minimax_onset_threshold", 0.0005)
+        )
+        self._output_tail_silence_seconds: float = max(
+            0.0,
+            min(2.0, float(config.get("output_tail_silence_seconds", 0.0))),
+        )
+        self._aplay_start_buffer_seconds: float = max(
+            0.0,
+            min(10.0, float(config.get("aplay_start_buffer_seconds", 0.0))),
+        )
+        self._aplay_wait_for_synthesis_complete: bool = bool(
+            config.get("aplay_wait_for_synthesis_complete", False)
+        )
+        self._aplay_drain_timeout_seconds: float = max(
+            1.0,
+            min(120.0, float(config.get("aplay_drain_timeout_seconds", 30.0))),
         )
 
         # Consecutive failure tracking for MiniMax auto-disable
@@ -447,6 +474,10 @@ class TTSEngine(TTSBackend):
     @staticmethod
     def _is_speakable_text(text: str) -> bool:
         """Return True for normal text and short numeric/CJK utterances."""
+        upper = text.upper()
+        if any(marker in upper for marker in TTSEngine._INTERNAL_TEXT_MARKERS):
+            logger.error("TTS blocked internal protocol text")
+            return False
         if len(text) > 1:
             return True
         char = text[0]
@@ -893,12 +924,69 @@ class TTSEngine(TTSBackend):
                 self.tts_text_queue.task_done()
                 break
             generation, text = item
+            acknowledgements = 1
+            stop_after_item = False
             try:
+                text, extra_acknowledgements, stop_after_item = self._coalesce_tts_text(
+                    generation, text
+                )
+                acknowledgements += extra_acknowledgements
                 self._generate_audio(text, generation)
             except Exception as e:
                 logger.error("TTS worker error: %s", e)
             finally:
+                for _ in range(acknowledgements):
+                    self.tts_text_queue.task_done()
+            if stop_after_item:
+                break
+
+    def _coalesce_tts_text(
+        self,
+        generation: int,
+        text: str,
+    ) -> tuple[str, int, bool]:
+        """Merge adjacent fragments from one response before cloud synthesis."""
+        wait_seconds = self._tts_text_coalesce_seconds
+        if wait_seconds <= 0 or len(text) >= self._tts_text_coalesce_max_chars:
+            return text, 0, False
+
+        deadline = time.monotonic() + wait_seconds
+        merged = text
+        acknowledgements = 0
+        stop_after_item = False
+        merged_items = 1
+        while len(merged) < self._tts_text_coalesce_max_chars:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                next_item = self.tts_text_queue.get(timeout=remaining)
+            except queue.Empty:
+                break
+            if next_item is None:
+                acknowledgements += 1
+                stop_after_item = True
+                break
+
+            next_generation, next_text = next_item
+            if next_generation != generation:
                 self.tts_text_queue.task_done()
+                self.tts_text_queue.put(next_item)
+                break
+
+            acknowledgements += 1
+            available = self._tts_text_coalesce_max_chars - len(merged)
+            if len(next_text) > available:
+                self.tts_text_queue.task_done()
+                self.tts_text_queue.put(next_item)
+                acknowledgements -= 1
+                break
+            merged += next_text
+            merged_items += 1
+
+        if merged_items > 1:
+            logger.info("TTS: coalesced %d text fragments", merged_items)
+        return merged, acknowledgements, stop_after_item
 
     def _generate_audio(self, text: str, generation: int) -> None:
         """Dispatch to local, edge, or minimax backend."""
@@ -950,6 +1038,18 @@ class TTSEngine(TTSBackend):
                     self._minimax_fail_count = 0
         else:
             self._run_async(self._generate_edge(text, generation))
+        self._queue_output_tail_silence(generation)
+
+    def _queue_output_tail_silence(self, generation: int) -> None:
+        """Keep USB playback fed briefly so the device does not swallow the final phoneme."""
+        if not self._is_generation_current(generation):
+            return
+        sample_count = int(self._sample_rate * self._output_tail_silence_seconds)
+        if sample_count <= 0:
+            return
+        with self._buffer_lock:
+            self.tts_buffer.append(np.zeros(sample_count, dtype=np.float32))
+        logger.debug("TTS: queued %.3fs output tail silence", self._output_tail_silence_seconds)
 
     def _use_minimax_fallback(self, text: str, generation: int) -> None:
         """Use local or edge TTS as a fallback when MiniMax is unavailable."""
@@ -1411,6 +1511,24 @@ class TTSEngine(TTSBackend):
                 proc.terminate()
             except Exception as exc:
                 logger.debug("aplay terminate failed (ignored): %s", exc)
+
+    def _wait_for_aplay_drain(self, proc: subprocess.Popen) -> bool:  # type: ignore[type-arg]
+        """Let aplay drain queued USB audio before resorting to a forced kill."""
+        try:
+            proc.wait(timeout=self._aplay_drain_timeout_seconds)
+            return True
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "aplay: drain timed out after %.1fs; forcing process stop",
+                self._aplay_drain_timeout_seconds,
+            )
+        except Exception as exc:
+            logger.error("aplay: drain wait failed; forcing process stop: %s", exc)
+        try:
+            proc.kill()
+        except Exception as exc:
+            logger.debug("aplay kill after drain failure ignored: %s", exc)
+        return False
 
     def _kill_usb_audio(self) -> None:
         """Terminate any running MCP01 direct USB playback helper."""
@@ -2042,6 +2160,7 @@ class TTSEngine(TTSBackend):
             _proc: subprocess.Popen | None = None  # type: ignore[type-arg]
             _need_preroll = True
             _empty_polls = 0
+            _prebuffer_wait_logged = False
             _MAX_EMPTY_POLLS = 250  # 250 × 20 ms = 5 s — keeps aplay warm between conversational turns, avoids re-paying 400ms pre-roll
             _router_ctx = None  # saved output_session() context manager
 
@@ -2059,10 +2178,7 @@ class TTSEngine(TTSBackend):
                     _proc.stdin.close()  # type: ignore[union-attr]
                 except Exception:
                     pass
-                try:
-                    _proc.wait(timeout=5)
-                except Exception:
-                    _proc.kill()
+                self._wait_for_aplay_drain(_proc)
                 with self._aplay_lock:
                     self._aplay_proc = None
                 _proc = None
@@ -2088,6 +2204,31 @@ class TTSEngine(TTSBackend):
                     _close_aplay()
                     logger.info("TTS playback: stop_requested, skipping queued audio")
                     continue
+
+                if (
+                    _aplay_cmd is not None
+                    and _proc is None
+                    and self._aplay_prebuffer_pending()
+                ):
+                    if not _prebuffer_wait_logged:
+                        if self._aplay_wait_for_synthesis_complete:
+                            logger.info("aplay: buffering complete utterance before playback")
+                        else:
+                            logger.info(
+                                "aplay: prebuffering up to %.2fs before streamed playback",
+                                self._aplay_start_buffer_seconds,
+                            )
+                        _prebuffer_wait_logged = True
+                    time.sleep(0.02)
+                    continue
+                if _prebuffer_wait_logged and _proc is None:
+                    with self._buffer_lock:
+                        buffered_samples = sum(len(item) for item in self.tts_buffer)
+                    logger.info(
+                        "aplay: prebuffer ready (%.2fs)",
+                        buffered_samples / float(self._sample_rate),
+                    )
+                    _prebuffer_wait_logged = False
 
                 chunk = None
                 with self._buffer_lock:
@@ -2248,6 +2389,19 @@ class TTSEngine(TTSBackend):
     def _has_buffered_audio(self) -> bool:
         with self._buffer_lock:
             return bool(self.tts_buffer)
+
+    def _aplay_prebuffer_pending(self) -> bool:
+        """Wait for a short network cushion before opening a streamed aplay utterance."""
+        if self.tts_text_queue.unfinished_tasks <= 0:
+            return False
+        if self._aplay_wait_for_synthesis_complete:
+            return True
+        target = int(self._sample_rate * self._aplay_start_buffer_seconds)
+        if target <= 0:
+            return False
+        with self._buffer_lock:
+            buffered = sum(len(chunk) for chunk in self.tts_buffer)
+        return buffered < target
 
     def _clear_audio_buffer(self) -> None:
         with self._buffer_lock:

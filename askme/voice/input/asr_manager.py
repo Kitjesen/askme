@@ -185,6 +185,12 @@ class ASRManager:
         if not self._recognition_active:
             return None
 
+        # Cloud ASR is the primary recognizer. A local endpoint may fire on a
+        # brief mid-sentence pause, so it must not terminate an active cloud
+        # session before VAD has confirmed that the user finished speaking.
+        if self._cloud_active:
+            return None
+
         if not self._asr.is_endpoint(self._stream):
             return None
 

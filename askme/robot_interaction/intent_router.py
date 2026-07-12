@@ -53,6 +53,25 @@ class Intent:
 class IntentRouter:
     """Route user input to the correct handler with safety-first priority."""
 
+    # Camera questions must reach TurnExecutor so it can capture the current
+    # LingTu frame and ask the configured vision model.  Keep this check ahead
+    # of legacy voice skills such as environment_report.
+    _VISUAL_QUERY_MARKERS = (
+        "看见",
+        "看到",
+        "看一下",
+        "看看",
+        "前面有什么",
+        "周围有什么",
+        "周围看到",
+        "摄像头",
+        "相机",
+        "图像",
+        "画面",
+        "图片",
+        "眼前有什么",
+    )
+
     BUILTIN_COMMANDS = DEFAULT_ROUTING_POLICY.builtin_commands
     MIN_TRIGGER_LENGTH = DEFAULT_ROUTING_POLICY.min_trigger_length
     _NEGATION_PREFIXES = DEFAULT_ROUTING_POLICY.negation_prefixes
@@ -131,6 +150,17 @@ class IntentRouter:
                 command=command,
                 raw_text=stripped,
                 reason="builtin_command",
+            )
+
+        # Route visual questions to the normal pipeline.  This intentionally
+        # precedes voice-trigger matching so "看看周围" does not invoke the
+        # legacy environment_report skill and its long, non-visual response.
+        if any(marker in stripped for marker in self._VISUAL_QUERY_MARKERS):
+            logger.info("Visual query routed to camera pipeline: '%s'", stripped)
+            return Intent(
+                type=IntentType.GENERAL,
+                raw_text=stripped,
+                reason="visual_query",
             )
 
         # 4. Voice trigger matching (substring match)

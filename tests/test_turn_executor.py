@@ -9,6 +9,12 @@ import pytest
 from askme.pipeline.turn_executor import TurnExecutor
 
 
+def test_internal_tool_protocol_is_detected_before_user_output() -> None:
+    assert TurnExecutor._contains_internal_protocol("正常中文回答") is False
+    assert TurnExecutor._contains_internal_protocol("<｜｜DSML｜｜tool_calls>") is True
+    assert TurnExecutor._contains_internal_protocol("<tool_call>internal</tool_call>") is True
+
+
 def _make_executor(**kwargs) -> TurnExecutor:
     """Build a TurnExecutor with all heavy deps mocked."""
     conversation = MagicMock()
@@ -434,6 +440,20 @@ class TestSetAudio:
         new_audio = MagicMock()
         te.set_audio(new_audio)
         assert te._audio is new_audio
+
+
+class TestVisualQueryDetection:
+    def test_visual_phrases_trigger_camera_capture(self):
+        from askme.pipeline.core.turn_executor import TurnExecutor
+
+        assert TurnExecutor._is_visual_query("小算，你看见了什么")
+        assert TurnExecutor._is_visual_query("看一下前面有什么")
+        assert TurnExecutor._is_visual_query("摄像头里有人吗")
+
+    def test_non_visual_question_does_not_trigger_camera_capture(self):
+        from askme.pipeline.core.turn_executor import TurnExecutor
+
+        assert not TurnExecutor._is_visual_query("你的老板是谁")
 
 
 class TestShutdown:

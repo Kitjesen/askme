@@ -5,8 +5,37 @@ from __future__ import annotations
 import threading
 import time
 import types
+import queue
 
 import pytest
+
+
+def test_cloud_tts_coalesces_adjacent_response_fragments() -> None:
+    from askme.voice.tts import TTSEngine
+
+    engine = object.__new__(TTSEngine)
+    engine._tts_text_coalesce_seconds = 0.05
+    engine._tts_text_coalesce_max_chars = 80
+    engine.tts_text_queue = queue.Queue()
+    engine.tts_text_queue.put((7, "后半句。"))
+
+    text, acknowledgements, stop_after_item = engine._coalesce_tts_text(
+        7, "前半句，"
+    )
+
+    assert text == "前半句，后半句。"
+    assert acknowledgements == 1
+    assert stop_after_item is False
+    engine.tts_text_queue.task_done()
+
+
+def test_tts_rejects_internal_protocol_and_silent_markers() -> None:
+    from askme.voice.tts import TTSEngine
+
+    assert TTSEngine._is_speakable_text("正常中文回答") is True
+    assert TTSEngine._is_speakable_text("[SILENT]") is False
+    assert TTSEngine._is_speakable_text("<｜｜DSML｜｜tool_calls>") is False
+    assert TTSEngine._is_speakable_text("<tool_call>internal</tool_call>") is False
 
 
 def test_local_backend_generates_and_queues(monkeypatch):
@@ -1004,3 +1033,97 @@ def test_auto_fallback_when_model_missing():
         assert engine._backend == "edge"
     finally:
         engine.shutdown()
+
+
+def test_output_tail_silence_is_queued_for_current_generation():
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine({
+        "backend": "edge",
+        "sample_rate": 16000,
+        "output_tail_silence_seconds": 0.25,
+    })
+
+    generation = engine._get_generation()
+    engine._queue_output_tail_silence(generation)
+
+    assert len(engine.tts_buffer) == 1
+    tail = engine.tts_buffer.popleft()
+    assert len(tail) == 4000
+    assert np.count_nonzero(tail) == 0
+
+
+def test_aplay_prebuffer_waits_only_while_synthesis_is_active():
+    import queue
+    import threading
+    from collections import deque
+
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    engine = object.__new__(TTSEngine)
+    engine._sample_rate = 1000
+    engine._aplay_start_buffer_seconds = 2.5
+    engine._aplay_wait_for_synthesis_complete = False
+    engine.tts_text_queue = queue.Queue()
+    engine.tts_buffer = deque()
+    engine._buffer_lock = threading.Lock()
+    engine.tts_text_queue.put((1, "测试"))
+    with engine._buffer_lock:
+        engine.tts_buffer.append(np.zeros(2000, dtype=np.float32))
+    assert engine._aplay_prebuffer_pending() is True
+    with engine._buffer_lock:
+        engine.tts_buffer.append(np.zeros(500, dtype=np.float32))
+    assert engine._aplay_prebuffer_pending() is False
+    engine.tts_text_queue.get_nowait()
+    engine.tts_text_queue.task_done()
+
+
+def test_aplay_complete_utterance_mode_waits_until_synthesis_finishes():
+    import queue
+    import threading
+    from collections import deque
+
+    import numpy as np
+
+    from askme.voice.tts import TTSEngine
+
+    engine = object.__new__(TTSEngine)
+    engine._sample_rate = 1000
+    engine._aplay_start_buffer_seconds = 0.0
+    engine._aplay_wait_for_synthesis_complete = True
+    engine.tts_text_queue = queue.Queue()
+    engine.tts_buffer = deque([np.zeros(8000, dtype=np.float32)])
+    engine._buffer_lock = threading.Lock()
+    engine.tts_text_queue.put((1, "完整回复"))
+    assert engine._aplay_prebuffer_pending() is True
+    engine.tts_text_queue.get_nowait()
+    engine.tts_text_queue.task_done()
+    assert engine._aplay_prebuffer_pending() is False
+
+
+def test_aplay_drain_uses_configured_timeout_without_killing():
+    from askme.voice.tts import TTSEngine
+
+    class FakeProcess:
+        def __init__(self):
+            self.timeout = None
+            self.killed = False
+
+        def wait(self, timeout):
+            self.timeout = timeout
+            return 0
+
+        def kill(self):
+            self.killed = True
+
+    engine = object.__new__(TTSEngine)
+    engine._aplay_drain_timeout_seconds = 30.0
+    process = FakeProcess()
+
+    assert engine._wait_for_aplay_drain(process) is True
+    assert process.timeout == 30.0
+    assert process.killed is False

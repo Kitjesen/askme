@@ -336,6 +336,19 @@ class TestCheckEndpoint:
 
         assert result is None
 
+    def test_check_endpoint_does_not_preempt_active_cloud_session(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+        mocks["asr"].is_endpoint.return_value = True
+        mocks["asr"].get_result.return_value = "你记住"
+
+        mgr.start_session()
+        result = mgr.check_endpoint()
+
+        assert mgr._cloud_active is True
+        assert result is None
+        mocks["asr"].get_result.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Status snapshot

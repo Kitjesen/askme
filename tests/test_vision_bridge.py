@@ -4,6 +4,68 @@ from __future__ import annotations
 
 from askme.perception.vision_bridge import VisionBridge
 
+
+def test_encode_frame_for_vlm_has_dependency_free_png_fallback(monkeypatch):
+    import builtins
+
+    import numpy as np
+
+    original_import = builtins.__import__
+
+    def without_cv2(name, *args, **kwargs):
+        if name == "cv2":
+            raise ImportError("cv2 intentionally unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_cv2)
+    media_type, encoded = VisionBridge._encode_frame_for_vlm(
+        np.zeros((2, 3, 3), dtype=np.uint8)
+    )
+
+    assert media_type == "image/png"
+    assert encoded.startswith("iVBORw0KGgo")
+
+
+def test_encode_frame_for_vlm_downsamples_large_frame(monkeypatch):
+    import base64
+    import builtins
+    import struct
+
+    import numpy as np
+
+    original_import = builtins.__import__
+
+    def without_cv2(name, *args, **kwargs):
+        if name == "cv2":
+            raise ImportError("cv2 intentionally unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_cv2)
+    media_type, encoded = VisionBridge._encode_frame_for_vlm(
+        np.zeros((480, 640, 3), dtype=np.uint8), max_width=320
+    )
+    png = base64.b64decode(encoded)
+    width, height = struct.unpack(">II", png[16:24])
+
+    assert media_type == "image/png"
+    assert (width, height) == (320, 240)
+
+
+def test_visual_question_reports_backend_failure(monkeypatch):
+    import asyncio
+
+    bridge = VisionBridge()
+    bridge._vlm_client = object()
+    bridge._vlm_backend = "openai"
+    monkeypatch.setattr(bridge, "_capture_frame", lambda: object())
+    monkeypatch.setattr(
+        bridge, "_encode_frame_for_vlm", lambda frame, max_width: ("image/png", "AA==")
+    )
+
+    result = asyncio.run(bridge.describe_scene_with_question("看见了什么"))
+
+    assert result == "视觉识别服务暂时不可用，无法确认当前摄像头画面。"
+
 # ── _clean_vlm_response ───────────────────────────────────────────────────────
 
 class TestCleanVlmResponse:

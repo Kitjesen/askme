@@ -556,11 +556,7 @@ class AudioAgent:
             with mic.open() as mic_ctx:
                 # Phase 1: Wake word detection (if KWS available)
                 if self.kws and self.kws.available and self.kws_stream:
-                    _within_wake_window = (
-                        self._wake_timeout > 0
-                        and self._last_interaction_time > 0
-                        and (time.monotonic() - self._last_interaction_time) < self._wake_timeout
-                    )
+                    _within_wake_window = self._followup_window_active()
                     if _within_wake_window:
                         self.last_turn_wake_source = "followup_window"
                         logger.info(
@@ -576,6 +572,13 @@ class AudioAgent:
                         self.last_turn_wake_authorized = True
                         self.last_turn_wake_source = "keyword"
                         self._play_chime("wake")
+                elif self._followup_window_active():
+                    self.last_turn_wake_authorized = True
+                    self.last_turn_wake_source = "followup_window"
+                    logger.info(
+                        "Follow-up window active (%.0fs left), accepting speech without wake word",
+                        self._wake_timeout - (time.monotonic() - self._last_interaction_time),
+                    )
                 else:
                     self.last_turn_wake_source = "always_awake"
 
@@ -837,6 +840,14 @@ class AudioAgent:
         """Renew the weak follow-up window only after a turn is admitted."""
         self._last_interaction_time = time.monotonic()
         self._refresh_voice_metrics()
+
+    def _followup_window_active(self) -> bool:
+        """Return whether speech may continue without repeating the wake word."""
+        return bool(
+            self._wake_timeout > 0
+            and self._last_interaction_time > 0
+            and (time.monotonic() - self._last_interaction_time) < self._wake_timeout
+        )
 
     @staticmethod
     def _rms_int16(samples_int16: np.ndarray) -> float:

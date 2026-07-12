@@ -4,6 +4,7 @@ barge-in hold, agent state transitions, mute/unmute, volume/speed delegation."""
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -93,6 +94,17 @@ def test_asr_result_does_not_renew_followup_window_before_admission() -> None:
 
     agent.mark_interaction_turn()
     assert agent._last_interaction_time > 123.0
+
+
+def test_followup_window_is_measured_from_last_completed_interaction() -> None:
+    agent = object.__new__(AudioAgent)
+    agent._wake_timeout = 30.0
+    agent._last_interaction_time = time.monotonic()
+
+    assert agent._followup_window_active() is True
+
+    agent._last_interaction_time -= 31.0
+    assert agent._followup_window_active() is False
 
 
 # ---------------------------------------------------------------------------

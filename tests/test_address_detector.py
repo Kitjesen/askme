@@ -13,6 +13,7 @@ def _make_detector(
     names: list[str] | None = None,
     uncertain_policy: str = "addressed",
     allow_pronoun_address: bool = True,
+    aliases: dict[str, str] | None = None,
 ) -> AddressDetector:
     config: dict[str, object] = {
         "enabled": enabled,
@@ -22,6 +23,8 @@ def _make_detector(
     }
     if names is not None:
         config["names"] = names
+    if aliases is not None:
+        config["aliases"] = aliases
     return AddressDetector(config=config)
 
 
@@ -46,6 +49,16 @@ class TestEmptyText:
 
 
 class TestRobotName:
+    def test_asr_name_alias_is_normalized_to_canonical_name(self):
+        det = _make_detector(
+            names=["小算"],
+            aliases={"小蒜": "小算", "小帅": "小算"},
+        )
+
+        assert det.normalize_text("小蒜，请回答") == "小算，请回答"
+        assert det.normalize_text("小帅你好") == "小算你好"
+        assert det.is_addressed("小蒜，请回答") is True
+
     def test_deployment_name_xiaosuan_activates_window(self):
         det = _make_detector(names=["小算"])
 

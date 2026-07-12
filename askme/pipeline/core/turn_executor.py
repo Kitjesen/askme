@@ -31,6 +31,22 @@ class TurnExecutor:
     """Orchestrates one full conversation turn: memory, LLM, tools, TTS, save."""
 
     _SILENT_MARKER = "[SILENT]"
+    _INTERNAL_PROTOCOL_MARKERS = ("DSML", "<TOOL_CALL", "TOOL_CALLS>")
+    _INTERNAL_PROTOCOL_FALLBACK = "抱歉，刚才查询失败，请再说一遍。"
+    _VISUAL_QUERY_MARKERS = (
+        "看见",
+        "看到",
+        "看一下",
+        "看看",
+        "前面有什么",
+        "周围有什么",
+        "摄像头",
+        "相机",
+        "图像",
+        "画面",
+        "图片",
+        "眼前有什么",
+    )
     _REFLECT_DELAY_S = 5.0       # seconds to wait before post-turn reflection
 
     def _track_task(
@@ -118,6 +134,11 @@ class TurnExecutor:
     def clear_turn_context(self) -> None:
         """Clear task-local turn metadata before a non-LLM routing path."""
         self._turn_rag_context.set(None)
+
+    @classmethod
+    def _contains_internal_protocol(cls, text: str) -> bool:
+        upper = str(text or "").upper()
+        return any(marker in upper for marker in cls._INTERNAL_PROTOCOL_MARKERS)
 
     def set_audio(self, audio: Any) -> None:
         """Late-bind AudioAgent (set by VoiceModule/TextModule after build)."""
@@ -223,7 +244,7 @@ class TurnExecutor:
 
         if not memory_task:
             memory_task = self.start_memory_prefetch(user_text)
-        vision_task = self._start_vision_capture()
+        vision_task = self._start_vision_capture(user_text)
 
         try:
             with _tracer.span("memory_retrieve"):
@@ -249,6 +270,32 @@ class TurnExecutor:
 
         if scene_desc:
             self._log_episode("perception", scene_desc)
+
+        # A visual question is already answered by the configured VLM.  Do not
+        # send that evidence through the ordinary chat model again: it can
+        # contradict the image result (for example, changing "桌子" to
+        # "没有可识别物体") and adds another 10-20 seconds of latency.
+        if self._is_visual_query(user_text):
+            visual_reply = (
+                scene_desc.strip()
+                if scene_desc and scene_desc.strip()
+                else "我暂时无法读取当前摄像头画面。"
+            )
+            self._add_user_message(user_text, conversation_session_id=session_scope)
+            self._add_assistant_message(
+                visual_reply, conversation_session_id=session_scope
+            )
+            self._last_spoken_text = visual_reply
+            if is_voice:
+                self._audio.start_playback()
+                self._audio.speak(visual_reply)
+                await asyncio.to_thread(self._audio.wait_speaking_done)
+                # This branch returns before the normal process finally block;
+                # explicitly release TTS state so VAD is not gated forever.
+                self._audio.stop_playback()
+                self._audio.drain_buffers()
+            self._log_episode("action", f"视觉回复: {visual_reply[:100]}")
+            return visual_reply
 
         rag_policy = self._turn_answer_policy(turn_rag)
         if rag_policy is None:
@@ -319,6 +366,13 @@ class TurnExecutor:
                     source=source,
                     conversation_session_id=session_scope,
                 )
+            if self._contains_internal_protocol(full_response):
+                logger.error("Blocked internal tool protocol from assistant response")
+                full_response = self._INTERNAL_PROTOCOL_FALLBACK
+                if is_voice:
+                    self._audio.drain_buffers()
+                    self._audio.speak(full_response)
+
             if full_response.lstrip().startswith(self._SILENT_MARKER):
                 logger.info("[SILENT] Not addressed to robot, suppressing output")
                 self._audio.drain_buffers()
@@ -421,12 +475,24 @@ class TurnExecutor:
 
     # Internal helpers.
 
-    def _start_vision_capture(self) -> asyncio.Task[str] | None:
+    @classmethod
+    def _is_visual_query(cls, text: str) -> bool:
+        normalized = str(text or "").strip()
+        return any(marker in normalized for marker in cls._VISUAL_QUERY_MARKERS)
+
+    def _start_vision_capture(self, user_text: str = "") -> asyncio.Task[str] | None:
         if not self._vision or not self._vision.available:
             return None
         auto_capture_enabled = getattr(self._vision, "auto_capture_enabled", None)
-        if callable(auto_capture_enabled) and not auto_capture_enabled():
+        auto_capture = bool(
+            callable(auto_capture_enabled) and auto_capture_enabled()
+        )
+        visual_query = self._is_visual_query(user_text)
+        if not auto_capture and not visual_query:
             return None
+        targeted = getattr(self._vision, "describe_scene_with_question", None)
+        if visual_query and callable(targeted):
+            return asyncio.create_task(targeted(user_text))
         return asyncio.create_task(self._vision.describe_scene())
 
     async def _memory_answer_policy(self) -> dict[str, Any] | None:

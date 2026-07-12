@@ -171,6 +171,17 @@ class VoiceLoop:
                 if not user_text:
                     continue
 
+                normalize_text = getattr(self._address_detector, "normalize_text", None)
+                if callable(normalize_text):
+                    normalized_text = normalize_text(user_text)
+                    if normalized_text != user_text:
+                        logger.info(
+                            "Normalized ASR robot-name alias: %r -> %r",
+                            user_text,
+                            normalized_text,
+                        )
+                        user_text = normalized_text
+
                 consecutive_errors = 0
 
                 # Start pipeline trace for this turn

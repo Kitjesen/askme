@@ -169,6 +169,18 @@ class VisionBridge:
         self._capture_backend: str = self._vision_cfg.get("capture_backend", "auto")
         self._ros2_topic: str = self._vision_cfg.get("ros2_topic", "/camera/color/image_raw")
         self._ros2_grabber: _ROS2FrameGrabber | None = None
+        self._lingtu_repo: str = self._vision_cfg.get(
+            "lingtu_repo", "/opt/lingtu/current"
+        )
+        self._lingtu_color_shm: str = self._vision_cfg.get(
+            "lingtu_color_shm", "/dev/shm/lingtu_camera_color"
+        )
+        self._lingtu_max_age_s: float = max(
+            0.05, float(self._vision_cfg.get("lingtu_max_age_s", 1.0))
+        )
+        self._lingtu_rotate_180: bool = bool(
+            self._vision_cfg.get("lingtu_rotate_180", True)
+        )
 
         # VLM fallback config
         self._vlm_enabled: bool = self._vision_cfg.get("vlm_enabled", False)
@@ -178,6 +190,12 @@ class VisionBridge:
         self._vlm_base_url: str = self._vision_cfg.get(
             "vlm_base_url",
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+        self._vlm_timeout: float = max(
+            5.0, float(self._vision_cfg.get("vlm_timeout", 20.0))
+        )
+        self._vlm_image_max_width: int = max(
+            160, int(self._vision_cfg.get("vlm_image_max_width", 320))
         )
 
         # BPU YOLO (fast path, ~3ms on Horizon J6)
@@ -192,7 +210,7 @@ class VisionBridge:
         self._selector: Any | None = None
         self._init_attempted: bool = False
         self._vlm_client: Any | None = None
-        self._vlm_backend: str = "openai"
+        self._vlm_backend: str = self._vision_cfg.get("vlm_backend", "openai")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -331,7 +349,7 @@ class VisionBridge:
             return True
         # Even without YOLO/VLM, if we can capture frames we're "available"
         # (VLM fallback or frame-only usage)
-        if self._enabled and self._capture_backend in ("ros2", "auto"):
+        if self._enabled and self._capture_backend in ("lingtu_shm", "ros2", "auto"):
             return True
         return False
 
@@ -442,41 +460,52 @@ class VisionBridge:
             if frame is None:
                 return ""
 
-            import base64
-
-            import numpy as np
-
-            image_b64 = ""
-            try:
-                import cv2  # type: ignore[import-untyped]
-                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                image_b64 = base64.b64encode(buf).decode("utf-8")
-            except ImportError:
-                try:
-                    import io
-
-                    from PIL import Image as PILImage
-                    img = PILImage.fromarray(np.asarray(frame))
-                    buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=80)
-                    image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                except ImportError:
-                    return ""
+            media_type, image_b64 = self._encode_frame_for_vlm(
+                frame, max_width=self._vlm_image_max_width
+            )
             if not image_b64:
                 return ""
 
             prompt = (
                 f"观察这张图片，回答以下问题：{question}\n"
-                "用简短的中文回答（不超过80字）。如果看到了目标物体，描述它的位置（左/右/前方/桌上等）。"
-                "如果没看到，直接说没看到。"
+                "你是视觉问答助手，必须直接回答用户的问题，不要固定重复‘看到了’。"
+                "用户问数量时认真数（例如几根手指），问有没有时直接回答有或没有，问是什么时回答物体类别，"
+                "问位置或属性时回答对应位置或属性；手指、文字等问题也要按图像实际内容回答。"
+                "如果目标被遮挡、太小或无法确认，明确说‘无法准确判断’，不要猜测。"
+                "只有用户泛问‘看见了什么’时，才简短列出清晰可辨认的主要物体（如瓶子、杯子、手机、纸箱、椅子）。"
+                "不要报告颜色、线条、线缆、墙面、地面、天花板、板面、阴影、纹理、网状结构或几何形状；"
+                "这些不是用户要的物体答案。禁止根据模糊轮廓、局部遮挡或室内常识猜测类别；"
+                "回答使用简短中文，不超过50字。"
             )
+            if any(term in question for term in ("手指", "几根", "伸出")):
+                prompt += (
+                    "这是手指计数问题：只数同一只手从掌部清晰伸直的手指，逐根核对；"
+                    "弯曲、遮挡、重叠或画面边缘不清楚的手指不要猜算。不要把手掌、手臂、衣物或其他物体算作手指。"
+                    "如果不能清楚确认数量，回答‘无法准确判断手指数量’，不要默认回答五根。"
+                )
 
             def _call_vlm() -> str:
-                if getattr(self, "_vlm_backend", "openai") == "anthropic":
+                if self._vlm_backend == "minimax_vision":
+                    response = self._vlm_client.post(
+                        "/v1/coding_plan/vlm",
+                        json={
+                            "prompt": prompt,
+                            "image_url": f"data:{media_type};base64,{image_b64}",
+                        },
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    base_resp = payload.get("base_resp") or {}
+                    if int(base_resp.get("status_code", 0)) != 0:
+                        raise RuntimeError(
+                            base_resp.get("status_msg") or "MiniMax vision request failed"
+                        )
+                    return str(payload.get("content") or "")
+                if self._vlm_backend == "anthropic":
                     response = self._vlm_client.messages.create(
                         model=self._vlm_model, max_tokens=150,
                         messages=[{"role": "user", "content": [
-                            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
+                            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
                             {"type": "text", "text": prompt},
                         ]}],
                     )
@@ -485,20 +514,21 @@ class VisionBridge:
                     response = self._vlm_client.chat.completions.create(
                         model=self._vlm_model, max_tokens=150,
                         messages=[{"role": "user", "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}"}},
                             {"type": "text", "text": prompt},
                         ]}],
                     )
                     return response.choices[0].message.content or ""
 
             raw = await asyncio.to_thread(_call_vlm)
-            # Targeted Q&A: return raw answer directly (no refusal cleaning).
-            # The relay-specific cleaner strips short Chinese answers like "没有。"
-            return raw.strip() if raw else ""
+            # Targeted Q&A: keep the short Chinese answer, but remove a
+            # sentence that positively names an uncertain fan/blade structure.
+            # These are common hallucinations for partial ceiling/cable views.
+            return self._ground_targeted_answer(raw)
 
         except Exception as exc:
             logger.warning("[Vision] VLM question failed: %s", exc)
-            return ""
+            return "视觉识别服务暂时不可用，无法确认当前摄像头画面。"
 
     async def get_tracks(self, frame: Any) -> list[Any]:
         """Lower-level: return raw Track objects for robot control use.
@@ -569,6 +599,66 @@ class VisionBridge:
     # VLM (Claude Sonnet) fallback
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _encode_frame_for_vlm(
+        frame: Any, *, max_width: int = 320
+    ) -> tuple[str, str]:
+        """Encode a compact OpenCV-style BGR frame without optional codecs."""
+        import base64
+
+        import numpy as np
+
+        array = np.asarray(frame, dtype=np.uint8)
+        if array.ndim != 3 or array.shape[2] != 3:
+            return "", ""
+
+        height, width = array.shape[:2]
+        if width > max_width:
+            target_height = max(1, round(height * max_width / width))
+            y_indices = np.linspace(0, height - 1, target_height).astype(np.intp)
+            x_indices = np.linspace(0, width - 1, max_width).astype(np.intp)
+            array = array[y_indices][:, x_indices]
+        try:
+            import cv2  # type: ignore[import-untyped]
+
+            ok, encoded = cv2.imencode(
+                ".jpg", array, [cv2.IMWRITE_JPEG_QUALITY, 80]
+            )
+            if ok:
+                return "image/jpeg", base64.b64encode(encoded).decode("ascii")
+        except ImportError:
+            pass
+
+        import binascii
+        import struct
+        import zlib
+
+        # Reducing each channel to 32 levels substantially improves PNG size
+        # while retaining enough detail for scene-level visual questions.
+        array = ((array.astype(np.uint16) // 8) * 8).astype(np.uint8)
+        rgb = np.ascontiguousarray(array[:, :, ::-1])
+        height, width = rgb.shape[:2]
+        scanlines = b"".join(
+            b"\x00" + rgb[row].tobytes() for row in range(height)
+        )
+
+        def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+            body = kind + payload
+            return (
+                struct.pack(">I", len(payload))
+                + body
+                + struct.pack(">I", binascii.crc32(body) & 0xFFFFFFFF)
+            )
+
+        png = b"\x89PNG\r\n\x1a\n"
+        png += _png_chunk(
+            b"IHDR",
+            struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0),
+        )
+        png += _png_chunk(b"IDAT", zlib.compress(scanlines, level=6))
+        png += _png_chunk(b"IEND", b"")
+        return "image/png", base64.b64encode(png).decode("ascii")
+
     def _ensure_vlm_client(self) -> bool:
         """Lazily initialise the VLM client. Returns True if ready.
 
@@ -580,6 +670,21 @@ class VisionBridge:
         if not self._vlm_enabled or not self._vlm_api_key:
             return False
 
+        if self._vlm_backend == "minimax_vision":
+            try:
+                import httpx
+
+                self._vlm_client = httpx.Client(
+                    base_url=self._vlm_base_url,
+                    headers={"Authorization": f"Bearer {self._vlm_api_key}"},
+                    timeout=self._vlm_timeout,
+                )
+                logger.info("[Vision] VLM client: MiniMax vision service.")
+                return True
+            except Exception as exc:
+                logger.warning("[Vision] MiniMax VLM client init failed: %s", exc)
+                return False
+
         # Try Anthropic native SDK (relay: /api endpoint, no dev-assistant injection)
         anthropic_url = self._vlm_base_url.rstrip("/").removesuffix("/v1")
         try:
@@ -587,6 +692,8 @@ class VisionBridge:
             self._vlm_client = anthropic.Anthropic(
                 api_key=self._vlm_api_key,
                 base_url=anthropic_url,
+                timeout=self._vlm_timeout,
+                max_retries=0,
             )
             self._vlm_backend = "anthropic"
             logger.info("[Vision] VLM client: Anthropic SDK (model=%s).", self._vlm_model)
@@ -602,6 +709,8 @@ class VisionBridge:
             self._vlm_client = OpenAI(
                 api_key=self._vlm_api_key,
                 base_url=self._vlm_base_url,
+                timeout=self._vlm_timeout,
+                max_retries=0,
             )
             self._vlm_backend = "openai"
             logger.info("[Vision] VLM client: OpenAI compat (model=%s).", self._vlm_model)
@@ -718,6 +827,52 @@ class VisionBridge:
     )
 
     @staticmethod
+    def _ground_targeted_answer(text: str) -> str:
+        """Drop unsupported fan/blade assertions while retaining visible facts."""
+        import re
+
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        sentences = re.split(r"(?<=[。！？.!?])|[\r\n]+", raw)
+        risky_terms = (
+            "风扇", "电风扇", "叶片", "扇叶", "旋转", "线条", "线缆", "电线",
+            "板面", "网状", "网格", "墙面", "地面", "天花板", "平面", "纹理",
+            "阴影", "光影",
+        )
+        object_terms = (
+            "瓶", "杯", "手机", "电话", "纸箱", "箱子", "椅", "桌", "沙发",
+            "电脑", "键盘", "显示器", "门", "窗", "人", "手", "衣服", "包",
+            "书", "袋", "玩具", "车", "猫", "狗", "植物", "垃圾桶", "灯", "设备",
+        )
+        negative_terms = ("未见", "没看到", "没有", "无法确认", "不确定", "未发现")
+        kept = []
+        for sentence in sentences:
+            has_risky = any(term in sentence for term in risky_terms)
+            has_object = any(term in sentence for term in object_terms)
+            if has_risky and not has_object and not any(
+                marker in sentence for marker in negative_terms
+            ):
+                continue
+            if has_risky and has_object and not any(
+                marker in sentence for marker in negative_terms
+            ):
+                clauses = re.split(r"[，,；;]", sentence)
+                if len(clauses) > 1:
+                    clauses = [
+                        clause for clause in clauses
+                        if not any(term in clause for term in risky_terms)
+                    ]
+                    sentence = "，".join(clauses)
+                else:
+                    for term in risky_terms:
+                        sentence = sentence.replace(term, "")
+                    sentence = re.sub(r"(旁边有|上方有|下方有|有)$", "", sentence)
+            kept.append(sentence)
+        result = "".join(kept).strip()
+        return result or "图中有一些无法确认的结构，暂时不能可靠判断具体物体。"
+
+    @staticmethod
     def _clean_vlm_response(text: str) -> str:
         """Extract only the Chinese scene description from VLM output.
 
@@ -765,11 +920,19 @@ class VisionBridge:
         """Capture a single frame from the camera (blocking).
 
         Tries backends in order based on ``capture_backend`` config:
+        - ``lingtu_shm``: read LingTu camera frames from its POSIX SHM data plane
         - ``ros2``: subscribe to ROS2 Image topic (for Orbbec / ROS cameras)
         - ``cv2``: OpenCV VideoCapture (for USB UVC cameras)
         - ``auto`` (default): try ros2 first, then cv2
         """
         backend = self._capture_backend
+
+        if backend in ("lingtu_shm", "auto"):
+            frame = self._capture_lingtu_shm()
+            if frame is not None:
+                return frame
+            if backend == "lingtu_shm":
+                return None
 
         if backend in ("ros2", "auto"):
             frame = self._capture_ros2()
@@ -780,6 +943,57 @@ class VisionBridge:
 
         # cv2 fallback
         return self._capture_cv2()
+
+    def _capture_lingtu_shm(self) -> Any:
+        """Read the latest RGB frame from LingTu's native camera SHM ring."""
+        try:
+            import sys
+
+            import numpy as np
+
+            source_root = str(Path(self._lingtu_repo) / "src")
+            if source_root not in sys.path:
+                sys.path.insert(0, source_root)
+            from drivers.real.camera.shm import ShmFrameReader
+
+            reader = ShmFrameReader(
+                self._lingtu_color_shm,
+                max_age_s=self._lingtu_max_age_s,
+            )
+            try:
+                frame = reader.read_latest()
+            finally:
+                reader.close()
+            if frame is None or frame.width <= 0 or frame.height <= 0:
+                return None
+
+            encoding = str(frame.encoding or "").lower()
+            if encoding not in {"rgb8", "bgr8"}:
+                logger.warning("[Vision] Unsupported LingTu color encoding: %s", encoding)
+                return None
+            row_bytes = int(frame.stride or frame.width * 3)
+            expected = int(frame.height) * row_bytes
+            raw = np.frombuffer(frame.payload, dtype=np.uint8)
+            if raw.size < expected:
+                logger.warning(
+                    "[Vision] LingTu color frame is short: %d < %d bytes",
+                    raw.size,
+                    expected,
+                )
+                return None
+            rows = raw[:expected].reshape(int(frame.height), row_bytes)
+            image = rows[:, : int(frame.width) * 3].reshape(
+                int(frame.height), int(frame.width), 3
+            )
+            # The rest of VisionBridge follows OpenCV's BGR convention.
+            if encoding == "rgb8":
+                image = image[:, :, ::-1]
+            if self._lingtu_rotate_180:
+                image = np.rot90(image, 2)
+            return np.ascontiguousarray(image)
+        except Exception as exc:
+            logger.warning("[Vision] LingTu SHM capture error: %s", exc)
+            return None
 
     def _capture_ros2(self) -> Any:
         """Grab latest frame — daemon file first (0ms), subprocess fallback (3-5s)."""

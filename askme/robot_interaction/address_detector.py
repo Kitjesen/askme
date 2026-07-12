@@ -84,6 +84,21 @@ class AddressDetector:
                 for name in configured_names
                 if str(name).strip()
             )
+        configured_aliases = cfg.get("aliases", {})
+        if isinstance(configured_aliases, dict):
+            self._name_aliases = tuple(
+                sorted(
+                    (
+                        (str(alias).strip(), str(canonical).strip())
+                        for alias, canonical in configured_aliases.items()
+                        if str(alias).strip() and str(canonical).strip()
+                    ),
+                    key=lambda item: len(item[0]),
+                    reverse=True,
+                )
+            )
+        else:
+            self._name_aliases = ()
         # Name activation window: after hearing robot name, treat all speech
         # as addressed for this many seconds (natural "呼名+对话" pattern)
         self._name_window: float = float(cfg.get("name_window", 30.0))
@@ -95,6 +110,13 @@ class AddressDetector:
             cfg.get("name_window_allows_ambiguous", True)
         )
 
+    def normalize_text(self, text: str) -> str:
+        """Replace ASR variants of the robot name with its canonical name."""
+        normalized = text
+        for alias, canonical in self._name_aliases:
+            normalized = normalized.replace(alias, canonical)
+        return normalized
+
     def is_addressed(self, text: str) -> bool:
         """Check if *text* is addressed to the robot.
 
@@ -104,7 +126,7 @@ class AddressDetector:
         if not self.enabled:
             return True
 
-        text_lower = text.lower().strip()
+        text_lower = self.normalize_text(text).lower().strip()
         if not text_lower:
             return False
 
