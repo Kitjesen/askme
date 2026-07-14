@@ -49,8 +49,15 @@ _READ_ONLY_LOCATION_PHRASES: frozenset[str] = frozenset(
 )
 
 _LOCATION_PREFACE = "\u6b63\u5728\u8bfb\u53d6\u5f53\u524d\u4f4d\u7f6e\uff0c\u8bf7\u7a0d\u5019\u3002"
+_PLEASE_YIELD_CACHE_KEY = "system-please-yield"
+_PLEASE_YIELD_TEXT = "\u60a8\u597d\uff0c\u8bf7\u8ba9\u4e00\u4e0b\uff0c\u8c22\u8c22\u3002"
+_PLEASE_YIELD_PHRASES: frozenset[str] = frozenset({
+    "\u8bf7\u8ba9\u4e00\u4e0b",
+    "\u9ebb\u70e6\u8ba9\u4e00\u4e0b",
+    "\u60a8\u597d\u8bf7\u8ba9\u4e00\u4e0b",
+})
 _SYSTEM_CACHED_PHRASES: Mapping[str, str] = {
-    "system-please-yield": "\u60a8\u597d\uff0c\u8bf7\u8ba9\u4e00\u4e0b\uff0c\u8c22\u8c22\u3002",
+    _PLEASE_YIELD_CACHE_KEY: _PLEASE_YIELD_TEXT,
 }
 
 
@@ -86,6 +93,15 @@ def match_fast_voice_intent(
             normalized_text=normalized,
             reply_text=reply_text,
             cache_key=_cache_key("quick", reply_text),
+        )
+
+    if normalized in _PLEASE_YIELD_PHRASES:
+        return FastVoiceIntent(
+            intent_id="please_yield",
+            kind=FastVoiceIntentKind.QUICK_REPLY,
+            normalized_text=normalized,
+            reply_text=_PLEASE_YIELD_TEXT,
+            cache_key=_PLEASE_YIELD_CACHE_KEY,
         )
 
     if normalized in _READ_ONLY_LOCATION_PHRASES:

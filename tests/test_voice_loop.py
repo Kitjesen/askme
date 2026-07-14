@@ -575,6 +575,36 @@ async def test_quick_reply_uses_cached_audio_before_ack_memory_or_llm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_yield_request_consumes_system_phrase_cache_without_llm() -> None:
+    audio = _Audio()
+    pipeline = _Pipeline()
+    texts = ["\u8bf7\u8ba9\u4e00\u4e0b", "exit"]
+    call_idx = 0
+
+    def _listen():
+        nonlocal call_idx
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(router=IntentRouter(), pipeline=pipeline, audio=audio)
+
+    await loop.run()
+
+    assert pipeline.process_calls == []
+    assert "\u8bf7\u8ba9\u4e00\u4e0b" not in pipeline.memory_calls
+    assert audio.cached_spoken == [
+        (
+            "\u60a8\u597d\uff0c\u8bf7\u8ba9\u4e00\u4e0b\uff0c\u8c22\u8c22\u3002",
+            "system-please-yield",
+        )
+    ]
+    assert audio.spoken == []
+    assert audio.ack_count == 1  # exit only
+
+
+@pytest.mark.asyncio
 async def test_location_fast_path_prefaces_then_runs_read_only_skill() -> None:
     audio = _Audio()
     pipeline = _Pipeline()

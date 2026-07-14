@@ -21,6 +21,29 @@ def test_fast_intent_matches_exact_quick_reply_with_punctuation() -> None:
     assert intent.cache_key
 
 
+def test_yield_request_matches_only_allowlisted_exact_phrases() -> None:
+    for phrase in (
+        "\u8bf7\u8ba9\u4e00\u4e0b",
+        "\u9ebb\u70e6\u8ba9\u4e00\u4e0b",
+        "\u60a8\u597d\u8bf7\u8ba9\u4e00\u4e0b",
+    ):
+        intent = match_fast_voice_intent(phrase, quick_replies=QUICK_REPLIES)
+
+        assert intent is not None
+        assert intent.kind is FastVoiceIntentKind.QUICK_REPLY
+        assert intent.reply_text == "\u60a8\u597d\uff0c\u8bf7\u8ba9\u4e00\u4e0b\uff0c\u8c22\u8c22\u3002"
+        assert intent.cache_key == "system-please-yield"
+
+    for phrase in (
+        "\u4e0d\u8981\u8bf4\u8bf7\u8ba9\u4e00\u4e0b",
+        "\u8bf7\u8ba9\u4e00\u4e0b\u7136\u540e\u524d\u8fdb",
+    ):
+        assert (
+            match_fast_voice_intent(phrase, quick_replies=QUICK_REPLIES)
+            is None
+        )
+
+
 def test_fast_intent_does_not_capture_longer_or_action_bearing_phrase() -> None:
     assert (
         match_fast_voice_intent(

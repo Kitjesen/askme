@@ -53,6 +53,17 @@ class TestIntentRouter:
         assert intent.cached_audio_key
         assert "\u5c0f\u7b97" in (intent.reply_text or "")
 
+    def test_yield_request_uses_local_cached_quick_reply(self):
+        router = self._make_router()
+
+        intent = router.route("\u9ebb\u70e6\u8ba9\u4e00\u4e0b\u3002")
+
+        assert intent.type == IntentType.QUICK_REPLY
+        assert intent.fast_path is True
+        assert intent.reply_text == "\u60a8\u597d\uff0c\u8bf7\u8ba9\u4e00\u4e0b\uff0c\u8c22\u8c22\u3002"
+        assert intent.cached_audio_key == "system-please-yield"
+        assert intent.reason == "quick_reply"
+
     def test_location_status_routes_to_read_only_skill(self):
         router = self._make_router()
 
