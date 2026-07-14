@@ -11,7 +11,7 @@ from askme.memory.vector_store import VectorStore
 
 
 def _patch_vector_available():
-    return patch("askme.memory.vector_store._check_st_available", return_value=True)
+    return patch("askme.memory.vector_store._check_fastembed_available", return_value=True)
 
 
 def _one_hot_encode(texts: list[str]) -> np.ndarray:

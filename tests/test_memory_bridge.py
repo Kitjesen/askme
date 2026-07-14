@@ -90,7 +90,7 @@ class TestInit:
         }
 
         def fake_find_spec(name):
-            return object() if name == "sentence_transformers" else None
+            return object() if name == "fastembed" else None
 
         vs_patch, vs_mock = _patch_vector_store()
         with patch("askme.memory.bridge.get_config", return_value=cfg), \
@@ -152,12 +152,12 @@ class TestInit:
         }
 
         def fake_find_spec(name):
-            return object() if name in {"mempalace", "sentence_transformers"} else None
+            return object() if name in {"mempalace", "fastembed"} else None
 
         def fake_version(package):
             versions = {
                 "mempalace": "3.3.5",
-                "sentence-transformers": "5.2.3",
+                "fastembed": "0.7.3",
             }
             if package not in versions:
                 from importlib.metadata import PackageNotFoundError
@@ -171,14 +171,16 @@ class TestInit:
              patch("askme.memory.bridge.importlib_metadata.version", side_effect=fake_version), \
              vs_patch:
             bridge = MemoryBridge()
-        bridge._store = vs_mock
-        health = bridge.health()
+            bridge._store = vs_mock
+            health = bridge.health()
 
         assert health["selected_backend_dependency"]["backend"] == "mempalace"
         assert health["selected_backend_dependency"]["installed"] is True
         assert health["selected_backend_dependency"]["version"] == "3.3.5"
         assert health["fallback_backend_dependency"]["backend"] == "vector"
-        assert health["fallback_backend_dependency"]["version"] == "5.2.3"
+        assert health["fallback_backend_dependency"]["module"] == "fastembed"
+        assert health["fallback_backend_dependency"]["package"] == "fastembed"
+        assert health["fallback_backend_dependency"]["version"] == "0.7.3"
         assert health["backend_dependencies"]["robotmem"]["installed"] is False
         assert (
             health["product_memory_roles"]["customer_knowledge"]["dependency"]["backend"]

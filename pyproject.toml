@@ -48,6 +48,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.3.0",
     "mypy>=1.0.0",
+    "tomli>=2.0.0; python_version < '3.11'",
 ]
 robot = [
     "pyserial>=3.5",
@@ -55,6 +56,7 @@ robot = [
 ]
 memory = [
     "mem0ai>=0.1.0",
+    "fastembed>=0.4.0",
 ]
 robotmem = [
     "robotmem[cjk]>=0.1.3,<0.2",

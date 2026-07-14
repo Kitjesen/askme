@@ -1,7 +1,8 @@
-"""Tests for VectorStore — works without sentence-transformers via mocking."""
+"""Tests for VectorStore — works without fastembed via mocking."""
 
-import threading
 import sys
+import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -11,8 +12,8 @@ from askme.memory.vector_store import VectorStore, _top_score_indices
 # -- Helpers ------------------------------------------------------------------
 
 def _patch_available(val):
-    """Patch _check_st_available to return a fixed value."""
-    return patch("askme.memory.vector_store._check_st_available", return_value=val)
+    """Patch _check_fastembed_available to return a fixed value."""
+    return patch("askme.memory.vector_store._check_fastembed_available", return_value=val)
 
 
 def _make_store(tmp_path=None, available=True):
@@ -20,7 +21,7 @@ def _make_store(tmp_path=None, available=True):
     store_path = tmp_path / "store.json" if tmp_path else None
     with _patch_available(available):
         store = VectorStore(store_path=store_path)
-    # Mock the encoder so we never import sentence_transformers
+    # Mock the encoder so we never import fastembed
     store._encode = MagicMock(side_effect=_mock_encode)
     # Patch available check on the instance's method calls too
     store._check = available
@@ -42,14 +43,23 @@ def _mock_encode(texts):
 
 
 # -- Tests: basic operations -------------------------------------------------
+class TestPackaging:
+    def test_memory_extra_installs_local_vector_backend(self):
+        pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+        memory_extra = pyproject.split("memory = [", 1)[1].split("]", 1)[0]
+
+        assert '"fastembed>=0.4.0"' in memory_extra
+
 
 class TestAvailability:
-    def test_available_when_st_installed(self):
+    def test_available_when_fastembed_installed(self):
         with _patch_available(True):
             store = VectorStore()
             assert store.available is True
 
-    def test_unavailable_when_st_missing(self):
+    def test_unavailable_when_fastembed_missing(self):
         with _patch_available(False):
             store = VectorStore()
             assert store.available is False

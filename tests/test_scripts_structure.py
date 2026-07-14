@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
-import tomllib
 from pathlib import Path
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility
+    import tomli as tomllib
 
 SCRIPTS_ROOT = Path("scripts")
 

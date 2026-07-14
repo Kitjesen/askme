@@ -8,7 +8,7 @@ Supported backends (``memory.backend`` in config.yaml):
 
 - ``"mem0"``      — Mem0 (default, backward-compatible)
 - ``"robotmem"``  — robotmem SDK (pip install robotmem)
-- ``"vector"``    — local VectorStore (sentence-transformers, no server)
+- ``"vector"``    — local VectorStore (fastembed/ONNX, no server)
 
 Lazy initialization: the selected backend is only instantiated on first
 use.  If it is unavailable (import error, config error, etc.), the bridge
@@ -62,8 +62,8 @@ _BACKEND_DEPENDENCIES = {
         "label": "Mem0 SDK",
     },
     "vector": {
-        "module": "sentence_transformers",
-        "packages": ("sentence-transformers",),
+        "module": "fastembed",
+        "packages": ("fastembed",),
         "label": "Local vector store",
     },
 }
@@ -271,7 +271,7 @@ class MemoryBridge:
         if backend == "mem0":
             return importlib.util.find_spec("mem0") is not None
         if backend == "vector":
-            return importlib.util.find_spec("sentence_transformers") is not None
+            return importlib.util.find_spec("fastembed") is not None
         return False
 
     def _backend_selection_snapshot(self) -> dict[str, Any]:

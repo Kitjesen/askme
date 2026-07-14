@@ -38,7 +38,7 @@ _MODEL_LOCK = threading.Lock()
 _FASTEMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 
-def _check_st_available() -> bool:
+def _check_fastembed_available() -> bool:
     """Check if fastembed is importable (cached after first call)."""
     global _FE_AVAILABLE
     if _FE_AVAILABLE is not None:
@@ -102,7 +102,7 @@ class VectorStore:
     @property
     def available(self) -> bool:
         """Whether the ONNX embedding backend is installed and usable."""
-        return _check_st_available()
+        return _check_fastembed_available()
 
     @property
     def size(self) -> int:
@@ -121,7 +121,7 @@ class VectorStore:
         if self._model is not None:
             return self._model
 
-        if not _check_st_available():
+        if not _check_fastembed_available():
             raise RuntimeError("fastembed is not installed (pip install fastembed)")
 
         cache_key = _FASTEMBED_MODEL
@@ -163,7 +163,7 @@ class VectorStore:
 
         No-ops when the embedding backend is unavailable.
         """
-        if not _check_st_available():
+        if not _check_fastembed_available():
             return
         if not text.strip():
             return
@@ -188,7 +188,7 @@ class VectorStore:
         Returns a list of dicts: ``{"text": ..., "score": ..., "metadata": ...}``.
         Returns empty list when unavailable or empty.
         """
-        if not _check_st_available() or self._embeddings is None or not query.strip():
+        if not _check_fastembed_available() or self._embeddings is None or not query.strip():
             return []
 
         try:
