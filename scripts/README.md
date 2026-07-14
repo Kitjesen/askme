@@ -32,6 +32,26 @@ Root scripts are reserved for cross-cutting CI or performance entrypoints:
 
 Do not add new root scripts without updating `tests/test_scripts_structure.py`.
 
+## Voice Performance and Cache Commands
+
+- `scripts/bench/evaluate_voice_fast_path.py` runs the deterministic voice
+  latency benchmark and writes its threshold report to `--output`.
+- `scripts/dev/prime_voice_phrase_cache.py` is a manual operator command that
+  invokes the configured real TTS backend. MiniMax requires `MINIMAX_API_KEY`
+  and network access; any configured local fallback requires its local model
+  assets and runtime dependencies. The command writes generated PCM to the
+  configured phrase cache and must not run in automatic CI.
+
+## KWS Model Deployment
+
+- `python scripts/dev/install_kws_model.py --check` verifies the configured
+  Sunrise KWS model files without network access or filesystem changes.
+- `python scripts/dev/install_kws_model.py` installs the pinned official
+  sherpa-onnx model from GitHub Releases. Installation requires outbound HTTPS;
+  the archive must match the SHA-256 embedded in the script before it is
+  extracted and atomically published. An existing valid model is reused without
+  downloading, while an incomplete existing directory is never overwritten.
+
 ## Multi-Agent Lanes
 
 Assign script work by runtime risk, not by filename alone:

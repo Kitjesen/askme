@@ -26,6 +26,11 @@ def test_scripts_root_stays_quiet() -> None:
     assert root_files == ALLOWED_ROOT_FILES
 
 
+def test_voice_fast_path_evaluator_lives_in_benchmark_bucket() -> None:
+    assert (SCRIPTS_ROOT / "bench" / "evaluate_voice_fast_path.py").is_file()
+    assert not (SCRIPTS_ROOT / "eval" / "evaluate_voice_fast_path.py").exists()
+
+
 def test_scripts_readme_documents_every_top_level_bucket() -> None:
     readme = (SCRIPTS_ROOT / "README.md").read_text(encoding="utf-8")
     documented = set(re.findall(r"`scripts/([^`/]+)/`", readme))

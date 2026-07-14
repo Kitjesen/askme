@@ -1,4 +1,10 @@
-"""Pre-synthesize deterministic voice replies into the persistent PCM cache."""
+"""Pre-synthesize deterministic voice replies into the persistent PCM cache.
+
+This is a manual command that invokes the configured real TTS backend. MiniMax
+requires ``MINIMAX_API_KEY`` and network access. If the configured backend falls
+back to local synthesis, its model assets and runtime dependencies must already
+be installed. Generated PCM is written to the configured phrase cache.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +20,13 @@ from askme.voice.output.tts import TTSEngine
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Prime deterministic replies with the configured real TTS backend.",
+        epilog=(
+            "MiniMax requires MINIMAX_API_KEY and network access; local fallback "
+            "requires its configured model assets and runtime dependencies."
+        ),
+    )
     parser.add_argument("--config", default="config.board.yaml")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--json", action="store_true")

@@ -26,11 +26,11 @@ pip install -e ".[dev,embed]"
 |------|------|
 | `dev` | 测试、lint、类型检查（pytest, ruff, mypy） |
 | `robot` | 机器人硬件控制（pyserial, onnxruntime） |
-| `memory` | Mem0 记忆后端 |
+| `memory` | Mem0 记忆后端与本地 fastembed/ONNX 向量后端 |
 | `robotmem` | RobotMem 记忆后端（CJK 支持） |
 | `mempalace` | MemPalace 记忆后端 |
 | `vision` | 视觉感知（qp-perception） |
-| `embed` | 文本嵌入（sentence-transformers） |
+| `embed` | 文本嵌入（fastembed/ONNX） |
 
 ---
 
