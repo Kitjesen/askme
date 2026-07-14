@@ -968,7 +968,22 @@ class MemoryBridge:
             self._mempalace is not None and self._mempalace.available
         )
         mem0_available = self._mem0 is not None
+        raw_vector_model_status = getattr(store, "model_status", {}) if store else {}
+        vector_model_status = (
+            dict(raw_vector_model_status)
+            if isinstance(raw_vector_model_status, dict)
+            else {}
+        )
         vector_available = bool(store and store.available)
+        if not vector_model_status:
+            vector_model_status = {
+                "dependency_installed": self._candidate_backend_available("vector"),
+                "ready": vector_available,
+                "cached": False,
+                "reason": "status_unavailable" if not vector_available else "runtime_ready",
+                "missing_artifacts": [],
+                "network_checked": False,
+            }
         backend_ready = {
             "robotmem": robotmem_available,
             "mempalace": mempalace_available,
@@ -983,8 +998,30 @@ class MemoryBridge:
             fallback_backend = self._mempalace_fallback_backend
         fallback_ready = bool(backend_ready.get(fallback_backend, False)) if fallback_backend else False
         backend_dependencies = self._backend_dependency_snapshot()
-        selected_dependency = backend_dependencies.get(self._backend, {})
-        fallback_dependency = backend_dependencies.get(fallback_backend, {}) if fallback_backend else {}
+        selected_dependency = dict(backend_dependencies.get(self._backend, {}))
+        fallback_dependency = (
+            dict(backend_dependencies.get(fallback_backend, {}))
+            if fallback_backend
+            else {}
+        )
+        vector_runtime = {
+            "runtime_ready": vector_available,
+            "unavailable_reason": (
+                "" if vector_available else str(vector_model_status.get("reason") or "")
+            ),
+            "model_status": vector_model_status,
+        }
+        if self._backend == "vector":
+            selected_dependency.update(vector_runtime)
+        if fallback_backend == "vector":
+            fallback_dependency.update(vector_runtime)
+        selected_unavailable_reason = ""
+        if not selected_backend_ready:
+            selected_unavailable_reason = str(
+                vector_model_status.get("reason")
+                if self._backend == "vector"
+                else "backend_not_initialized"
+            )
         return {
             "enabled": self._enabled,
             "backend": self._backend,
@@ -994,6 +1031,7 @@ class MemoryBridge:
             "robot_behavior_memory_backend": self._robot_behavior_memory_backend,
             "robot_behavior_memory_enabled": self._robot_behavior_memory_enabled,
             "selected_backend_ready": selected_backend_ready,
+            "selected_backend_unavailable_reason": selected_unavailable_reason,
             "selected_backend_installed": self._candidate_backend_available(self._backend),
             "selected_backend_dependency": selected_dependency,
             "fallback_backend": fallback_backend,
@@ -1033,6 +1071,10 @@ class MemoryBridge:
             ),
             "mem0_ready": mem0_available,
             "vector_ready": vector_available,
+            "vector_dependency_installed": bool(
+                vector_model_status.get("dependency_installed", False)
+            ),
+            "vector_model_status": vector_model_status,
             "vector_store_path": str(self._store_path),
             "vector_min_similarity": self._vector_min_similarity,
             "embed_model": self._embed_model,

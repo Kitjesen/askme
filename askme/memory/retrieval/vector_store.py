@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,14 @@ _MODEL_LOCK = threading.Lock()
 
 # fastembed canonical model name for the same architecture.
 _FASTEMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+_FASTEMBED_HF_REPO = "qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q"
+_FASTEMBED_REQUIRED_ARTIFACTS = (
+    "config.json",
+    "model_optimized.onnx",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+)
 
 
 def _check_fastembed_available() -> bool:
@@ -50,6 +60,93 @@ def _check_fastembed_available() -> bool:
     except ImportError:
         _FE_AVAILABLE = False
     return _FE_AVAILABLE
+
+
+def _fastembed_model_status(
+    *,
+    cache_dir: str | Path | None = None,
+    dependency_installed: bool | None = None,
+) -> dict[str, Any]:
+    """Return a network-free snapshot of local FastEmbed model readiness.
+
+    FastEmbed stores this model in the Hugging Face cache rooted at its own
+    cache directory. ``try_to_load_from_cache`` only resolves local cache
+    entries; it never contacts the Hub. Requiring every artifact consumed by
+    FastEmbed's ONNX text loader avoids treating an installed wheel as a
+    runnable embedding backend.
+    """
+
+    installed = (
+        _check_fastembed_available()
+        if dependency_installed is None
+        else bool(dependency_installed)
+    )
+    resolved_cache = Path(
+        cache_dir
+        or os.getenv("FASTEMBED_CACHE_PATH")
+        or (Path(tempfile.gettempdir()) / "fastembed_cache")
+    ).expanduser()
+    status: dict[str, Any] = {
+        "dependency_installed": installed,
+        "model": _FASTEMBED_MODEL,
+        "source_repo": _FASTEMBED_HF_REPO,
+        "cache_dir": str(resolved_cache),
+        "ready": False,
+        "cached": False,
+        "model_path": "",
+        "missing_artifacts": list(_FASTEMBED_REQUIRED_ARTIFACTS),
+        "reason": "dependency_missing" if not installed else "model_artifacts_missing",
+        "check_mode": "huggingface_local_cache",
+        "network_checked": False,
+    }
+    if not installed:
+        return status
+    if _FASTEMBED_MODEL in _MODEL_CACHE:
+        status.update(
+            ready=True,
+            cached=True,
+            missing_artifacts=[],
+            reason="model_loaded",
+        )
+        return status
+
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        status["reason"] = "local_cache_resolver_missing"
+        return status
+
+    resolved: dict[str, Path] = {}
+    try:
+        for filename in _FASTEMBED_REQUIRED_ARTIFACTS:
+            cached_path = try_to_load_from_cache(
+                repo_id=_FASTEMBED_HF_REPO,
+                filename=filename,
+                cache_dir=resolved_cache,
+                revision="main",
+            )
+            if not isinstance(cached_path, str):
+                continue
+            artifact = Path(cached_path)
+            if artifact.is_file() and artifact.stat().st_size > 0:
+                resolved[filename] = artifact
+    except OSError as exc:
+        status["reason"] = f"local_cache_error:{type(exc).__name__}"
+        return status
+
+    missing = [
+        name for name in _FASTEMBED_REQUIRED_ARTIFACTS if name not in resolved
+    ]
+    status["missing_artifacts"] = missing
+    if missing:
+        return status
+    status.update(
+        ready=True,
+        cached=True,
+        model_path=str(resolved["model_optimized.onnx"].parent),
+        reason="local_model_ready",
+    )
+    return status
 
 
 def _top_score_indices(scores: np.ndarray, top_k: int) -> np.ndarray:
@@ -100,9 +197,21 @@ class VectorStore:
     # -- Properties -----------------------------------------------------------
 
     @property
-    def available(self) -> bool:
-        """Whether the ONNX embedding backend is installed and usable."""
+    def dependency_installed(self) -> bool:
+        """Whether the FastEmbed Python dependency is installed."""
         return _check_fastembed_available()
+
+    @property
+    def model_status(self) -> dict[str, Any]:
+        """Return network-free local model readiness evidence."""
+        return _fastembed_model_status(
+            dependency_installed=self.dependency_installed,
+        )
+
+    @property
+    def available(self) -> bool:
+        """Whether FastEmbed and its required local model are usable."""
+        return bool(self.model_status["ready"])
 
     @property
     def size(self) -> int:
@@ -139,6 +248,7 @@ class VectorStore:
                     cache_key,
                     providers=["CPUExecutionProvider"],
                     cuda=False,
+                    local_files_only=True,
                 )
                 elapsed = (time.perf_counter() - t0) * 1000
                 logger.info(

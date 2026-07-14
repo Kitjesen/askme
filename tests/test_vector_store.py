@@ -7,7 +7,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-from askme.memory.vector_store import VectorStore, _top_score_indices
+from askme.memory.vector_store import (
+    VectorStore,
+    _fastembed_model_status,
+    _top_score_indices,
+)
 
 # -- Helpers ------------------------------------------------------------------
 
@@ -54,14 +58,62 @@ class TestPackaging:
 
 
 class TestAvailability:
-    def test_available_when_fastembed_installed(self):
-        with _patch_available(True):
+    def test_dependency_installed_without_cached_model_is_not_runtime_ready(
+        self,
+        tmp_path,
+    ):
+        status = _fastembed_model_status(
+            cache_dir=tmp_path,
+            dependency_installed=True,
+        )
+        with (
+            _patch_available(True),
+            patch(
+                "askme.memory.vector_store._fastembed_model_status",
+                return_value=status,
+            ),
+        ):
             store = VectorStore()
-            assert store.available is True
+            assert store.dependency_installed is True
+            assert store.available is False
+            assert store.model_status["reason"] == "model_artifacts_missing"
+            assert store.model_status["network_checked"] is False
+
+    def test_complete_local_model_artifacts_are_runtime_ready(self, tmp_path):
+        snapshot = (
+            tmp_path
+            / "models--qdrant--paraphrase-multilingual-MiniLM-L12-v2-onnx-Q"
+            / "snapshots"
+            / "local-revision"
+        )
+        snapshot.mkdir(parents=True)
+        refs = snapshot.parents[1] / "refs"
+        refs.mkdir()
+        (refs / "main").write_text("local-revision", encoding="utf-8")
+        for filename in (
+            "config.json",
+            "model_optimized.onnx",
+            "special_tokens_map.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ):
+            (snapshot / filename).write_bytes(b"local-artifact")
+
+        status = _fastembed_model_status(
+            cache_dir=tmp_path,
+            dependency_installed=True,
+        )
+
+        assert status["ready"] is True
+        assert status["cached"] is True
+        assert status["model_path"] == str(snapshot)
+        assert status["missing_artifacts"] == []
+        assert status["network_checked"] is False
 
     def test_unavailable_when_fastembed_missing(self):
         with _patch_available(False):
             store = VectorStore()
+            assert store.dependency_installed is False
             assert store.available is False
 
     def test_add_noop_when_unavailable(self):
@@ -90,6 +142,7 @@ class TestAvailability:
             "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
             providers=["CPUExecutionProvider"],
             cuda=False,
+            local_files_only=True,
         )
 
 

@@ -28,6 +28,14 @@ def _patch_vector_store():
     mock_instance = MagicMock()
     mock_instance.available = False
     mock_instance.size = 0
+    mock_instance.model_status = {
+        "dependency_installed": False,
+        "ready": False,
+        "cached": False,
+        "reason": "dependency_missing",
+        "missing_artifacts": [],
+        "network_checked": False,
+    }
     mock_cls.return_value = mock_instance
     return patch("askme.memory.bridge.VectorStore", mock_cls), mock_instance
 
@@ -75,6 +83,87 @@ class TestInit:
         vs.available = True
         # No Mem0, but VectorStore works
         assert bridge.available is True
+
+    def test_health_separates_installed_dependency_from_missing_vector_model(self):
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "backend": "vector",
+                "embed_model": "test-model",
+                "retrieve_timeout": 2.0,
+            },
+            "app": {"data_dir": "data"},
+            "brain": {},
+        }
+        vs_patch, vs_mock = _patch_vector_store()
+        vs_mock.model_status = {
+            "dependency_installed": True,
+            "ready": False,
+            "cached": False,
+            "reason": "model_artifacts_missing",
+            "missing_artifacts": ["model_optimized.onnx"],
+            "network_checked": False,
+        }
+
+        with (
+            patch("askme.memory.bridge.get_config", return_value=cfg),
+            patch(
+                "askme.memory.bridge.importlib.util.find_spec",
+                return_value=object(),
+            ),
+            vs_patch,
+        ):
+            bridge = MemoryBridge()
+        bridge._store = vs_mock
+        health = bridge.health()
+
+        assert health["selected_backend_installed"] is True
+        assert health["selected_backend_dependency"]["installed"] is True
+        assert health["selected_backend_dependency"]["runtime_ready"] is False
+        assert health["selected_backend_ready"] is False
+        assert health["available"] is False
+        assert health["vector_ready"] is False
+        assert health["vector_model_status"]["reason"] == "model_artifacts_missing"
+
+    def test_health_reports_cached_vector_model_ready(self):
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "backend": "vector",
+                "embed_model": "test-model",
+                "retrieve_timeout": 2.0,
+            },
+            "app": {"data_dir": "data"},
+            "brain": {},
+        }
+        vs_patch, vs = _patch_vector_store()
+        with (
+            patch("askme.memory.bridge.get_config", return_value=cfg),
+            vs_patch,
+        ):
+            bridge = MemoryBridge()
+        bridge._store = vs
+        vs.available = True
+        vs.model_status = {
+            "dependency_installed": True,
+            "ready": True,
+            "cached": True,
+            "reason": "local_model_ready",
+            "missing_artifacts": [],
+            "network_checked": False,
+        }
+        with patch(
+            "askme.memory.bridge.importlib.util.find_spec",
+            return_value=object(),
+        ):
+            health = bridge.health()
+
+        assert health["selected_backend_dependency"]["installed"] is True
+        assert health["selected_backend_dependency"]["runtime_ready"] is True
+        assert health["selected_backend_ready"] is True
+        assert health["available"] is True
+        assert health["vector_ready"] is True
+        assert health["vector_model_status"]["reason"] == "local_model_ready"
 
     def test_auto_backend_selects_first_available_candidate(self):
         cfg = {
