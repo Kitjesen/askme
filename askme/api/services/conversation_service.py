@@ -155,7 +155,7 @@ class ConversationService:
             payload = await self.attach_space_chat_context(payload, body=body, text=text)
             timings["space_context_ms"] = _elapsed_ms(space_started)
             return payload
-        except TimeoutError as exc:
+        except (TimeoutError, asyncio.TimeoutError) as exc:
             status = "timeout"
             error_type = exc.__class__.__name__
             timeout_s = self._chat_timeout_s or 0.0

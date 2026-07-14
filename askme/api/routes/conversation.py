@@ -174,7 +174,7 @@ def create_conversation_router(
                 payload = await dispatch
             RuntimeVoiceTurnResponse.model_validate(payload)
             return JSONResponse(payload, headers=_NO_STORE_HEADERS)
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
             return JSONResponse(
                 {
                     "error": "runtime voice-turn timed out",

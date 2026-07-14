@@ -29,10 +29,38 @@ def imports_by_module(tree: ast.AST) -> dict[str, set[str]]:
     return imports
 
 
+def _joined_route_path(prefix: str, path: str) -> str:
+    clean_prefix = str(prefix or "").rstrip("/")
+    clean_path = str(path or "")
+    if not clean_prefix:
+        return clean_path
+    if not clean_path:
+        return clean_prefix or "/"
+    return clean_prefix + (clean_path if clean_path.startswith("/") else f"/{clean_path}")
+
+
+def _iter_routes_with_paths(
+    routes: Iterable[Any],
+    *,
+    prefix: str = "",
+) -> Iterable[tuple[Any, str]]:
+    for route in routes:
+        original_router = getattr(route, "original_router", None)
+        if original_router is not None:
+            include_context = getattr(route, "include_context", None)
+            include_prefix = str(getattr(include_context, "prefix", "") or "")
+            yield from _iter_routes_with_paths(
+                getattr(original_router, "routes", ()) or (),
+                prefix=_joined_route_path(prefix, include_prefix),
+            )
+            continue
+        path = _joined_route_path(prefix, str(getattr(route, "path", "")))
+        yield route, path
+
+
 def route_paths(app: Any, prefix: str) -> list[str]:
     paths: list[str] = []
-    for route in app.router.routes:
-        path = getattr(route, "path", "")
+    for _, path in _iter_routes_with_paths(app.router.routes):
         if path.startswith(prefix):
             paths.append(path)
     return paths
@@ -46,8 +74,7 @@ def route_method_counts(
 ) -> dict[tuple[str, str], int]:
     ignored = set(ignored_methods)
     route_methods: dict[tuple[str, str], int] = {}
-    for route in app.router.routes:
-        path = getattr(route, "path", "")
+    for route, path in _iter_routes_with_paths(app.router.routes):
         methods = getattr(route, "methods", set()) or set()
         if not path.startswith(prefix):
             continue
