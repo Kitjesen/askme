@@ -2,8 +2,11 @@
 
 Uses ``fastembed.TextEmbedding`` (ONNX Runtime, no PyTorch) instead of the
 heavy ``sentence_transformers`` (which pulls in torch/transformers — ~17 s
-import alone).  FastEmbed loads the same ``paraphrase-multilingual-MiniLM-L12-v2``
-model via ONNX in under a second after the initial model download.
+import alone). Runtime loading is strict ``local_files_only``: deployments must
+pre-populate the ``Qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q``
+snapshot in ``FASTEMBED_CACHE_PATH`` or the system temporary directory's
+``fastembed_cache``. The snapshot must contain the ONNX model plus its config
+and tokenizer artifacts; startup and retrieval never download them.
 
 Graceful degradation: works without fastembed installed —
 ``available`` returns False and all queries return empty results.
