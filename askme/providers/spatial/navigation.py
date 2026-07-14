@@ -14,6 +14,7 @@ from askme.ports import NavigationPort, TemporalMemoryPort
 
 _DISPATCH_PATH = "/api/v1/navigation/dispatch"
 _STATUS_PATH = "/api/v1/navigation/status"
+_STATE_PATH = "/api/v1/state"
 _TEMPORAL_MEMORY_PATH = "/api/v1/memory/temporal"
 
 
@@ -83,7 +84,17 @@ class NavGatewayClient:
             return {"error": "NAV_GATEWAY_URL not configured"}
         try:
             with urllib.request.urlopen(f"{self._base_url}{_STATUS_PATH}", timeout=3) as resp:
-                return json.loads(resp.read())
+                result = json.loads(resp.read())
+            if result.get("has_odometry") is True:
+                try:
+                    with urllib.request.urlopen(f"{self._base_url}{_STATE_PATH}", timeout=3) as resp:
+                        state = json.loads(resp.read())
+                    odometry = state.get("odometry")
+                    if isinstance(odometry, dict):
+                        result["odometry"] = odometry
+                except Exception:
+                    pass
+            return result
         except Exception as exc:
             return {"error": str(exc)}
 

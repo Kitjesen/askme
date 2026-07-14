@@ -149,6 +149,7 @@ class BaseTool(ABC):
     safety_level: str = "normal"  # normal | dangerous | critical
     dev_only: bool = False  # if True, excluded when production_mode=True
     agent_allowed: bool = False  # if True, available in ThunderAgentShell
+    read_only: bool = False  # if True, direct status-query skills may call it without an LLM
     voice_label: str = ""  # Chinese TTS label (e.g. "观察环境"), empty = no announce
     queue_priority: int | None = None
     rate_limit_per_minute: float | None = None

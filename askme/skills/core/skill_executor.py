@@ -62,6 +62,31 @@ class SkillExecutor:
         Returns:
             The final LLM text response.
         """
+        if skill.execution == "read_only_tool":
+            tool_names = [
+                line.strip()
+                for line in skill.tools_section.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            if len(tool_names) != 1:
+                return "[Error] read_only_tool skills must declare exactly one tool."
+            tool_name = tool_names[0]
+            tool = self._tools.get(tool_name)
+            if (
+                skill.safety_level != "normal"
+                or tool is None
+                or not getattr(tool, "read_only", False)
+                or getattr(tool, "safety_level", "critical") != "normal"
+            ):
+                return f"[Error] Tool '{tool_name}' is not approved for read-only execution."
+            return await asyncio.to_thread(
+                self._tools.execute,
+                tool_name,
+                "{}",
+                allowed_names={tool_name},
+                max_safety_level="normal",
+            )
+
         prompt = skill.build_prompt(context)
         model = skill.model or self._default_model
         timeout = skill.timeout
