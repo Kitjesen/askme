@@ -33,7 +33,7 @@ brain:
   persona:
     robot_name: 小算
     product_name: 巨龙科创e谷智能服务系统
-    customer_name: 巨龙科创e谷
+    customer_name: 聚龙科创e谷
     operator_audience: 巨龙科创e谷的园区访客、物业运营和巡检人员
     role: 大算机器人公司生产的导览与巡检机器狗
     ownership_label: 生产方是大算机器人公司；服务单位是巨龙科创e谷；方总是巨龙科创e谷的老板，也是小算的老板；方总不是大算机器人公司的老板，绝不能混淆
@@ -43,7 +43,7 @@ brain:
   # Text/admin turns can use up to this cap; voice turns use voice_max_tokens below.
   max_tokens: 200
   # Voice turns need short replies — cap tokens tightly to keep TTFT low.
-  voice_max_tokens: 50
+  voice_max_tokens: 32
   temperature: 0.7
   # Resilience: timeout, retry, model fallback.
   # Voice turns need fast-fail; keep timeout tight and retries low.
@@ -170,6 +170,9 @@ voice:
   # KWS can be skipped briefly for a natural answer to the assistant's last
   # question. This is a weak listening window, not permission to reply.
   wake_timeout: 30.0
+  # During TTS, only a detected "小算" may interrupt playback. Retain
+  # enough AEC-cleaned audio to preserve a command attached to the keyword.
+  barge_in_pre_roll_s: 1.2
   # Host-specific device routing. These values are applied only on Windows;
   # Linux robot deployments continue to use the generic settings below.
   platform_overrides:
@@ -226,6 +229,14 @@ voice:
     sample_rate: 16000
     buffer_size_seconds: 30
 
+  # Exact safe phrases may close from a stable streaming partial after a
+  # short low-energy tail. Physical-action commands stay on the normal path.
+  fast_path:
+    enabled: true
+    candidate_silence_ms: 300
+    stable_partial_ms: 160
+    quiet_peak_threshold: 500
+
   # Noise gate: skip VAD when mic peak is below threshold (not in active speech).
   # Prevents USB mic noise floor from triggering Silero VAD continuously.
   # On sunrise MCP01: noise floor ~100-200, speech ~1000+. Set 0 to disable.
@@ -235,18 +246,25 @@ voice:
 
   # MCP01 direct capture hears playback tail/noise for a few seconds after TTS.
   # Discard that tail so Sunrise does not recognize its own answer as a user turn.
-  post_tts_input_cooldown_s: 3.0
+  # Keep a short guard against speaker loopback without delaying the ready cue.
+  post_tts_input_cooldown_s: 1.0
   # Audible turn-taking cues: the existing acknowledge chime plays after an
   # admitted utterance; this distinct ready tone plays when follow-up input opens.
   ready_chime_enabled: true
   ready_chime_min_interval_s: 0.0
 
-  # Echo gate: suppress mic during TTS playback when peak < threshold.
-  # Sunrise currently has no separate ALSA/HKMIC input; the MCP01 direct
-  # capture sees the speaker loopback itself, often peaking above 20k. Gate
-  # that echo during playback so the assistant's own answer is not treated as
-  # user barge-in. Set lower only after a real separate user mic is verified.
-  echo_gate_peak: 65535
+  # Software AEC: use the speaker PCM as a reference and remove its acoustic
+  # return from the microphone before VAD/ASR.
+  echo_cancellation:
+    enabled: true
+    backend: speexdsp
+    frame_ms: 10
+    filter_length_ms: 500
+    playback_delay_ms: 250
+
+  # Legacy amplitude gate. Disabled when software AEC is active so barge-in
+  # remains possible while the robot is speaking.
+  echo_gate_peak: 0
 
   # Cloud ASR primary with local sherpa-onnx fallback.
   cloud_asr:
@@ -373,8 +391,10 @@ voice:
     backend: minimax
     # Merge punctuation-split LLM fragments before one cloud TTS request.
     # This trades about one second of initial latency for continuous speech.
-    text_coalesce_seconds: 0.35
+    text_coalesce_seconds: 0.12
     text_coalesce_max_chars: 120
+    phrase_cache_enabled: true
+    phrase_cache_dir: ~/.cache/askme/voice_phrases
     # Keep speech available when a cloud provider is out of balance or offline.
     fallback_backend: local
     # Local backend settings (MeloTTS: 44100Hz, natural Chinese)
@@ -394,7 +414,7 @@ voice:
     # WebSocket uses the Speech 2.8 T2A task_start/task_continue/task_finish flow.
     minimax_api_key: ${MINIMAX_API_KEY}
     minimax_tts_url: https://api.minimax.chat/v1
-    minimax_tts_transport: websocket
+    minimax_tts_transport: sse
     # China account/key uses minimaxi.com; global accounts can use api.minimax.io.
     minimax_tts_ws_url: wss://api.minimaxi.com/ws/v1/t2a_v2
     minimax_tts_model: speech-2.8-turbo
@@ -459,7 +479,7 @@ voice:
     output_tail_silence_seconds: 0.25
     # Buffer enough streamed speech before opening aplay to absorb provider
     # jitter. Short replies play as soon as synthesis completes.
-    aplay_start_buffer_seconds: 1.5
+    aplay_start_buffer_seconds: 0.25
     # The board's USB speaker still truncates streamed utterances after ALSA
     # underruns, so prioritize complete playback over lowest possible latency.
     aplay_wait_for_synthesis_complete: false
@@ -1021,6 +1041,10 @@ runtime_handoff:
 # Runtime: NOVA Dog runtime bridge
 # ----------------------------------------------------------
 runtime:
+  navigation:
+    # Read-only LingTu status/position queries. This does not enable motion.
+    base_url: http://127.0.0.1:5050
+
   voice_bridge:
     # Requires askme-edge-service running locally
     # Set true when connected to NOVA Dog runtime stack

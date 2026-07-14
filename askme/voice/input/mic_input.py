@@ -426,7 +426,11 @@ class MicInput:
         if self._device is not None:
             try:
                 device_info = sd.query_devices(self._device, kind="input")
-            except OSError:
+            except Exception as exc:
+                logger.debug(
+                    "Configured input device is unavailable through PortAudio: %s",
+                    exc,
+                )
                 return False
             if isinstance(device_info, dict):
                 return int(device_info.get("max_input_channels", 0) or 0) >= required_channels
@@ -434,7 +438,8 @@ class MicInput:
 
         try:
             devices = sd.query_devices()
-        except OSError:
+        except Exception as exc:
+            logger.debug("No input devices available through PortAudio: %s", exc)
             return False
 
         if isinstance(devices, dict):

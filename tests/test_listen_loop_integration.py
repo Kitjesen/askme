@@ -232,8 +232,8 @@ class TestListenLoopIntegration:
             assert not raw_aplay_called.wait(timeout=0.1)
             agent._play_chime.assert_called_once_with("wake")
 
-    def test_barge_in_stops_tts_and_feeds_buffer(self):
-        """BARGE_IN_CONFIRMED -> tts.stop_immediately + tts.drain_buffers called, buffer fed to ASR."""
+    def test_barge_in_requires_wake_keyword_before_stopping_tts(self):
+        """A keyword-authorized barge-in stops TTS and captures the new command."""
         with _agent_ctx() as agent:
             mic = _setup_mic_open(agent)
             proc = agent._audio_proc
@@ -247,8 +247,9 @@ class TestListenLoopIntegration:
             # Simulate TTS active
             agent.tts.is_active.return_value = True
 
-            barge_buf_chunk = np.ones(160, dtype=np.float32)
-            vad.barge_in_buffer = [barge_buf_chunk]
+            agent.kws.available = True
+            agent.kws_stream = object()
+            agent._wait_for_wake_word_mic = MagicMock(return_value=True)
 
             call_count = 0
 
@@ -257,7 +258,7 @@ class TestListenLoopIntegration:
                 call_count += 1
                 if call_count == 1:
                     vad.speech_active = True
-                    return VADEvent.BARGE_IN_CONFIRMED
+                    return VADEvent.SPEECH_START
                 if call_count == 2:
                     vad.speech_active = False
                     return VADEvent.SPEECH_END
@@ -270,18 +271,43 @@ class TestListenLoopIntegration:
                 text="停下来", source="local", is_noise=False,
             )
 
-            result = agent.listen_loop()
+            result = agent.listen_loop(_barge_mode=True)
 
             assert result == "停下来"
             voice_turn = agent.status_snapshot()["voice_turn"]
             latest = voice_turn["latest"]
             stages = {stage["name"]: stage for stage in latest["stages"]}
             assert voice_turn["counters"]["barge_in_count"] == 1
-            assert stages["barge_in_confirmed"]["metadata"]["peak"] == 3000
+            assert stages["barge_in_confirmed"]["metadata"]["keyword"] == "小算"
+            agent._wait_for_wake_word_mic.assert_called_once_with(
+                mic, barge_only=True
+            )
             agent.tts.stop_immediately.assert_called_once()
             agent.tts.drain_buffers.assert_called_once()
-            # Buffer was fed to ASR
             assert asr.feed_audio.call_count >= 1
+
+    def test_vad_only_barge_in_does_not_stop_tts(self):
+        """Ambient speech cannot interrupt playback without the wake keyword."""
+        with _agent_ctx() as agent:
+            mic = _setup_mic_open(agent)
+            proc = agent._audio_proc
+            vad = agent._vad_ctrl
+            asr = agent._asr_mgr
+
+            mic.read_chunk.return_value = _CHUNK
+            proc.process.return_value = (_CHUNK, _CHUNK_I16, 3000, False)
+            agent.tts.is_active.return_value = True
+
+            def vad_feed(*args, **kwargs):
+                agent.stop_event.set()
+                return VADEvent.BARGE_IN_CONFIRMED
+
+            vad.feed.side_effect = vad_feed
+            asr.check_endpoint.return_value = None
+
+            assert agent.listen_loop() is None
+            agent.tts.stop_immediately.assert_not_called()
+            agent.tts.drain_buffers.assert_not_called()
 
     def test_noise_result_resets_and_continues(self):
         """SPEECH_END with noise result -> asr.reset + vad.reset, loop continues."""

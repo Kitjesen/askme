@@ -43,6 +43,31 @@ async def test_voice_module_uses_audio_input_lifecycle() -> None:
     mod._audio.shutdown.assert_called_once_with()
 
 
+@pytest.mark.asyncio
+async def test_voice_module_retries_input_without_crashing_runtime() -> None:
+    started = asyncio.Event()
+
+    async def _run() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    mod = VoiceModule()
+    mod._audio = MagicMock()
+    mod._audio.start_input.side_effect = [RuntimeError("device missing"), None]
+    mod._voice_loop = MagicMock()
+    mod._voice_loop.run = _run
+    mod._task = None
+    mod._input_retry_seconds = 0.01
+
+    await mod.start()
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await mod.stop()
+
+    assert mod._audio.start_input.call_count == 2
+    assert mod._audio.stop_input.call_count >= 2
+    mod._audio.shutdown.assert_called_once_with()
+
+
 def test_runtime_voice_stack_builds_shared_audio_router_and_gateway(monkeypatch) -> None:
     calls: dict[str, object] = {}
     audio = object()

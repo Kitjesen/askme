@@ -65,6 +65,10 @@ class VoiceModule(Module):
 
         llm_mod = self.llm_in
         self._voice_cfg = dict(effective_cfg.get("voice", {}) or {})
+        self._input_retry_seconds = max(
+            0.1,
+            float(self._voice_cfg.get("input_retry_seconds", 5.0)),
+        )
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else OTABridgeMetrics()
 
         tools_mod = self.tool_registry_in
@@ -168,10 +172,38 @@ class VoiceModule(Module):
                 logger.warning("VoiceModule: persisted prompt selection ignored: %s", exc)
 
     async def start(self) -> None:
-        """Open mic persistently, then start the VoiceLoop."""
-        self._audio.start_input()  # mic stays open across listen/speak cycles
-        self._task = asyncio.create_task(self._voice_loop.run(), name="voice-loop")
+        """Start a voice task that recovers when microphone hardware is absent."""
+        self._task = asyncio.create_task(
+            self._run_with_input_recovery(),
+            name="voice-loop",
+        )
+        logger.info("VoiceModule: voice task started")
+
+    async def _run_with_input_recovery(self) -> None:
+        retry_seconds = max(0.0, float(getattr(self, "_input_retry_seconds", 5.0)))
+        while True:
+            try:
+                self._audio.start_input()
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "VoiceModule: microphone unavailable; retrying in %.1fs: %s",
+                    retry_seconds,
+                    exc,
+                )
+                try:
+                    self._audio.stop_input()
+                except Exception:
+                    logger.debug(
+                        "VoiceModule: failed to clean up input after open error",
+                        exc_info=True,
+                    )
+                await asyncio.sleep(retry_seconds)
+
         logger.info("VoiceModule: voice loop started (mic persistent)")
+        await self._voice_loop.run()
 
     async def stop(self) -> None:
         """Cancel the voice loop task and close mic."""

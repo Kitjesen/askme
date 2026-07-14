@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+import yaml
+
 from askme.voice.interaction_gate import InteractionAction, InteractionGate
 from askme.voice.perception_context import InteractionPerceptionSnapshot
 
@@ -7,6 +10,16 @@ from askme.contracts import (
     RobotActionType,
     interaction_decision_to_action_decision,
 )
+
+
+def test_sunrise_board_requires_wake_word_and_interaction_gate() -> None:
+    config_path = Path(__file__).resolve().parents[1] / "config.board.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    voice = config["voice"]
+
+    assert voice["product_readiness"]["require_wake_word"] is True
+    assert voice["interaction_gate"]["enabled"] is True
+    assert voice["interaction_gate"]["silent_on_ambiguous"] is True
 
 
 def test_bystander_speech_records_without_brain_continuation() -> None:

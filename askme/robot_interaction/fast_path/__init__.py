@@ -1,4 +1,4 @@
-"""Human-robot interaction gate and perception context package."""
+"""Deterministic interaction fast-path policies."""
 
 from __future__ import annotations
 
@@ -25,19 +25,6 @@ _LAZY_EXPORTS = {
     "normalize_fast_voice_text": (
         "askme.robot_interaction.fast_path.voice_intents",
         "normalize_fast_voice_text",
-    ),
-    "InteractionAction": ("askme.robot_interaction.interaction_gate", "InteractionAction"),
-    "InteractionDecision": ("askme.robot_interaction.interaction_gate", "InteractionDecision"),
-    "InteractionGate": ("askme.robot_interaction.interaction_gate", "InteractionGate"),
-    "MissionActorRole": ("askme.robot_interaction.interaction_gate", "MissionActorRole"),
-    "MissionCommandCategory": (
-        "askme.robot_interaction.interaction_gate",
-        "MissionCommandCategory",
-    ),
-    "MissionMode": ("askme.robot_interaction.interaction_gate", "MissionMode"),
-    "InteractionPerceptionSnapshot": (
-        "askme.robot_interaction.perception_context",
-        "InteractionPerceptionSnapshot",
     ),
 }
 

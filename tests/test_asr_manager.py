@@ -8,6 +8,7 @@ import numpy as np
 from askme.voice.asr_manager import (
     _SINGLE_CHAR_COMMANDS,
     ASRManager,
+    ASRPartial,
 )
 
 # ---------------------------------------------------------------------------
@@ -348,6 +349,42 @@ class TestCheckEndpoint:
         assert mgr._cloud_active is True
         assert result is None
         mocks["asr"].get_result.assert_not_called()
+
+
+class TestPartialResult:
+    def test_cloud_partial_is_exposed_without_finishing_session(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+        mocks["cloud"].status_snapshot.return_value = {
+            "partial_text": "\u4f60\u597d",
+            "partial_age_ms": 180.0,
+        }
+
+        mgr.start_session()
+        partial = mgr.partial_result()
+
+        assert partial == ASRPartial(
+            text="\u4f60\u597d",
+            source="cloud_partial",
+            age_ms=180.0,
+        )
+        mocks["cloud"].finish_session.assert_not_called()
+
+    def test_commit_partial_cancels_cloud_without_waiting_for_final(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+        mgr.start_session()
+
+        result = mgr.commit_partial(
+            ASRPartial(text="\u4f60\u597d", source="cloud_partial", age_ms=200.0)
+        )
+
+        assert result is not None
+        assert result.source == "cloud_partial"
+        assert result.text.startswith("\u4f60\u597d")
+        assert mgr._recognition_active is False
+        mocks["cloud"].cancel_session.assert_called_once()
+        mocks["cloud"].finish_session.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

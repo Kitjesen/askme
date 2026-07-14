@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from askme.interfaces.tts import TTSBackend
+from askme.voice.output.phrase_cache import PhraseAudioCache
 from askme.voice.output.voice_profiles import (
     VoiceProfile,
     build_voice_profiles,
@@ -117,7 +119,13 @@ class TTSEngine(TTSBackend):
         "TOOL_CALLS>",
     )
 
-    def __init__(self, config: dict[str, Any], *, audio_router: AudioRouter | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        *,
+        audio_router: AudioRouter | None = None,
+        echo_reference: Any | None = None,
+    ) -> None:
         self._backend: str = config.get("backend", "local")
         self._fallback_backend: str = str(
             config.get("fallback_backend", "edge")
@@ -137,6 +145,11 @@ class TTSEngine(TTSBackend):
         self._tts_text_coalesce_max_chars: int = max(
             1, int(config.get("text_coalesce_max_chars", 160))
         )
+        self._phrase_cache = PhraseAudioCache(
+            config.get("phrase_cache_dir", "~/.cache/askme/voice_phrases"),
+            enabled=bool(config.get("phrase_cache_enabled", True)),
+        )
+        self._phrase_prime_lock = threading.Lock()
 
         # Local backend config
         self._model_dir: str = config.get("model_dir", "models/tts/vits-melo-tts-zh_en")
@@ -300,6 +313,9 @@ class TTSEngine(TTSBackend):
         self._usb_audio_build_failed = False
         # Immediate stop flag: checked by _playback_loop to abort mid-chunk
         self._stop_requested = threading.Event()
+        # After a barge-in, streamed LLM text may continue arriving briefly.
+        # Drop it until the next explicit playback lifecycle starts.
+        self._discard_text_until_restart = threading.Event()
         # Pre-roll warm state: skip 400ms pre-roll when DAC was recently active
         self._last_aplay_close: float = 0.0  # monotonic time of last aplay close
         _PREROLL_WARM_WINDOW = 5.0  # seconds — DAC stays warm after close
@@ -308,6 +324,8 @@ class TTSEngine(TTSBackend):
 
         # AudioRouter for device ownership coordination (optional)
         self._audio_router: AudioRouter | None = audio_router
+        # Optional microphone-side software AEC reference.
+        self._echo_reference = echo_reference
 
         # Local TTS engine (lazy init)
         self._local_tts: Any | None = None
@@ -457,6 +475,9 @@ class TTSEngine(TTSBackend):
         """Strip emoji/markdown from *text* and queue it for TTS generation."""
         if not text:
             return
+        if self._discard_text_until_restart.is_set():
+            logger.info("TTS interrupted: dropping late streamed text")
+            return
         clean = text
         clean = self._RE_EMOJI.sub('', clean)
         clean = self._RE_BOLD.sub(r'\1', clean)
@@ -470,6 +491,134 @@ class TTSEngine(TTSBackend):
         if clean and self._is_speakable_text(clean):
             logger.info("speak queued: %r", clean[:60])
             self.tts_text_queue.put((self._get_generation(), clean))
+
+    def queue_cached_pcm(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        *,
+        cache_key: str = "",
+    ) -> bool:
+        """Queue cached mono PCM through the normal cancellable speech path."""
+
+        audio = np.asarray(samples, dtype=np.float32)
+        if (
+            audio.ndim != 1
+            or len(audio) == 0
+            or int(sample_rate) <= 0
+            or not np.all(np.isfinite(audio))
+        ):
+            return False
+
+        generation = self._get_generation()
+        prepared = self._resample(audio, int(sample_rate), self._sample_rate)
+        if len(prepared) == 0:
+            return False
+        tail_count = int(self._sample_rate * self._output_tail_silence_seconds)
+
+        with self._generation_lock:
+            if generation != self._generation:
+                return False
+            with self._buffer_lock:
+                self.tts_buffer.append(prepared.astype(np.float32, copy=True))
+                if tail_count > 0:
+                    self.tts_buffer.append(np.zeros(tail_count, dtype=np.float32))
+        logger.info(
+            "TTS phrase cache queued: key=%s samples=%d",
+            cache_key or "anonymous",
+            len(prepared),
+        )
+        return True
+
+    def queue_cached_phrase(self, text: str, *, cache_key: str) -> bool:
+        """Queue a persisted phrase without invoking any TTS provider."""
+
+        storage_key = self._phrase_cache_storage_key(text, cache_key)
+        cached = self._phrase_cache.get(storage_key)
+        if cached is None:
+            logger.info("TTS phrase cache miss: key=%s", cache_key)
+            return False
+        return self.queue_cached_pcm(
+            cached.samples,
+            cached.sample_rate,
+            cache_key=storage_key,
+        )
+
+    def prime_cached_phrase(self, text: str, *, cache_key: str) -> dict[str, Any]:
+        """Synthesize one phrase off-line from playback and persist its PCM."""
+
+        storage_key = self._phrase_cache_storage_key(text, cache_key)
+        existing = self._phrase_cache.get(storage_key)
+        if existing is not None:
+            return {
+                "cached": True,
+                "created": False,
+                "cache_key": storage_key,
+                "samples": len(existing.samples),
+                "sample_rate": existing.sample_rate,
+            }
+
+        with self._phrase_prime_lock:
+            if self.is_active() or self.tts_text_queue.unfinished_tasks:
+                return {
+                    "cached": False,
+                    "created": False,
+                    "cache_key": storage_key,
+                    "reason": "tts_busy",
+                }
+            with self._buffer_lock:
+                if self.tts_buffer:
+                    return {
+                        "cached": False,
+                        "created": False,
+                        "cache_key": storage_key,
+                        "reason": "audio_buffer_not_empty",
+                    }
+
+            generation = self._get_generation()
+            self._generate_audio(text, generation)
+            with self._buffer_lock:
+                chunks = list(self.tts_buffer)
+                self.tts_buffer.clear()
+            if not chunks:
+                return {
+                    "cached": False,
+                    "created": False,
+                    "cache_key": storage_key,
+                    "reason": "synthesis_empty",
+                }
+            audio = np.concatenate(chunks).astype(np.float32, copy=False)
+            tail_count = int(self._sample_rate * self._output_tail_silence_seconds)
+            if tail_count > 0 and len(audio) > tail_count:
+                audio = audio[:-tail_count]
+            created = self._phrase_cache.put(storage_key, audio, self._sample_rate)
+            return {
+                "cached": created,
+                "created": created,
+                "cache_key": storage_key,
+                "samples": len(audio),
+                "sample_rate": self._sample_rate,
+                "reason": "" if created else "cache_write_failed",
+            }
+
+    def _phrase_cache_storage_key(self, text: str, cache_key: str) -> str:
+        signature = {
+            "cache_key": cache_key,
+            "text": text,
+            "backend": self._backend,
+            "voice_profile": self._active_voice_profile_id,
+            "voice": self._voice,
+            "rate": self._rate,
+            "minimax_voice": self._minimax_voice_id,
+            "speed": self._minimax_speed,
+            "pitch": self._minimax_pitch,
+            "emotion": self._minimax_emotion,
+            "sample_rate": self._sample_rate,
+        }
+        digest = hashlib.sha256(
+            json.dumps(signature, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+        return f"{cache_key}-{digest}"
 
     @staticmethod
     def _is_speakable_text(text: str) -> bool:
@@ -488,6 +637,7 @@ class TTSEngine(TTSBackend):
         with self._playback_lock:
             if self._is_playing:
                 return
+            self._discard_text_until_restart.clear()
             self._is_playing = True
             self._playback_thread = threading.Thread(target=self._playback_loop, daemon=True)
             self._playback_thread.start()
@@ -502,6 +652,9 @@ class TTSEngine(TTSBackend):
         self._kill_usb_audio()
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+        # stop_immediately() can race with playback-loop shutdown. Do not let
+        # an unconsumed stop request cancel the first audio of the next turn.
+        self._stop_requested.clear()
 
     def is_active(self) -> bool:
         """Return True if audio is buffered or playback is in progress."""
@@ -599,6 +752,7 @@ class TTSEngine(TTSBackend):
         The _playback_loop checks _stop_requested and exits the current
         chunk early.  The flag is auto-cleared when _playback_loop resumes.
         """
+        self._discard_text_until_restart.set()
         self._stop_requested.set()
         self._kill_aplay()
         self._kill_usb_audio()
@@ -911,6 +1065,16 @@ class TTSEngine(TTSBackend):
         if self._volume != 1.0:
             outdata[:, 0] *= self._volume
             np.clip(outdata[:, 0], -1.0, 1.0, out=outdata[:, 0])
+        self._publish_echo_reference(outdata[:, 0])
+
+    def _publish_echo_reference(self, samples: np.ndarray) -> None:
+        """Publish actual mono PCM output to the microphone AEC, if enabled."""
+        if self._echo_reference is None:
+            return
+        try:
+            self._echo_reference.push_playback(samples, self._sample_rate)
+        except Exception as exc:
+            logger.debug("AEC playback reference publish failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Internal — worker thread
@@ -1689,6 +1853,7 @@ class TTSEngine(TTSBackend):
                 self._usb_direct_warming.set()
                 warming_set = True
             try:
+                self._publish_echo_reference(samples)
                 if self._audio_router is not None:
                     with self._audio_router.output_session():
                         return self._play_chunk_usb_direct_locked(samples)
@@ -2287,12 +2452,17 @@ class TTSEngine(TTSBackend):
                                 )
                                 if not _dac_warm:
                                     _proc.stdin.write(_preroll_bytes)  # type: ignore[union-attr]
+                                    self._publish_echo_reference(
+                                        np.frombuffer(_preroll_bytes, dtype=np.int16).astype(np.float32)
+                                        / 32767.0
+                                    )
                                 else:
                                     logger.debug("aplay: skipping pre-roll (DAC warm)")
                                 _need_preroll = False
 
                             _proc.stdin.write(pcm.tobytes())  # type: ignore[union-attr]
                             _proc.stdin.flush()  # type: ignore[union-attr]
+                            self._publish_echo_reference(pcm.astype(np.float32) / 32767.0)
                         except (BrokenPipeError, OSError):
                             # aplay killed externally (barge-in)
                             with self._aplay_lock:
@@ -2311,9 +2481,11 @@ class TTSEngine(TTSBackend):
                     else:
                         if self._audio_router is not None:
                             with self._audio_router.output_session():
+                                self._publish_echo_reference(chunk)
                                 sd.play(chunk, samplerate=self._sample_rate, device=self._output_device)
                                 sd.wait()
                         else:
+                            self._publish_echo_reference(chunk)
                             sd.play(chunk, samplerate=self._sample_rate, device=self._output_device)
                             sd.wait()
                     self._playback_busy.clear()

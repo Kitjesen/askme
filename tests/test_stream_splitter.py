@@ -37,6 +37,15 @@ def test_medium_punctuation_splits():
     assert "较长的句子" in result[0]
 
 
+def test_early_first_chunk_preserves_pending_punctuation_context():
+    s = StreamSplitter(early_first_chunk_min_len=8)
+
+    assert s.feed("一二三四") == []
+    assert s.feed("五六七八九十") == ["一二三四五六七八"]
+    assert s.feed("；") == ["九十；"]
+    assert s.flush() is None
+
+
 def test_medium_punctuation_no_split_short():
     """Semicolons don't split very short buffers."""
     s = StreamSplitter()

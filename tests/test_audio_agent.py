@@ -78,6 +78,93 @@ def test_wake_word_wait_records_microphone_frames() -> None:
     )
 
 
+def test_barge_wake_word_uses_aec_and_requires_near_end_speech() -> None:
+    agent = object.__new__(AudioAgent)
+    agent.stop_event = threading.Event()
+    agent._barge_listener_stop = threading.Event()
+    agent._barge_wake_preroll = []
+    agent._record_input_observation = MagicMock()
+    agent._refresh_voice_metrics = MagicMock()
+    agent._audio_proc = MagicMock()
+    agent._vad_ctrl = MagicMock()
+    agent._vad_ctrl.speech_active = True
+    agent._vad_ctrl.feed.return_value = MagicMock()
+    agent.tts = MagicMock()
+    agent.tts.is_active.return_value = True
+    agent.kws = MagicMock()
+    agent.kws.available = True
+    agent._barge_wake_terms = ("小算", "小蒜", "小帅")
+    kws_stream = MagicMock()
+    agent.kws.create_stream.return_value = kws_stream
+    agent.kws.spotter.is_ready.return_value = False
+    agent.kws.spotter.get_result.return_value = "小算"
+
+    raw = np.array([0.25, -0.5], dtype=np.float32)
+    cleaned = np.array([0.10, -0.20], dtype=np.float32)
+    cleaned_i16 = np.array([3276, -6553], dtype=np.int16)
+    agent._audio_proc.process.return_value = (
+        cleaned,
+        cleaned_i16,
+        6553,
+        False,
+    )
+    agent._audio_proc.is_noise_gated.return_value = False
+
+    mic = MagicMock()
+    mic.sample_rate = 16000
+    mic.read_chunk.return_value = raw
+
+    assert agent._wait_for_wake_word_mic(mic, barge_only=True) is True
+    agent._audio_proc.process.assert_called_once_with(
+        raw,
+        tts_active=True,
+        speech_active=False,
+    )
+    kws_stream.accept_waveform.assert_called_once_with(16000, cleaned)
+    assert len(agent._barge_wake_preroll) == 1
+    np.testing.assert_array_equal(agent._barge_wake_preroll[0], cleaned)
+
+
+def test_barge_wake_word_falls_back_to_existing_streaming_asr() -> None:
+    agent = object.__new__(AudioAgent)
+    agent.stop_event = threading.Event()
+    agent._barge_listener_stop = threading.Event()
+    agent._barge_wake_preroll = []
+    agent._barge_wake_terms = ("小算", "小蒜", "小帅")
+    agent._record_input_observation = MagicMock()
+    agent._refresh_voice_metrics = MagicMock()
+    agent._audio_proc = MagicMock()
+    agent._vad_ctrl = MagicMock()
+    agent._vad_ctrl.speech_active = True
+    agent.tts = MagicMock()
+    agent.tts.is_active.return_value = True
+    agent.kws = MagicMock()
+    agent.kws.available = False
+    agent.asr = MagicMock()
+    asr_stream = MagicMock()
+    agent.asr.create_stream.return_value = asr_stream
+    agent.asr.is_ready.return_value = False
+    agent.asr.get_result.return_value = "小蒜带我去前台"
+
+    samples = np.array([0.10, -0.20], dtype=np.float32)
+    samples_i16 = np.array([3276, -6553], dtype=np.int16)
+    agent._audio_proc.process.return_value = (
+        samples,
+        samples_i16,
+        6553,
+        False,
+    )
+    agent._audio_proc.is_noise_gated.return_value = False
+
+    mic = MagicMock()
+    mic.sample_rate = 16000
+    mic.read_chunk.return_value = samples
+
+    assert agent._wait_for_wake_word_mic(mic, barge_only=True) is True
+    asr_stream.accept_waveform.assert_called_once_with(16000, samples)
+    agent.asr.get_result.assert_called_once_with(asr_stream)
+
+
 def test_asr_result_does_not_renew_followup_window_before_admission() -> None:
     agent = object.__new__(AudioAgent)
     agent._turn_traces = MagicMock()
@@ -349,6 +436,17 @@ class TestStatusSnapshot:
             snap = agent.status_snapshot()
             assert snap["muted"] is True
             assert snap["agent_state"] == "muted"
+        finally:
+            agent.shutdown()
+
+    def test_closed_microphone_is_not_reported_ready(self):
+        agent = _make_agent()
+        try:
+            assert agent._mic.is_open is False
+            snap = agent.status_snapshot()
+            assert snap["input_ready"] is False
+            assert snap["pipeline_ok"] is False
+            assert snap["interaction"]["state"] == "not_ready"
         finally:
             agent.shutdown()
 

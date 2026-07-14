@@ -17,6 +17,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from askme.robot_interaction.fast_path import (
+    FastVoiceIntentKind,
+    match_fast_voice_intent,
+)
 from askme.robot_interaction.routing_policy import DEFAULT_ROUTING_POLICY, RoutingPolicy
 from askme.robot_interaction.scenario_intents import classify_scenario_intent
 
@@ -48,6 +52,10 @@ class Intent:
     scenario_id: str | None = None
     confidence: float | None = None
     route_evidence: dict[str, Any] | None = None
+    cached_audio_key: str | None = None
+    preface_text: str | None = None
+    preface_audio_key: str | None = None
+    fast_path: bool = False
 
 
 class IntentRouter:
@@ -71,6 +79,9 @@ class IntentRouter:
         "图片",
         "眼前有什么",
     )
+    # These legacy skills overlap intentionally with camera language. Their
+    # exact triggers must still reach the live visual pipeline.
+    _VISUAL_PIPELINE_SKILLS = frozenset({"environment_report"})
 
     BUILTIN_COMMANDS = DEFAULT_ROUTING_POLICY.builtin_commands
     MIN_TRIGGER_LENGTH = DEFAULT_ROUTING_POLICY.min_trigger_length
@@ -130,7 +141,37 @@ class IntentRouter:
             )
 
         # 2. Quick replies — simple greetings, skip LLM entirely
+        fast_intent = match_fast_voice_intent(
+            stripped,
+            quick_replies=self._policy.quick_replies,
+        )
+        if (
+            fast_intent is not None
+            and fast_intent.kind is FastVoiceIntentKind.READ_ONLY_SKILL
+        ):
+            logger.info(
+                "Read-only fast voice intent: '%s' -> skill '%s'",
+                stripped,
+                fast_intent.skill_name,
+            )
+            return Intent(
+                type=IntentType.VOICE_TRIGGER,
+                skill_name=fast_intent.skill_name,
+                raw_text=stripped,
+                trigger_phrase=stripped,
+                reason="read_only_fast_path",
+                preface_text=fast_intent.preface_text,
+                preface_audio_key=fast_intent.cache_key,
+                fast_path=True,
+            )
+
         quick = self._policy.quick_replies.get(stripped)
+        if (
+            quick is None
+            and fast_intent is not None
+            and fast_intent.kind is FastVoiceIntentKind.QUICK_REPLY
+        ):
+            quick = fast_intent.reply_text
         if quick:
             logger.info("Quick reply: '%s' → '%s'", stripped, quick)
             return Intent(
@@ -140,6 +181,10 @@ class IntentRouter:
                 # Compatibility: older loops read the quick reply from skill_name.
                 skill_name=quick,
                 reason="quick_reply",
+                cached_audio_key=(
+                    fast_intent.cache_key if fast_intent is not None else None
+                ),
+                fast_path=fast_intent is not None,
             )
 
         # 3. Built-in commands
@@ -150,6 +195,25 @@ class IntentRouter:
                 command=command,
                 raw_text=stripped,
                 reason="builtin_command",
+            )
+
+        # A complete trigger is stronger evidence than a generic visual marker
+        # embedded in it (for example, "看看文件"). Preserve visual-report
+        # skills below so "看看周围" still captures a current frame.
+        exact_trigger = self._match_exact_voice_trigger(stripped)
+        if exact_trigger and exact_trigger[0] not in self._VISUAL_PIPELINE_SKILLS:
+            matched_skill, trigger_phrase = exact_trigger
+            logger.info(
+                "Exact voice trigger matched: '%s' → skill '%s'",
+                stripped,
+                matched_skill,
+            )
+            return Intent(
+                type=IntentType.VOICE_TRIGGER,
+                skill_name=matched_skill,
+                raw_text=stripped,
+                trigger_phrase=trigger_phrase,
+                reason="voice_trigger",
             )
 
         # Route visual questions to the normal pipeline.  This intentionally
@@ -271,6 +335,19 @@ class IntentRouter:
             self._is_question_context(text)
             and skill_name not in self._policy.question_safe_skills
         )
+
+    def _match_exact_voice_trigger(self, text: str) -> tuple[str, str] | None:
+        """Return a safe trigger only when it covers the complete utterance."""
+        normalized = text.casefold()
+        for trigger_phrase, skill_name in self._sorted_triggers:
+            if len(trigger_phrase) < self._policy.min_trigger_length:
+                continue
+            if normalized != trigger_phrase.casefold():
+                continue
+            if self._question_context_blocks_skill(text, skill_name):
+                continue
+            return skill_name, trigger_phrase
+        return None
 
     def _match_voice_trigger(self, text: str) -> tuple[str, str] | None:
         """Find the best matching voice trigger, skipping negated and question occurrences.

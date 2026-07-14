@@ -93,6 +93,7 @@ _PROJECT_RELATIVE_CONFIG_PATHS = (
     ("voice", "punctuation", "model_path"),
     ("voice", "kws", "model_dir"),
     ("voice", "tts", "model_dir"),
+    ("voice", "tts", "phrase_cache_dir"),
     ("voice", "tts", "voice_profile_state_path"),
     ("voice", "control_state_path"),
     ("vision", "model_path"),

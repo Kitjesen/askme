@@ -34,10 +34,15 @@ def test_local_config_paths_are_resolved_from_project_root(
 
     config = get_config(reload=True)
     root = project_root().resolve()
+    runtime_cache = (
+        Path.home() / ".cache" / "askme" / "voice_phrases"
+    ).resolve()
 
     for configured_path in _configured_local_paths(config):
         path = Path(configured_path)
         assert path.is_absolute()
+        if path == runtime_cache:
+            continue
         assert path.is_relative_to(root)
 
 

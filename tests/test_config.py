@@ -32,6 +32,13 @@ class TestGetConfig:
         sr = cfg.get("voice", {}).get("tts", {}).get("sample_rate")
         assert isinstance(sr, (int, float))
 
+    def test_phrase_cache_dir_is_expanded_to_an_absolute_path(self):
+        cfg = get_config(reload=True)
+        cache_dir = Path(cfg["voice"]["tts"]["phrase_cache_dir"])
+
+        assert cache_dir.is_absolute()
+        assert cache_dir == Path.home() / ".cache" / "askme" / "voice_phrases"
+
     @pytest.mark.skipif(os.name != "nt", reason="Windows audio override")
     def test_windows_audio_profile_uses_verified_realtek_route(self):
         cfg = get_config(reload=True)
@@ -50,7 +57,7 @@ class TestGetConfig:
         assert cfg["brain"]["persona"]["robot_name"] == "小算"
         assert cfg["brain"]["persona"]["customer_name"] == "聚龙科创e谷"
         assert cfg["voice"]["address_detection"]["names"] == ["小算"]
-        assert cfg["voice"]["interaction_gate"]["wake_terms"] == ["小算", "机器人"]
+        assert cfg["voice"]["interaction_gate"]["wake_terms"] == ["小算"]
         assert cfg["voice"]["kws"]["keywords"] == [
             "x iǎo s uàn :2.0 #0.20 @小算"
         ]

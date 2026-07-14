@@ -227,6 +227,11 @@ voice:
     sample_rate: 16000
     buffer_size_seconds: 30
 
+  fast_path:
+    enabled: true
+    candidate_silence_ms: 300
+    stable_partial_ms: 160
+
   # Noise gate: skip VAD when mic peak is below threshold (not in active speech).
   # Prevents USB mic noise floor from triggering Silero VAD continuously.
   # On sunrise MCP01: noise floor ~100-200, speech ~1000+. Set 0 to disable.
@@ -364,6 +369,8 @@ voice:
     # MiniMax is the cloud-primary product path; local remains the offline
     # fallback when the provider is unavailable or out of balance.
     backend: minimax
+    phrase_cache_enabled: true
+    phrase_cache_dir: ~/.cache/askme/voice_phrases
     # Keep speech available when a cloud provider is out of balance or offline.
     fallback_backend: local
     # Local backend settings (MeloTTS: 44100Hz, natural Chinese)

@@ -18,8 +18,6 @@ documented buckets below instead of beside this README.
 | `scripts/bench/` | Benchmarks, latency probes, audio readiness checks, and benchmark helper scripts. | Pytest unit tests. | `pytest tests/test_performance_benchmarks.py tests/test_generated_voice_capability_check.py -q` for supported benchmark code. |
 | `scripts/e2e/` | Provider-backed or hardware-backed end-to-end probes. | Automatic pytest collection. | Manual execution only; document required keys, models, devices, and network. |
 | `scripts/audit/` | Secret scanning, key rotation guides, and security audit helpers. | Product APIs and runtime services. | Script-specific `--help` when present. |
-| `scripts/artifacts/` | Media, fixtures, and sample files used by scripts. | Executable scripts. | Static structure checks only. |
-| `scripts/tools/` | Low-level maintenance helpers used by scripts or manual flows. | Product APIs and runtime services. | Static tests, plus script-specific `--help` when present. |
 
 ## Root Files
 
@@ -71,7 +69,7 @@ cameras, model files, API keys, network access, or a robot runtime.
 6. Hardware, audio, camera, cloud, and real provider probes must document their
    external requirements and remain manual by default.
 7. Do not add binaries, captured audio, generated reports, images, or videos to
-   executable script directories; use `scripts/artifacts/` or `artifacts/`.
+   executable script directories; use the repository-level `artifacts/` directory.
 
 ## Verification
 

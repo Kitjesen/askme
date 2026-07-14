@@ -43,6 +43,36 @@ class TestIntentRouter:
         assert intent.skill_name == intent.reply_text  # legacy compatibility
         assert intent.reason == "quick_reply"
 
+    def test_self_introduction_uses_cached_quick_reply_path(self):
+        router = self._make_router()
+
+        intent = router.route("\u4f60\u662f\u8c01\uff1f")
+
+        assert intent.type == IntentType.QUICK_REPLY
+        assert intent.fast_path is True
+        assert intent.cached_audio_key
+        assert "\u5c0f\u7b97" in (intent.reply_text or "")
+
+    def test_location_status_routes_to_read_only_skill(self):
+        router = self._make_router()
+
+        intent = router.route("\u5f53\u524d\u4f4d\u7f6e")
+
+        assert intent.type == IntentType.VOICE_TRIGGER
+        assert intent.skill_name == "nav_query"
+        assert intent.reason == "read_only_fast_path"
+        assert intent.fast_path is True
+        assert intent.preface_text
+        assert intent.preface_audio_key
+
+    def test_action_phrase_never_uses_fast_path(self):
+        router = self._make_router(triggers={"\u5bfc\u822a": "navigate"})
+
+        intent = router.route("\u5e26\u6211\u53bb\u5927\u5802")
+
+        assert intent.fast_path is False
+        assert intent.type == IntentType.GENERAL
+
     def test_intent_route_payload_is_audit_ready(self):
         router = self._make_router(triggers={"导航到仓库": "navigate"})
         intent = router.route("帮我导航到仓库")
@@ -249,3 +279,26 @@ class TestQuestionContext:
     def test_environment_report_question(self):
         intent = self.router.route("环境报告准确吗")
         assert intent.type == IntentType.GENERAL
+
+
+class TestVisualQueryPriority:
+    def setup_method(self):
+        self.router = IntentRouter(
+            voice_triggers={
+                "看看文件": "list_directory",
+                "看看周围": "environment_report",
+            }
+        )
+
+    def test_complete_non_visual_voice_trigger_wins(self):
+        intent = self.router.route("看看文件")
+
+        assert intent.type == IntentType.VOICE_TRIGGER
+        assert intent.skill_name == "list_directory"
+        assert intent.trigger_phrase == "看看文件"
+
+    def test_environment_report_visual_trigger_stays_visual(self):
+        intent = self.router.route("看看周围")
+
+        assert intent.type == IntentType.GENERAL
+        assert intent.reason == "visual_query"

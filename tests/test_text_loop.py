@@ -21,6 +21,16 @@ class _QuickReplyRouter:
         return Intent(type=IntentType.QUICK_REPLY, skill_name="quick reply", raw_text=text)
 
 
+class _CachedQuickReplyRouter:
+    def route(self, text: str) -> Intent:
+        return Intent(
+            type=IntentType.QUICK_REPLY,
+            reply_text="cached quick reply",
+            cached_audio_key="quick-hi",
+            raw_text=text,
+        )
+
+
 class _TraceRouter:
     def route(self, text: str) -> Intent:
         return Intent(
@@ -86,12 +96,18 @@ class _Skills:
 class _Audio:
     def __init__(self) -> None:
         self.spoken: list[str] = []
+        self.cached: list[tuple[str, str]] = []
+        self.cached_result = True
         self.started = 0
         self.stopped = 0
         self.waited = 0
 
     def speak(self, text: str) -> None:
         self.spoken.append(text)
+
+    async def speak_cached_and_wait(self, text: str, *, cache_key: str) -> bool:
+        self.cached.append((text, cache_key))
+        return self.cached_result
 
     def start_playback(self) -> None:
         self.started += 1
@@ -557,6 +573,53 @@ async def test_process_turn_quick_reply_speaks_when_speak_true() -> None:
 
     assert reply == "quick reply"
     assert audio.spoken == ["quick reply"]
+    assert audio.started == 1
+    assert audio.waited == 1
+    assert audio.stopped == 1
+
+
+@pytest.mark.asyncio
+async def test_process_turn_quick_reply_uses_cached_audio_when_available() -> None:
+    pipeline = _Pipeline()
+    audio = _Audio()
+    loop = TextLoop(
+        router=_CachedQuickReplyRouter(),
+        pipeline=pipeline,
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=audio,
+    )
+
+    reply = await loop.process_turn("hi", speak=True)
+
+    assert reply == "cached quick reply"
+    assert audio.cached == [("cached quick reply", "quick-hi")]
+    assert audio.spoken == []
+    assert audio.started == 0
+    assert audio.waited == 0
+    assert audio.stopped == 0
+
+
+@pytest.mark.asyncio
+async def test_process_turn_quick_reply_falls_back_when_cache_misses() -> None:
+    pipeline = _Pipeline()
+    audio = _Audio()
+    audio.cached_result = False
+    loop = TextLoop(
+        router=_CachedQuickReplyRouter(),
+        pipeline=pipeline,
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=audio,
+    )
+
+    reply = await loop.process_turn("hi", speak=True)
+
+    assert reply == "cached quick reply"
+    assert audio.cached == [("cached quick reply", "quick-hi")]
+    assert audio.spoken == ["cached quick reply"]
     assert audio.started == 1
     assert audio.waited == 1
     assert audio.stopped == 1

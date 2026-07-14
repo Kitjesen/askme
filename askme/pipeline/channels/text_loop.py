@@ -392,6 +392,11 @@ class TextLoop:
                 reply = intent.reply_text or intent.skill_name or ""
                 if not speak:
                     return reply
+                cache_key = str(intent.cached_audio_key or "").strip()
+                speak_cached = getattr(self._audio, "speak_cached_and_wait", None)
+                if cache_key and callable(speak_cached):
+                    if await speak_cached(reply, cache_key=cache_key):
+                        return reply
                 self._audio.speak(reply)
                 self._audio.start_playback()
                 try:

@@ -203,6 +203,25 @@ class TestMicInputUsbDirect:
         finally:
             mic._usb_audio_proc = None
 
+    def test_alsa_input_probe_handles_portaudio_device_error(self, monkeypatch):
+        mic = MicInput(device=0)
+
+        monkeypatch.setattr("askme.voice.mic_input.os.name", "posix")
+        monkeypatch.setattr(
+            "askme.voice.mic_input.Path.read_text",
+            lambda self, **_kwargs: " 0 [MCP01 ]: USB-Audio - MCP01\n",
+        )
+
+        def _raise_portaudio_error(*_args, **_kwargs):
+            raise RuntimeError("Error querying device 0")
+
+        monkeypatch.setattr(
+            "askme.voice.mic_input.sd.query_devices",
+            _raise_portaudio_error,
+        )
+
+        assert mic._alsa_input_available() is False
+
     def test_alsa_input_requires_configured_channel_count(self, monkeypatch):
         mic = MicInput(mic_native_rate=48000, mic_channels=2)
 
