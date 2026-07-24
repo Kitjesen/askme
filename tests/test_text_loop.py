@@ -47,6 +47,7 @@ class _Pipeline:
         self.process_calls: list[str] = []
         self.process_source_calls: list[str] = []
         self.process_conversation_session_ids: list[str | None] = []
+        self.process_turn_owners: list[str | None] = []
         self.skill_calls: list[tuple[str, str]] = []
         self.pending_calls: list[str] = []
         self.pending_reply_map: dict[str, str] = {}
@@ -68,10 +69,12 @@ class _Pipeline:
         memory_task=None,
         source: str = "voice",
         conversation_session_id: str | None = None,
+        turn_owner: str | None = None,
     ):
         self.process_calls.append(user_text)
         self.process_source_calls.append(source)
         self.process_conversation_session_ids.append(conversation_session_id)
+        self.process_turn_owners.append(turn_owner)
         return "fallback"
 
     async def execute_skill(self, skill_name: str, user_text: str, source: str = "voice"):
@@ -401,6 +404,7 @@ async def test_text_loop_falls_back_to_local_pipeline_when_runtime_bridge_fails(
     assert [call["text"] for call in bridge.calls] == ["status?"]
     assert pipeline.process_calls == ["status?"]
     assert pipeline.process_conversation_session_ids == [None]
+    assert pipeline.process_turn_owners == ["text"]
 
 
 @pytest.mark.asyncio

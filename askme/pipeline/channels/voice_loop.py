@@ -639,6 +639,7 @@ class VoiceLoop:
                             user_text,
                             memory_task=memory_task,
                             conversation_session_id=conversation_session_id,
+                            turn_owner="voice",
                         )
                 self._record_local_gateway_turn(
                     conversation_session_id,

@@ -24,6 +24,7 @@ class _Pipeline:
     def __init__(self) -> None:
         self.process_calls: list[str] = []
         self.process_conversation_session_ids: list[str | None] = []
+        self.process_turn_owners: list[str | None] = []
         self.skill_calls: list[tuple[str, str]] = []
         self.memory_calls: list[str] = []
         self.pending_calls: list[str] = []
@@ -50,9 +51,11 @@ class _Pipeline:
         *,
         memory_task=None,
         conversation_session_id: str | None = None,
+        turn_owner: str | None = None,
     ):
         self.process_calls.append(user_text)
         self.process_conversation_session_ids.append(conversation_session_id)
+        self.process_turn_owners.append(turn_owner)
         return "fallback"
 
     async def execute_skill(self, skill_name: str, user_text: str):
@@ -72,9 +75,11 @@ class _SpeakingPipeline(_Pipeline):
         *,
         memory_task=None,
         conversation_session_id: str | None = None,
+        turn_owner: str | None = None,
     ):
         self.process_calls.append(user_text)
         self.process_conversation_session_ids.append(conversation_session_id)
+        self.process_turn_owners.append(turn_owner)
         if memory_task is not None:
             self.memory_results.append(await memory_task)
         reply = f"pipeline reply: {user_text}"
@@ -478,6 +483,7 @@ async def test_voice_loop_falls_back_to_local_pipeline_when_runtime_bridge_unhan
     assert bridge.calls == ["inspect zone"]
     assert pipeline.process_calls == ["inspect zone"]
     assert pipeline.process_conversation_session_ids == [None]
+    assert pipeline.process_turn_owners == ["voice"]
 
 
 @pytest.mark.asyncio

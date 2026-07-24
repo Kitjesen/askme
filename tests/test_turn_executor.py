@@ -150,6 +150,29 @@ class TestProcessHappyPath:
         te._memory.save.assert_called_once_with("hello", "robot answer")
 
     @pytest.mark.asyncio
+    async def test_behavior_memory_is_retrieved_and_saved_separately(self):
+        memory_system = MagicMock()
+        memory_system.retrieve_behavior = AsyncMock(
+            return_value="- \u7528\u6237\u559c\u6b22\u7b80\u77ed\u56de\u7b54"
+        )
+        memory_system.save_behavior_memory = AsyncMock(return_value=True)
+        memory_system.should_reflect.return_value = False
+        te = _make_executor(memory_system=memory_system)
+
+        await te.process("\u4ee5\u540e\u8bf7\u7b80\u77ed\u56de\u7b54")
+        await asyncio.gather(*te._pending_tasks, return_exceptions=True)
+
+        memory_system.retrieve_behavior.assert_awaited_once_with(
+            "\u4ee5\u540e\u8bf7\u7b80\u77ed\u56de\u7b54"
+        )
+        _, prompt_kwargs = te._prompt_builder.build_system_prompt.call_args
+        assert prompt_kwargs["behavior_context"] == "- \u7528\u6237\u559c\u6b22\u7b80\u77ed\u56de\u7b54"
+        memory_system.save_behavior_memory.assert_awaited_once_with(
+            "\u4ee5\u540e\u8bf7\u7b80\u77ed\u56de\u7b54", "robot answer"
+        )
+        te._memory.save.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_prompt_builder_called(self):
         te = _make_executor()
         await te.process("hello")

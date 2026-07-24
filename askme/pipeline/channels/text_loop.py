@@ -286,7 +286,9 @@ class TextLoop:
                     reply = await self._pipeline.process(
                         user_text,
                         memory_task=memory_task,
+                        source="text",
                         conversation_session_id=conversation_session_id,
+                        turn_owner="text",
                     )
                 memory_task = None  # pipeline took ownership
                 logger.info("[Assistant]: %s", reply)
@@ -478,6 +480,7 @@ class TextLoop:
                     user_text,
                     memory_task=memory_task,
                     source=source,
+                    turn_owner=source,
                 )
             else:
                 reply = await self._pipeline.process(
@@ -485,6 +488,7 @@ class TextLoop:
                     memory_task=memory_task,
                     source=source,
                     conversation_session_id=fallback_conversation_session_id,
+                    turn_owner=source,
                 )
             memory_task = None
             return reply

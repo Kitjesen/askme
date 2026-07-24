@@ -8,6 +8,7 @@ not publish directly to ROS2 topics or call vendor instruction endpoints.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from askme.tools.core.tool_registry import BaseTool
@@ -64,6 +65,9 @@ class MoveRobotTool(BaseTool):
     safety_level = "dangerous"
     agent_allowed = True
     voice_label = "移动机器人"
+    cancelable = True
+    cancel_on_turn_interrupt = True
+    side_effect_class = "physical_motion"
 
     def __init__(
         self,
@@ -72,6 +76,9 @@ class MoveRobotTool(BaseTool):
     ) -> None:
         self._robot_control_client = robot_control_client
         self._navigation_client = navigation_client
+        self._state_lock = threading.Lock()
+        self._active_action = ""
+        self._cancel_requested = False
 
     def set_robot_control_client(self, robot_control_client: Any) -> None:
         self._robot_control_client = robot_control_client
@@ -88,15 +95,86 @@ class MoveRobotTool(BaseTool):
         target: str = "",
         **kwargs: Any,
     ) -> str:
+        if action in {"go_to", "rotate", "forward"}:
+            with self._state_lock:
+                self._active_action = action
+                self._cancel_requested = False
+
         if action == "go_to":
-            return self._go_to(target)
-        if action == "rotate":
-            return self._dispatch_control("rotate", {"angle_deg": angle})
-        if action == "forward":
-            return self._dispatch_control("walk_forward", {"distance_m": distance})
-        if action == "stop":
-            return self._dispatch_control("stop")
-        return f"[错误] 未知动作: {action}"
+            result = self._go_to(target)
+        elif action == "rotate":
+            result = self._dispatch_control("rotate", {"angle_deg": angle})
+        elif action == "forward":
+            result = self._dispatch_control("walk_forward", {"distance_m": distance})
+        elif action == "stop":
+            result = self._dispatch_control("stop")
+            with self._state_lock:
+                self._active_action = ""
+                self._cancel_requested = False
+            return result
+        else:
+            return f"[错误] 未知动作: {action}"
+
+        with self._state_lock:
+            cancel_after_dispatch = self._cancel_requested
+        if cancel_after_dispatch:
+            # A dispatch acknowledgement may race the first cancellation
+            # request. Repeating the graceful stop after the acknowledgement is
+            # intentional and relies on the downstream idempotent cancel path.
+            self._request_graceful_stop(action, "turn_interrupted")
+        return result
+
+    def request_cancel(self, reason: str) -> bool:
+        """Request a normal motion stop; this is not an emergency stop."""
+        with self._state_lock:
+            action = self._active_action
+            self._cancel_requested = bool(action)
+        if not action:
+            return False
+        return self._request_graceful_stop(action, reason)
+
+    def _request_graceful_stop(self, action: str, reason: str) -> bool:
+        if action == "go_to":
+            cancel_navigation = getattr(
+                self._navigation_client,
+                "cancel_navigation",
+                None,
+            )
+            if callable(cancel_navigation):
+                try:
+                    result = cancel_navigation(reason=reason)
+                except Exception:
+                    return False
+            else:
+                result = _call_runtime_api(
+                    "nav",
+                    "POST",
+                    "/api/v1/navigation/cancel",
+                    {"reason": reason},
+                )
+        elif action in {"rotate", "forward"}:
+            if self._robot_control_client is not None:
+                try:
+                    result = self._robot_control_client.dispatch_capability(
+                        "stop",
+                        {"reason": reason},
+                    )
+                except Exception:
+                    return False
+            else:
+                result = _call_runtime_api(
+                    "control",
+                    "POST",
+                    "/api/v1/control/executions",
+                    {
+                        "mission_type": "motion_command",
+                        "requested_capability": "stop",
+                        "parameters": {"reason": reason},
+                    },
+                )
+        else:
+            return False
+        return not isinstance(result, dict) or "error" not in result
 
     def _go_to(self, target: str) -> str:
         """Semantic navigation via Thunder nav-gateway dispatch path."""

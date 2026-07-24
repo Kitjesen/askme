@@ -156,6 +156,81 @@ class TestProcessDelegation:
         result = await pipeline.execute_skill("navigate", "去仓库A")
         assert result == "skill result"
 
+    @pytest.mark.asyncio
+    async def test_barge_in_cancels_only_active_turn_and_next_turn_runs(self):
+        emergency_token = asyncio.Event()
+        pipeline = _make_injectable_pipeline(cancel_token=emergency_token)
+        started = asyncio.Event()
+
+        async def _blocked_turn(*args, **kwargs):
+            started.set()
+            await asyncio.Future()
+
+        pipeline._turn_executor.process = AsyncMock(side_effect=_blocked_turn)
+        active_turn = asyncio.create_task(pipeline.process("first"))
+        await started.wait()
+
+        assert pipeline.cancel_current_turn(reason="barge_in") is True
+        assert await active_turn == ""
+        assert emergency_token.is_set() is False
+
+        pipeline._turn_executor.process = AsyncMock(return_value="next response")
+        assert await pipeline.process("second") == "next response"
+        assert emergency_token.is_set() is False
+
+    @pytest.mark.asyncio
+    async def test_default_barge_in_cancels_voice_owner_not_newer_text_turn(self):
+        pipeline = _make_injectable_pipeline()
+        voice_started = asyncio.Event()
+        text_started = asyncio.Event()
+        release_voice = asyncio.Event()
+        release_text = asyncio.Event()
+
+        async def _blocked_turn(user_text, **kwargs):
+            started = voice_started if user_text == "voice" else text_started
+            release = release_voice if user_text == "voice" else release_text
+            started.set()
+            await release.wait()
+            return f"{user_text} response"
+
+        pipeline._turn_executor.process = AsyncMock(side_effect=_blocked_turn)
+        voice = asyncio.create_task(
+            pipeline.process("voice", turn_owner="voice")
+        )
+        await voice_started.wait()
+        text = asyncio.create_task(
+            pipeline.process("text", source="text", turn_owner="text")
+        )
+        await text_started.wait()
+
+        try:
+            assert pipeline.cancel_current_turn(owner="voice") is True
+            assert await voice == ""
+            assert text.done() is False
+            release_text.set()
+            assert await text == "text response"
+        finally:
+            release_voice.set()
+            release_text.set()
+            await asyncio.gather(voice, text, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_external_task_cancellation_is_not_swallowed_as_barge_in(self):
+        pipeline = _make_injectable_pipeline()
+        started = asyncio.Event()
+
+        async def _blocked_turn(*args, **kwargs):
+            started.set()
+            await asyncio.Future()
+
+        pipeline._turn_executor.process = AsyncMock(side_effect=_blocked_turn)
+        active_turn = asyncio.create_task(pipeline.process("cancel externally"))
+        await started.wait()
+
+        active_turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await active_turn
+
 
 # ── set_audio / set_skill_manager ─────────────────────────────────────────────
 

@@ -378,12 +378,14 @@ class SkillDispatcher:
                 user_text,
                 memory_task=memory_task,
                 source=source,
+                turn_owner=source,
             )
         return await self._pipeline.process(
             user_text,
             memory_task=memory_task,
             source=source,
             conversation_session_id=conversation_session_id,
+            turn_owner=source,
         )
 
     def get_skill(self, skill_name: str):
