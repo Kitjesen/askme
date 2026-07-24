@@ -237,11 +237,13 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 embed = [
     { name = "fastembed" },
 ]
 memory = [
+    { name = "fastembed" },
     { name = "mem0ai" },
 ]
 mempalace = [
@@ -265,9 +267,10 @@ requires-dist = [
     { name = "edge-tts", specifier = ">=6.1.0" },
     { name = "fastapi", specifier = ">=0.103.0" },
     { name = "fastembed", marker = "extra == 'embed'", specifier = ">=0.4.0" },
+    { name = "fastembed", marker = "extra == 'memory'", specifier = ">=0.4.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.0.0" },
     { name = "mem0ai", marker = "extra == 'memory'", specifier = ">=0.1.0" },
-    { name = "mempalace", marker = "extra == 'mempalace'", specifier = ">=3.3.5,<4" },
+    { name = "mempalace", marker = "extra == 'mempalace'", specifier = "==3.5.0" },
     { name = "miniaudio", specifier = ">=1.61" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "numpy", specifier = ">=1.26.0" },
@@ -286,6 +289,7 @@ requires-dist = [
     { name = "sherpa-onnx", specifier = ">=1.10.0" },
     { name = "sounddevice", specifier = ">=0.4.6" },
     { name = "soundfile", specifier = ">=0.12.1" },
+    { name = "tomli", marker = "python_full_version < '3.11' and extra == 'dev'", specifier = ">=2.0.0" },
     { name = "uvicorn", specifier = ">=0.23.0" },
     { name = "websocket-client", specifier = ">=1.8.0" },
 ]
@@ -2513,7 +2517,7 @@ wheels = [
 
 [[package]]
 name = "mempalace"
-version = "3.4.1"
+version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "chromadb" },
@@ -2525,9 +2529,9 @@ dependencies = [
     { name = "tokenizers" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/dc/38/b5bd19281a337b2e48434dcd617b6c452f45702faff7a2e96fa463702326/mempalace-3.4.1.tar.gz", hash = "sha256:7f7982f3a37d96560274aca385fb60199e32a1159939e7b50e581230cc9265a8", size = 25109136, upload-time = "2026-06-15T09:39:06.678Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cf/35/0b647c4508b05e755b334a440e60d81e0f8db27f34dfcc55f61d7eb1d103/mempalace-3.5.0.tar.gz", hash = "sha256:65166dfddd51b58385341afe1db113b8e3abdafa5b49caad7b83a9876140737e", size = 25205826, upload-time = "2026-06-23T01:21:16.252Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7f/41/6a29ac07c72528b2b4c8e7be1f3754ca0b001f70bcaaed32085b4cf8118a/mempalace-3.4.1-py3-none-any.whl", hash = "sha256:d926e79d29f2d9d85780adb6f248ccf57775b33c56f53347d54d2e5d688f34dd", size = 491175, upload-time = "2026-06-15T09:39:03.978Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/c7/ae5d244ec0e4d419ca5f45334d7d7e79da1146f91a4681be649529c22a95/mempalace-3.5.0-py3-none-any.whl", hash = "sha256:df8ac612e59ff2910779a35b19743fbd6824f09fe6388565388f479433784408", size = 536970, upload-time = "2026-06-23T01:21:14.377Z" },
 ]
 
 [[package]]

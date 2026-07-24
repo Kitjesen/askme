@@ -101,6 +101,13 @@ class MemoryAdmissionControl:
 
         return admitted, score
 
+    def discard(self, text: str) -> None:
+        """Forget a provisional admission when downstream persistence fails."""
+        try:
+            self._recent_texts.remove(text)
+        except ValueError:
+            pass
+
     def _compute_novelty(self, text: str) -> float:
         """Simple character-level Jaccard novelty against recent texts."""
         if not self._recent_texts:

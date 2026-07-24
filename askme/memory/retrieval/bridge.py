@@ -511,6 +511,26 @@ class MemoryBridge:
             except Exception as exc:
                 logger.debug("[Memory] VectorStore warmup triggered model load (expected): %s", exc)
 
+    async def close(self) -> None:
+        """Release initialized backends and cancel pending retrievals."""
+        async with self._retrieve_cache_lock:
+            tasks = list(self._retrieve_inflight.values())
+            self._retrieve_inflight.clear()
+            self._retrieve_cache.clear()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        backend = self._mempalace
+        close = getattr(backend, "close", None)
+        if callable(close):
+            try:
+                await asyncio.to_thread(close)
+            except Exception as exc:
+                logger.debug("[Memory] MemPalace close failed: %s", exc)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -831,22 +851,21 @@ class MemoryBridge:
         # Fallback to VectorStore
         await self._save_vector_store(user_text, assistant_text)
 
-    async def save_fact(self, text: str, metadata: dict[str, Any] | None = None) -> None:
+    async def save_fact(self, text: str, metadata: dict[str, Any] | None = None) -> bool:
         """Persist a curated knowledge fact with optional metadata."""
         if not self._enabled:
-            return
+            return False
         clean = str(text or "").strip()
         if not clean:
-            return
+            return False
         await self._clear_retrieve_cache()
 
         if self._backend == "robotmem" and await asyncio.to_thread(self._ensure_robotmem):
-            await self._robotmem.save_fact(clean, metadata or {})
-            return
+            result = await self._robotmem.save_fact(clean, metadata or {})
+            return bool(result)
 
         if self._backend == "mempalace" and await asyncio.to_thread(self._ensure_mempalace):
-            await self._mempalace.save_fact(clean, metadata or {})
-            return
+            return bool(await self._mempalace.save_fact(clean, metadata or {}))
 
         use_mem0 = self._backend == "mem0" or (
             self._backend == "robotmem" and self._robotmem_fallback_backend == "mem0"
@@ -854,14 +873,18 @@ class MemoryBridge:
             self._backend == "mempalace" and self._mempalace_fallback_backend == "mem0"
         )
         if use_mem0 and await asyncio.to_thread(self._ensure_mem0):
-            await self._save_mem0(clean, f"[knowledge_import] {metadata or {}}")
-            return
+            return await self._save_mem0(clean, f"[knowledge_import] {metadata or {}}")
 
         store = self._ensure_store()
         if not store or not store.available:
-            return
-        await asyncio.to_thread(store.add, clean, {"type": "knowledge", **(metadata or {})})
+            return False
+        previous_size = int(getattr(store, "size", 0) or 0)
+        result = await asyncio.to_thread(
+            store.add, clean, {"type": "knowledge", **(metadata or {})}
+        )
         await asyncio.to_thread(store.save)
+        current_size = int(getattr(store, "size", 0) or 0)
+        return bool(result) or current_size > previous_size
 
     async def list_knowledge(self, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         """List locally indexed knowledge records for admin UI.
@@ -891,9 +914,6 @@ class MemoryBridge:
         if not self._enabled:
             return {"updated": False, "error": "memory_disabled"}
         await self._clear_retrieve_cache()
-        store = self._ensure_store()
-        if not store:
-            return {"updated": False, "error": "vector_store_unavailable"}
         allowed = {
             "approval_status",
             "category",
@@ -901,6 +921,18 @@ class MemoryBridge:
             "owner",
             "updated_at",
             "expires_at",
+            "quality_status",
+            "visibility",
+            "customer_id",
+            "project_id",
+            "product_area",
+            "workstream",
+            "linked_object_type",
+            "linked_object_id",
+            "document_type",
+            "source_version",
+            "evidence_version",
+            "conflict_set_id",
             "deleted_at",
             "deleted_reason",
             "restored_at",
@@ -908,6 +940,21 @@ class MemoryBridge:
         clean_patch = {k: v for k, v in patch.items() if k in allowed}
         if not clean_patch:
             return {"updated": False, "error": "empty_patch"}
+
+        if (
+            self._backend == "mempalace"
+            and await asyncio.to_thread(self._ensure_mempalace)
+        ):
+            updated = await self._mempalace.update_metadata(record_id, clean_patch)
+            return {
+                "updated": bool(updated),
+                "record_id": record_id,
+                "patch": clean_patch,
+            }
+
+        store = self._ensure_store()
+        if not store:
+            return {"updated": False, "error": "vector_store_unavailable"}
         updated = await asyncio.to_thread(store.update_metadata, record_id, clean_patch)
         if updated:
             await asyncio.to_thread(store.save)
@@ -998,6 +1045,28 @@ class MemoryBridge:
             fallback_backend = self._mempalace_fallback_backend
         fallback_ready = bool(backend_ready.get(fallback_backend, False)) if fallback_backend else False
         backend_dependencies = self._backend_dependency_snapshot()
+        mempalace_health = (
+            getattr(self._mempalace, "health_snapshot", {})
+            if self._mempalace is not None
+            else {}
+        )
+        if (
+            mempalace_available
+            and isinstance(mempalace_health, dict)
+            and mempalace_health.get("transport") == "http"
+        ):
+            remote_dependency = dict(backend_dependencies.get("mempalace", {}))
+            remote_version = str(mempalace_health.get("mempalace_version") or "")
+            remote_dependency.update(
+                installed=True,
+                version=remote_version,
+                version_available=bool(remote_version),
+                version_error="",
+                install_scope="isolated_sidecar",
+                transport="http",
+                runtime_ready=True,
+            )
+            backend_dependencies["mempalace"] = remote_dependency
         selected_dependency = dict(backend_dependencies.get(self._backend, {}))
         fallback_dependency = (
             dict(backend_dependencies.get(fallback_backend, {}))
@@ -1022,6 +1091,13 @@ class MemoryBridge:
                 if self._backend == "vector"
                 else "backend_not_initialized"
             )
+        backend_selection = self._backend_selection_snapshot()
+        for candidate in backend_selection["candidates"]:
+            backend_name = str(candidate.get("backend") or "")
+            runtime_ready = bool(backend_ready.get(backend_name, False))
+            candidate["runtime_ready"] = runtime_ready
+            candidate["available"] = bool(candidate.get("available") or runtime_ready)
+        selected_backend_installed = bool(selected_dependency.get("installed", False))
         return {
             "enabled": self._enabled,
             "backend": self._backend,
@@ -1032,20 +1108,20 @@ class MemoryBridge:
             "robot_behavior_memory_enabled": self._robot_behavior_memory_enabled,
             "selected_backend_ready": selected_backend_ready,
             "selected_backend_unavailable_reason": selected_unavailable_reason,
-            "selected_backend_installed": self._candidate_backend_available(self._backend),
+            "selected_backend_installed": selected_backend_installed,
             "selected_backend_dependency": selected_dependency,
             "fallback_backend": fallback_backend,
             "fallback_ready": fallback_ready,
             "fallback_backend_dependency": fallback_dependency,
             "backend_dependencies": backend_dependencies,
-            "backend_selection": self._backend_selection_snapshot(),
+            "backend_selection": backend_selection,
             "product_memory_roles": {
                 "customer_knowledge": {
                     "purpose": "auditable answer evidence for customer questions",
                     "configured_backend": self._customer_knowledge_backend,
                     "selected_backend": self._backend,
                     "ready": selected_backend_ready,
-                    "installed": self._candidate_backend_available(self._backend),
+                    "installed": selected_backend_installed,
                     "dependency": selected_dependency,
                     "vector_store_path": str(self._store_path),
                 },
@@ -1483,14 +1559,16 @@ class MemoryBridge:
             logger.debug("[Memory] Mem0 retrieve failed: %s", exc)
             return ""
 
-    async def _save_mem0(self, user_text: str, assistant_text: str) -> None:
+    async def _save_mem0(self, user_text: str, assistant_text: str) -> bool:
         """Add conversation turn to Mem0 (auto-extracts facts)."""
         try:
             text = f"用户: {user_text}\n回复: {assistant_text[:200]}"
             await asyncio.to_thread(self._mem0.add, text, user_id="robot")
             logger.debug("[Memory] Mem0 saved conversation turn.")
+            return True
         except Exception as exc:
             logger.debug("[Memory] Mem0 save failed: %s", exc)
+            return False
 
     # ------------------------------------------------------------------
     # VectorStore fallback

@@ -24,6 +24,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from askme.memory.core.admission import MemoryAdmissionControl
 from askme.memory.core.policies import PolicyStore
 from askme.memory.intelligence.association import AssociationGraph
 from askme.memory.intelligence.strategy import StrategyGenerator, Suggestion
@@ -41,6 +42,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_BEHAVIOR_FACT_MARKERS = ("记住", "以后请", "我喜欢", "我不喜欢", "叫我")
+_UNSAFE_BEHAVIOR_MARKERS = (
+    "忽略安全",
+    "忽略之前",
+    "系统提示",
+    "绕过权限",
+    "绕过安全",
+    "泄露密钥",
+    "执行任意命令",
+    "ignore previous",
+    "system prompt",
+    "bypass safety",
+    "reveal secret",
+)
+
+
+def _is_unsafe_behavior_fact(text: str) -> bool:
+    normalized = text.casefold()
+    return any(marker in normalized for marker in _UNSAFE_BEHAVIOR_MARKERS)
+
+
+def _is_explicit_behavior_fact(text: str) -> bool:
+    if any(marker in text for marker in _BEHAVIOR_FACT_MARKERS):
+        return True
+    correction_start = text.find("不是")
+    return correction_start >= 0 and "是" in text[correction_start + 2 :]
+
 
 class MemorySystem:
     """Unified facade over L1-L4 memory layers.
@@ -56,6 +84,7 @@ class MemorySystem:
         session_memory: SessionMemory | None,
         episodic: EpisodicMemory | None,
         vector_memory: MemoryBridge | None,
+        behavior_memory: Any | None = None,
         site_knowledge: SiteKnowledge | None = None,
         procedural: ProceduralMemory | None = None,
         config: dict[str, Any] | None = None,
@@ -78,6 +107,11 @@ class MemorySystem:
 
         # L5: Semantic Index (unified search across L2+L3+L4)
         mem_cfg = config.get("memory", {})
+        self._behavior = behavior_memory
+        self._behavior_enabled = bool(
+            mem_cfg.get("robot_behavior_memory_enabled", False)
+        )
+        self._behavior_admission = MemoryAdmissionControl(threshold=0.7)
         self._semantic = SemanticIndex(mem_cfg)
 
         # L6: Policies & Templates
@@ -105,12 +139,62 @@ class MemorySystem:
         self._conversation.add_user_message(user_text)
         self._conversation.add_assistant_message(assistant_text)
 
-    async def save_to_vector(self, user_text: str, assistant_text: str) -> None:
-        """Fire-and-forget save to L4 vector memory."""
-        if self._vector:
-            await self._vector.save(user_text, assistant_text)
+    async def save_behavior_memory(
+        self,
+        user_text: str,
+        assistant_text: str = "",
+    ) -> bool:
+        """Persist an explicit long-lived user preference or instruction."""
+        clean = str(user_text or "").strip()
+        if not (
+            self._behavior_enabled
+            and self._behavior
+            and not _is_unsafe_behavior_fact(clean)
+            and _is_explicit_behavior_fact(clean)
+        ):
+            return False
+
+        admitted, _ = self._behavior_admission.should_admit(
+            "command", clean, importance=0.8
+        )
+        if not admitted:
+            return False
+
+        _ = assistant_text
+        try:
+            result = await self._behavior.save_fact(
+                clean,
+                {
+                    "memory_type": "robot_behavior",
+                    "source": "conversation",
+                },
+            )
+        except Exception as exc:
+            self._behavior_admission.discard(clean)
+            logger.warning("Behavior memory save failed: %s", exc)
+            return False
+        saved = bool(result)
+        if not saved:
+            self._behavior_admission.discard(clean)
+        return saved
+
+    async def save_to_vector(self, user_text: str, assistant_text: str) -> bool:
+        """Compatibility alias for behavior-memory admission and persistence."""
+        return await self.save_behavior_memory(user_text, assistant_text)
 
     # -- Retrieve --
+
+    async def retrieve_behavior(self, user_text: str) -> str:
+        """Retrieve non-authoritative personalization context."""
+        clean = str(user_text or "").strip()
+        if not (self._behavior_enabled and self._behavior and clean):
+            return ""
+        try:
+            result = await self._behavior.retrieve(clean)
+        except Exception as exc:
+            logger.warning("Behavior memory retrieve failed: %s", exc)
+            return ""
+        return str(result or "").strip()
 
     def get_memory_context(self, user_text: str = "") -> str:
         """Assemble memory context for system prompt from L2+L3.
