@@ -21,6 +21,12 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from askme.interfaces.tts import TTSBackend
+from askme.voice.output.audio_output_worker import (
+    AplayOutputAdapter,
+    AudioOutputAdapter,
+    AudioOutputConfig,
+    AudioOutputWorker,
+)
 from askme.voice.output.phrase_cache import PhraseAudioCache
 from askme.voice.output.voice_profiles import (
     VoiceProfile,
@@ -125,6 +131,7 @@ class TTSEngine(TTSBackend):
         *,
         audio_router: AudioRouter | None = None,
         echo_reference: Any | None = None,
+        audio_output_adapter: AudioOutputAdapter | None = None,
     ) -> None:
         self._backend: str = config.get("backend", "local")
         self._fallback_backend: str = str(
@@ -326,6 +333,81 @@ class TTSEngine(TTSBackend):
         self._audio_router: AudioRouter | None = audio_router
         # Optional microphone-side software AEC reference.
         self._echo_reference = echo_reference
+        self._resident_output_enabled = bool(
+            config.get("resident_output_enabled", False)
+        )
+        self._resident_output_adapter_injected = (
+            audio_output_adapter is not None
+        )
+        self._resident_last_playback_error: str | None = None
+        self._resident_output_disabled_reason = ""
+        self._resident_output_keepalive_requested = bool(
+            config.get("resident_output_idle_keepalive", False)
+        )
+        self._resident_output_full_duplex_verified = bool(
+            config.get("resident_output_full_duplex_verified", False)
+        )
+        self._audio_output_worker: AudioOutputWorker | None = None
+        if self._resident_output_enabled:
+            if self._output_transport not in {"auto", "aplay"}:
+                self._resident_output_disabled_reason = (
+                    f"unsupported_transport:{self._output_transport}"
+                )
+            elif audio_output_adapter is None and self._aplay_bin is None:
+                self._resident_output_disabled_reason = "aplay_unavailable"
+            elif (
+                audio_output_adapter is None and not self._alsa_output_available()
+            ):
+                self._resident_output_disabled_reason = "alsa_output_unavailable"
+            else:
+                keep_warm = self._resident_output_full_duplex_verified
+                if self._resident_output_keepalive_requested and not keep_warm:
+                    logger.warning(
+                        "Resident output keepalive disabled until full-duplex is verified"
+                    )
+                output_config = AudioOutputConfig(
+                    native_sample_rate=int(
+                        config.get("resident_output_sample_rate", 48_000)
+                    ),
+                    channels=int(config.get("resident_output_channels", 2)),
+                    period_ms=int(config.get("resident_output_period_ms", 10)),
+                    buffer_ms=int(config.get("resident_output_buffer_ms", 80)),
+                    idle_keepalive=(
+                        self._resident_output_keepalive_requested and keep_warm
+                    ),
+                    warm_hold_seconds=(
+                        float(
+                            config.get(
+                                "resident_output_warm_hold_seconds", 45.0
+                            )
+                        )
+                        if keep_warm
+                        else 0.0
+                    ),
+                    idle_dither_lsb=int(
+                        config.get("resident_output_idle_dither_lsb", 0)
+                    ),
+                    cold_preroll_ms=int(
+                        config.get("resident_output_cold_preroll_ms", 250)
+                    ),
+                    warm_leadin_ms=int(
+                        config.get("resident_output_warm_leadin_ms", 80)
+                    ),
+                )
+                adapter = audio_output_adapter or AplayOutputAdapter(
+                    device=(
+                        str(self._output_device)
+                        if self._output_device is not None
+                        else None
+                    ),
+                    config=output_config,
+                    executable=self._aplay_bin or "aplay",
+                )
+                self._audio_output_worker = AudioOutputWorker(
+                    adapter,
+                    config=output_config,
+                    render_reference=self._publish_echo_reference_at_rate,
+                )
 
         # Local TTS engine (lazy init)
         self._local_tts: Any | None = None
@@ -601,6 +683,19 @@ class TTSEngine(TTSBackend):
                 "reason": "" if created else "cache_write_failed",
             }
 
+    def cached_phrase_pcm(
+        self,
+        text: str,
+        *,
+        cache_key: str,
+    ) -> tuple[np.ndarray, int] | None:
+        """Return a copy of cached PCM for artifact export without playback."""
+        storage_key = self._phrase_cache_storage_key(text, cache_key)
+        cached = self._phrase_cache.get(storage_key)
+        if cached is None:
+            return None
+        return cached.samples.astype(np.float32, copy=True), int(cached.sample_rate)
+
     def _phrase_cache_storage_key(self, text: str, cache_key: str) -> str:
         signature = {
             "cache_key": cache_key,
@@ -638,9 +733,19 @@ class TTSEngine(TTSBackend):
             if self._is_playing:
                 return
             self._discard_text_until_restart.clear()
+            self._resident_last_playback_error = None
             self._is_playing = True
             self._playback_thread = threading.Thread(target=self._playback_loop, daemon=True)
             self._playback_thread.start()
+
+    def warm_output(self, seconds: float | None = None) -> bool:
+        """Pre-open verified full-duplex output while ASR/LLM work continues."""
+
+        worker = self._audio_output_worker
+        if worker is None or not self._resident_output_full_duplex_verified:
+            return False
+        worker.warm_for(seconds)
+        return True
 
     def stop_playback(self) -> None:
         """Stop playback immediately."""
@@ -648,6 +753,14 @@ class TTSEngine(TTSBackend):
             self._is_playing = False
             thread = self._playback_thread
             self._playback_thread = None
+        resident_worker = getattr(self, "_audio_output_worker", None)
+        playback_busy = getattr(self, "_playback_busy", None)
+        if (
+            resident_worker is not None
+            and playback_busy is not None
+            and playback_busy.is_set()
+        ):
+            resident_worker.cancel(generation=self._get_generation())
         self._kill_aplay()
         self._kill_usb_audio()
         if thread is not None and thread.is_alive():
@@ -699,6 +812,9 @@ class TTSEngine(TTSBackend):
                 logger.warning("wait_done: timed out after %.1fs waiting for MCP01 USB audio", timeout)
                 return False
             time.sleep(0.02)
+        if self._resident_last_playback_error:
+            logger.warning("wait_done: resident output failed: %s", self._resident_last_playback_error)
+            return False
         return True
         # Fallback: wait for any sounddevice stream (non-aplay systems).
         try:
@@ -713,12 +829,27 @@ class TTSEngine(TTSBackend):
         ACK/thinking chimes should use that same path so the user hears prompt
         feedback during LLM/TTS latency gaps.
         """
-        if not self._should_use_usb_direct():
-            return False
-
         samples = np.asarray(audio, dtype=np.float32)
         if len(samples) == 0:
             return True
+        if self._audio_output_worker is not None:
+            self._playback_busy.set()
+            try:
+                ticket = self._audio_output_worker.submit(
+                    samples,
+                    sample_rate=sample_rate,
+                    generation=self._get_generation(),
+                )
+                timeout = max(1.0, len(samples) / max(1, sample_rate) + 1.0)
+                return bool(
+                    ticket.wait(timeout=timeout)
+                    and not ticket.cancelled
+                    and ticket.error is None
+                )
+            finally:
+                self._playback_busy.clear()
+        if not self._should_use_usb_direct():
+            return False
         if sample_rate != self._sample_rate:
             samples = self._resample(samples, sample_rate, self._sample_rate)
         if self._volume != 1.0:
@@ -733,7 +864,10 @@ class TTSEngine(TTSBackend):
 
     def drain_buffers(self) -> None:
         """Clear all pending TTS text and audio buffers."""
+        interrupted_generation = self._get_generation()
         self._advance_generation()
+        if self._audio_output_worker is not None:
+            self._audio_output_worker.cancel(generation=interrupted_generation)
         while not self.tts_text_queue.empty():
             try:
                 self.tts_text_queue.get_nowait()
@@ -754,6 +888,8 @@ class TTSEngine(TTSBackend):
         """
         self._discard_text_until_restart.set()
         self._stop_requested.set()
+        if self._audio_output_worker is not None:
+            self._audio_output_worker.cancel(generation=self._get_generation())
         self._kill_aplay()
         self._kill_usb_audio()
 
@@ -764,11 +900,59 @@ class TTSEngine(TTSBackend):
         self.stop_playback()
         if self._worker_thread.is_alive():
             self._worker_thread.join(timeout=1.0)
+        if self._audio_output_worker is not None:
+            self._audio_output_worker.shutdown()
 
     @property
     def backend(self) -> str:
         """Return the active TTS backend name."""
         return self._backend
+
+    def output_readiness(self) -> tuple[bool, str]:
+        """Return physical playback readiness and a stable reason code."""
+
+        worker = self._audio_output_worker
+        if worker is not None:
+            worker_status = worker.status_snapshot()
+            if worker_status.get("last_error"):
+                return False, "resident_output_error"
+            if self._resident_output_adapter_injected:
+                return True, "resident_adapter_injected"
+            if worker_status.get("stream_open"):
+                return True, "resident_stream_open"
+
+        if self._output_transport == "usb_direct":
+            if self._usb_direct_device_present():
+                return True, "usb_direct_device_present"
+            return False, "usb_direct_device_unavailable"
+
+        if self._output_transport in {"auto", "aplay"}:
+            if self._aplay_bin is not None and self._alsa_output_available():
+                return True, "alsa_output_available"
+            if (
+                self._output_transport == "auto"
+                and self._usb_direct_device_present()
+            ):
+                return True, "usb_direct_fallback_present"
+            return False, "alsa_output_unavailable"
+
+        if self._output_transport == "sounddevice":
+            try:
+                device = sd.query_devices(self._output_device, kind="output")
+                channels = int(device.get("max_output_channels", 0))
+            except Exception:
+                channels = 0
+            if channels > 0:
+                return True, "sounddevice_output_available"
+            return False, "sounddevice_output_unavailable"
+
+        return False, "unsupported_output_transport"
+
+    def output_ready(self) -> bool:
+        """Return whether synthesized speech can reach a physical sink."""
+
+        ready, _reason = self.output_readiness()
+        return ready
 
     def status_snapshot(self) -> dict[str, Any]:
         """Return non-secret TTS provider and playback status for health/UI."""
@@ -780,10 +964,25 @@ class TTSEngine(TTSBackend):
         minimax_disabled_remaining_s = max(
             0.0, self._minimax_disabled_until - time.monotonic()
         )
+        resident_output = (
+            self._audio_output_worker.status_snapshot()
+            if self._audio_output_worker is not None
+            else {}
+        )
+        resident_output.update({
+            "enabled": self._audio_output_worker is not None,
+            "requested": self._resident_output_enabled,
+            "full_duplex_verified": self._resident_output_full_duplex_verified,
+            "disabled_reason": self._resident_output_disabled_reason,
+            "last_playback_error": self._resident_last_playback_error,
+        })
+        output_ready, output_readiness_reason = self.output_readiness()
         return {
             "backend": self._backend,
             "fallback_backend": self._fallback_backend,
             "output_transport": self._output_transport,
+            "output_ready": output_ready,
+            "output_readiness_reason": output_readiness_reason,
             "sample_rate": self._sample_rate,
             "is_playing": playing,
             "playback_busy": self._playback_busy.is_set(),
@@ -791,6 +990,7 @@ class TTSEngine(TTSBackend):
             "queued_text_items": self.tts_text_queue.qsize(),
             "buffered_chunks": buffered_chunks,
             "buffered_samples": buffered_samples,
+            "resident_output": resident_output,
             "minimax": {
                 "configured": bool(self._minimax_api_key),
                 "transport": self._minimax_tts_transport,
@@ -1018,6 +1218,16 @@ class TTSEngine(TTSBackend):
         """Adjust speed by delta (+/-). Returns new value."""
         return self.set_speed(self._speed + delta)
 
+    def set_pitch(self, semitones: float) -> float:
+        """Set provider pitch in the controlled -12 to +12 semitone range."""
+        value = max(-12.0, min(12.0, float(semitones)))
+        self._minimax_pitch = int(round(value))
+        return value
+
+    @property
+    def pitch(self) -> float:
+        return float(self._minimax_pitch)
+
     @property
     def volume(self) -> float:
         return self._volume
@@ -1069,10 +1279,18 @@ class TTSEngine(TTSBackend):
 
     def _publish_echo_reference(self, samples: np.ndarray) -> None:
         """Publish actual mono PCM output to the microphone AEC, if enabled."""
+        self._publish_echo_reference_at_rate(samples, self._sample_rate)
+
+    def _publish_echo_reference_at_rate(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+    ) -> None:
+        """Publish rendered PCM with its physical output sample rate."""
         if self._echo_reference is None:
             return
         try:
-            self._echo_reference.push_playback(samples, self._sample_rate)
+            self._echo_reference.push_playback(samples, sample_rate)
         except Exception as exc:
             logger.debug("AEC playback reference publish failed: %s", exc)
 
@@ -2046,22 +2264,41 @@ class TTSEngine(TTSBackend):
         return self._output_device is not None and str(self._output_device).startswith("plughw:")
 
     def _alsa_output_available(self) -> bool:
-        """Return False when ALSA clearly has no card for a plughw output."""
-        if os.name != "posix" or not self._is_plughw_output():
+        """Return whether POSIX ALSA has the requested physical card."""
+        if os.name != "posix":
             return True
 
         cards_path = Path("/proc/asound/cards")
         try:
-            cards_text = cards_path.read_text(encoding="utf-8", errors="ignore").lower()
+            cards_text = cards_path.read_text(
+                encoding="utf-8", errors="ignore"
+            ).strip().lower()
         except OSError:
-            return True
-        if "no soundcards" in cards_text:
+            return False
+        if not cards_text or "no soundcards" in cards_text:
             return False
 
-        match = re.match(r"plughw:(\d+)", str(self._output_device))
+        device = "default" if self._output_device is None else str(self._output_device)
+        match = re.match(r"(?:plug)?hw:(\d+)(?:,|$)", device)
         if match and not Path(f"/proc/asound/card{match.group(1)}").exists():
             return False
         return True
+
+    @staticmethod
+    def _usb_direct_device_present() -> bool:
+        """Return whether the Lenovo MCP01 USB speaker is enumerated."""
+
+        if os.name != "posix":
+            return False
+        for vendor_path in Path("/sys/bus/usb/devices").glob("*/idVendor"):
+            try:
+                vendor = vendor_path.read_text().strip().lower()
+                product = vendor_path.with_name("idProduct").read_text().strip().lower()
+            except OSError:
+                continue
+            if vendor == "17ef" and product == "a03b":
+                return True
+        return False
 
     def _should_use_usb_direct(self) -> bool:
         if self._output_transport == "usb_direct":
@@ -2244,6 +2481,84 @@ class TTSEngine(TTSBackend):
             return np.concatenate([excerpt, gap])
         return excerpt
 
+    def _playback_loop_resident(self) -> None:
+        """Drain speech through the turn-cancellable resident output worker."""
+
+        worker = self._audio_output_worker
+        if worker is None:
+            return
+        logger.info(
+            "TTS playback: resident native output enabled (source_rate=%d)",
+            self._sample_rate,
+        )
+        try:
+            while self._is_playing:
+                if self._stop_requested.is_set():
+                    self._stop_requested.clear()
+                    worker.cancel(generation=self._get_generation())
+                    self._clear_audio_buffer()
+                    self._playback_busy.clear()
+                    logger.info(
+                        "TTS resident playback: stop requested; queued audio discarded"
+                    )
+                    continue
+
+                with self._generation_lock:
+                    generation = self._generation
+                chunk = None
+                with self._buffer_lock:
+                    if self.tts_buffer:
+                        chunk = self.tts_buffer.popleft()
+
+                if chunk is None or len(chunk) == 0:
+                    time.sleep(0.01)
+                    continue
+
+                if self._volume != 1.0:
+                    chunk = np.asarray(chunk, dtype=np.float32) * self._volume
+                    np.clip(chunk, -1.0, 1.0, out=chunk)
+
+                self._playback_busy.set()
+                try:
+                    with self._generation_lock:
+                        if generation != self._generation:
+                            continue
+                        ticket = worker.submit(
+                            chunk,
+                            sample_rate=self._sample_rate,
+                            generation=generation,
+                        )
+                    while not ticket.wait(timeout=0.02):
+                        if not self._is_playing or self._stop_requested.is_set():
+                            worker.cancel(generation=generation)
+                    if ticket.error is not None:
+                        self._resident_last_playback_error = (
+                            f"{type(ticket.error).__name__}: {ticket.error}"
+                        )
+                        logger.error(
+                            "TTS resident playback failed: %s",
+                            self._resident_last_playback_error,
+                        )
+                    elif ticket.cancelled:
+                        logger.info(
+                            "TTS resident playback generation %d cancelled",
+                            generation,
+                        )
+                except BaseException as exc:
+                    self._resident_last_playback_error = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    logger.error(
+                        "TTS resident playback submission failed: %s",
+                        self._resident_last_playback_error,
+                    )
+                finally:
+                    self._playback_busy.clear()
+        finally:
+            self._playback_busy.clear()
+            with self._playback_lock:
+                self._is_playing = False
+
     def _playback_loop(self) -> None:
         """Drain tts_buffer one sentence at a time.
 
@@ -2255,6 +2570,9 @@ class TTSEngine(TTSBackend):
 
         On other platforms: fall back to sd.play() + sd.wait().
         """
+        if self._audio_output_worker is not None:
+            self._playback_loop_resident()
+            return
         try:
             logger.info(
                 "TTS playback: device=%s, sample_rate=%d, transport=%s, aplay=%s",

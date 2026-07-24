@@ -23,9 +23,19 @@ LATENCY_BUCKET_STAGE_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "asr_final_ms": ("asr_final", "asr_done"),
     "intent_route_ms": ("intent_route", "intent_routed", "route_intent"),
-    "llm_ttft_ms": ("llm_ttft", "llm_first_token", "llm_first_delta"),
+    "llm_first_payload_ms": ("llm_first_payload",),
+    "llm_first_semantic_text_ms": ("llm_first_semantic_text",),
+    "llm_ttft_ms": (
+        "llm_first_semantic_text",
+        "llm_ttft",
+        "llm_first_token",
+        "llm_first_delta",
+    ),
     "llm_done_ms": ("llm_done", "llm_completed"),
+    "tts_first_request_ms": ("tts_first_request",),
+    "tts_first_pcm_ms": ("tts_first_pcm",),
     "tts_first_audio_ms": (
+        "tts_first_pcm",
         "tts_first_audio",
         "tts_first_audio_chunk",
         "tts_audio_first_chunk",
@@ -33,6 +43,10 @@ LATENCY_BUCKET_STAGE_ALIASES: dict[str, tuple[str, ...]] = {
     "playback_start_ms": ("playback_start", "tts_playback_started"),
     "playback_done_ms": ("playback_done", "tts_playback_done"),
     "barge_in_stop_ms": ("barge_in_stop", "barge_in_confirmed"),
+    "render_first_semantic_nonzero_ms": (
+        "render_first_semantic_nonzero",
+    ),
+    "physical_first_audio_ms": ("physical_first_audio_observed",),
 }
 
 LATENCY_BUCKET_NAMES: tuple[str, ...] = tuple(LATENCY_BUCKET_STAGE_ALIASES)
@@ -50,6 +64,7 @@ DEFAULT_REQUIRED_VOICE_TURN_BUCKETS: tuple[str, ...] = (
     "llm_ttft_ms",
     "tts_first_audio_ms",
     "playback_start_ms",
+    "physical_first_audio_ms",
 )
 
 
@@ -143,6 +158,10 @@ class VoiceTurnTrace:
                 (self.stages[stage_name] for stage_name in stage_aliases if stage_name in self.stages),
                 None,
             )
+            if bucket_name == "physical_first_audio_ms" and (
+                stage is None or stage.metadata.get("evidence_kind") != "external_sensor"
+            ):
+                stage = None
             buckets[bucket_name] = _round_ms(stage.offset_ms) if stage is not None else None
         return buckets
 
@@ -239,6 +258,23 @@ class VoiceTurnTraceRecorder:
     def mark_barge_in(self, **metadata: Any) -> None:
         self._barge_in_count += 1
         self.mark("barge_in_confirmed", **metadata)
+
+    def mark_physical_first_audio(
+        self,
+        *,
+        evidence_source: str,
+        **metadata: Any,
+    ) -> None:
+        """Record physical sound only when an external sensor observed it."""
+        source = str(evidence_source or "").strip()
+        if not source:
+            raise ValueError("evidence_source is required")
+        self.mark(
+            "physical_first_audio_observed",
+            evidence_kind="external_sensor",
+            evidence_source=source,
+            **metadata,
+        )
 
     def latency_summary(self) -> dict[str, Any]:
         history = self._history[-_SUMMARY_WINDOW_SIZE:]

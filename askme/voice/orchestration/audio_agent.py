@@ -9,7 +9,7 @@ import threading
 import time
 from collections import deque
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import numpy as np
@@ -170,12 +170,20 @@ class AudioAgent:
         )
 
         # A second capture loop is used only while TTS/LLM output is active.
-        # It requires the wake keyword before taking ownership of the turn.
+        # Its configured policy authorizes when it may take ownership of the turn.
         self._barge_listener_stop = threading.Event()
         self._barge_listener_lock = threading.Lock()
         self._barge_listener_thread: threading.Thread | None = None
         self._barge_listener_results: queue.Queue[str] = queue.Queue()
         self._barge_in_active = threading.Event()
+        self._barge_in_callback: Callable[[], None] | None = None
+        self._barge_in_callback_lock = threading.Lock()
+        self._barge_in_notified = threading.Event()
+        self._barge_in_requested_mode = (
+            str(voice_cfg.get("barge_in_mode", "keyword")).strip().lower()
+        )
+        self._barge_in_mode = "keyword"
+        self._barge_in_warning_emitted = False
         barge_pre_roll_s = max(
             0.5,
             float(voice_cfg.get("barge_in_pre_roll_s", 1.2)),
@@ -227,6 +235,7 @@ class AudioAgent:
         self._mic = MicInput.from_config(config, audio_router=audio_router)
         self._media_transport = self._resolve_media_transport_label(voice_cfg)
         self._audio_proc = AudioProcessor(voice_cfg)
+        self._configure_barge_in_policy(voice_cfg)
         # Keep text-mode construction lightweight and safe on machines with
         # native audio/VAD libraries installed: sherpa-onnx VAD initialization
         # can abort the interpreter on some Windows setups. Only voice mode
@@ -277,12 +286,78 @@ class AudioAgent:
         """Whether TTS is actively playing or has queued text."""
         return self.tts.is_active() or not self.tts.tts_text_queue.empty()
 
+    def _configure_barge_in_policy(self, voice_cfg: dict[str, Any]) -> None:
+        """Resolve natural barge-in behind hardware and field acceptance gates."""
+        tts_cfg = voice_cfg.get("tts", {}) or {}
+        aec_cfg = voice_cfg.get("echo_cancellation", {}) or {}
+        aec_enabled = bool(aec_cfg.get("enabled", False))
+        requirements = {
+            "full_duplex_verified": bool(
+                tts_cfg.get("resident_output_full_duplex_verified", False)
+            ),
+            "aec_enabled": aec_enabled,
+            "aec_ready": bool(
+                aec_enabled and self._audio_proc.echo_reference is not None
+            ),
+            "field_acceptance_verified": bool(
+                voice_cfg.get("barge_in_field_acceptance_verified", False)
+            ),
+        }
+        missing_reasons = [
+            reason
+            for key, reason in (
+                ("full_duplex_verified", "full_duplex_not_verified"),
+                ("aec_enabled", "aec_not_enabled"),
+                ("aec_ready", "aec_not_ready"),
+                (
+                    "field_acceptance_verified",
+                    "field_acceptance_not_verified",
+                ),
+            )
+            if not requirements[key]
+        ]
+        speech_gate_ready = not missing_reasons
+        requested_mode = self._barge_in_requested_mode
+
+        if requested_mode == "speech" and speech_gate_ready:
+            effective_mode = "speech"
+            reason = "speech_gate_passed"
+        elif requested_mode == "speech":
+            effective_mode = "keyword"
+            reason = "speech_gate_blocked:" + ",".join(missing_reasons)
+            if not self._barge_in_warning_emitted:
+                logger.warning(
+                    "Speech barge-in disabled; falling back to keyword (%s)",
+                    reason,
+                )
+                self._barge_in_warning_emitted = True
+        elif requested_mode == "keyword":
+            effective_mode = "keyword"
+            reason = "keyword_configured"
+        else:
+            effective_mode = "keyword"
+            reason = f"unsupported_mode:{requested_mode or 'empty'}"
+            if not self._barge_in_warning_emitted:
+                logger.warning("Unsupported barge-in mode; using keyword (%s)", reason)
+                self._barge_in_warning_emitted = True
+
+        self._barge_in_mode = effective_mode
+        self._barge_in_policy = {
+            "requested_mode": requested_mode,
+            "effective_mode": effective_mode,
+            "speech_gate_ready": speech_gate_ready,
+            "reason": reason,
+            "requirements": requirements,
+        }
+
     def speak(self, text: str) -> None:
         """Queue text for TTS (strips emoji/markdown internally)."""
         self.tts.speak(text)
         self._refresh_voice_metrics()
 
     def start_playback(self) -> None:
+        with self._barge_in_callback_lock:
+            self._barge_in_notified.clear()
         self._ready_chime_generation += 1
         self._agent_state = AgentState.SPEAKING
         self._turn_traces.mark("tts_playback_started")
@@ -290,17 +365,45 @@ class AudioAgent:
         self._start_barge_listener()
         self._refresh_voice_metrics()
 
+    def set_barge_in_callback(
+        self,
+        callback: Callable[[], None] | None,
+    ) -> None:
+        """Set the fast, synchronous callback invoked on confirmed barge-in."""
+        with self._barge_in_callback_lock:
+            self._barge_in_callback = callback
+
+    def _confirm_barge_in(self) -> bool:
+        """Cancel generation, advance audio buffers, then stop physical output once."""
+        with self._barge_in_callback_lock:
+            if self._barge_in_notified.is_set():
+                return False
+            self._barge_in_notified.set()
+            callback = self._barge_in_callback
+
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                logger.exception("Barge-in cancellation callback failed")
+
+        try:
+            self.tts.drain_buffers()
+        finally:
+            self.tts.stop_immediately()
+        return True
+
     def stop_playback(self) -> None:
         self.tts.stop_playback()
         barge_capture_active = self._barge_in_active.is_set()
         self._stop_barge_listener()
         self._turn_traces.mark("playback_done")
 
-        # Keyword-authorized barge-in owns VAD/ASR until its utterance ends.
+        # A confirmed barge-in owns VAD/ASR until its utterance ends.
         # Cooldown resets those engines, so applying it here would discard the
         # first words after "小算" and let the main loop race for the mic.
         if barge_capture_active:
-            logger.info("Playback stopped for keyword barge-in; ASR capture continues")
+            logger.info("Playback stopped for confirmed barge-in; ASR capture continues")
             self._input_cooldown_until = 0.0
             self._agent_state = AgentState.LISTENING
             self._refresh_voice_metrics()
@@ -345,7 +448,7 @@ class AudioAgent:
                 self._barge_listener_thread = None
 
     def _barge_listener_worker(self) -> None:
-        """Run keyword-gated barge-in until playback ends or a new turn wins."""
+        """Run configured barge-in policy until playback ends or a new turn wins."""
         try:
             while not self._barge_listener_stop.is_set() and self.tts.is_active():
                 result = self.listen_loop(_barge_mode=True)
@@ -379,8 +482,12 @@ class AudioAgent:
         import asyncio
         self.speak(text)
         self.start_playback()
-        await asyncio.to_thread(self.wait_speaking_done)
-        self.stop_playback()
+        try:
+            completed = await asyncio.to_thread(self.wait_speaking_done)
+            if not completed:
+                raise TimeoutError("Speech playback did not complete within 30 seconds.")
+        finally:
+            self.stop_playback()
 
     async def speak_cached_and_wait(self, text: str, *, cache_key: str) -> bool:
         """Play a persisted phrase without invoking a TTS provider."""
@@ -388,9 +495,15 @@ class AudioAgent:
         if not self.tts.queue_cached_phrase(text, cache_key=cache_key):
             return False
         self.start_playback()
-        await asyncio.to_thread(self.wait_speaking_done)
-        self.stop_playback()
-        return True
+        try:
+            completed = await asyncio.to_thread(self.wait_speaking_done)
+            if not completed:
+                raise TimeoutError(
+                    "Cached speech playback did not complete within 30 seconds."
+                )
+            return True
+        finally:
+            self.stop_playback()
 
     def start_input(self) -> None:
         """Open the microphone input stream for long-lived voice sessions."""
@@ -490,6 +603,12 @@ class AudioAgent:
         v = self.tts.set_speed(value)
         self._refresh_voice_metrics()
         return v
+
+    def set_pitch(self, semitones: float) -> float:
+        """Set provider pitch in semitones within the TTS safety range."""
+        value = self.tts.set_pitch(semitones)
+        self._refresh_voice_metrics()
+        return value
 
     def adjust_speed(self, delta: float) -> float:
         """Adjust TTS speed by delta. Returns new value."""
@@ -705,7 +824,7 @@ class AudioAgent:
 
             with mic.open() as mic_ctx:
                 # Phase 1: Wake word detection (if KWS available)
-                if _barge_mode:
+                if _barge_mode and self._barge_in_mode == "keyword":
                     logger.info("Barge-in listener active; waiting for wake word")
                     self.woken_up = False
                     if not self._wait_for_wake_word_mic(mic_ctx, barge_only=True):
@@ -722,9 +841,11 @@ class AudioAgent:
                     self._turn_traces.mark_barge_in(keyword="小算")
                     self._agent_state = AgentState.LISTENING
                     self._refresh_voice_metrics()
-                    self.tts.drain_buffers()
-                    self.tts.stop_immediately()
+                    self._confirm_barge_in()
                     self._play_chime("wake")
+                elif _barge_mode:
+                    logger.info("Barge-in listener active; waiting for confirmed speech")
+                    self.woken_up = False
                 elif self.kws and self.kws.available and self.kws_stream:
                     _within_wake_window = self._followup_window_active()
                     if _within_wake_window:
@@ -912,19 +1033,47 @@ class AudioAgent:
                         asr.feed_audio(samples_f32, samples_i16, mic_ctx.sample_rate)
 
                     elif event == VADEvent.BARGE_IN_CONFIRMED:
-                        # VAD-only speech is ambient conversation until KWS has
-                        # heard "小算". Never stop playback on this event.
-                        logger.info(
-                            "Ignoring VAD-only barge-in; wake word '小算' is required"
-                        )
-                        self._turn_traces.mark(
-                            "barge_in_rejected", reason="wake_word_required"
-                        )
-                        asr.reset()
-                        asr_session_started = False
-                        vad.reset()
-                        mic_ctx.pre_roll.clear()
-                        deadline = time.monotonic() + self._asr_timeout
+                        if _barge_mode and self._barge_in_mode == "speech":
+                            barge_keyword_authorized = True
+                            self._barge_in_active.set()
+                            self.last_turn_wake_authorized = True
+                            self.last_turn_wake_source = "barge_in_speech"
+                            self._turn_traces.mark_barge_in(mode="speech")
+                            self._turn_traces.mark(
+                                "vad_start", peak=peak, rms=rms, mode="barge_in_speech"
+                            )
+                            self._agent_state = AgentState.LISTENING
+                            self._refresh_voice_metrics()
+                            self._confirm_barge_in()
+
+                            deadline = time.monotonic() + self._asr_timeout
+                            if not asr_session_started:
+                                asr.start_session()
+                                asr_session_started = True
+                            buffered_audio = list(vad.barge_in_buffer)
+                            if not buffered_audio:
+                                buffered_audio = [samples_i16.copy()]
+                            for buf_i16 in buffered_audio:
+                                asr.feed_audio(
+                                    buf_i16.astype(np.float32) / 32768.0,
+                                    buf_i16,
+                                    mic_ctx.sample_rate,
+                                )
+                            vad.barge_in_buffer.clear()
+                        else:
+                            # VAD-only speech is ambient conversation until KWS has
+                            # heard "小算". Never stop playback on this event.
+                            logger.info(
+                                "Ignoring VAD-only barge-in; wake word '小算' is required"
+                            )
+                            self._turn_traces.mark(
+                                "barge_in_rejected", reason="wake_word_required"
+                            )
+                            asr.reset()
+                            asr_session_started = False
+                            vad.reset()
+                            mic_ctx.pre_roll.clear()
+                            deadline = time.monotonic() + self._asr_timeout
 
                     elif event == VADEvent.BARGE_IN_DISMISSED:
                         mic_ctx.buffer_pre_roll(raw)
@@ -1626,6 +1775,12 @@ class AudioAgent:
         return self._refresh_voice_metrics()
 
     def _refresh_voice_metrics(self, **overrides: Any) -> dict[str, Any]:
+        tts_snapshot = self._component_status_snapshot(self.tts)
+        output_ready = self._tts_output_ready(tts_snapshot)
+        barge_in_status = dict(self._barge_in_policy)
+        barge_in_status["requirements"] = dict(
+            self._barge_in_policy["requirements"]
+        )
         input_ready = bool(
             self.voice_mode
             and self.asr is not None
@@ -1637,8 +1792,8 @@ class AudioAgent:
             "mode": "voice" if self.voice_mode else "text",
             "enabled": self.voice_mode,
             "input_ready": input_ready,
-            "output_ready": self.tts is not None,
-            "pipeline_ok": bool(self.tts) and (not self.voice_mode or input_ready),
+            "output_ready": output_ready,
+            "pipeline_ok": output_ready and (not self.voice_mode or input_ready),
             "asr_available": self.asr is not None,
             "vad_available": self.vad is not None,
             "kws_available": bool(self.kws and getattr(self.kws, "available", False)),
@@ -1662,11 +1817,12 @@ class AudioAgent:
             "tts_backend": self.tts.backend,
             "tts_busy": self.is_busy,
             "agent_state": self._agent_state.value,
-            "interaction": self._interaction_status_snapshot(),
+            "barge_in": barge_in_status,
+            "interaction": self._interaction_status_snapshot(output_ready=output_ready),
             "media": self._media_status_snapshot(),
             "voice_turn": self._turn_traces.snapshot(),
             "asr": self._component_status_snapshot(self._asr_mgr),
-            "tts": self._component_status_snapshot(self.tts),
+            "tts": tts_snapshot,
             "pending_runtime_updates": {
                 "asr": self._pending_asr_config is not None,
                 "tts": self._pending_tts_config is not None,
@@ -1685,7 +1841,26 @@ class AudioAgent:
                 return result
         return {"available": component is not None}
 
-    def _interaction_status_snapshot(self) -> dict[str, Any]:
+    def _tts_output_ready(
+        self,
+        snapshot: dict[str, Any] | None = None,
+    ) -> bool:
+        """Use the TTS physical sink contract instead of object existence."""
+
+        if self.tts is None:
+            return False
+        current = snapshot
+        if current is None:
+            current = self._component_status_snapshot(self.tts)
+        if "output_ready" in current:
+            return bool(current["output_ready"])
+        return True
+
+    def _interaction_status_snapshot(
+        self,
+        *,
+        output_ready: bool | None = None,
+    ) -> dict[str, Any]:
         cooldown_remaining = round(self._in_post_tts_input_cooldown(), 2)
         input_ready = bool(
             self.voice_mode
@@ -1693,7 +1868,8 @@ class AudioAgent:
             and self.vad is not None
             and self._mic.is_open
         )
-        output_ready = self.tts is not None
+        if output_ready is None:
+            output_ready = self._tts_output_ready()
         if self._muted:
             state = "muted"
             can_talk = False
