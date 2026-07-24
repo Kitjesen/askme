@@ -20,6 +20,7 @@ from askme.ports import (
     TemporalMemoryPort,
     VisionPort,
     VoiceIOPort,
+    SpeechPlaybackPort,
 )
 from askme.runtime.core.profiles import MCP_PROFILE
 
@@ -44,6 +45,7 @@ class AppContext:
     temporal_memory_client: TemporalMemoryPort | None = None
     robot_control_client: RobotControlPort | None = None
     voice_io: VoiceIOPort | None = None
+    speech_playback: SpeechPlaybackPort | None = None
     tts_engine: Any = None
     asr_engine: Any = None
     vad_engine: Any = None
@@ -181,12 +183,14 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     voice_cfg = get_section("voice")
     if voice_cfg:
         try:
-            from askme.providers import build_edge_voice_io
+            from askme.providers import build_edge_voice_io, build_speech_playback
 
             ctx.voice_io = build_edge_voice_io(ctx.config)
             ctx.tts_engine = getattr(ctx.voice_io, "tts", None)
             ctx.asr_engine = getattr(ctx.voice_io, "asr", None)
             ctx.vad_engine = getattr(ctx.voice_io, "vad", None)
+            ctx.speech_playback = build_speech_playback(ctx.config, audio=ctx.voice_io)
+            await ctx.speech_playback.start()
             ctx.voice_enabled = True
             logger.info("Voice I/O initialised.")
         except Exception as exc:
@@ -211,6 +215,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         if ctx.arm_controller:
             ctx.arm_controller.emergency_stop()
             ctx.arm_controller.close()
+        if ctx.speech_playback:
+            await ctx.speech_playback.shutdown()
         if ctx.tts_engine:
             ctx.tts_engine.shutdown()
         logger.info("Shutdown complete.")

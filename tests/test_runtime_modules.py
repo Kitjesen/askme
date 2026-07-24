@@ -130,6 +130,55 @@ class TestMemoryModule:
         assert kwargs["config"] == cfg
         assert kwargs["knowledge_catalog"] is mod._knowledge_catalog
 
+    def test_build_wires_mempalace_behavior_memory_with_isolated_room(self):
+        from askme.runtime.modules.memory_module import MemoryModule
+
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "backend": "mempalace",
+                "customer_knowledge_backend": "mempalace",
+                "robot_behavior_memory_backend": "mempalace",
+                "robot_behavior_memory_enabled": True,
+                "mempalace_wing": "askme",
+                "mempalace_room": "customer_knowledge",
+                "mempalace_behavior_wing": "personalization",
+                "mempalace_behavior_room": "robot_behavior",
+            },
+            "brain": {"model": "test-model"},
+        }
+        mod = MemoryModule()
+        with (
+            patch("askme.runtime.modules.memory_module.SessionMemory"),
+            patch(
+                "askme.runtime.modules.memory_module.ConversationManager"
+            ) as mock_conv,
+            patch("askme.runtime.modules.memory_module.MemoryBridge"),
+            patch(
+                "askme.runtime.modules.memory_module.EpisodicMemory"
+            ) as mock_epi,
+            patch(
+                "askme.runtime.modules.memory_module.MemPalaceBackend"
+            ) as mock_behavior,
+            patch(
+                "askme.runtime.modules.memory_module.MemorySystem"
+            ) as mock_system,
+        ):
+            mock_conv.return_value.history = []
+            mock_epi.return_value._buffer = []
+            mod.llm_client = None
+            mod.build(cfg, _make_registry())
+
+        behavior_cfg, brain_cfg = mock_behavior.call_args.args
+        assert behavior_cfg["mempalace_wing"] == "personalization"
+        assert behavior_cfg["mempalace_room"] == "robot_behavior"
+        assert brain_cfg == cfg["brain"]
+        assert (
+            mock_system.call_args.kwargs["behavior_memory"]
+            is mock_behavior.return_value
+        )
+        assert mock_system.call_args.kwargs["config"] == cfg
+
     def test_health_returns_ok(self):
         mod = self._make_module()
         h = mod.health()
@@ -246,6 +295,32 @@ class TestMemoryModule:
         assert text == "[location] Restroom east"
         assert metadata["category"] == "location"
         assert metadata["record_id"].startswith("know_")
+
+    @pytest.mark.asyncio
+    async def test_knowledge_import_does_not_mark_failed_backend_write_indexed(
+        self,
+        tmp_path,
+    ):
+        mod = self._make_module_with_catalog(tmp_path)
+        mod.memory_bridge.save_fact = AsyncMock(return_value=False)
+        mod.memory_bridge.update_knowledge_metadata = AsyncMock(
+            return_value={"updated": False}
+        )
+        mod.memory_bridge.health.return_value = {
+            "enabled": True,
+            "backend": "mempalace",
+        }
+
+        with patch.object(mod._knowledge_catalog, "mark_indexed") as mark_indexed:
+            payload = await mod.import_payload({
+                "filename": "site.md",
+                "content": "- Service desk is on floor one",
+                "category": "location",
+            })
+
+        assert payload["imported"] == 0
+        assert payload["errors"] == ["catalog sync record 1: backend_write_failed"]
+        mark_indexed.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_knowledge_import_payload_catalogs_internal_records_without_public_indexing(
@@ -552,6 +627,35 @@ class TestMemoryModule:
             "refuse_when_conflicting": True,
             "robot_behavior_memory_enters_customer_prompt": False,
         }
+
+    def test_memory_strategy_reports_mempalace_behavior_readiness_and_count(self):
+        mod = self._make_module()
+        mod._memory_cfg = {
+            "robot_behavior_memory_backend": "mempalace",
+            "robot_behavior_memory_enabled": True,
+        }
+        behavior = MagicMock()
+        behavior.health_snapshot = {
+            "transport": "http",
+            "available": True,
+            "wing": "askme",
+            "room": "robot_behavior",
+            "count": 7,
+            "last_error": "",
+        }
+        mod._behavior_memory = behavior
+
+        strategy = mod._memory_strategy_payload({
+            "backend": "mempalace",
+            "available": True,
+            "rag_enforce_expiry": True,
+        })
+        robot = strategy["robot_behavior_memory"]
+
+        assert robot["ready"] is True
+        assert robot["count"] == 7
+        assert robot["enters_prompt"] is True
+        assert robot["enters_customer_evidence"] is False
 
     @pytest.mark.asyncio
     async def test_memory_health_payload_warns_when_expiry_is_not_enforced(self, tmp_path):
@@ -874,6 +978,50 @@ class TestMemoryModule:
         await asyncio.gather(mod._warmup_task)
 
         mod.memory_bridge.warmup.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_warms_customer_and_behavior_backends_concurrently(self):
+        mod = self._make_module()
+        started: set[str] = set()
+        both_started = asyncio.Event()
+
+        async def warm(name: str) -> None:
+            started.add(name)
+            if len(started) == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=0.2)
+
+        async def warm_customer() -> None:
+            await warm("customer")
+
+        async def warm_behavior() -> None:
+            await warm("behavior")
+
+        mod.memory_bridge.warmup = AsyncMock(side_effect=warm_customer)
+        behavior = MagicMock()
+        behavior.warmup = AsyncMock(side_effect=warm_behavior)
+        behavior.stats = AsyncMock(return_value={"available": True, "count": 0})
+        mod._behavior_memory = behavior
+
+        await mod.start()
+        await asyncio.wait_for(mod._warmup_task, timeout=0.5)
+
+        assert started == {"customer", "behavior"}
+        mod.memory_bridge.warmup.assert_awaited_once()
+        behavior.warmup.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_closes_customer_and_behavior_backends(self):
+        mod = self._make_module()
+        mod.memory_bridge.close = AsyncMock()
+        behavior = MagicMock()
+        behavior.close = MagicMock()
+        mod._behavior_memory = behavior
+
+        await mod.stop()
+
+        mod.memory_bridge.close.assert_awaited_once()
+        behavior.close.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_stop_no_llm_no_crash(self):

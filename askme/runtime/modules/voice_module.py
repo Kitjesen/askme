@@ -22,7 +22,17 @@ from askme.llm.core.client import LLMClient
 from askme.pipeline.core.brain_pipeline import BrainPipeline
 from askme.pipeline.core.persona import persona_from_brain_config
 from askme.pipeline.skills.skill_dispatcher import SkillDispatcher
-from askme.ports import AudioFrontendPort, AudioRouterPort
+from askme.ports import (
+    AudioFrontendPort,
+    AudioRouterPort,
+    PlaybackTarget,
+    SpeechActor,
+    SpeechDelivery,
+    SpeechPlaybackPort,
+    SpeechPlaybackRequest,
+    SpeechPriority,
+)
+from askme.providers import build_speech_playback
 from askme.runtime.core.module import In, Module, ModuleRegistry, Out
 from askme.runtime.modules.voice_stack import build_runtime_voice_stack
 from askme.runtime.voice_control import VoiceControlStateStore, deep_merge
@@ -97,6 +107,10 @@ class VoiceModule(Module):
         self._voice_runtime_bridge = voice_stack.voice_runtime_bridge
         self._voice_gateway = voice_stack.voice_gateway
         self._router = voice_stack.router
+        self._speech_playback = build_speech_playback(
+            effective_cfg,
+            audio=self._audio,
+        )
 
         # Register voice tools
         if tools is not None:
@@ -108,6 +122,15 @@ class VoiceModule(Module):
         # so it is responsible for injecting it into objects built by earlier modules.
         if pipeline is not None:
             pipeline.set_audio(self._audio)
+            set_barge_in_callback = getattr(
+                self._audio, "set_barge_in_callback", None
+            )
+            cancel_current_turn = getattr(pipeline, "cancel_current_turn", None)
+            if callable(set_barge_in_callback) and callable(cancel_current_turn):
+                def _cancel_voice_turn() -> None:
+                    cancel_current_turn(owner="voice")
+
+                set_barge_in_callback(_cancel_voice_turn)
         if agent_shell is not None:
             agent_shell.set_audio(self._audio)
         if dispatcher is not None:
@@ -173,6 +196,9 @@ class VoiceModule(Module):
 
     async def start(self) -> None:
         """Start a voice task that recovers when microphone hardware is absent."""
+        speech_playback = getattr(self, "_speech_playback", None)
+        if speech_playback is not None:
+            await speech_playback.start()
         self._task = asyncio.create_task(
             self._run_with_input_recovery(),
             name="voice-loop",
@@ -213,6 +239,9 @@ class VoiceModule(Module):
                 await self._task
             except asyncio.CancelledError:
                 pass
+        speech_playback = getattr(self, "_speech_playback", None)
+        if speech_playback is not None:
+            await speech_playback.shutdown()
         self._audio.stop_input()
         self._audio.shutdown()
         logger.info("VoiceModule: stopped")
@@ -277,6 +306,107 @@ class VoiceModule(Module):
     def tts_provider(self) -> Any:
         """The TTS provider behind the audio frontend."""
         return getattr(self._audio, "tts", self._tts_provider)
+
+    @property
+    def speech_playback(self) -> SpeechPlaybackPort:
+        """Shared playback job port used by HTTP, MCP, and internal callers."""
+        return self._speech_playback
+
+    async def speak_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Queue literal text for the local robot; never invoke the LLM."""
+        semantics = str(payload.get("semantics") or "verbatim").strip().lower()
+        if semantics != "verbatim":
+            raise ValueError("speak_payload only accepts semantics=verbatim")
+        job = await self._speech_playback.submit(
+            self._speech_request(payload, delivery=SpeechDelivery.PLAYBACK)
+        )
+        return job.to_payload()
+
+    async def synthesize_speech_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Synthesize literal text without releasing it to the speaker."""
+        job = await self._speech_playback.submit(
+            self._speech_request(payload, delivery=SpeechDelivery.SYNTHESIZE_ONLY)
+        )
+        return job.to_payload()
+
+    async def speech_playback_audio_payload(
+        self,
+        playback_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del payload
+        artifact = await self._speech_playback.artifact_file(playback_id)
+        return {
+            "path": str(artifact.path),
+            "filename": artifact.filename,
+            "media_type": artifact.media_type,
+            "size_bytes": artifact.size_bytes,
+            "sha256": artifact.sha256,
+        }
+
+    async def speech_playback_status_payload(
+        self,
+        playback_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del payload
+        return (await self._speech_playback.status(playback_id)).to_payload()
+
+    async def cancel_speech_playback_payload(
+        self,
+        playback_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        job = await self._speech_playback.cancel(
+            playback_id,
+            reason=str(payload.get("reason") or "operator_cancelled"),
+            actor=self._speech_actor(payload),
+        )
+        return job.to_payload()
+
+    def _speech_request(
+        self,
+        payload: dict[str, Any],
+        *,
+        delivery: SpeechDelivery,
+    ) -> SpeechPlaybackRequest:
+        return SpeechPlaybackRequest(
+            text=str(payload.get("text") or ""),
+            target=PlaybackTarget(
+                robot_id=str(payload.get("robot_id") or ""),
+                device_id=str(payload.get("device_id") or ""),
+                site_id=str(payload.get("site_id") or ""),
+            ),
+            actor=self._speech_actor(payload),
+            idempotency_key=str(payload.get("idempotency_key") or ""),
+            delivery=delivery,
+            priority=SpeechPriority(str(payload.get("priority") or "normal")),
+            queue_policy=str(payload.get("queue_policy") or "enqueue"),
+            voice_profile_id=str(payload.get("voice_profile_id") or ""),
+            speed=_optional_float(payload.get("speed")),
+            pitch=_optional_float(payload.get("pitch")),
+            volume=_optional_float(payload.get("volume")),
+            ttl_s=float(payload.get("ttl_s", 60.0)),
+        )
+
+    @staticmethod
+    def _speech_actor(payload: dict[str, Any]) -> SpeechActor:
+        auth = payload.get("operator_auth")
+        operator = auth.get("operator") if isinstance(auth, dict) else {}
+        operator = operator if isinstance(operator, dict) else {}
+        roles = operator.get("roles") if isinstance(operator.get("roles"), list) else []
+        return SpeechActor(
+            operator_id=str(
+                operator.get("operator_id")
+                or payload.get("operator_id")
+                or "unknown.operator"
+            ).strip(),
+            roles=frozenset(str(role).strip() for role in roles if str(role).strip()),
+            surface=str(payload.get("surface") or "fastapi"),
+        )
 
     def voice_profiles_payload(self) -> dict[str, Any]:
         return self.tts_provider.voice_profiles_payload()
@@ -365,6 +495,7 @@ class VoiceModule(Module):
                 "llm": llm_status,
                 "asr": audio_status.get("asr", {}),
                 "tts": audio_status.get("tts", {}),
+                "playback": self._speech_playback.snapshot(),
                 "kws": {
                     "enabled": audio_status.get("wake_word_enabled", False),
                     "keyword": "小算",
@@ -944,3 +1075,9 @@ def _status_snapshot(component: Any) -> dict[str, Any]:
             "error_type": type(exc).__name__,
         }
     return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)

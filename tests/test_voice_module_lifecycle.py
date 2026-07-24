@@ -210,6 +210,77 @@ def test_voice_module_injects_runtime_stack_gate_components(monkeypatch) -> None
     }
 
 
+def test_voice_module_wires_barge_in_to_pipeline_turn_cancel(monkeypatch) -> None:
+    pipeline = MagicMock()
+    audio = MagicMock()
+    stack = SimpleNamespace(
+        audio=audio,
+        audio_router=object(),
+        asr_provider="asr-provider",
+        tts_provider="tts-provider",
+        voice_runtime_bridge=object(),
+        voice_gateway=object(),
+        router=object(),
+        address_detector=object(),
+        interaction_gate=object(),
+    )
+
+    monkeypatch.setattr(
+        "askme.runtime.modules.voice_module.build_runtime_voice_stack",
+        MagicMock(return_value=stack),
+    )
+    monkeypatch.setattr(
+        "askme.pipeline.channels.voice_loop.VoiceLoop",
+        MagicMock,
+    )
+
+    mod = VoiceModule()
+    mod.pipeline_in = SimpleNamespace(brain_pipeline=pipeline)
+    mod.build({}, ModuleRegistry())
+
+    audio.set_barge_in_callback.assert_called_once()
+    callback = audio.set_barge_in_callback.call_args.args[0]
+    callback()
+    pipeline.cancel_current_turn.assert_called_once_with(owner="voice")
+
+
+def test_voice_module_accepts_legacy_audio_and_pipeline_without_barge_api(
+    monkeypatch,
+) -> None:
+    audio = object()
+    pipeline = SimpleNamespace(set_audio=MagicMock())
+    stack = SimpleNamespace(
+        audio=audio,
+        audio_router=object(),
+        asr_provider="asr-provider",
+        tts_provider="tts-provider",
+        voice_runtime_bridge=object(),
+        voice_gateway=object(),
+        router=object(),
+        address_detector=object(),
+        interaction_gate=object(),
+    )
+
+    monkeypatch.setattr(
+        "askme.runtime.modules.voice_module.build_runtime_voice_stack",
+        MagicMock(return_value=stack),
+    )
+    monkeypatch.setattr(
+        "askme.runtime.modules.voice_module.build_speech_playback",
+        MagicMock(return_value=MagicMock()),
+    )
+    monkeypatch.setattr(
+        "askme.pipeline.channels.voice_loop.VoiceLoop",
+        MagicMock,
+    )
+
+    mod = VoiceModule()
+    mod.pipeline_in = SimpleNamespace(brain_pipeline=pipeline)
+    mod.build({}, ModuleRegistry())
+
+    pipeline.set_audio.assert_called_once_with(audio)
+
+
 def test_mission_context_provider_maps_runtime_and_safety_state() -> None:
     active_run = SimpleNamespace(current_state="paused")
     runtime_service = SimpleNamespace(
