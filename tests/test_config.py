@@ -71,17 +71,19 @@ class TestGetConfig:
         assert cfg["space_cognition"]["park_id"] == "julong-tech-e-valley"
         assert cfg["space_cognition"]["routes"] == []
 
-    def test_customer_knowledge_uses_inspectable_vector_backend_by_default(self):
-        """Product default stays local and inspectable; optional memory SDKs are not blockers."""
+    def test_mempalace_is_enabled_with_separate_customer_and_behavior_rooms(self):
         cfg = get_config(reload=True)
         memory = cfg.get("memory", {})
 
-        assert memory["backend"] == "vector"
-        assert memory["customer_knowledge_backend"] == "vector"
+        assert memory["backend"] == "mempalace"
+        assert memory["customer_knowledge_backend"] == "mempalace"
         assert memory["mempalace_fallback_backend"] == "vector"
         assert memory["auto_backend_order"][:2] == ["mempalace", "vector"]
-        assert memory["robot_behavior_memory_backend"] == "robotmem"
-        assert memory["robot_behavior_memory_enabled"] is False
+        assert memory["robot_behavior_memory_backend"] == "mempalace"
+        assert memory["robot_behavior_memory_enabled"] is True
+        assert memory["mempalace_transport"] == "http"
+        assert memory["mempalace_room"] == "customer_knowledge"
+        assert memory["mempalace_behavior_room"] == "robot_behavior"
 
     def test_customer_editable_config_sections_are_readable(self):
         """High-touch deployment config must not contain mojibake text."""

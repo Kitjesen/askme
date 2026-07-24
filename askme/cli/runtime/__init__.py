@@ -100,8 +100,10 @@ def _run_terminal_tui(*, robot_mode: bool) -> None:
 def _run_mcp_server(*, transport: str, host: str, port: int) -> None:
     from askme.mcp.server import mcp
 
-    if transport == "sse":
-        mcp.run(transport="sse", host=host, port=port)
+    if transport in {"sse", "streamable-http"}:
+        mcp.settings.host = host
+        mcp.settings.port = int(port)
+        mcp.run(transport=transport)
         return
     mcp.run()
 

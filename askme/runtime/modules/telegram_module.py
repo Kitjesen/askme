@@ -208,7 +208,11 @@ class TelegramModule(Module):
             await update.message.reply_text("[错误] 大脑管线未就绪")
             return
         try:
-            response = await self._pipeline.process(text, source="telegram")
+            response = await self._pipeline.process(
+                text,
+                source="telegram",
+                turn_owner="telegram",
+            )
             reply = response if isinstance(response, str) else str(response)
         except Exception as exc:
             logger.exception("TelegramModule: pipeline error")

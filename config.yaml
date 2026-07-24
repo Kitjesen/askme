@@ -84,19 +84,13 @@ brain:
 # Memory: MemU / Embedding
 # ----------------------------------------------------------
 memory:
-  # Product default:
-  # - customer knowledge RAG uses a locally inspectable backend first.
-  # - robot long-term behavior memory is a separate RobotMem lane.
-  # Do not mix customer evidence with robot behavior memory.
+  # MemPalace is the persistent store for both product roles. The rooms stay
+  # separate so behavior preferences can never become customer RAG evidence.
   enabled: true
-  # Customer knowledge backend: "vector" or "mempalace".
-  # Keep the inspectable local vector backend as the production default.
-  # MemPalace remains available as an optional backend from the control plane.
-  backend: vector
-  customer_knowledge_backend: vector
-  # RobotMem is reserved for robot long-term behavior memory, not customer RAG evidence.
-  robot_behavior_memory_backend: robotmem
-  robot_behavior_memory_enabled: false
+  backend: mempalace
+  customer_knowledge_backend: mempalace
+  robot_behavior_memory_backend: mempalace
+  robot_behavior_memory_enabled: true
   auto_backend_order: [mempalace, vector, robotmem, mem0]
   robotmem_fallback_backend: vector
   mempalace_fallback_backend: vector
@@ -121,10 +115,17 @@ memory:
   # RobotMem settings (used when backend: robotmem)
   robotmem_collection: askme
   # robotmem_db_path: null  # default: ~/.robotmem/memory.db
-  # MemPalace settings (used when backend: mempalace)
-  mempalace_palace_path: data/memory/mempalace
+  # MemPalace runs in an isolated local sidecar so its native dependencies do
+  # not change the latency-sensitive AskMe environment.
+  mempalace_transport: http
+  mempalace_url: http://127.0.0.1:8766
+  mempalace_palace_path: data/memory/mempalace/palace
+  mempalace_collection_name: askme
   mempalace_wing: askme
-  mempalace_room: robot
+  mempalace_room: customer_knowledge
+  mempalace_behavior_wing: askme
+  mempalace_behavior_room: robot_behavior
+  mempalace_embedding_model: embeddinggemma
   mempalace_n_results: 5
   mempalace_min_similarity: 0.3
   knowledge_index_jobs:
@@ -161,6 +162,19 @@ conversation:
 voice:
   # Non-secret live selections persisted by the management console.
   control_state_path: data/voice/system_control.json
+  playback:
+    enabled: true
+    robot_id: xiaosuan-1
+    device_id: xiaosuan-1
+    site_id: julong-tech-e-valley
+    max_queue_size: 32
+    max_text_chars: 500
+    artifact_dir: artifacts/voice/playback
+    ledger_path: data/voice/playback_ledger.json
+    max_history: 500
+    mcp_enabled: true
+    mcp_operator_id: askme.mcp
+    mcp_roles: [operator]
   product_readiness:
     # Unattended product deployments must not treat ambient speech as a turn.
     require_wake_word: true
@@ -776,6 +790,10 @@ field_operations:
         - runtime:resume
         - skill:read
         - voice:profile:read
+        - voice:playback:create
+        - voice:playback:read
+        - voice:playback:cancel
+        - voice:synthesis:create
       supervisor:
         - audit:read
         - audit:export
@@ -803,8 +821,13 @@ field_operations:
         - skill:read
         - skill:review
         - voice:profile:read
+        - voice:playback:create
+        - voice:playback:read
+        - voice:playback:cancel
+        - voice:synthesis:create
         - voice:profile:update
         - voice:system:update
+        - voice:playback:override
       product_owner:
         - audit:read
         - field:project:read
