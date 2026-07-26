@@ -44,8 +44,9 @@ class TestDashboardHttp:
         assert voice_css_response.status_code == 200
         assert product_css_response.status_code == 200
         assert "/dashboard/voice.css?v=20260712-5" in response.text
-        assert "/dashboard/product.css?v=20260712-8" in response.text
-        assert "/dashboard/app.js?v=20260712-2" in response.text
+        assert "/dashboard/product.css?v=20260713-16" in response.text
+        assert "/dashboard/app.js?v=20260713-6" in response.text
+        assert 'class="workspace-bar"' in response.text
         assert 'id="nav-toggle"' in response.text
         assert 'id="nav-drawer"' in response.text
         assert 'id="nav-backdrop"' in response.text
@@ -74,9 +75,11 @@ class TestDashboardHttp:
         assert "/dashboard/voice" in js_response.text
         assert "/dashboard/delivery" in js_response.text
         assert "renderOverview" in js_response.text
-        assert "今天先看状态，再处理任务" in js_response.text
-        assert "dashboard-shortcuts" in js_response.text
-        assert "最近需要处理" in js_response.text
+        assert "需要关注的三件事" in js_response.text
+        assert "dashboard-status-grid" in js_response.text
+        assert "dashboard-event-grid" in js_response.text
+        assert "dashboard-readiness-card" in js_response.text
+        assert "dashboard-shortcuts" not in js_response.text
         assert "服务在线" in js_response.text
         assert "renderConversation" in js_response.text
         assert "现场上下文" in js_response.text

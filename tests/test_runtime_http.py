@@ -270,7 +270,12 @@ def test_runtime_voice_turn_endpoint_reports_timeout_from_config(monkeypatch):
     monkeypatch.setattr(
         health_server,
         "get_config",
-        lambda: {"conversation": {"runtime_voice_turn_timeout_s": 0.001}},
+        lambda: {
+            "conversation": {"runtime_voice_turn_timeout_s": 0.001},
+            "field_operations": {
+                "operators": {"dashboard.operator": {"roles": ["operator"]}}
+            },
+        },
     )
 
     class SlowRuntimeHandler:

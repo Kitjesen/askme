@@ -1,4 +1,4 @@
-"""End-to-end test: MiniMax M2.5 conversation + TTS pipeline.
+"""End-to-end test: MiniMax M2.7 conversation + TTS pipeline.
 
 Tests realistic askme scenarios:
   1. Basic greeting (Thunder identity)
@@ -28,8 +28,8 @@ from openai import AsyncOpenAI
 # ── Config ────────────────────────────────────────────────────
 
 MINIMAX_KEY = os.environ.get("MINIMAX_API_KEY", "")
-MINIMAX_URL = "https://api.minimax.chat/v1"
-MINIMAX_MODEL = "MiniMax-M2.5-highspeed"
+MINIMAX_URL = "https://api.minimaxi.com/v1"
+MINIMAX_MODEL = "MiniMax-M2.7-highspeed"
 
 RELAY_KEY = os.environ.get("LLM_API_KEY", "")
 RELAY_URL = os.environ.get("LLM_BASE_URL", "https://cursor.scihub.edu.kg/api/v1")
@@ -254,7 +254,7 @@ async def main():
     relay_client = AsyncOpenAI(api_key=RELAY_KEY, base_url=RELAY_URL, timeout=30.0)
 
     print("=" * 70)
-    print("Askme E2E Test: MiniMax M2.5 vs Claude Relay")
+    print("Askme E2E Test: MiniMax M2.7 vs Claude Relay")
     print("=" * 70)
 
     # ── Test 1: Basic greeting ────────────────────────────────

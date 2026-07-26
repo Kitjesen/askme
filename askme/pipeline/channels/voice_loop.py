@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import threading
 from collections.abc import Callable
+from dataclasses import dataclass
+from inspect import signature
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
@@ -12,15 +16,42 @@ from askme.contracts.adapters import (
     interaction_decision_to_action_decision,
     perception_snapshot_to_input,
 )
+from askme.conversation import ConversationLedgerError
+from askme.pipeline.channels.external_turns import (
+    ExternalGenerationBeginError,
+    begin_external_turn,
+    cancel_external_turn,
+    complete_external_turn,
+    discard_external_generation,
+)
 from askme.pipeline.channels.runtime_bridge_calls import try_runtime_bridge_turn
+from askme.pipeline.core.protocols import CancellationToken
 from askme.pipeline.core.trace import get_tracer
-from askme.ports import AudioFrontendPort, AudioRouterPort, VoiceTurnBridgePort
+from askme.pipeline.core.turn_control import AtomicCancellationToken
+from askme.pipeline.skills.outcome import (
+    GENERIC_SKILL_FAILURE_MESSAGE,
+    NAV_LOCATION_UNAVAILABLE_MESSAGE,
+    SkillOutcome,
+    is_internal_skill_text,
+)
+from askme.ports import (
+    AudioFrontendPort,
+    AudioRouterPort,
+    RealtimeApprovalPort,
+    RealtimeVoiceFrontendPort,
+    VoiceTurnBridgePort,
+)
 from askme.robot_interaction import attach_intent_route_trace
 from askme.robot_interaction.interaction_gate import (
     InteractionAction,
     InteractionDecision,
+    contains_emergency_intent,
+    contains_robot_task_intent,
+    contains_tool_route_intent,
 )
 from askme.robot_interaction.perception_context import InteractionPerceptionSnapshot
+from askme.voice.diagnostics.status_privacy import sanitize_voice_status
+from askme.voice.realtime.policy import decide_realtime_route
 
 if TYPE_CHECKING:
     from askme.pipeline.core.brain_pipeline import BrainPipeline
@@ -29,6 +60,26 @@ if TYPE_CHECKING:
     from askme.skills.core.skill_model import SkillDefinition
 
 logger = logging.getLogger(__name__)
+_SAFE_VOICE_TURN_ID = re.compile(r"[A-Za-z0-9._~:/@+=-]{1,256}")
+
+
+def _validated_voice_turn_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized if _SAFE_VOICE_TURN_ID.fullmatch(normalized) is not None else None
+
+
+@dataclass(frozen=True, slots=True)
+class _CapturedUtterance:
+    """Transcript plus wake metadata captured before the next listen starts."""
+
+    text: str | None
+    wake_authorized: bool
+    wake_source: str
+    voice_turn_id: str | None = None
+    realtime_generation: int = 0
+    realtime_baseline_generation: int = 0
 
 
 class AddressDetectorProtocol(Protocol):
@@ -83,6 +134,11 @@ _AGENT_BYPASS_SKILLS: frozenset[str] = frozenset([
     "repeat_last", "mute_mic", "unmute_mic",
 ])
 
+_KWS_UNAVAILABLE_SAFETY_SOURCE = "kws_unavailable_safety_only"
+_KWS_UNAVAILABLE_LOCAL_SKILLS: frozenset[str] = frozenset(
+    {"stop_speaking", "mute_mic", "unmute_mic"}
+)
+
 
 class VoiceLoop:
     """Continuous voice-input loop.
@@ -126,6 +182,17 @@ class VoiceLoop:
         self._last_runtime_bridge_status: dict[str, Any] | None = None
         self._conversation_session_id: str | None = None
         self._degraded_conversation_session_id: str | None = None
+        self._event_loop: asyncio.AbstractEventLoop | None = None
+        self._listen_task: asyncio.Task[_CapturedUtterance] | None = None
+        self._full_duplex_active = False
+        self._closing = False
+        self._active_interaction_cancel: AtomicCancellationToken | None = None
+        self._solicited_response_active = False
+        self._active_realtime_generation = 0
+        self._active_realtime_baseline_generation = 0
+        self._input_recovery_lock = threading.Lock()
+        self._input_recovery_attempted = False
+        self._lifecycle_generation = 0
 
     def set_address_detector(self, detector: AddressDetectorProtocol) -> None:
         """Wire the address detector after construction."""
@@ -143,7 +210,917 @@ class VoiceLoop:
         """Wire the runtime-owned mission and actor state for voice admission."""
         self._mission_context_provider = provider
 
+    async def _speak_cached_or_fallback(
+        self,
+        text: str,
+        *,
+        cache_key: str | None,
+        fallback_to_tts: bool,
+    ) -> bool:
+        """Prefer persisted PCM while keeping older audio frontends compatible."""
+
+        cached_speaker = getattr(self._audio, "speak_cached_and_wait", None)
+        if cache_key and callable(cached_speaker):
+            try:
+                if await cached_speaker(text, cache_key=cache_key):
+                    return True
+            except Exception as exc:
+                logger.warning("Cached voice reply failed: %s", exc)
+        if fallback_to_tts:
+            await self._audio.speak_and_wait(text)
+        return False
+
+    async def _preflight_voice_skill(
+        self,
+        skill_name: str,
+        user_text: str,
+    ) -> SkillOutcome:
+        """Check a local skill before any task-specific audible preface."""
+
+        owner: Any = self._dispatcher
+        if owner is None:
+            pipeline_state = getattr(self._pipeline, "__dict__", {})
+            if isinstance(pipeline_state, dict):
+                owner = pipeline_state.get("_skill_gate")
+        preflight = getattr(owner, "can_execute", None)
+        if not callable(preflight):
+            # A location preface promises that a real backend query is about
+            # to happen. If there is no readiness probe, fail closed instead
+            # of playing the preface and then returning an internal marker (or
+            # silence) from an unbound skill path.
+            if skill_name == "nav_query":
+                return SkillOutcome.blocked(
+                    code="preflight_unavailable",
+                    result="[Skill] Preflight unavailable: nav_query",
+                    user_message=NAV_LOCATION_UNAVAILABLE_MESSAGE,
+                )
+            return SkillOutcome.ready()
+        try:
+            outcome = await preflight(
+                skill_name,
+                user_text,
+                source="voice",
+            )
+        except Exception as exc:
+            logger.warning(
+                "VoiceLoop: skill preflight failed closed for %s: %s",
+                skill_name,
+                exc,
+            )
+            return SkillOutcome.blocked(
+                code="preflight_error",
+                result=f"[Skill] Preflight failed: {skill_name}",
+                user_message=(
+                    NAV_LOCATION_UNAVAILABLE_MESSAGE
+                    if skill_name == "nav_query"
+                    else GENERIC_SKILL_FAILURE_MESSAGE
+                ),
+            )
+        if isinstance(outcome, SkillOutcome):
+            return outcome
+        logger.error(
+            "VoiceLoop: invalid skill preflight outcome for %s: %r",
+            skill_name,
+            outcome,
+        )
+        return SkillOutcome.blocked(
+            code="invalid_preflight_outcome",
+            result=f"[Skill] Invalid preflight: {skill_name}",
+            user_message=(
+                NAV_LOCATION_UNAVAILABLE_MESSAGE
+                if skill_name == "nav_query"
+                else GENERIC_SKILL_FAILURE_MESSAGE
+            ),
+        )
+
+    async def _speak_skill_outcome(self, outcome: SkillOutcome) -> None:
+        """Speak a blocked outcome once without exposing its internal result."""
+
+        if not outcome.should_speak or not outcome.user_message:
+            return
+        self._audio.drain_buffers()
+        await self._audio.speak_and_wait(outcome.user_message)
+        self._remember_spoken_text(outcome.user_message)
+
+    async def _handle_kws_unavailable_safety_turn(self, intent: Any) -> None:
+        """Consume the fail-closed KWS lane without ACK, memory, LLM or skills."""
+
+        skill_name = str(getattr(intent, "skill_name", "") or "")
+        if skill_name not in _KWS_UNAVAILABLE_LOCAL_SKILLS:
+            self._discard_realtime_turn(_KWS_UNAVAILABLE_SAFETY_SOURCE)
+            logger.warning(
+                "VoiceLoop: KWS unavailable; blocked non-safety voice turn (%s)",
+                getattr(getattr(intent, "type", None), "value", "unknown"),
+            )
+            return
+
+        self._discard_realtime_turn(_KWS_UNAVAILABLE_SAFETY_SOURCE)
+        self._audio.drain_buffers()
+        if skill_name == "stop_speaking":
+            cancelled = bool(
+                self._dispatcher
+                and self._dispatcher.cancel_active_agent_task()
+            )
+            if cancelled:
+                await self._audio.speak_and_wait("已取消任务。")
+            return
+        if skill_name == "mute_mic":
+            self._audio.mute()
+            await self._audio.speak_and_wait('好的，已关闭麦克风。说"开麦"来重新打开。')
+            return
+        self._audio.unmute()
+        await self._audio.speak_and_wait("好的，已重新开启。")
+
+    async def _safe_runtime_spoken_reply(self, text: str) -> None:
+        reply = str(text or "").strip()
+        if is_internal_skill_text(reply):
+            logger.error("Suppressed runtime internal marker from TTS: %s", reply[:120])
+            reply = GENERIC_SKILL_FAILURE_MESSAGE
+        if reply:
+            await self._audio.speak_and_wait(reply)
+
+    def _remember_spoken_text(self, text: str) -> None:
+        executor = getattr(self._pipeline, "_turn_executor", None)
+        if executor is not None:
+            executor._last_spoken_text = text
+            return
+        try:
+            setattr(self._pipeline, "last_spoken_text", text)
+        except (AttributeError, TypeError):
+            pass
+
+    async def _handle_estop_intent(self) -> None:
+        """Execute one safety stop before any conversational admission gate."""
+
+        self._discard_realtime_turn("estop")
+        if self._dispatcher:
+            self._dispatcher.cancel_active_agent_task()
+        self._pipeline.handle_estop()
+        self._audio.drain_buffers()
+        await self._audio.speak_and_wait("\u5df2\u7ecf\u7d27\u6025\u505c\u6b62\u3002")
+
+    def _realtime_audio_port(self) -> RealtimeVoiceFrontendPort | None:
+        audio = self._audio
+        if isinstance(audio, RealtimeVoiceFrontendPort):
+            return audio
+        return None
+
+    def _discard_realtime_turn(self, reason: str) -> None:
+        realtime = self._realtime_audio_port()
+        if realtime is None:
+            return
+        try:
+            realtime.discard_realtime_turn(
+                reason,
+                expected_generation=self._active_realtime_generation,
+                after_generation=self._active_realtime_baseline_generation,
+            )
+        except Exception as exc:
+            logger.debug("Realtime turn discard failed: %s", exc)
+
+    def _realtime_general_chat_ready(self) -> bool:
+        realtime = self._realtime_audio_port()
+        if realtime is None:
+            return False
+        try:
+            return bool(realtime.realtime_general_chat_ready())
+        except Exception as exc:
+            logger.debug("Realtime voice readiness check failed: %s", exc)
+            return False
+
+    def _realtime_capture_active(self) -> bool:
+        realtime = self._realtime_audio_port()
+        if realtime is None:
+            return False
+        try:
+            return bool(realtime.realtime_capture_active())
+        except Exception as exc:
+            logger.debug("Realtime capture status check failed: %s", exc)
+            return False
+
+    def _realtime_mode(self) -> str:
+        """Return the provider mode without expanding the stable frontend port."""
+
+        realtime = self._realtime_audio_port()
+        if realtime is None:
+            return "split"
+        context_snapshot = getattr(realtime, "realtime_context_snapshot", None)
+        if callable(context_snapshot):
+            try:
+                snapshot = context_snapshot()
+                if isinstance(snapshot, dict):
+                    mode = str(snapshot.get("mode") or "").strip().lower()
+                    if mode in {"split", "shadow", "general_chat"}:
+                        return mode
+            except Exception as exc:
+                logger.debug("Realtime mode snapshot unavailable: %s", exc)
+        # Compatibility inference for older frontends/fakes.  The production
+        # AudioAgent always exposes the explicit status snapshot above.
+        if self._realtime_general_chat_ready():
+            return "general_chat"
+        if self._realtime_capture_active():
+            return "shadow"
+        return "split"
+
+    def _abort_realtime_playback(
+        self,
+        reason: str,
+        *,
+        expected_generation: int = 0,
+    ) -> None:
+        realtime = self._realtime_audio_port()
+        if realtime is not None:
+            abort: Any = realtime.abort_realtime_playback
+            try:
+                supports_generation = (
+                    "expected_generation" in signature(abort).parameters
+                )
+            except (TypeError, ValueError):
+                supports_generation = False
+            if expected_generation > 0 and supports_generation:
+                abort(
+                    reason,
+                    expected_generation=expected_generation,
+                )
+            else:
+                abort(reason)
+            return
+        self._discard_realtime_turn(reason)
+        drain = getattr(self._audio, "drain_buffers", None)
+        if callable(drain):
+            drain()
+        stop = getattr(self._audio, "stop_immediately", None)
+        if callable(stop):
+            stop()
+
+    async def _try_handle_realtime_general_chat(
+        self,
+        user_text: str,
+        *,
+        expected_generation: int,
+        conversation_session_id: str | None,
+        voice_turn_id: str | None,
+        turn_cancel_token: CancellationToken | None,
+    ) -> bool:
+        """Use approved provider audio without bypassing local intent/safety."""
+
+        realtime = self._realtime_audio_port()
+        if realtime is None:
+            return False
+        if turn_cancel_token is not None and turn_cancel_token.is_set():
+            self._discard_realtime_turn("cancelled_before_realtime_approval")
+            return True
+        prepare = getattr(realtime, "prepare_realtime_general_chat", None)
+        release = getattr(realtime, "release_realtime_general_chat", None)
+        two_phase = bool(callable(prepare) and callable(release))
+        if not two_phase:
+            logger.warning(
+                "Realtime general-chat frontend lacks two-phase admission; "
+                "using cascade"
+            )
+            self._discard_realtime_turn("two_phase_admission_unavailable")
+            return False
+        assert callable(prepare)
+
+        def _admit_realtime() -> Any:
+            return prepare(
+                user_text,
+                expected_generation=expected_generation,
+            )
+        try:
+            approval = await asyncio.to_thread(_admit_realtime)
+        except Exception as exc:
+            logger.warning("Realtime voice approval failed; using cascade: %s", exc)
+            return False
+        if approval is None:
+            return False
+        if not isinstance(approval, RealtimeApprovalPort):
+            logger.warning("Realtime provider returned an invalid approval handle")
+            self._discard_realtime_turn("invalid_realtime_approval")
+            return False
+
+        initial_text = str(approval.initial_text or "")
+        final_text = initial_text
+
+        def _provider_context() -> dict[str, Any]:
+            context_snapshot = getattr(realtime, "realtime_context_snapshot", None)
+            if not callable(context_snapshot):
+                return {}
+            try:
+                snapshot = context_snapshot()
+                return dict(snapshot) if isinstance(snapshot, dict) else {}
+            except Exception as exc:
+                logger.debug("Realtime provider context unavailable: %s", exc)
+                return {}
+
+        provider_context = _provider_context()
+        provider_session_id = (
+            str(provider_context.get("session_id") or "").strip() or None
+        )
+        provider_dialog_id = (
+            str(provider_context.get("dialog_id") or "").strip() or None
+        )
+        turn_metadata: dict[str, Any] = {
+            "realtime_generation": int(expected_generation or 0),
+        }
+        if provider_dialog_id:
+            turn_metadata["provider_dialog_id"] = provider_dialog_id
+        generation_id = (
+            f"{voice_turn_id}:volcengine:{int(expected_generation or 0)}"
+            if voice_turn_id
+            else None
+        )
+        try:
+            external_turn = begin_external_turn(
+                self._pipeline,
+                user_text,
+                source="volcengine_realtime",
+                conversation_session_id=conversation_session_id,
+                turn_id=voice_turn_id,
+                provider="volcengine",
+                provider_session_id=provider_session_id,
+                provider_generation_id=str(expected_generation or "") or None,
+                generation_id=generation_id,
+                response_text=initial_text,
+                metadata=turn_metadata,
+            )
+        except ExternalGenerationBeginError as exc:
+            logger.info("Realtime generation rejected by Conversation Core: %s", exc)
+            self._discard_realtime_turn("conversation_generation_begin_failed")
+            return False
+        except ConversationLedgerError as exc:
+            # The provider candidate is still prepared/buffered on the
+            # production two-phase path.  Fence it before the established local
+            # cascade sees the canonical Turn conflict.
+            logger.info("Realtime turn rejected by Conversation Core: %s", exc)
+            self._discard_realtime_turn("conversation_turn_conflict")
+            return False
+        if external_turn is None:
+            logger.error("Realtime release blocked because no durable Turn was begun")
+            self._discard_realtime_turn("conversation_turn_begin_failed")
+            return False
+        if not external_turn.generation_id:
+            logger.error(
+                "Realtime release blocked because no durable provider Generation was begun"
+            )
+            self._discard_realtime_turn("conversation_generation_begin_failed")
+            return False
+        if turn_cancel_token is not None and turn_cancel_token.is_set():
+            discard_external_generation(
+                self._pipeline,
+                external_turn,
+                reason="cancelled_before_realtime_release",
+                metadata=turn_metadata,
+            )
+            self._discard_realtime_turn("cancelled_before_realtime_release")
+            return True
+        assert callable(release)
+
+        def _release_realtime() -> Any:
+            kwargs: dict[str, Any] = {
+                "expected_generation": expected_generation,
+            }
+            supports_owner = False
+            try:
+                parameters = signature(release).parameters.values()
+            except (TypeError, ValueError):
+                pass
+            else:
+                supports_owner = any(
+                    parameter.name == "voice_turn_id"
+                    for parameter in parameters
+                )
+            if voice_turn_id and supports_owner:
+                kwargs["voice_turn_id"] = voice_turn_id
+            return release(
+                approval,
+                **kwargs,
+            )
+
+        try:
+            released = bool(await asyncio.to_thread(_release_realtime))
+        except Exception as exc:
+            logger.warning("Realtime PCM release failed; using cascade: %s", exc)
+            released = False
+        if not released:
+            discard_external_generation(
+                self._pipeline,
+                external_turn,
+                reason="realtime_release_rejected",
+                metadata=turn_metadata,
+            )
+            self._discard_realtime_turn("realtime_release_rejected")
+            return False
+
+        def _cancel_realtime_turn(reason: str) -> None:
+            context = _provider_context()
+            played_ms = max(
+                0,
+                int(
+                    context.get("physical_played_ms")
+                    or context.get("committed_audio_ms")
+                    or 0
+                ),
+            )
+            # Capture the physical playhead before stop, then stop immediately;
+            # the fsync-backed ledger write must never delay barge-in audio.
+            self._abort_realtime_playback(
+                reason,
+                expected_generation=expected_generation,
+            )
+            stopped_context = _provider_context()
+            played_ms = max(
+                played_ms,
+                int(
+                    stopped_context.get("physical_played_ms")
+                    or stopped_context.get("committed_audio_ms")
+                    or 0
+                ),
+            )
+            cancel_external_turn(
+                self._pipeline,
+                external_turn,
+                user_text=user_text,
+                source="volcengine_realtime",
+                reason=reason,
+                played_ms=played_ms,
+                heard_text="",
+                conversation_session_id=conversation_session_id,
+                metadata={
+                    **turn_metadata,
+                    "heard_text_alignment": "unavailable",
+                },
+            )
+
+        try:
+            completed_text = await asyncio.to_thread(approval.wait, 30.0)
+            final_text = str(completed_text or initial_text)
+
+            completed = bool(approval.completed)
+            playback_started = bool(realtime.realtime_playback_started())
+            if not completed or not playback_started:
+                reason = (
+                    "realtime_response_timeout"
+                    if not completed
+                    else "realtime_response_without_audio"
+                )
+                if playback_started:
+                    _cancel_realtime_turn(reason)
+                    return True
+                self._abort_realtime_playback(
+                    reason,
+                    expected_generation=expected_generation,
+                )
+                discard_external_generation(
+                    self._pipeline,
+                    external_turn,
+                    reason=reason,
+                    metadata=turn_metadata,
+                )
+                return False
+
+            playback_done = await asyncio.to_thread(self._audio.wait_speaking_done)
+            if playback_done is False:
+                _cancel_realtime_turn("realtime_playback_timeout")
+                return True
+            finish_realtime = getattr(
+                realtime,
+                "finish_realtime_playback",
+                None,
+            )
+            if callable(finish_realtime):
+                if not bool(
+                    finish_realtime(
+                        expected_generation=expected_generation,
+                    )
+                ):
+                    raise RuntimeError("stale realtime playback owner")
+            else:
+                self._audio.stop_playback()
+        except Exception as exc:
+            # Once provider audio has been admitted, never emit a second local
+            # answer for the same turn.
+            logger.warning("Realtime voice playback ended early: %s", exc)
+            _cancel_realtime_turn("realtime_playback_failure")
+            return True
+
+        if turn_cancel_token is not None and turn_cancel_token.is_set():
+            _cancel_realtime_turn("cancelled_realtime_reply")
+            return True
+
+        if final_text:
+            complete_external_turn(
+                self._pipeline,
+                external_turn,
+                user_text=user_text,
+                assistant_text=final_text,
+                source="volcengine_realtime",
+                conversation_session_id=conversation_session_id,
+                metadata=turn_metadata,
+            )
+            self._remember_spoken_text(final_text)
+            self._record_local_gateway_turn(
+                conversation_session_id,
+                user_text,
+                final_text,
+            )
+        else:
+            # Provider audio was delivered but no trustworthy transcript was
+            # returned.  Settle the canonical Turn as interrupted/unknown
+            # instead of leaving it permanently STARTED or committing content
+            # that cannot be audited.
+            _cancel_realtime_turn("realtime_response_without_text")
+        return True
+
     async def run(self) -> None:
+        """Run the voice session and always release full-duplex callbacks/tasks."""
+
+        self._event_loop = asyncio.get_running_loop()
+        self._lifecycle_generation += 1
+        self._closing = False
+        self._full_duplex_active = (
+            getattr(self._audio, "full_duplex_enabled", False) is True
+        )
+        if self._full_duplex_active:
+            self._install_barge_in_callback()
+        try:
+            await self._run_session()
+        finally:
+            await self.stop()
+
+    async def stop(self) -> None:
+        """Stop the capture owner, then detach its callback and async task."""
+
+        self._closing = True
+        self._lifecycle_generation += 1
+        self._event_loop = None
+        setter = getattr(self._audio, "set_barge_in_callback", None)
+        if callable(setter):
+            try:
+                setter(None)
+            except Exception as exc:
+                logger.debug("Failed to clear barge-in callback: %s", exc)
+
+        listen_task = self._listen_task
+        self._listen_task = None
+        if listen_task is not None and not listen_task.done():
+            # Cancel the asyncio wrapper first so an executor job that has not
+            # started cannot become a late microphone consumer.  The audio
+            # module below separately joins a job that already entered.
+            listen_task.cancel()
+
+        stop_listening = getattr(self._audio, "stop_listening", None)
+        if callable(stop_listening):
+            try:
+                if not bool(await asyncio.to_thread(stop_listening)):
+                    logger.warning("Microphone listener did not stop before timeout")
+            except Exception as exc:
+                logger.warning("Failed to stop microphone listener: %s", exc)
+
+        if listen_task is not None:
+            try:
+                await listen_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug("Pending listener stopped with an error: %s", exc)
+        await asyncio.to_thread(self._finalize_input_recovery)
+        self._full_duplex_active = False
+
+    def _install_barge_in_callback(self) -> None:
+        setter = getattr(self._audio, "set_barge_in_callback", None)
+        if not callable(setter):
+            logger.warning(
+                "Full-duplex audio does not expose a confirmed barge-in callback"
+            )
+            return
+        setter(self._on_confirmed_barge_in)
+
+    def _on_confirmed_barge_in(self) -> None:
+        """Atomically mark the active turn cancelled from the capture thread."""
+
+        if self._closing:
+            return
+        if self._solicited_response_active:
+            # During clarification/confirmation the overlapping speech is the
+            # answer we explicitly asked for. AudioAgent still stops the
+            # question playback after this callback, but the parent skill turn
+            # remains dispatchable and the captured answer is not discarded.
+            logger.debug("Barge-in accepted as a solicited proactive response")
+            return
+        # Cancel the pipeline lease first while it still owns the shared
+        # interaction token.  This records the controller epoch/reason; the
+        # direct event set below also covers planner/proactive gaps where no
+        # BrainPipeline lease exists yet.
+        self._cancel_active_turn_for_barge_in()
+        interaction_cancel = self._active_interaction_cancel
+        if interaction_cancel is not None:
+            interaction_cancel.set()
+
+    def _cancel_active_turn_for_barge_in(self) -> None:
+        cancel_active_turn = getattr(self._pipeline, "cancel_active_turn", None)
+        if not callable(cancel_active_turn):
+            return
+        try:
+            cancel_active_turn(reason="barge_in")
+        except Exception as exc:
+            logger.warning("Failed to cancel active voice turn on barge-in: %s", exc)
+
+    async def _capture_once(self) -> _CapturedUtterance:
+        text = await asyncio.to_thread(self._audio.listen_loop)
+        realtime = self._realtime_audio_port()
+        return _CapturedUtterance(
+            text=text,
+            wake_authorized=bool(
+                getattr(self._audio, "last_turn_wake_authorized", False)
+            ),
+            wake_source=str(
+                getattr(self._audio, "last_turn_wake_source", "none") or "none"
+            ).strip().lower(),
+            voice_turn_id=_validated_voice_turn_id(
+                getattr(self._audio, "last_accepted_voice_turn_id", None)
+            ),
+            realtime_generation=(
+                int(realtime.last_turn_realtime_generation or 0)
+                if realtime is not None
+                else 0
+            ),
+            realtime_baseline_generation=(
+                int(realtime.last_turn_realtime_baseline_generation or 0)
+                if realtime is not None
+                else 0
+            ),
+        )
+
+    def _refresh_full_duplex_state(self) -> bool:
+        if not self._full_duplex_active:
+            return False
+        if getattr(self._audio, "full_duplex_enabled", False) is True:
+            return True
+
+        self._full_duplex_active = False
+        setter = getattr(self._audio, "set_barge_in_callback", None)
+        if callable(setter):
+            setter(None)
+        logger.warning("VoiceLoop: audio frontend degraded to half-duplex")
+        return False
+
+    def _fail_closed_full_duplex_on_audio_error(
+        self,
+        *,
+        reason: str,
+        exc: BaseException,
+    ) -> bool:
+        """Downgrade overlap mode after a simultaneous-open device failure."""
+
+        if not self._full_duplex_active:
+            return False
+        fail_closed = getattr(self._audio, "_full_duplex_fail_closed", None)
+        if not callable(fail_closed):
+            logger.error(
+                "Full-duplex audio error has no fail-closed handler: %s",
+                exc,
+            )
+            return False
+        fail_closed(reason, exc)
+        self._refresh_full_duplex_state()
+        return True
+
+    def _restart_audio_input(self, expected_generation: int | None = None) -> bool:
+        """Release a failed capture handle and open a fresh input stream."""
+
+        stop_input = getattr(self._audio, "stop_input", None)
+        start_input = getattr(self._audio, "start_input", None)
+        if not callable(stop_input) or not callable(start_input):
+            logger.error("VoiceLoop: audio frontend cannot restart microphone input")
+            return False
+
+        with self._input_recovery_lock:
+            if expected_generation is None:
+                expected_generation = self._lifecycle_generation
+            self._input_recovery_attempted = True
+            if (
+                self._closing
+                or expected_generation != self._lifecycle_generation
+            ):
+                return False
+            try:
+                stop_input()
+            except Exception as exc:
+                # A robust input implementation clears its ownership pointer
+                # before talking to a failed driver, so reopening may still work.
+                logger.warning(
+                    "VoiceLoop: microphone release failed before reconnect: %s",
+                    exc,
+                )
+            if (
+                self._closing
+                or expected_generation != self._lifecycle_generation
+            ):
+                return False
+            try:
+                start_input()
+            except Exception as exc:
+                logger.warning("VoiceLoop: microphone reconnect failed: %s", exc)
+                return False
+
+            if (
+                self._closing
+                or expected_generation != self._lifecycle_generation
+            ):
+                try:
+                    stop_input()
+                except Exception as exc:
+                    logger.warning(
+                        "VoiceLoop: late microphone reconnect cleanup failed: %s",
+                        exc,
+                    )
+                return False
+
+            try:
+                input_open = getattr(self._audio, "is_input_open", None)
+                if callable(input_open):
+                    input_open = input_open()
+            except Exception as exc:
+                logger.warning(
+                    "VoiceLoop: microphone reconnect readiness probe failed: %s",
+                    exc,
+                )
+                try:
+                    stop_input()
+                except Exception:
+                    pass
+                return False
+            if input_open is not None and not bool(input_open):
+                logger.warning(
+                    "VoiceLoop: microphone reconnect returned without an open input"
+                )
+                try:
+                    stop_input()
+                except Exception as exc:
+                    logger.debug(
+                        "VoiceLoop: failed to clean up false reconnect: %s",
+                        exc,
+                    )
+                return False
+
+        logger.info("VoiceLoop: microphone input reconnected")
+        return True
+
+    def _finalize_input_recovery(self) -> None:
+        """Wait out any reconnect worker and leave its microphone input closed."""
+
+        with self._input_recovery_lock:
+            if not self._input_recovery_attempted:
+                return
+            stop_input = getattr(self._audio, "stop_input", None)
+            if not callable(stop_input):
+                self._input_recovery_attempted = False
+                return
+            try:
+                stop_input()
+            except Exception as exc:
+                logger.warning(
+                    "VoiceLoop: final microphone recovery cleanup failed: %s",
+                    exc,
+                )
+            finally:
+                self._input_recovery_attempted = False
+
+    def _start_next_listen(self) -> None:
+        if self._closing or not self._refresh_full_duplex_state():
+            return
+        if self._listen_task is not None and not self._listen_task.done():
+            return
+        self._listen_task = asyncio.create_task(
+            self._capture_once(),
+            name="voice-listen-next",
+        )
+
+    async def _next_utterance(self) -> _CapturedUtterance:
+        if not self._refresh_full_duplex_state():
+            return await self._capture_once()
+
+        self._start_next_listen()
+        listen_task = self._listen_task
+        if listen_task is None:
+            raise RuntimeError("full-duplex listener was not started")
+        try:
+            utterance = await listen_task
+        finally:
+            if self._listen_task is listen_task:
+                self._listen_task = None
+        self._start_next_listen()
+        return utterance
+
+    async def _next_utterance_text(self) -> str | None:
+        """Share the single capture owner with proactive confirmation turns."""
+
+        return (await self._next_utterance()).text
+
+    async def _dispatcher_handle_general(
+        self,
+        user_text: str,
+        *,
+        source: str,
+        memory_task: asyncio.Task[str] | None,
+        conversation_session_id: str | None,
+        voice_turn_id: str | None,
+        turn_cancel_token: CancellationToken | None,
+    ) -> Any:
+        if self._dispatcher is None:
+            raise RuntimeError("skill dispatcher is not configured")
+        kwargs: dict[str, Any] = {
+            "source": source,
+            "memory_task": memory_task,
+            "conversation_session_id": conversation_session_id,
+        }
+        try:
+            from inspect import Parameter, signature
+
+            parameters = signature(self._dispatcher.handle_general).parameters
+            accepts_kwargs = any(
+                parameter.kind is Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            accepts_token = "turn_cancel_token" in parameters or accepts_kwargs
+            accepts_turn_id = "voice_turn_id" in parameters or accepts_kwargs
+        except (TypeError, ValueError):
+            accepts_token = False
+            accepts_turn_id = False
+        if accepts_token:
+            kwargs["turn_cancel_token"] = turn_cancel_token
+        if accepts_turn_id:
+            kwargs["voice_turn_id"] = voice_turn_id
+        return await self._dispatcher.handle_general(user_text, **kwargs)
+
+    async def _pipeline_process_general(
+        self,
+        user_text: str,
+        *,
+        memory_task: asyncio.Task[str] | None,
+        conversation_session_id: str | None,
+        voice_turn_id: str | None,
+        turn_cancel_token: CancellationToken | None,
+    ) -> Any:
+        """Pass the capture-thread token when the pipeline supports it."""
+
+        kwargs: dict[str, Any] = {
+            "memory_task": memory_task,
+            "conversation_session_id": conversation_session_id,
+        }
+        try:
+            from inspect import Parameter, signature
+
+            parameters = signature(self._pipeline.process).parameters
+            accepts_kwargs = any(
+                parameter.kind is Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            accepts_token = "turn_cancel_token" in parameters or accepts_kwargs
+            accepts_turn_id = "voice_turn_id" in parameters or accepts_kwargs
+        except (TypeError, ValueError):
+            accepts_token = False
+            accepts_turn_id = False
+        if accepts_token:
+            kwargs["turn_cancel_token"] = turn_cancel_token
+        if accepts_turn_id:
+            kwargs["voice_turn_id"] = voice_turn_id
+        return await self._pipeline.process(user_text, **kwargs)
+
+    async def _run_proactive_interaction(
+        self,
+        skill_name: str,
+        user_text: str,
+    ) -> Any:
+        """Mark the whole prompt/capture window as a solicited response."""
+
+        self._solicited_response_active = True
+        try:
+            return await self._proactive.run(
+                skill_name,
+                user_text,
+                self._audio,
+                source="voice",
+                listen_once=self._next_utterance_text,
+            )
+        finally:
+            self._solicited_response_active = False
+
+    def _arm_processing_feedback(
+        self,
+        cancel_token: AtomicCancellationToken | None,
+    ) -> bool:
+        try:
+            return bool(self._audio.arm_processing_feedback(cancel_token))
+        except Exception as exc:
+            logger.debug(
+                "VoiceLoop: processing feedback arm failed: %s",
+                exc,
+            )
+            return False
+
+    async def _run_session(self) -> None:
         """Block until Ctrl+C or too many consecutive errors."""
         from askme.robot_interaction import IntentType
 
@@ -154,6 +1131,9 @@ class VoiceLoop:
         _tracer = get_tracer()
         while True:
             memory_task: asyncio.Task[str] | None = None
+            interaction_cancel: AtomicCancellationToken | None = None
+            processing_feedback_armed = False
+            interaction_turn_id: str | None = None
             _trace = None
             try:
                 # Tell the noise filter whether we're waiting for a
@@ -167,18 +1147,31 @@ class VoiceLoop:
                     or _ends_with_question
                 )
 
-                user_text = await asyncio.to_thread(self._audio.listen_loop)
+                utterance = await self._next_utterance()
+                user_text = utterance.text
                 if not user_text:
                     continue
+                self._active_realtime_generation = max(
+                    0,
+                    int(utterance.realtime_generation or 0),
+                )
+                self._active_realtime_baseline_generation = max(
+                    0,
+                    int(utterance.realtime_baseline_generation or 0),
+                )
+                interaction_cancel = AtomicCancellationToken()
+                interaction_turn_id = utterance.voice_turn_id or uuid4().hex
+                self._active_interaction_cancel = interaction_cancel
 
                 normalize_text = getattr(self._address_detector, "normalize_text", None)
                 if callable(normalize_text):
                     normalized_text = normalize_text(user_text)
                     if normalized_text != user_text:
                         logger.info(
-                            "Normalized ASR robot-name alias: %r -> %r",
-                            user_text,
-                            normalized_text,
+                            "Normalized ASR robot-name alias "
+                            "(input_chars=%d, normalized_chars=%d)",
+                            len(user_text),
+                            len(normalized_text),
                         )
                         user_text = normalized_text
 
@@ -186,18 +1179,47 @@ class VoiceLoop:
 
                 # Start pipeline trace for this turn
                 _trace = _tracer.start_trace("voice_turn")
-                _trace.metadata["user_text"] = user_text[:60]
+                _trace.metadata["user_text_chars"] = len(user_text)
+
+                # Route once before every conversational admission gate. A
+                # deterministic E-STOP must remain available while muted, while
+                # an approval is pending, and when ambient-speech policy would
+                # otherwise reject the utterance.
+                with _tracer.span("intent_route") as _route_span:
+                    intent = self._router.route(user_text)
+                    _route_span.metadata.update(
+                        attach_intent_route_trace(
+                            _trace,
+                            intent,
+                            source="voice",
+                            include_content=False,
+                        )
+                    )
+                _trace.metadata["voice_fast_path"] = bool(intent.fast_path)
+                if intent.type == IntentType.ESTOP:
+                    await self._handle_estop_intent()
+                    continue
+
+                # AudioAgent marks this source when product policy requires a
+                # wake word but KWS is unavailable.  Only local, deterministic
+                # safety controls may pass; everything else is consumed before
+                # interaction admission, ACK, memory, LLM, bridge, or skill work.
+                if utterance.wake_source == _KWS_UNAVAILABLE_SAFETY_SOURCE:
+                    _trace.metadata["kws_unavailable_safety_only"] = True
+                    await self._handle_kws_unavailable_safety_turn(intent)
+                    continue
 
                 # Muted state gate
                 # When muted, only the unmute_mic voice trigger and COMMAND
                 # (quit/exit) pass through. Everything else is silently discarded.
                 if self._audio.is_muted:
-                    _muted_intent = self._router.route(user_text)
+                    _muted_intent = intent
                     attach_intent_route_trace(
                         _trace,
                         _muted_intent,
                         source="voice",
                         stage="muted_gate_route",
+                        include_content=False,
                     )
                     if (
                         _muted_intent.type == IntentType.VOICE_TRIGGER
@@ -209,16 +1231,13 @@ class VoiceLoop:
                     elif _muted_intent.type == IntentType.COMMAND:
                         pass  # fall through to COMMAND handler below
                     else:
+                        self._discard_realtime_turn("muted")
                         continue
 
                 # Interaction gate: separate ambient speech from real user turns.
                 addressed_by_text = self._address_detector.is_addressed(user_text)
-                wake_authorized = bool(
-                    getattr(self._audio, "last_turn_wake_authorized", False)
-                )
-                wake_source = str(
-                    getattr(self._audio, "last_turn_wake_source", "none") or "none"
-                ).strip().lower()
+                wake_authorized = utterance.wake_authorized
+                wake_source = utterance.wake_source
                 if wake_authorized and wake_source == "none":
                     wake_source = "keyword"
                 followup_active = wake_source == "followup_window"
@@ -260,23 +1279,27 @@ class VoiceLoop:
                 )
                 self._last_input_contract = input_contract.to_dict()
                 self._last_action_contract = action_contract.to_dict()
-                _trace.metadata["interaction_gate"] = {
-                    "action": gate_decision.action.value,
-                    "reason": gate_decision.reason,
-                    "confidence": gate_decision.confidence,
-                    "addressed": addressed,
-                    "addressed_by_text": addressed_by_text,
-                    "wake_authorized": wake_authorized,
-                    "wake_source": wake_source,
-                    "followup_active": followup_active,
-                    "awaiting_confirmation": bool(self._audio.awaiting_confirmation),
-                    "perception": self._last_interaction_perception,
-                    "mission_context": self._last_mission_context,
-                }
-                _trace.metadata["product_contract"] = {
-                    "perception_input": self._last_input_contract,
-                    "action_decision": self._last_action_contract,
-                }
+                _trace.metadata["interaction_gate"] = sanitize_voice_status(
+                    {
+                        "action": gate_decision.action.value,
+                        "reason": gate_decision.reason,
+                        "confidence": gate_decision.confidence,
+                        "addressed": addressed,
+                        "addressed_by_text": addressed_by_text,
+                        "wake_authorized": wake_authorized,
+                        "wake_source": wake_source,
+                        "followup_active": followup_active,
+                        "awaiting_confirmation": bool(self._audio.awaiting_confirmation),
+                        "perception": self._last_interaction_perception,
+                        "mission_context": self._last_mission_context,
+                    }
+                )
+                _trace.metadata["product_contract"] = sanitize_voice_status(
+                    {
+                        "perception_input": self._last_input_contract,
+                        "action_decision": self._last_action_contract,
+                    }
+                )
                 logger.info(
                     "InteractionGate: action=%s reason=%s confidence=%.2f "
                     "wake_source=%s addressed=%s",
@@ -290,6 +1313,9 @@ class VoiceLoop:
                     InteractionAction.IGNORE,
                     InteractionAction.RECORD_ONLY,
                 ):
+                    self._discard_realtime_turn(
+                        f"interaction_gate_{gate_decision.action.value}"
+                    )
                     self._record_environment_speech(user_text, gate_decision)
                     continue
 
@@ -299,14 +1325,98 @@ class VoiceLoop:
                     InteractionAction.DEFER,
                     InteractionAction.REFUSE,
                 ):
+                    self._discard_realtime_turn(
+                        f"interaction_gate_{gate_decision.action.value}"
+                    )
                     self._record_environment_speech(user_text, gate_decision)
                     if gate_decision.reply:
                         await self._audio.speak_and_wait(gate_decision.reply)
                     continue
 
+                pending_approval = self._pipeline.has_pending_tool_approval()
+                realtime_capture_active = self._realtime_capture_active()
+                realtime_general_ready = self._realtime_general_chat_ready()
+                realtime_mode = self._realtime_mode()
+                realtime_robot_task = bool(
+                    contains_robot_task_intent(user_text)
+                    or str(gate_decision.reason or "").startswith("robot_task")
+                    or gate_decision.reason == "unaddressed_robot_task"
+                )
+                realtime_emergency = contains_emergency_intent(user_text)
+                realtime_tool_route = bool(
+                    intent.type != IntentType.GENERAL
+                    or contains_tool_route_intent(user_text)
+                    or getattr(intent, "skill_name", None)
+                    or getattr(intent, "command", None)
+                    or getattr(intent, "scenario_id", None)
+                    or str(getattr(intent, "reason", "") or "") == "visual_query"
+                )
+                realtime_route = decide_realtime_route(
+                    mode=realtime_mode,
+                    interaction_admitted=(
+                        gate_decision.action is InteractionAction.RESPOND
+                    ),
+                    intent_type=intent.type.value,
+                    provider_ready=realtime_capture_active,
+                    emergency=realtime_emergency,
+                    pending_approval=pending_approval,
+                    robot_task=realtime_robot_task,
+                    tool_route=realtime_tool_route,
+                )
+                _trace.metadata["realtime_route"] = {
+                    "mode": realtime_mode,
+                    "route": realtime_route.route,
+                    "allow_provider_audio": realtime_route.allow_provider_audio,
+                    "interrupt_provider": realtime_route.interrupt_provider,
+                    "reason": realtime_route.reason,
+                    "robot_task": realtime_robot_task,
+                    "tool_route": realtime_tool_route,
+                    "emergency": realtime_emergency,
+                }
+                realtime_candidate = bool(
+                    realtime_route.allow_provider_audio
+                    and utterance.realtime_generation > 0
+                    and realtime_general_ready
+                )
+                if not realtime_candidate and realtime_capture_active:
+                    if pending_approval:
+                        discard_reason = "pending_tool_approval"
+                    elif intent.type != IntentType.GENERAL:
+                        discard_reason = f"intent_{intent.type.value}"
+                    elif realtime_route.route == "shadow":
+                        discard_reason = "local_cascade"
+                    elif not realtime_route.allow_provider_audio:
+                        discard_reason = realtime_route.reason
+                    else:
+                        discard_reason = "realtime_generation_unavailable"
+                    self._discard_realtime_turn(discard_reason)
+
+                # Deterministic cached replies run before the ACK chime,
+                # memory retrieval, LLM and online TTS. Pending tool approval
+                # still takes precedence over ordinary quick replies.
+                if not pending_approval and intent.type == IntentType.QUICK_REPLY:
+                    if idle_task and not idle_task.done():
+                        idle_task.cancel()
+                    _quick_text = (
+                        intent.reply_text
+                        or intent.skill_name
+                        or "\u597d\u7684\u3002"
+                    )
+                    self._audio.drain_buffers()
+                    cache_hit = await self._speak_cached_or_fallback(
+                        _quick_text,
+                        cache_key=intent.cached_audio_key,
+                        fallback_to_tts=True,
+                    )
+                    _trace.metadata["voice_phrase_cache_hit"] = cache_hit
+                    self._remember_spoken_text(_quick_text)
+                    idle_task = self._pipeline.start_idle_reflection()
+                    continue
+
                 # Immediate audio feedback -user knows we heard them
                 # Fires before LLM call to fill the latency gap
-                self._audio.acknowledge()
+                if not intent.fast_path and not realtime_candidate:
+                    self._audio.acknowledge()
 
                 # Cancel idle reflection on user activity
                 if idle_task and not idle_task.done():
@@ -314,28 +1424,20 @@ class VoiceLoop:
 
                 pending_reply = await self._pipeline.handle_pending_tool_response(user_text)
                 if pending_reply is not None:
+                    self._discard_realtime_turn("pending_tool_response")
                     if idle_task and not idle_task.done():
                         idle_task.cancel()
                     idle_task = self._pipeline.start_idle_reflection()
                     continue
 
-                # Start memory prefetch ASAP (overlaps with routing)
-                memory_task = self._pipeline.start_memory_prefetch(user_text)
-
-                with _tracer.span("intent_route") as _route_span:
-                    intent = self._router.route(user_text)
-                    _route_span.metadata.update(
-                        attach_intent_route_trace(_trace, intent, source="voice")
+                if intent.type == IntentType.GENERAL and not realtime_candidate:
+                    processing_feedback_armed = self._arm_processing_feedback(
+                        interaction_cancel
                     )
-
-                if intent.type == IntentType.ESTOP:
-                    # Cancel any background agent task before hard stop
-                    if self._dispatcher:
-                        self._dispatcher.cancel_active_agent_task()
-                    self._pipeline.handle_estop()
-                    self._audio.drain_buffers()  # stop any ongoing TTS immediately
-                    await self._audio.speak_and_wait("已紧急停止。")
-                    continue
+                # Start memory prefetch only after deterministic paths have
+                # exited.  This avoids needless retrieval work on fast replies.
+                if not intent.fast_path:
+                    memory_task = self._pipeline.start_memory_prefetch(user_text)
 
                 # Quick reply -zero LLM, instant response
                 if intent.type == IntentType.QUICK_REPLY:
@@ -345,7 +1447,7 @@ class VoiceLoop:
                     _quick_text = intent.reply_text or intent.skill_name or "好的。"
                     self._audio.drain_buffers()
                     await self._audio.speak_and_wait(_quick_text)
-                    self._pipeline._turn_executor._last_spoken_text = _quick_text
+                    self._remember_spoken_text(_quick_text)
                     if idle_task and not idle_task.done():
                         idle_task.cancel()
                     idle_task = self._pipeline.start_idle_reflection()
@@ -441,6 +1543,7 @@ class VoiceLoop:
                         and intent.skill_name in _AGENT_BYPASS_SKILLS
                     )
                     if not _bypass:
+                        self._discard_realtime_turn("agent_task_busy")
                         if memory_task and not memory_task.done():
                             memory_task.cancel()
                             memory_task = None
@@ -462,23 +1565,54 @@ class VoiceLoop:
                             idle_task.cancel()
                         idle_task = self._pipeline.start_idle_reflection()
                         continue
-                    # Bridge not configured / failed -local skill dispatch
+
+                    # Bridge not configured / failed: prove the local skill is
+                    # runnable before saying a task-specific waiting sentence.
+                    skill_name = intent.skill_name or ""
+                    skill_outcome = await self._preflight_voice_skill(
+                        skill_name,
+                        user_text,
+                    )
+                    _trace.metadata["skill_preflight"] = {
+                        "skill": skill_name,
+                        "status": skill_outcome.status.value,
+                        "code": skill_outcome.code,
+                    }
+                    if not skill_outcome.can_execute:
+                        await self._speak_skill_outcome(skill_outcome)
+                        if idle_task and not idle_task.done():
+                            idle_task.cancel()
+                        idle_task = self._pipeline.start_idle_reflection()
+                        continue
+
+                    if intent.preface_text:
+                        cache_hit = await self._speak_cached_or_fallback(
+                            intent.preface_text,
+                            cache_key=intent.preface_audio_key,
+                            fallback_to_tts=False,
+                        )
+                        _trace.metadata["voice_preface_cache_hit"] = cache_hit
+                        if not cache_hit:
+                            self._audio.acknowledge()
+
+                    # Ready local skill dispatch
                     if self._dispatcher:
-                        result = await self._proactive.run(
-                            intent.skill_name or "", user_text, self._audio,
-                            source="voice",
+                        result = await self._run_proactive_interaction(
+                            skill_name,
+                            user_text,
                         )
                         if result.proceed:
-                            await self._dispatcher.dispatch(
-                                intent.skill_name or "", result.enriched_text,
-                                source="voice",
-                            )
+                            if not interaction_cancel.is_set():
+                                await self._dispatcher.dispatch(
+                                    skill_name, result.enriched_text,
+                                    source="voice",
+                                )
                         elif result.interrupt_payload:
                             # User bailed out and issued a new intent in the same breath
                             # e.g. "算了，去仓库B" -> reroute immediately without re-listening
                             logger.info(
-                                "VoiceLoop: rerouting interrupt_payload: %r",
-                                result.interrupt_payload,
+                                "VoiceLoop: rerouting interrupt payload (chars=%d)",
+                                len(result.interrupt_payload),
                             )
                             _reroute_intent = self._router.route(result.interrupt_payload)
                             attach_intent_route_trace(
@@ -486,23 +1620,23 @@ class VoiceLoop:
                                 _reroute_intent,
                                 source="voice",
                                 stage="interrupt_reroute",
+                                include_content=False,
                             )
                             if (
                                 _reroute_intent.type == IntentType.VOICE_TRIGGER
                                 and _reroute_intent.skill_name
                             ):
-                                _rr = await self._proactive.run(
+                                _rr = await self._run_proactive_interaction(
                                     _reroute_intent.skill_name,
                                     result.interrupt_payload,
-                                    self._audio,
-                                    source="voice",
                                 )
                                 if _rr.proceed:
-                                    await self._dispatcher.dispatch(
-                                        _reroute_intent.skill_name,
-                                        _rr.enriched_text,
-                                        source="voice",
-                                    )
+                                    if not interaction_cancel.is_set():
+                                        await self._dispatcher.dispatch(
+                                            _reroute_intent.skill_name,
+                                            _rr.enriched_text,
+                                            source="voice",
+                                        )
                             else:
                                 # Rerouted to a general intent -start fresh memory
                                 # prefetch for the new payload so LLM gets context.
@@ -510,20 +1644,23 @@ class VoiceLoop:
                                     result.interrupt_payload
                                 )
                                 conversation_session_id = self._conversation_session_for()
-                                await self._dispatcher.handle_general(
+                                await self._dispatcher_handle_general(
                                     result.interrupt_payload,
                                     source="voice",
                                     memory_task=memory_task,
                                     conversation_session_id=conversation_session_id,
+                                    voice_turn_id=interaction_turn_id,
+                                    turn_cancel_token=interaction_cancel,
                                 )
                                 memory_task = None  # handle_general took ownership
                                 if idle_task and not idle_task.done():
                                     idle_task.cancel()
                                 idle_task = self._pipeline.start_idle_reflection()
                     else:
-                        await self._pipeline.execute_skill(
-                            intent.skill_name or "", user_text,
-                        )
+                        if not interaction_cancel.is_set():
+                            await self._pipeline.execute_skill(
+                                skill_name, user_text,
+                            )
                     continue
 
                 if intent.type == IntentType.COMMAND:
@@ -536,6 +1673,7 @@ class VoiceLoop:
                 if intent.type == IntentType.GENERAL:
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
+                        self._discard_realtime_turn("runtime_bridge_handled")
                         # Cancel the memory prefetch we started earlier -the bridge
                         # handled the turn so the prefetched context is no longer needed.
                         if memory_task and not memory_task.done():
@@ -546,22 +1684,57 @@ class VoiceLoop:
                         idle_task = self._pipeline.start_idle_reflection()
                         continue
 
+                    conversation_session_id = self._conversation_session_for()
+                    if realtime_candidate:
+                        realtime_handled = await self._try_handle_realtime_general_chat(
+                            user_text,
+                            expected_generation=utterance.realtime_generation,
+                            conversation_session_id=conversation_session_id,
+                            voice_turn_id=interaction_turn_id,
+                            turn_cancel_token=interaction_cancel,
+                        )
+                        if realtime_handled:
+                            if memory_task and not memory_task.done():
+                                memory_task.cancel()
+                            memory_task = None
+                            if idle_task and not idle_task.done():
+                                idle_task.cancel()
+                            idle_task = self._pipeline.start_idle_reflection()
+                            continue
+                        # Transcript mismatch, timeout, provider failure, or a
+                        # stale turn token retains the established cascade.
+                        self._discard_realtime_turn(
+                            "realtime_general_fallback"
+                        )
+                        if not intent.fast_path:
+                            self._audio.acknowledge()
+
+                # Realtime fallback and non-exit command routes reach the same
+                # LLM path without the early GENERAL fuse.
+                if not processing_feedback_armed:
+                    processing_feedback_armed = self._arm_processing_feedback(
+                        interaction_cancel
+                    )
                 # General ->LLM (pass pre-fetched memory)
                 conversation_session_id = self._conversation_session_for()
                 assistant_reply: Any = None
                 with _tracer.span("llm_pipeline"):
                     if self._dispatcher:
-                        assistant_reply = await self._dispatcher.handle_general(
+                        assistant_reply = await self._dispatcher_handle_general(
                             user_text,
                             source="voice",
                             memory_task=memory_task,
                             conversation_session_id=conversation_session_id,
+                            voice_turn_id=interaction_turn_id,
+                            turn_cancel_token=interaction_cancel,
                         )
                     else:
-                        assistant_reply = await self._pipeline.process(
+                        assistant_reply = await self._pipeline_process_general(
                             user_text,
                             memory_task=memory_task,
                             conversation_session_id=conversation_session_id,
+                            voice_turn_id=interaction_turn_id,
+                            turn_cancel_token=interaction_cancel,
                         )
                 self._record_local_gateway_turn(
                     conversation_session_id,
@@ -581,6 +1754,7 @@ class VoiceLoop:
             except KeyboardInterrupt:
                 break
             except Exception as exc:
+                self._discard_realtime_turn("voice_loop_error")
                 kind = self._classify_audio_error(exc)
                 kind_value = _audio_error_value(kind)
 
@@ -596,6 +1770,10 @@ class VoiceLoop:
                 # DEVICE_BUSY: short backoff, silent retry
                 if kind_value == "device_busy":
                     logger.warning("Voice loop: audio device busy -retrying in 2s: %s", exc)
+                    self._fail_closed_full_duplex_on_audio_error(
+                        reason="audio_device_runtime_failure",
+                        exc=exc,
+                    )
                     await asyncio.sleep(2.0)
                     continue
 
@@ -611,10 +1789,22 @@ class VoiceLoop:
                     consecutive_errors += 1
                     if consecutive_errors == 1:
                         try:
-                            self._audio.tts.speak("麦克风断开，正在重连。")
+                            await self._audio.speak_and_wait("麦克风断开，正在重连。")
                         except Exception:
                             pass
-                    await asyncio.sleep(5.0)
+                    recovery_generation = self._lifecycle_generation
+                    recovered = await asyncio.to_thread(
+                        self._restart_audio_input,
+                        recovery_generation,
+                    )
+                    if recovered:
+                        retry_delay = min(
+                            5.0,
+                            0.5 * (2 ** min(consecutive_errors - 1, 4)),
+                        )
+                    else:
+                        retry_delay = 5.0
+                    await asyncio.sleep(retry_delay)
                     continue
 
                 # UNKNOWN: standard consecutive-error escalation
@@ -626,13 +1816,21 @@ class VoiceLoop:
                         consecutive_errors,
                     )
                     try:
-                        self._audio.tts.speak("系统暂时遇到问题，请稍候。")
+                        await self._audio.speak_and_wait("系统暂时遇到问题，请稍候。")
                     except Exception:
                         pass
                     await asyncio.sleep(5)
                     consecutive_errors = 0
                 await asyncio.sleep(1)
             finally:
+                if processing_feedback_armed and self._audio.processing_feedback_armed:
+                    try:
+                        self._audio.cancel_processing_feedback()
+                    except Exception as exc:
+                        logger.debug(
+                            "VoiceLoop: processing feedback cancel failed: %s",
+                            exc,
+                        )
                 # Finish pipeline trace for this turn
                 if _trace is not None:
                     _tracer.finish_trace()
@@ -645,6 +1843,10 @@ class VoiceLoop:
                         await memory_task
                     except (asyncio.CancelledError, Exception):
                         pass
+                if self._active_interaction_cancel is interaction_cancel:
+                    self._active_interaction_cancel = None
+                self._active_realtime_generation = 0
+                self._active_realtime_baseline_generation = 0
 
         # Session-end summarization -save L2 summary if enough conversation happened
         _sm = getattr(self._pipeline, "_session_memory", None)
@@ -669,11 +1871,11 @@ class VoiceLoop:
     ) -> None:
         """Best-effort ambient speech record without creating a chat turn."""
         logger.info(
-            "InteractionGate: %s (%s, %.2f): %r",
+            "InteractionGate: %s (%s, %.2f, chars=%d)",
             decision.action.value,
             decision.reason,
             decision.confidence,
-            user_text[:80],
+            len(user_text),
         )
         if not decision.should_record_environment:
             return
@@ -745,7 +1947,7 @@ class VoiceLoop:
                 conversation_session_id=conversation_session_id,
                 pipeline=self._pipeline,
                 dispatcher=self._dispatcher,
-                on_spoken_reply=self._audio.speak_and_wait,
+                on_spoken_reply=self._safe_runtime_spoken_reply,
                 label="Voice",
             )
             status = self._runtime_bridge_snapshot()
@@ -788,7 +1990,10 @@ class VoiceLoop:
         manager = getattr(self._voice_runtime_bridge, "session_manager", None)
         get_or_create = getattr(manager, "get_or_create", None)
         if not callable(get_or_create):
-            return None
+            if self._degraded_conversation_session_id is None:
+                self._degraded_conversation_session_id = f"voice-local-{uuid4().hex}"
+            self._conversation_session_id = self._degraded_conversation_session_id
+            return self._conversation_session_id
         try:
             session = get_or_create(channel="voice")
         except Exception as exc:

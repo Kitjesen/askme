@@ -11,12 +11,20 @@ from askme.api.routes.agent_profiles import register_agent_profile_routes
 from askme.api.routes.audit import register_audit_routes
 from askme.api.routes.governance import register_governance_routes
 from askme.api.routes.skills import register_skill_routes
+from askme.api.routes.voice_lab import register_voice_lab_routes
 
 
 def register_admin_routes(app: FastAPI, deps: Any) -> None:
     """Register routes used by operators, supervisors, and delivery teams."""
 
     register_field_surface_routes(app, deps, surfaces={"admin"})
+    register_voice_lab_routes(
+        app,
+        mission_json=deps.mission_json,
+        optional_json_body=deps.optional_json_body,
+        cors_options_response=deps.cors_options_response,
+        authorize=deps.authorize,
+    )
     register_governance_routes(
         app,
         governance_payload=deps.governance_payload,

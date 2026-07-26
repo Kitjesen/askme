@@ -49,8 +49,15 @@ class _FakeSSEResponse:
 class _FakeClient:
     def __init__(self, response):
         self._response = response
+        self.request: dict[str, object] | None = None
 
     def stream(self, method, url, json=None, headers=None):
+        self.request = {
+            "method": method,
+            "url": url,
+            "json": json,
+            "headers": headers,
+        }
         return self._response
 
     async def __aenter__(self):
@@ -104,6 +111,7 @@ def test_tts_status_snapshot_exposes_provider_without_secret():
         assert snapshot["minimax"]["configured"] is True
         assert snapshot["minimax"]["transport"] == "sse"
         assert snapshot["minimax"]["model"] == "speech-2.8-hd"
+        assert snapshot["minimax"]["url"] == "https://api.minimaxi.com/v1"
         assert snapshot["queued_text_items"] == 0
         assert snapshot["buffered_chunks"] == 0
         assert "test-minimax-key" not in repr(snapshot)
@@ -138,14 +146,20 @@ async def test_minimax_websocket_streaming_queues_audio():
         assert result is True
         assert engine._has_buffered_audio()
         connect.assert_called_once()
-        assert ws.closed is True
+        assert ws.closed is False
         assert [item["event"] for item in ws.sent] == [
             "task_start",
             "task_continue",
-            "task_finish",
         ]
     finally:
         engine.shutdown()
+
+    assert ws.closed is True
+    assert [item["event"] for item in ws.sent] == [
+        "task_start",
+        "task_continue",
+        "task_finish",
+    ]
 
 
 async def test_minimax_websocket_error_returns_false():
@@ -544,6 +558,35 @@ def test_auto_fallback_minimax_no_key():
     engine = _make_engine(backend="minimax", minimax_api_key="")
     try:
         assert engine._backend == "edge"
+    finally:
+        engine.shutdown()
+
+
+async def test_minimax_sse_request_uses_shared_voice_and_audio_settings():
+    engine = _make_engine(
+        minimax_api_key="test-key",
+        minimax_tts_model="speech-2.8-turbo",
+        minimax_voice_id="voice-test",
+        minimax_speed=1.25,
+        minimax_vol=2.5,
+        minimax_pitch=2,
+        minimax_emotion="happy",
+        minimax_sample_rate=32_000,
+        minimax_bitrate=96_000,
+        minimax_audio_format="pcm",
+    )
+    try:
+        response = _FakeSSEResponse(["data:[DONE]"])
+        client = _FakeClient(response)
+
+        with patch("httpx.AsyncClient", return_value=client):
+            await engine._generate_minimax("hello", engine._get_generation())
+
+        assert client.request is not None
+        body = client.request["json"]
+        assert isinstance(body, dict)
+        assert body["voice_setting"] == engine._minimax_voice_setting()
+        assert body["audio_setting"] == engine._minimax_audio_setting()
     finally:
         engine.shutdown()
 

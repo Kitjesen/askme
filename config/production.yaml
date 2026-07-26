@@ -154,8 +154,7 @@ integrations:
     timeout_seconds: 30
     max_retries: 2
     allowed_models:
-      - "MiniMax-M2.5-highspeed"
-      - "MiniMax-M2.7"
+      - "MiniMax-M2.7-highspeed"
 
 # ----------------------------------------------------------
 # External Access Control (firewall / VPN rules — informational)

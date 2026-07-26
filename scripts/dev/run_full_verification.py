@@ -14,21 +14,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
-import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
 
 ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = ROOT / "artifacts" / "verification"
 
 
 def _timestamp() -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
@@ -220,7 +219,7 @@ def main() -> None:
     if not report_path:
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         report_path = str(
-            REPORT_DIR / f"verification-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+            REPORT_DIR / f"verification-{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.json"
         )
 
     with open(report_path, "w", encoding="utf-8") as f:

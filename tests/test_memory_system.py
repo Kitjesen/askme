@@ -36,6 +36,7 @@ def _make_system(
     if vector:
         vector.retrieve = AsyncMock(return_value="vector context")
         vector.save = AsyncMock()
+        vector.admit_turn = AsyncMock(return_value="admitted")
 
     ms = MemorySystem(
         llm=llm,
@@ -154,8 +155,10 @@ class TestVectorMemory:
     @pytest.mark.asyncio
     async def test_save_to_vector(self):
         ms, _, _, _, _, vector = _make_system()
-        await ms.save_to_vector("user", "assistant")
-        vector.save.assert_awaited_once_with("user", "assistant")
+        result = await ms.save_to_vector("user", "assistant")
+        assert result == "admitted"
+        vector.admit_turn.assert_awaited_once_with("user")
+        vector.save.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_save_noop_without_vector(self):

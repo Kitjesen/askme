@@ -34,6 +34,13 @@ class TestIntentRouter:
         assert intent.type == IntentType.ESTOP
         assert intent.reason == "estop_keyword"
 
+    def test_exact_estop_ignores_trailing_punctuation_without_safety(self):
+        router = self._make_router(safety=False)
+
+        assert router.route("\u6025\u505c\uff01").type == IntentType.ESTOP
+        assert router.route("estop!").type == IntentType.ESTOP
+        assert router.route("\u4e0d\u8981\u6025\u505c\uff01").type == IntentType.GENERAL
+
     # ── Quick replies ──
     def test_quick_reply_has_explicit_reply_text(self):
         router = self._make_router()
@@ -42,6 +49,36 @@ class TestIntentRouter:
         assert intent.reply_text == "你好，有什么需要帮忙的？"
         assert intent.skill_name == intent.reply_text  # legacy compatibility
         assert intent.reason == "quick_reply"
+
+    def test_self_introduction_uses_cached_quick_reply_path(self):
+        router = self._make_router()
+
+        intent = router.route("\u4f60\u662f\u8c01\uff1f")
+
+        assert intent.type == IntentType.QUICK_REPLY
+        assert intent.fast_path is True
+        assert intent.cached_audio_key
+        assert "\u5c0f\u7b97" in (intent.reply_text or "")
+
+    def test_location_status_routes_to_read_only_skill(self):
+        router = self._make_router()
+
+        intent = router.route("\u5f53\u524d\u4f4d\u7f6e")
+
+        assert intent.type == IntentType.VOICE_TRIGGER
+        assert intent.skill_name == "nav_query"
+        assert intent.reason == "read_only_fast_path"
+        assert intent.fast_path is True
+        assert intent.preface_text
+        assert intent.preface_audio_key
+
+    def test_action_phrase_never_uses_fast_path(self):
+        router = self._make_router(triggers={"\u5bfc\u822a": "navigate"})
+
+        intent = router.route("\u5e26\u6211\u53bb\u5927\u5802")
+
+        assert intent.fast_path is False
+        assert intent.type == IntentType.GENERAL
 
     def test_intent_route_payload_is_audit_ready(self):
         router = self._make_router(triggers={"导航到仓库": "navigate"})
@@ -114,11 +151,35 @@ class TestIntentRouter:
         assert intent.reason == "empty_input"
 
     # ── No safety checker ──
-    def test_no_safety_skips_estop(self):
+    def test_local_estop_vocabulary_does_not_depend_on_safety_checker(self):
         router = self._make_router(safety=False)
-        intent = router.route("停")
-        # Without safety checker, "停" is not recognized as e-stop
-        assert intent.type == IntentType.GENERAL
+
+        for phrase in (
+            "停",
+            "停下",
+            "停下来",
+            "别动",
+            "不要动",
+            "立即停止",
+            "马上停止",
+            "危险",
+            "halt",
+            "freeze",
+        ):
+            intent = router.route(phrase)
+            assert intent.type == IntentType.ESTOP
+            assert intent.reason == "estop_keyword"
+
+    def test_stop_speaking_phrase_is_not_promoted_to_estop(self):
+        router = self._make_router(
+            safety=False,
+            triggers={"停止播放": "stop_speaking"},
+        )
+
+        intent = router.route("停止播放")
+
+        assert intent.type == IntentType.VOICE_TRIGGER
+        assert intent.skill_name == "stop_speaking"
 
     # ── Routing policy ──
     def test_routing_policy_can_override_deterministic_surfaces(self):
@@ -132,6 +193,22 @@ class TestIntentRouter:
         assert router.route("ping").reply_text == "pong"
         assert router.route("/STATUS").command == "/status"
         assert router.route("HALT").type == IntentType.ESTOP
+
+    def test_generic_look_word_does_not_override_nonvisual_skill_trigger(self):
+        router = self._make_router(triggers={"看看文件": "list_directory"})
+
+        intent = router.route("看看文件")
+
+        assert intent.type == IntentType.VOICE_TRIGGER
+        assert intent.skill_name == "list_directory"
+
+    def test_visual_environment_request_stays_on_current_camera_pipeline(self):
+        router = self._make_router(triggers={"看看周围": "environment_report"})
+
+        intent = router.route("看看周围")
+
+        assert intent.type == IntentType.GENERAL
+        assert intent.reason == "visual_query"
 
 
 class TestNegationDetection:

@@ -14,6 +14,7 @@ from askme.llm.providers.domestic import (
     ZhipuProvider,
 )
 from askme.llm.providers.fake import FakeLLMProvider
+from askme.llm.providers.litellm import LiteLLMProxyProvider
 from askme.llm.providers.openai_compatible import OpenAICompatibleProvider
 from askme.llm.providers.profiles import infer_provider_name, normalize_provider_name
 from askme.llm.streaming.retry import default_backoff
@@ -21,6 +22,7 @@ from askme.llm.streaming.retry import default_backoff
 _PROVIDER_CLASSES = {
     "openai_compatible": OpenAICompatibleProvider,
     "openai": OpenAICompatibleProvider,
+    "litellm": LiteLLMProxyProvider,
     "minimax": MiniMaxProvider,
     "doubao": DoubaoProvider,
     "dashscope": DashScopeProvider,

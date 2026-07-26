@@ -8,6 +8,8 @@ from askme.pipeline.utils import (
     strip_think_blocks,
 )
 
+from askme.llm.core.contracts import LLMNoSemanticResponse
+
 
 class TestStripThinkBlocks:
     def test_removes_single_block(self):
@@ -39,6 +41,10 @@ class TestStripThinkBlocks:
 
 
 class TestClassifyLlmError:
+    def test_no_semantic_response_has_retryable_voice_message(self):
+        msg = classify_llm_error(LLMNoSemanticResponse(model_alias="voice-fast"))
+        assert msg == "这次没有生成回答，你再说一遍？"
+
     def test_asyncio_timeout(self):
         msg = classify_llm_error(TimeoutError())
         assert "超时" in msg or "想了" in msg

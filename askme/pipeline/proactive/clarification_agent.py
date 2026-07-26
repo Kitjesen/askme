@@ -145,7 +145,14 @@ class ClarificationPlannerAgent(ProactiveAgent):
                     )
 
             question = self._build_question(analysis, skill, context, turn)
-            answer = await ask_and_listen(question, audio)
+            if context.listen_once is None:
+                answer = await ask_and_listen(question, audio)
+            else:
+                answer = await ask_and_listen(
+                    question,
+                    audio,
+                    listen_once=context.listen_once,
+                )
 
             # ESTOP — highest priority, abort everything
             if _is_estop(answer):

@@ -7,32 +7,42 @@
     python -m askme.blueprints.presets.lingtu_voice
 """
 
-from askme.runtime.core.module import Runtime
-from askme.runtime.modules import (
-    LLMModule,
-    MemoryModule,
+from askme.blueprints.catalog.data import LINGTU_VOICE_MODULES
+
+_LABEL = "灵途语音导航适配器"
+
+
+def _build_lingtu_voice():
+    from askme.blueprints.runner.runner import compose_runtime
+    from askme.runtime.modules import (
+        LLMModule,
+        MemoryModule,
     PipelineModule,
     SkillModule,
     TelegramModule,
     TextModule,
     ToolsModule,
-    VoiceModule,
-)
+        VoiceModule,
+    )
 
-lingtu_voice = (
-    Runtime.use(LLMModule)
-    + Runtime.use(ToolsModule)
-    + Runtime.use(MemoryModule)
-    + Runtime.use(PipelineModule)
-    + Runtime.use(SkillModule)
-    + Runtime.use(VoiceModule)
-    + Runtime.use(TextModule)
-    + Runtime.use(TelegramModule)
-)
+    return compose_runtime(
+        (
+            LLMModule,
+            ToolsModule,
+            MemoryModule,
+            PipelineModule,
+            SkillModule,
+            VoiceModule,
+            TextModule,
+            TelegramModule,
+        )
+    )
 
 __all__ = ["lingtu_voice"]
 
 if __name__ == "__main__":
     from askme.blueprints.runner.runner import run_blueprint
 
-    run_blueprint(lingtu_voice, "灵途语音导航适配器")
+    run_blueprint(_build_lingtu_voice, _LABEL, module_names=LINGTU_VOICE_MODULES)
+else:
+    lingtu_voice = _build_lingtu_voice()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -41,6 +42,7 @@ class ProactiveContext:
     dispatcher: Any = None  # SkillDispatcher — for mission history
     source: str = "voice"
     session: ClarificationSession | None = None  # state machine (one per run)
+    listen_once: Callable[[], Awaitable[str | None]] | None = None
 
 
 class ProactiveAgent(ABC):
@@ -63,7 +65,12 @@ class ProactiveAgent(ABC):
         """Run the interaction and return an enriched result."""
 
 
-async def ask_and_listen(question: str, audio: Any) -> str | None:
+async def ask_and_listen(
+    question: str,
+    audio: Any,
+    *,
+    listen_once: Callable[[], Awaitable[str | None]] | None = None,
+) -> str | None:
     """Say *question* via TTS, wait, then listen for one user response.
 
     Returns the transcribed text, or None if nothing was captured.
@@ -90,6 +97,8 @@ async def ask_and_listen(question: str, audio: Any) -> str | None:
         # are not silently eaten by the noise utterance filter.
         audio.awaiting_confirmation = True
         try:
+            if listen_once is not None:
+                return await listen_once()
             return await asyncio.to_thread(audio.listen_loop)
         finally:
             audio.awaiting_confirmation = False

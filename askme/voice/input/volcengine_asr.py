@@ -236,6 +236,9 @@ class VolcengineASR(ASRBackend):
         return text
 
     def cancel_session(self) -> None:
+        # Release a concurrent finish_session() immediately even when no
+        # receiver thread was created or the WebSocket close is slow.
+        self._result_ready.set()
         self._cleanup()
 
     def status_snapshot(self) -> dict[str, Any]:

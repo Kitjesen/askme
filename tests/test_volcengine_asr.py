@@ -159,3 +159,12 @@ class TestVolcengineStatus:
         assert snapshot["resource_id"] == "volc.seedasr.sauc.duration"
         assert snapshot["available"] is True
         assert "access-test" not in repr(snapshot)
+
+
+def test_cancel_releases_concurrent_finish_wait() -> None:
+    asr = VolcengineASR(_config())
+    asr._result_ready.clear()
+
+    asr.cancel_session()
+
+    assert asr._result_ready.is_set()

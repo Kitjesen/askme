@@ -50,6 +50,12 @@ Current modules:
 - `scenario_intents.py`: scenario intent classification.
 - `service.py`: stable `RobotInteractionService` facade.
 
+Current subpackages:
+
+- `mission/`: mission-mode admission policy and actor-role constraints.
+- `routing/`: side-effect-free fast-path routing helpers; these may classify
+  audio-only replies or read-only queries but never authorize robot motion.
+
 ## Boundary Rules
 
 Files in this package must not import concrete implementation or execution

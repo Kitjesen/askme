@@ -232,7 +232,11 @@ class TestTextLoopReroute:
         with patch("builtins.input", side_effect=input_fn):
             await loop.run()
 
-        mock_dispatcher.handle_general.assert_called_once_with("查个时间", source="text")
+        mock_dispatcher.handle_general.assert_called_once()
+        args, kwargs = mock_dispatcher.handle_general.call_args
+        assert args == ("查个时间",)
+        assert kwargs["source"] == "text"
+        assert kwargs["conversation_session_id"].startswith("text-local-")
 
     async def test_original_not_dispatched_on_reroute(self):
         """On reroute, dispatch is called exactly once (for the rerouted skill, not original)."""

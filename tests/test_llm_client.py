@@ -5,27 +5,37 @@ Complements test_llm_retry.py which covers non-streaming chat() basics.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 
+def _semantic_chunk(text: str = "ok") -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=text, tool_calls=None))]
+    )
+
+
 def _make_client(monkeypatch, **overrides):
     """Create an LLMClient with test defaults."""
     monkeypatch.setattr(
         "askme.llm.core.client.get_config",
-        lambda: {"brain": {
-            "api_key": "test-key",
-            "base_url": "https://test.example.com/v1",
-            "model": "primary-model",
-            "max_retries": 1,
-            "timeout": 5.0,
-            "fallback_models": ["fallback-1", "fallback-2"],
-            **overrides,
-        }},
+        lambda: {
+            "brain": {
+                "api_key": "test-key",
+                "base_url": "https://test.example.com/v1",
+                "model": "primary-model",
+                "max_retries": 1,
+                "timeout": 5.0,
+                "fallback_models": ["fallback-1", "fallback-2"],
+                **overrides,
+            }
+        },
     )
     from askme.llm.client import LLMClient
+
     return LLMClient()
 
 
@@ -38,7 +48,7 @@ async def test_stream_retries_on_timeout(monkeypatch):
     """chat_stream retries on APITimeoutError during connection phase."""
     client = _make_client(monkeypatch, max_retries=2)
 
-    chunk = MagicMock()
+    chunk = _semantic_chunk()
     chunk.choices = [MagicMock()]
     chunk.choices[0].delta.content = "hi"
 
@@ -69,7 +79,7 @@ async def test_stream_retries_on_503(monkeypatch):
     """chat_stream retries on HTTP 503 (retryable status)."""
     client = _make_client(monkeypatch, max_retries=1)
 
-    chunk = MagicMock()
+    chunk = _semantic_chunk()
 
     async def fake_chunks():
         yield chunk
@@ -127,12 +137,12 @@ async def test_stream_mid_stream_error_propagates(monkeypatch):
     client = _make_client(monkeypatch, max_retries=2)
 
     async def exploding_chunks():
-        yield MagicMock()  # first chunk OK
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content="真实语义", tool_calls=None))]
+        )
         raise APITimeoutError(request=MagicMock())  # mid-stream failure
 
-    client._client.chat.completions.create = AsyncMock(
-        return_value=exploding_chunks()
-    )
+    client._client.chat.completions.create = AsyncMock(return_value=exploding_chunks())
 
     with pytest.raises(APITimeoutError):
         async for _ in client.chat_stream([{"role": "user", "content": "hi"}]):
@@ -148,7 +158,7 @@ async def test_stream_falls_back_to_next_model(monkeypatch):
     """chat_stream falls back to next model when primary fails."""
     client = _make_client(monkeypatch, max_retries=0)
 
-    chunk = MagicMock()
+    chunk = _semantic_chunk()
 
     async def fake_chunks():
         yield chunk
@@ -215,7 +225,7 @@ async def test_stream_retries_on_connection_error(monkeypatch):
     """chat_stream retries on APIConnectionError during connection."""
     client = _make_client(monkeypatch, max_retries=1)
 
-    chunk = MagicMock()
+    chunk = _semantic_chunk()
 
     async def fake_chunks():
         yield chunk
@@ -247,6 +257,7 @@ async def test_stream_retries_on_connection_error(monkeypatch):
 async def test_chat_records_metrics_on_success(monkeypatch):
     """Metrics are recorded after successful chat()."""
     from askme.robot.ota_bridge import OTABridgeMetrics
+
     metrics = OTABridgeMetrics()
 
     client = _make_client(monkeypatch)
@@ -268,6 +279,7 @@ async def test_chat_records_metrics_on_success(monkeypatch):
 async def test_chat_records_metrics_on_failure(monkeypatch):
     """Metrics are recorded even after chat() failure."""
     from askme.robot.ota_bridge import OTABridgeMetrics
+
     metrics = OTABridgeMetrics()
 
     client = _make_client(monkeypatch, max_retries=0, fallback_models=[])
@@ -288,19 +300,18 @@ async def test_chat_records_metrics_on_failure(monkeypatch):
 async def test_stream_records_metrics(monkeypatch):
     """Metrics recorded for streaming calls."""
     from askme.robot.ota_bridge import OTABridgeMetrics
+
     metrics = OTABridgeMetrics()
 
     client = _make_client(monkeypatch)
     client._metrics = metrics
 
-    chunk = MagicMock()
+    chunk = _semantic_chunk()
 
     async def fake_chunks():
         yield chunk
 
-    client._client.chat.completions.create = AsyncMock(
-        return_value=fake_chunks()
-    )
+    client._client.chat.completions.create = AsyncMock(return_value=fake_chunks())
 
     async for _ in client.chat_stream([{"role": "user", "content": "hi"}]):
         pass
@@ -318,8 +329,9 @@ async def test_stream_records_metrics(monkeypatch):
 
 def test_client_for_model_routes_minimax(monkeypatch):
     """_client_for_model returns MiniMax client for 'MiniMax-*' models."""
-    client = _make_client(monkeypatch, minimax_api_key="mm-key",
-                          minimax_base_url="https://api.minimax.chat/v1")
+    client = _make_client(
+        monkeypatch, minimax_api_key="mm-key", minimax_base_url="https://api.minimaxi.com/v1"
+    )
 
     mm_client = client._client_for_model("MiniMax-M2.5-highspeed")
     default_client = client._client_for_model("claude-opus-4-6")
@@ -426,11 +438,9 @@ async def test_chat_stream_passes_tool_choice(monkeypatch):
     client = _make_client(monkeypatch)
 
     async def fake_chunks():
-        yield MagicMock()
+        yield _semantic_chunk()
 
-    client._client.chat.completions.create = AsyncMock(
-        return_value=fake_chunks()
-    )
+    client._client.chat.completions.create = AsyncMock(return_value=fake_chunks())
 
     async for _ in client.chat_stream(
         [{"role": "user", "content": "hi"}],
@@ -451,7 +461,7 @@ async def test_chat_stream_uses_minimax_reasoning_split(monkeypatch):
     )
 
     async def fake_chunks():
-        yield MagicMock()
+        yield _semantic_chunk()
 
     client._client.chat.completions.create = AsyncMock(return_value=fake_chunks())
 
@@ -471,7 +481,7 @@ async def test_chat_stream_omits_minimax_extra_body_when_thinking_enabled(monkey
     )
 
     async def fake_chunks():
-        yield MagicMock()
+        yield _semantic_chunk()
 
     client._client.chat.completions.create = AsyncMock(return_value=fake_chunks())
 
@@ -490,7 +500,7 @@ async def test_chat_stream_does_not_send_minimax_extra_body_to_other_models(monk
     client = _make_client(monkeypatch, model="primary-model", fallback_models=[])
 
     async def fake_chunks():
-        yield MagicMock()
+        yield _semantic_chunk()
 
     client._client.chat.completions.create = AsyncMock(return_value=fake_chunks())
 

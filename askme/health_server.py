@@ -61,7 +61,7 @@ _PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 _DEGRADED_OTA_STATES = {"auth_error", "degraded"}
 _UTC = timezone.utc  # noqa: UP017 - Sunrise runs Python 3.10, where datetime.UTC is unavailable.
 _PUBLIC_HTTP_PATHS = frozenset(("/health", "/healthz", "/metrics", "/metrics/prometheus"))
-_PROTECTED_HTTP_PREFIXES = ("/api/",)
+_PROTECTED_HTTP_PREFIXES = ("/api/", "/dashboard/")
 _PROTECTED_HTTP_PATHS = frozenset(("/dashboard", "/trace"))
 _FIELD_EVIDENCE_ROOT_NAMES = ("artifacts", "output", "data")
 _append_metric = _prometheus_metrics.append_metric

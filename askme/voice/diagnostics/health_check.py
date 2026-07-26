@@ -15,6 +15,7 @@ from askme.config import get_config, project_root
 logger = logging.getLogger(__name__)
 
 from askme.voice.diagnostics.minimax_hybrid import check_minimax_hybrid_voice_brain
+from askme.voice.realtime.readiness import check_realtime_voice
 
 _ASR_DEFAULT_DIR = "models/asr/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
 _KWS_DEFAULT_DIR = "models/kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
@@ -103,8 +104,9 @@ def run_voice_health(
     bridge = _check_runtime_bridge(cfg.get("runtime", {}).get("voice_bridge", {}))
     audio = _check_audio_devices(voice_cfg, deps)
     voice_brain = check_minimax_hybrid_voice_brain(cfg, deps=deps)
+    realtime_voice = check_realtime_voice(cfg, deps=deps)
 
-    for check in (asr, vad, kws, tts, bridge, audio, voice_brain):
+    for check in (asr, vad, kws, tts, bridge, audio, voice_brain, realtime_voice):
         errors.extend(check.get("errors", []))
         warnings.extend(check.get("warnings", []))
 
@@ -116,12 +118,14 @@ def run_voice_health(
     models_ok = bool(asr["ok"] and vad["ok"] and kws["ok"] and tts["model_ok"])
     runtime_bridge_ok = bool(bridge["ok"])
     voice_brain_ok = bool(voice_brain.get("ok", True))
+    realtime_voice_ok = bool(realtime_voice.get("ok", True))
     voice_ok = bool(
         config_ok
         and models_ok
         and tts["ok"]
         and runtime_bridge_ok
         and voice_brain_ok
+        and realtime_voice_ok
         and health_snapshot_ok
     )
 
@@ -140,6 +144,7 @@ def run_voice_health(
         "tts_ok": bool(tts["ok"]),
         "runtime_bridge_ok": runtime_bridge_ok,
         "voice_brain_ok": voice_brain_ok,
+        "realtime_voice_ok": realtime_voice_ok,
         "health_snapshot_ok": health_snapshot_ok,
         "hardware_required": bool(live),
         "live_requested": bool(live),
@@ -154,6 +159,7 @@ def run_voice_health(
             "runtime_bridge": bridge,
             "audio": audio,
             "voice_brain": voice_brain,
+            "realtime_voice": realtime_voice,
         },
         "health_snapshot": health_snapshot,
     }
@@ -170,6 +176,7 @@ def print_voice_health_summary(payload: dict[str, Any]) -> None:
     logger.info(f"  tts: {_label(payload.get('tts_ok'))}")
     logger.info(f"  runtime_bridge: {_label(payload.get('runtime_bridge_ok'))}")
     logger.info(f"  voice_brain: {_label(payload.get('voice_brain_ok', True))}")
+    logger.info(f"  realtime_voice: {_label(payload.get('realtime_voice_ok', True))}")
     logger.info(f"  health_snapshot: {_label(payload.get('health_snapshot_ok'))}")
     for warning in payload.get("warnings", []):
         logger.warning(f"  warn: {warning}")
@@ -282,7 +289,9 @@ def _check_kws(cfg: dict[str, Any], root: Path, deps: dict[str, bool]) -> dict[s
 
 
 def _check_tts(cfg: dict[str, Any], root: Path, deps: dict[str, bool]) -> dict[str, Any]:
-    requested_backend = str(cfg.get("backend", "local")).strip() or "local"
+    requested_backend = str(cfg.get("backend", "local")).strip().lower() or "local"
+    if requested_backend == "volc":
+        requested_backend = "volcengine"
     model_dir = _resolve_path(root, cfg.get("model_dir", _TTS_DEFAULT_DIR))
     model = _find_model_file(model_dir, cfg.get("model"), _TTS_MODELS)
     local_missing = _missing_paths(
@@ -294,6 +303,20 @@ def _check_tts(cfg: dict[str, Any], root: Path, deps: dict[str, bool]) -> dict[s
     )
     local_model_ok = not local_missing and deps["sherpa_onnx"]
     minimax_key = str(cfg.get("minimax_api_key", "")).strip()
+    volcengine_auth_ready = bool(
+        str(cfg.get("volcengine_tts_api_key", "")).strip()
+        or (
+            str(cfg.get("volcengine_tts_app_id", "")).strip()
+            and str(cfg.get("volcengine_tts_access_key", "")).strip()
+        )
+    )
+    volcengine_config_ready = bool(
+        volcengine_auth_ready
+        and str(cfg.get("volcengine_tts_resource_id", "")).strip()
+        and str(cfg.get("volcengine_tts_speaker", "")).strip()
+        and str(cfg.get("volcengine_tts_audio_format", "pcm")).strip().lower()
+        == "pcm"
+    )
     fallback_backend = str(cfg.get("fallback_backend", "edge")).strip().lower()
     if fallback_backend not in {"local", "edge"}:
         fallback_backend = "edge"
@@ -306,12 +329,20 @@ def _check_tts(cfg: dict[str, Any], root: Path, deps: dict[str, bool]) -> dict[s
         warnings.append(
             f"MiniMax TTS API key is empty; runtime will fall back to {backend}"
         )
+    if backend == "volcengine" and not volcengine_config_ready:
+        backend = "local" if fallback_backend == "local" and local_model_ok else "edge"
+        warnings.append(
+            "Volcengine TTS credentials/resource/speaker/PCM configuration is "
+            f"incomplete; runtime will fall back to {backend}"
+        )
     if backend == "local" and not local_model_ok:
         backend = "edge"
         warnings.append("local TTS model is incomplete; runtime will fall back to edge")
 
     if backend == "edge" and not deps["edge_tts"]:
         errors.append("TTS dependency missing: edge_tts")
+    if backend == "volcengine" and not deps["websocket_client"]:
+        errors.append("TTS dependency missing: websocket-client")
     if backend == "minimax" and not minimax_key:
         errors.append("MiniMax TTS API key is empty")
     if backend == "local" and not local_model_ok:
@@ -322,13 +353,14 @@ def _check_tts(cfg: dict[str, Any], root: Path, deps: dict[str, bool]) -> dict[s
 
     return {
         "ok": not errors,
-        "model_ok": local_model_ok or backend in {"edge", "minimax"},
+        "model_ok": local_model_ok or backend in {"edge", "minimax", "volcengine"},
         "requested_backend": requested_backend,
         "effective_backend": backend,
         "fallback_backend": fallback_backend,
         "dependency_ok": {
             "sherpa_onnx": deps["sherpa_onnx"],
             "edge_tts": deps["edge_tts"],
+            "websocket_client": deps["websocket_client"],
         },
         "paths": {
             "model_dir": str(model_dir),

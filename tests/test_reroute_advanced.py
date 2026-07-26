@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 from askme.pipeline.voice_loop import VoiceLoop
 
 from askme.pipeline.proactive.base import ProactiveResult
+from askme.pipeline.skills.outcome import SkillOutcome
 from askme.robot_interaction import IntentType
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -83,6 +84,7 @@ def _make_voice_loop(
     mock_dispatcher = MagicMock()
     mock_dispatcher.dispatch = AsyncMock()
     mock_dispatcher.handle_general = AsyncMock()
+    mock_dispatcher.can_execute = AsyncMock(return_value=SkillOutcome.ready())
     mock_dispatcher.has_active_agent_task = False
 
     loop = VoiceLoop(

@@ -8,6 +8,7 @@ import secrets
 import time
 from collections import deque
 from collections.abc import Callable
+from copy import deepcopy
 from inspect import Parameter, isawaitable, signature
 from typing import Any
 
@@ -20,6 +21,7 @@ from askme.api.services.space_preview import (
     space_resolution_evidence_items,
     space_resolution_preview,
 )
+from askme.conversation import canonical_thread_id
 from askme.pipeline.core.rag_policy import forced_rag_reply
 from askme.robot_interaction.scenario_intents import classify_scenario_intent
 
@@ -107,7 +109,21 @@ class ConversationService:
         if not text:
             raise EmptyChatText("empty text")
         speak = bool(body.get("speak") or body.get("voice") or body.get("play_audio"))
-        voice_turn = self.voice_turn_payload_from_body(body, text=text)
+        conversation_session_id = canonical_thread_id(
+            thread_id=_clean_optional_text(body.get("thread_id")),
+            conversation_thread_id=_clean_optional_text(
+                body.get("conversation_thread_id")
+            ),
+            conversation_session_id=_clean_optional_text(
+                body.get("conversation_session_id")
+            ),
+            conversation_id=_clean_optional_text(body.get("conversation_id")),
+            chat_session_id=_clean_optional_text(body.get("chat_session_id")),
+            session_id=_clean_optional_text(body.get("session_id")),
+        ) or f"chat-thread-{secrets.token_hex(16)}"
+        normalized_body = dict(body)
+        normalized_body["conversation_thread_id"] = conversation_session_id
+        voice_turn = self.voice_turn_payload_from_body(normalized_body, text=text)
         timings["parse_ms"] = _elapsed_ms(started)
 
         await self._enter_chat_turn()
@@ -115,11 +131,6 @@ class ConversationService:
         error_type = ""
         try:
             handler_started = time.perf_counter()
-            conversation_session_id = _clean_optional_text(
-                body.get("conversation_session_id")
-                or body.get("conversation_id")
-                or body.get("chat_session_id")
-            )
             planning_session_id = _clean_optional_text(body.get("planning_session_id"))
             runtime_policy = _clean_runtime_policy(
                 body.get("runtime_policy") or body.get("runtime_bridge_mode")
@@ -127,8 +138,9 @@ class ConversationService:
 
             if self._chat_handler is None:
                 result = self._offline_chat_result(text=text, speak=speak)
+                captured_turn_rag = None
             else:
-                result = await self._dispatch_chat_handler_with_timeout(
+                result, captured_turn_rag = await self._dispatch_chat_handler_with_timeout(
                     text,
                     speak=speak,
                     conversation_session_id=conversation_session_id,
@@ -144,7 +156,12 @@ class ConversationService:
                 speak=speak,
                 voice_turn=voice_turn,
             )
-            payload = self._attach_handler_turn_rag(payload)
+            payload["conversation_thread_id"] = conversation_session_id
+            payload["conversation_session_id"] = conversation_session_id
+            payload = self._attach_handler_turn_rag(
+                payload,
+                turn_rag=captured_turn_rag,
+            )
             timings["response_build_ms"] = _elapsed_ms(response_started)
 
             memory_started = time.perf_counter()
@@ -215,14 +232,21 @@ class ConversationService:
         conversation_session_id: str | None = None,
         planning_session_id: str | None = None,
         runtime_policy: str = "disabled",
-    ) -> Any:
-        call = self.dispatch_chat_handler(
-            text,
-            speak=speak,
-            conversation_session_id=conversation_session_id,
-            planning_session_id=planning_session_id,
-            runtime_policy=runtime_policy,
-        )
+    ) -> tuple[Any, dict[str, Any] | None]:
+        async def dispatch_and_capture() -> tuple[Any, dict[str, Any] | None]:
+            result = await self.dispatch_chat_handler(
+                text,
+                speak=speak,
+                conversation_session_id=conversation_session_id,
+                planning_session_id=planning_session_id,
+                runtime_policy=runtime_policy,
+            )
+            # asyncio.wait_for runs this coroutine in a child Task. ContextVar
+            # writes made by TurnExecutor do not flow back to the parent Task,
+            # so capture the turn-scoped evidence before leaving this context.
+            return result, self._handler_turn_rag_snapshot()
+
+        call = dispatch_and_capture()
         if self._chat_timeout_s is None:
             return await call
         return await asyncio.wait_for(call, timeout=self._chat_timeout_s)
@@ -362,13 +386,21 @@ class ConversationService:
             "safety_bypass_allowed": False,
             "created_at": time.time(),
         }
-        conversation_session_id = _clean_optional_text(
-            body.get("conversation_session_id")
-            or body.get("conversation_id")
-            or body.get("chat_session_id")
+        conversation_session_id = canonical_thread_id(
+            thread_id=_clean_optional_text(body.get("thread_id")),
+            conversation_thread_id=_clean_optional_text(
+                body.get("conversation_thread_id")
+            ),
+            conversation_session_id=_clean_optional_text(
+                body.get("conversation_session_id")
+            ),
+            conversation_id=_clean_optional_text(body.get("conversation_id")),
+            chat_session_id=_clean_optional_text(body.get("chat_session_id")),
+            session_id=_clean_optional_text(body.get("session_id")),
         )
         planning_session_id = _clean_optional_text(body.get("planning_session_id"))
         if conversation_session_id:
+            payload["conversation_thread_id"] = conversation_session_id
             payload["conversation_session_id"] = conversation_session_id
         if planning_session_id:
             payload["planning_session_id"] = planning_session_id
@@ -512,11 +544,21 @@ class ConversationService:
                 rag_payload["block_reason"] = answer_policy.get("reason", "")
         return payload
 
-    def _attach_handler_turn_rag(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _handler_turn_rag_snapshot(self) -> dict[str, Any] | None:
         handler_owner = getattr(self._chat_handler, "__self__", None)
         turn_rag = getattr(handler_owner, "current_turn_rag", None)
         if callable(turn_rag):
             turn_rag = turn_rag()
+        if not isinstance(turn_rag, dict):
+            return None
+        return deepcopy(turn_rag)
+
+    def _attach_handler_turn_rag(
+        self,
+        payload: dict[str, Any],
+        *,
+        turn_rag: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         if not isinstance(turn_rag, dict):
             return payload
         rag = turn_rag.get("rag")

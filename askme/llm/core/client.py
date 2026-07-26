@@ -55,7 +55,7 @@ def _legacy_config(
     return LLMConfig(
         provider=cfg.get("provider", cfg.get("backend", "")),
         api_key=api_key or cfg.get("api_key", ""),
-        base_url=base_url or cfg.get("base_url", "https://api.minimax.chat/v1"),
+        base_url=base_url or cfg.get("base_url", "https://api.minimaxi.com/v1"),
         model=model or cfg.get("model", "MiniMax-M2.7-highspeed"),
         max_tokens=cfg.get("max_tokens", 0),
         temperature=cfg.get("temperature", 0.7),
@@ -63,7 +63,7 @@ def _legacy_config(
         max_retries=cfg.get("max_retries", 2),
         fallback_models=cfg.get("fallback_models", []),
         minimax_api_key=cfg.get("minimax_api_key", ""),
-        minimax_base_url=cfg.get("minimax_base_url", "https://api.minimax.chat/v1"),
+        minimax_base_url=cfg.get("minimax_base_url", "https://api.minimaxi.com/v1"),
         provider_options=cfg.get("provider_options", {}),
     )
 

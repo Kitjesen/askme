@@ -1,5 +1,6 @@
 """Shared pytest fixtures for askme tests."""
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -100,7 +101,12 @@ def project_root() -> Path:
 @pytest.fixture
 def tmp_path(project_root: Path) -> Path:
     """Create a writable temp directory inside the repository workspace."""
-    base_dir = project_root / "data" / "pytest-tmp"
+    configured_base = os.environ.get("ASKME_PYTEST_TMPDIR", "").strip()
+    base_dir = (
+        Path(configured_base).expanduser().resolve()
+        if configured_base
+        else project_root / "data" / "pytest-tmp"
+    )
     base_dir.mkdir(parents=True, exist_ok=True)
     path = Path(tempfile.mkdtemp(prefix="case-", dir=base_dir))
     try:

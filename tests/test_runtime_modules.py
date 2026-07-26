@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from askme.runtime.module import ModuleRegistry
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -70,6 +72,29 @@ class TestLLMModule:
         # Give the event loop a tick to process cancellation
         await asyncio.sleep(0)
         assert task.cancelled() or task.cancelling() > 0
+
+    @pytest.mark.asyncio
+    async def test_warmup_uses_voice_model_and_consumes_stream(self):
+        mod = self._make_module(
+            {"brain": {"voice_model": "voice-fast-model"}}
+        )
+        yielded: list[str] = []
+
+        async def warmup_stream(*_args, **_kwargs):
+            for chunk in ("first", "final"):
+                yielded.append(chunk)
+                yield chunk
+
+        mod.client.chat_stream = MagicMock(side_effect=warmup_stream)
+
+        await mod._warmup()
+
+        assert yielded == ["first", "final"]
+        assert mod.client.chat_stream.call_args.kwargs == {
+            "model": "voice-fast-model",
+            "max_tokens": 1,
+            "temperature": 0.0,
+        }
 
 
 # ── MemoryModule ──────────────────────────────────────────────────────────────
@@ -931,6 +956,131 @@ class TestHealthModule:
         assert h["status"] == "ok"
         assert h["port"] == 8080
 
+    async def _conversation_core_readiness(self, conversation_core):
+        from askme.runtime.modules.health_module import HealthModule
+
+        class LLMModule:
+            name = "llm"
+
+            def health(self):
+                return {"status": "ok", "model": "test-model"}
+
+        class MemoryModule:
+            name = "memory"
+
+            def health(self):
+                return {"status": "ok", "backend": "memory"}
+
+        class VoiceModule:
+            name = "voice"
+
+            def __init__(self):
+                self.tts_provider = object()
+                self.asr_provider = object()
+
+            def health(self):
+                return {
+                    "status": "ok",
+                    "audio": {
+                        "output_ready": True,
+                        "input_ready": True,
+                        "tts": {"backend": "fake"},
+                        "asr": {"provider": "fake", "local": {"available": True}},
+                    },
+                }
+
+        class PipelineModule:
+            name = "pipeline"
+
+            def health(self):
+                return {
+                    "status": conversation_core.get("status", "ok"),
+                    "conversation_core": conversation_core,
+                }
+
+        registry = _make_registry()
+        registry.register(LLMModule())
+        registry.register(MemoryModule())
+        registry.register(VoiceModule())
+        registry.register(PipelineModule())
+
+        mock_server = MagicMock()
+        mock_server.enabled = True
+        mock_server.port = 8080
+        with patch("askme.health_server.AskmeHealthServer", return_value=mock_server):
+            module = HealthModule()
+            module.build({}, registry)
+
+        return await module.health_service.check_all()
+
+    @pytest.mark.asyncio
+    async def test_readiness_includes_healthy_conversation_core(self):
+        payload = await self._conversation_core_readiness(
+            {
+                "enabled": True,
+                "status": "ok",
+                "write_failures": 0,
+                "path": "turn_ledger.jsonl",
+            }
+        )
+
+        assert payload["status"] == "healthy"
+        assert payload["components"]["conversation_core"]["status"] == "healthy"
+        assert payload["components"]["conversation_core"]["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_readiness_degrades_when_enabled_conversation_core_degrades(self):
+        payload = await self._conversation_core_readiness(
+            {
+                "enabled": True,
+                "status": "degraded",
+                "write_failures": 2,
+                "last_error_type": "OSError",
+            }
+        )
+
+        assert payload["status"] == "degraded"
+        assert payload["components"]["conversation_core"]["status"] == "degraded"
+        assert payload["components"]["conversation_core"]["write_failures"] == 2
+
+    @pytest.mark.asyncio
+    async def test_readiness_does_not_fail_when_conversation_core_disabled(self):
+        payload = await self._conversation_core_readiness(
+            {
+                "enabled": False,
+                "status": "degraded",
+                "message": "not configured for this runtime",
+            }
+        )
+
+        assert payload["status"] == "healthy"
+        assert payload["components"]["conversation_core"]["status"] == "healthy"
+        assert payload["components"]["conversation_core"]["enabled"] is False
+
+    def test_readiness_endpoint_returns_503_for_degraded_conversation_core(self):
+        from askme.api.routes.health import register_health_routes
+        from askme.api.services.health_service import HealthService
+
+        health_service = HealthService()
+        health_service.register(
+            "conversation_core",
+            lambda: {
+                "status": "degraded",
+                "enabled": True,
+                "write_failures": 2,
+            },
+        )
+        app = FastAPI()
+        register_health_routes(app, health_service, routes=("ready",))
+
+        response = TestClient(app).get("/ready")
+
+        assert response.status_code == 503
+        assert response.json()["ready"] is False
+        assert response.json()["components"]["conversation_core"]["status"] == (
+            "degraded"
+        )
+
     def test_runtime_health_provider_reports_ok_when_children_ok(self):
         from askme.runtime.modules.health_module import HealthModule
 
@@ -1100,6 +1250,37 @@ class TestHealthModule:
             snapshot["skill_callability"]["agent_shell_replacement"] == "ZeroClaw MCP Agent"
         )
         assert snapshot["skill_callability"]["agent_shell_skills"] == ["agent_task"]
+
+    def test_runtime_health_model_routing_reports_volcengine_tts(self):
+        from askme.runtime.modules.health_module import HealthModule
+
+        routing = HealthModule()._model_routing(
+            {
+                "brain": {"provider": "deepseek", "model": "deepseek-v4-flash"},
+                "voice": {
+                    "tts": {
+                        "backend": "volcengine",
+                        "volcengine_tts_model": "seed-tts-config",
+                    }
+                },
+            },
+            _make_registry(),
+            {
+                "voice_pipeline_status": {
+                    "tts_backend": "volcengine",
+                    "tts": {
+                        "volcengine": {
+                            "model": "seed-tts-live",
+                            "speaker": "speaker-a",
+                        }
+                    },
+                }
+            },
+        )
+
+        assert routing["dialogue"]["tts_backend"] == "volcengine"
+        assert routing["dialogue"]["tts_model"] == "seed-tts-live"
+        assert routing["dialogue"]["voice_profile"] == "speaker-a"
 
     def test_runtime_health_provider_exposes_rag_trust_report(self, tmp_path):
         from askme.runtime.modules.health_module import HealthModule

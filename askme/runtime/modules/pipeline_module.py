@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Any
 
 # LLMClient imported lazily to avoid circular imports at module scan time
+from askme.conversation import VoiceTurnLedger
 from askme.llm.core.client import LLMClient
+from askme.memory.core.conversation_consumer import ConversationMemoryConsumer
 from askme.pipeline.core.brain_pipeline import BrainPipeline
 from askme.pipeline.core.persona import persona_from_brain_config
 from askme.ports import RobotControlPort, SafetyPort, VisionPort
@@ -31,6 +33,29 @@ logger = logging.getLogger(__name__)
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
+
+
+def _turn_ledger_path(cfg: dict[str, Any]) -> Path:
+    """Resolve the durable Conversation Core event log outside the package."""
+
+    conversation_cfg = cfg.get("conversation", {})
+    configured = (
+        os.getenv("ASKME_TURN_LEDGER_PATH")
+        or conversation_cfg.get("turn_ledger_path")
+        or "data/conversation/turn_ledger.jsonl"
+    )
+    path = Path(str(configured)).expanduser()
+    return path if path.is_absolute() else _project_root() / path
+
+
+def _legacy_conversation_history_path(cfg: dict[str, Any]) -> Path:
+    configured = (
+        cfg.get("conversation", {}).get("history_file")
+        or cfg.get("memory", {}).get("history_file")
+        or "data/conversation_history.json"
+    )
+    path = Path(str(configured)).expanduser()
+    return path if path.is_absolute() else _project_root() / path
 
 
 def _load_soul_seed(cfg: dict[str, Any]) -> list[dict[str, str]]:
@@ -110,11 +135,49 @@ class PipelineModule(Module):
         persona = persona_from_brain_config(brain_cfg)
         system_prompt = brain_cfg.get("system_prompt") or persona.build_system_prompt()
         prompt_seed = (
-            _load_soul_seed(cfg)
-            or brain_cfg.get("prompt_seed", [])
-            or persona.build_prompt_seed()
+            _load_soul_seed(cfg) or brain_cfg.get("prompt_seed", []) or persona.build_prompt_seed()
         )
         user_prefix = brain_cfg.get("user_prefix") or persona.build_user_prefix()
+        ledger_path = _turn_ledger_path(cfg)
+        self._turn_ledger = VoiceTurnLedger(ledger_path)
+        self._memory_consumer = (
+            ConversationMemoryConsumer(
+                source=self._turn_ledger,
+                sink=memory_bridge,
+                checkpoint_path=ledger_path.with_name("memory_consumer_checkpoint.json"),
+                source_id=f"voice-turn-ledger-v1:{ledger_path.resolve()}",
+                # Conversation Core's current committed-turn projection omits
+                # erased threads but cannot notify Memory to delete an event it
+                # already projected. Keep processing fail-closed until that
+                # deletion contract exists end to end.
+                erasure_deletion_supported=False,
+            )
+            if memory_bridge is not None
+            else None
+        )
+        conversation_cfg = cfg.get("conversation", {})
+        legacy_history_path = _legacy_conversation_history_path(cfg)
+        migrate_legacy = getattr(self._turn_ledger, "migrate_legacy_history", None)
+        if (
+            bool(conversation_cfg.get("migrate_legacy_history", True))
+            and legacy_history_path.is_file()
+            and callable(migrate_legacy)
+        ):
+            try:
+                result = migrate_legacy(legacy_history_path)
+                if getattr(result, "turn_count", 0):
+                    logger.info(
+                        "Conversation Core: migrated %d legacy turns from %s",
+                        result.turn_count,
+                        legacy_history_path,
+                    )
+            except Exception as exc:
+                # The source stays untouched and ordinary turn handling remains
+                # available; operators can retry the deterministic import.
+                logger.warning(
+                    "Conversation Core legacy history migration failed: %s",
+                    exc,
+                )
 
         self._pipeline = BrainPipeline(
             llm=llm,
@@ -135,6 +198,14 @@ class PipelineModule(Module):
             prompt_seed=prompt_seed,
             user_prefix=user_prefix,
             voice_model=brain_cfg.get("voice_model"),
+            voice_memory_retrieval_deadline_s=brain_cfg.get(
+                "voice_memory_retrieval_deadline_s",
+                0.25,
+            ),
+            voice_llm_latency_budget_ms=brain_cfg.get(
+                "voice_llm_latency_budget_ms",
+                1500,
+            ),
             general_tool_max_safety_level=cfg.get("tools", {}).get(
                 "general_chat_max_safety_level", "normal"
             ),
@@ -143,6 +214,7 @@ class PipelineModule(Module):
             memory_system=memory_system,
             rag_policy_templates=brain_cfg.get("rag_policy_templates", {}),
             relay_compat_mode=bool(brain_cfg.get("relay_compat_mode", False)),
+            turn_ledger=self._turn_ledger,
         )
         logger.info("PipelineModule: built")
 
@@ -152,5 +224,51 @@ class PipelineModule(Module):
         """The BrainPipeline instance."""
         return self._pipeline
 
+    @property
+    def turn_ledger(self) -> VoiceTurnLedger:
+        """Runtime-owned authoritative conversation event ledger."""
+
+        return self._turn_ledger
+
+    @property
+    def memory_consumer(self) -> ConversationMemoryConsumer:
+        """Committed-event Memory projection, currently privacy-gated off."""
+
+        consumer = self._memory_consumer
+        if consumer is None:
+            raise RuntimeError("memory consumer is unavailable without a memory bridge")
+        return consumer
+
     def health(self) -> dict[str, Any]:
-        return {"status": "ok"}
+        ledger = getattr(self, "_turn_ledger", None)
+        pipeline = getattr(self, "_pipeline", None)
+        health_snapshot = getattr(pipeline, "conversation_core_health", None)
+        conversation_health = dict(health_snapshot()) if callable(health_snapshot) else {}
+        conversation_health.update(
+            {
+                "enabled": ledger is not None,
+                "event_count": int(getattr(ledger, "event_count", 0) or 0),
+                "path": str(getattr(ledger, "path", "")),
+            }
+        )
+        consumer = getattr(self, "_memory_consumer", None)
+        consumer_status = consumer.status() if consumer is not None else None
+        memory_projection = {
+            "configured": consumer is not None,
+            "processing_allowed": bool(
+                consumer_status is not None and consumer_status.processing_allowed
+            ),
+            "erasure_deletion_supported": bool(
+                consumer_status is not None and consumer_status.erasure_deletion_supported
+            ),
+            "blocked_reason": (
+                consumer_status.blocked_reason
+                if consumer_status is not None
+                else "memory_bridge_unavailable"
+            ),
+        }
+        return {
+            "status": conversation_health.get("status", "ok"),
+            "conversation_core": conversation_health,
+            "memory_committed_event_consumer": memory_projection,
+        }

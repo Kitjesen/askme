@@ -1,7 +1,7 @@
 """Tests for VectorStore — works without sentence-transformers via mocking."""
 
-import threading
 import sys
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -177,6 +177,74 @@ class TestAddAndSearch:
             results = store.search("test entry", top_k=1)
             assert results[0]["metadata"]["source"] == "test"
             assert results[0]["metadata"]["id"] == 42
+
+    def test_stable_record_id_replaces_text_and_embedding(self, tmp_path):
+        with _patch_available(True):
+            store = _make_store(tmp_path)
+            store.add(
+                "A区卫生间在一楼",
+                {"record_id": "know_restroom", "evidence_version": 1},
+            )
+            store.add(
+                "A区卫生间在二楼",
+                {"record_id": "know_restroom", "evidence_version": 2},
+            )
+            assert store.size == 1
+            records = store.list_records()
+            assert records[0]["text"] == "A区卫生间在二楼"
+            assert records[0]["metadata"]["evidence_version"] == 2
+
+    def test_older_evidence_version_cannot_overwrite_newer_record(self, tmp_path):
+        with _patch_available(True):
+            store = _make_store(tmp_path)
+            store.add("新版路线", {"record_id": "know_route", "evidence_version": 3})
+            store.add("过期路线", {"record_id": "know_route", "evidence_version": 2})
+            assert store.size == 1
+            records = store.list_records()
+            assert records[0]["text"] == "新版路线"
+            assert records[0]["metadata"]["evidence_version"] == 3
+
+    def test_metadata_update_invalidates_all_historical_duplicates(self, tmp_path):
+        with _patch_available(True):
+            store = _make_store(tmp_path)
+            store.add("旧知识一")
+            store.add("旧知识二")
+            store._metadata[0] = {
+                "record_id": "know_duplicate",
+                "approval_status": "published",
+            }
+            store._metadata[1] = {
+                "record_id": "know_duplicate",
+                "approval_status": "published",
+            }
+            assert store.update_metadata(
+                "know_duplicate",
+                {"approval_status": "deleted"},
+            )
+            assert all(
+                record["metadata"]["approval_status"] == "deleted"
+                for record in store.list_records()
+            )
+
+    def test_stale_metadata_patch_cannot_downgrade_evidence_version(self, tmp_path):
+        with _patch_available(True):
+            store = _make_store(tmp_path)
+            store.add(
+                "新版路线",
+                {
+                    "record_id": "know_route",
+                    "evidence_version": 3,
+                    "approval_status": "published",
+                },
+            )
+
+            assert not store.update_metadata(
+                "know_route",
+                {"evidence_version": 2, "approval_status": "deleted"},
+            )
+            record = store.list_records()[0]
+            assert record["metadata"]["evidence_version"] == 3
+            assert record["metadata"]["approval_status"] == "published"
 
 
 class TestPersistence:

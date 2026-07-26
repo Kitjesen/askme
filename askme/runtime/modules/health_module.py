@@ -22,6 +22,7 @@ from askme.api.routes.health import register_health_routes
 from askme.api.services.health_service import HealthService
 from askme.config import project_root
 from askme.runtime.core.module import Module, ModuleRegistry
+from askme.voice.diagnostics.status_privacy import sanitize_voice_status
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,11 @@ class HealthModule(Module):
         from askme.health_server import AskmeHealthServer, build_health_snapshot
 
         health_cfg = cfg.get("health_server", {})
+        include_voice_transcripts = (
+            health_cfg.get("debug_include_voice_transcripts") is True
+            if isinstance(health_cfg, dict)
+            else False
+        )
 
         # Collect health from all registered modules in the runtime.
         def _runtime_health_provider() -> dict[str, Any]:
@@ -81,7 +87,10 @@ class HealthModule(Module):
                 reasons = list(snapshot.get("degraded_reasons", []))
                 reasons.extend(f"component:{name}" for name in degraded_components)
                 snapshot["degraded_reasons"] = reasons
-            return snapshot
+            return sanitize_voice_status(
+                snapshot,
+                include_transcripts=include_voice_transcripts,
+            )
 
         self.server = AskmeHealthServer(
             health_cfg,
@@ -115,6 +124,12 @@ class HealthModule(Module):
         check function is a closure that reads live state from the registry at
         call time rather than capturing a snapshot during build.
         """
+        health_cfg = cfg.get("health_server", {})
+        include_voice_transcripts = (
+            health_cfg.get("debug_include_voice_transcripts") is True
+            if isinstance(health_cfg, dict)
+            else False
+        )
 
         # ── LLM ──────────────────────────────────────────────────────────
         def _check_llm() -> dict[str, Any]:
@@ -123,9 +138,13 @@ class HealthModule(Module):
                 return {"status": "unhealthy", "error": "llm module not registered"}
             health = llm_mod.health()
             model = health.get("model", "unknown")
+            provider = health.get("provider", "unknown")
+            routing_owner = health.get("routing_owner", "askme")
             return {
                 "status": "healthy" if health.get("status") == "ok" else "degraded",
+                "provider": str(provider),
                 "model": str(model),
+                "routing_owner": str(routing_owner),
             }
 
         self.health_service.register("llm", _check_llm)
@@ -201,10 +220,51 @@ class HealthModule(Module):
                     else type(asr).__name__
                 ),
                 "available": available,
-                "details": asr_status if isinstance(asr_status, dict) else {},
+                "details": sanitize_voice_status(
+                    asr_status,
+                    include_transcripts=include_voice_transcripts,
+                )
+                if isinstance(asr_status, dict)
+                else {},
             }
 
         self.health_service.register("asr", _check_asr)
+
+        # ── Conversation Core ────────────────────────────────────────────
+        def _check_conversation_core() -> dict[str, Any]:
+            pipeline_mod = registry.get("pipeline")
+            if pipeline_mod is None:
+                return {
+                    "status": "healthy",
+                    "enabled": False,
+                    "message": "Conversation Core not wired in this runtime",
+                }
+            health = pipeline_mod.health()
+            raw_conversation_core = health.get("conversation_core")
+            conversation_core: dict[str, Any] = (
+                dict(raw_conversation_core)
+                if isinstance(raw_conversation_core, dict)
+                else {}
+            )
+            enabled = bool(conversation_core.get("enabled", False))
+            raw_status = str(
+                conversation_core.get("status") or health.get("status") or "ok"
+            )
+            if not enabled:
+                status = "healthy"
+            elif raw_status in {"ok", "healthy"}:
+                status = "healthy"
+            elif raw_status in {"error", "unhealthy"}:
+                status = "unhealthy"
+            else:
+                status = "degraded"
+            return {
+                **conversation_core,
+                "enabled": enabled,
+                "status": status,
+            }
+
+        self.health_service.register("conversation_core", _check_conversation_core)
 
     @staticmethod
     def _tts_from_text_module(registry: ModuleRegistry) -> Any | None:
@@ -354,18 +414,18 @@ class HealthModule(Module):
                         "evidence": rag_payload["evidence"],
                         "rag": rag_payload["rag"],
                     }
-                payload: dict[str, Any] = {"reply": reply, "spoken": False}
+                spoken_payload: dict[str, Any] = {"reply": reply, "spoken": False}
                 try:
-                    payload["spoken"] = await self._speak_text_loop_reply(
+                    spoken_payload["spoken"] = await self._speak_text_loop_reply(
                         text_loop,
                         reply,
                     )
                 except Exception as exc:
                     logger.warning("HealthModule: HTTP chat speak failed: %s", exc)
-                    payload["speak_error"] = str(exc)
-                payload["evidence"] = rag_payload["evidence"]
-                payload["rag"] = rag_payload["rag"]
-                return payload
+                    spoken_payload["speak_error"] = str(exc)
+                spoken_payload["evidence"] = rag_payload["evidence"]
+                spoken_payload["rag"] = rag_payload["rag"]
+                return spoken_payload
 
             return _handle_text_chat
 
@@ -916,7 +976,20 @@ class HealthModule(Module):
         asr_status = voice_status.get("asr", {}) if isinstance(voice_status, dict) else {}
         cloud_asr_status = asr_status.get("cloud", {}) if isinstance(asr_status, dict) else {}
         tts_status = voice_status.get("tts", {}) if isinstance(voice_status, dict) else {}
-        minimax_status = tts_status.get("minimax", {}) if isinstance(tts_status, dict) else {}
+        tts_backend = str(
+            voice_status.get("tts_backend") or tts_cfg.get("backend") or "unknown"
+        )
+        provider_tts_status = (
+            tts_status.get(tts_backend, {}) if isinstance(tts_status, dict) else {}
+        )
+        if not isinstance(provider_tts_status, dict):
+            provider_tts_status = {}
+        configured_tts_model = {
+            "volcengine": tts_cfg.get("volcengine_tts_model"),
+            "minimax": tts_cfg.get("minimax_tts_model"),
+            "edge": tts_cfg.get("voice"),
+            "local": Path(str(tts_cfg.get("model_dir") or "")).name,
+        }.get(tts_backend)
 
         executor = registry.get("executor")
         shell = getattr(executor, "shell", None) if executor else None
@@ -939,13 +1012,18 @@ class HealthModule(Module):
                     or cloud_asr_cfg.get("model")
                     or "unknown"
                 ),
-                "tts_backend": str(voice_status.get("tts_backend") or tts_cfg.get("backend") or "unknown"),
+                "tts_backend": tts_backend,
                 "tts_model": str(
-                    minimax_status.get("model")
-                    or tts_cfg.get("minimax_tts_model")
+                    provider_tts_status.get("model")
+                    or configured_tts_model
                     or "unknown"
                 ),
-                "voice_profile": str(minimax_status.get("active_profile") or tts_cfg.get("voice_profile") or ""),
+                "voice_profile": str(
+                    provider_tts_status.get("active_profile")
+                    or provider_tts_status.get("speaker")
+                    or tts_cfg.get("voice_profile")
+                    or ""
+                ),
             },
             "reasoning": {
                 "provider": str(brain_cfg.get("provider") or "unknown"),

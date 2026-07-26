@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from askme.pipeline.channels.external_turns import record_external_turn
 from askme.pipeline.channels.runtime_bridge_calls import (
@@ -81,6 +83,14 @@ class TextLoop:
     def current_turn_rag(self) -> dict[str, Any] | None:
         return self._pipeline.current_turn_rag
 
+    @property
+    def last_cognition_result(self) -> dict[str, Any] | None:
+        return self._last_cognition_result.get()
+
+    @last_cognition_result.setter
+    def last_cognition_result(self, value: dict[str, Any] | None) -> None:
+        self._last_cognition_result.set(value)
+
     def __init__(
         self,
         *,
@@ -106,7 +116,12 @@ class TextLoop:
         self._active_planning_session_id: str | None = None
         self._active_planning_session_ids: dict[str, str] = {}
         self._conversation_session_ids: dict[str, str] = {}
-        self.last_cognition_result: dict[str, Any] | None = None
+        self._thread_turn_locks: dict[str, asyncio.Lock] = {}
+        self._thread_turn_lock_users: dict[str, int] = {}
+        self._last_cognition_result: ContextVar[dict[str, Any] | None] = ContextVar(
+            f"text_loop_cognition_{id(self)}",
+            default=None,
+        )
 
         from askme.pipeline.proactive import ProactiveOrchestrator
         self._proactive = ProactiveOrchestrator.default(
@@ -342,6 +357,42 @@ class TextLoop:
         conversation_session_id: str | None = None,
         planning_session_id: str | None = None,
     ) -> str:
+        """Serialize all routing paths for one Thread while other Threads run."""
+
+        thread_key = str(conversation_session_id or "").strip() or "__anonymous__"
+        lock = self._thread_turn_locks.get(thread_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._thread_turn_locks[thread_key] = lock
+            self._thread_turn_lock_users[thread_key] = 0
+        self._thread_turn_lock_users[thread_key] += 1
+        try:
+            async with lock:
+                return await self._process_turn_unlocked(
+                    user_text,
+                    speak=speak,
+                    runtime_policy=runtime_policy,
+                    conversation_session_id=conversation_session_id,
+                    planning_session_id=planning_session_id,
+                )
+        finally:
+            remaining = self._thread_turn_lock_users.get(thread_key, 1) - 1
+            if remaining <= 0:
+                self._thread_turn_lock_users.pop(thread_key, None)
+                if self._thread_turn_locks.get(thread_key) is lock:
+                    self._thread_turn_locks.pop(thread_key, None)
+            else:
+                self._thread_turn_lock_users[thread_key] = remaining
+
+    async def _process_turn_unlocked(
+        self,
+        user_text: str,
+        *,
+        speak: bool = False,
+        runtime_policy: str = "disabled",
+        conversation_session_id: str | None = None,
+        planning_session_id: str | None = None,
+    ) -> str:
         """Execute a single turn through full intent routing + skill dispatch.
 
         Used by /api/chat for single-turn local chat routing. It does not use
@@ -405,7 +456,11 @@ class TextLoop:
                 return ""
 
             if runtime_policy == "runtime_first":
-                runtime_reply = await self._maybe_handle_runtime_bridge_reply(user_text)
+                runtime_reply = await self._maybe_handle_runtime_bridge_reply(
+                    user_text,
+                    conversation_session_id=fallback_conversation_session_id,
+                    source=source,
+                )
                 if runtime_reply is not None:
                     memory_task.cancel()
                     if speak:
@@ -420,6 +475,7 @@ class TextLoop:
                 user_text,
                 source=source,
                 speak=speak,
+                conversation_session_id=fallback_conversation_session_id,
             )
             if cognition_reply is not None:
                 memory_task.cancel()
@@ -498,13 +554,17 @@ class TextLoop:
         *,
         source: str,
         speak: bool,
+        conversation_session_id: str | None = None,
     ) -> str | None:
         """Route robot task planning turns into cognition when available."""
         cognition = self._cognition_handler
         if cognition is None:
             return None
 
-        conversation_session_id = self._conversation_session_for(source)
+        conversation_session_id = (
+            str(conversation_session_id or "").strip()
+            or self._conversation_session_for(source)
+        )
         active_planning_session_id = self._active_planning_session_for(
             conversation_session_id
         )
@@ -565,6 +625,8 @@ class TextLoop:
             user_text,
             reply,
             source="cognition",
+            conversation_session_id=conversation_session_id,
+            metadata={"planning_session_id": session_id} if session_id else None,
         )
         if speak:
             await self._speak_reply(reply)
@@ -581,12 +643,16 @@ class TextLoop:
         manager = getattr(self._voice_runtime_bridge, "session_manager", None)
         get_or_create = getattr(manager, "get_or_create", None)
         if not callable(get_or_create):
-            return None
+            session_id = f"{channel_name}-local-{uuid4().hex}"
+            self._conversation_session_ids[cache_key] = session_id
+            return session_id
         try:
             session = get_or_create(channel=channel_name)
         except Exception as exc:
             logger.debug("TextLoop: conversation session unavailable: %s", exc)
-            return None
+            session_id = f"{channel_name}-degraded-{uuid4().hex}"
+            self._conversation_session_ids[cache_key] = session_id
+            return session_id
         session_id = str(getattr(session, "session_id", "") or "").strip()
         if session_id:
             self._conversation_session_ids[cache_key] = session_id
@@ -647,17 +713,25 @@ class TextLoop:
         finally:
             self._audio.stop_playback()
 
-    async def _maybe_handle_runtime_bridge_reply(self, user_text: str) -> str | None:
+    async def _maybe_handle_runtime_bridge_reply(
+        self,
+        user_text: str,
+        *,
+        conversation_session_id: str | None = None,
+        source: str = "text",
+    ) -> str | None:
         """Try the text runtime bridge for explicit single-turn chat policy."""
         if self._voice_runtime_bridge is None:
             return None
 
-        conversation_session_id = self._conversation_session_for("text", channel="text")
+        resolved_session_id = str(conversation_session_id or "").strip() or None
+        if resolved_session_id is None:
+            resolved_session_id = self._conversation_session_for(source, channel=source)
         try:
             outcome = await try_runtime_bridge_turn(
                 self._voice_runtime_bridge.handle_text_input,
                 user_text,
-                conversation_session_id=conversation_session_id,
+                conversation_session_id=resolved_session_id,
                 pipeline=self._pipeline,
                 dispatcher=self._dispatcher,
                 on_spoken_reply=lambda reply: logger.info("[Assistant]: %s", reply),

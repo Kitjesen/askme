@@ -17,6 +17,7 @@ class ProviderProfile:
     supports_tools: bool = True
     supports_vision: bool = False
     domestic: bool = False
+    manages_model_routing: bool = False
 
     def matches_model(self, model: str) -> bool:
         model_lower = str(model or "").lower()
@@ -31,6 +32,13 @@ PROVIDER_PROFILES: dict[str, ProviderProfile] = {
     "openai_compatible": ProviderProfile(
         name="openai_compatible",
         aliases=("openai-compatible", "compatible", "custom"),
+    ),
+    "litellm": ProviderProfile(
+        name="litellm",
+        aliases=("litellm-proxy", "llm-gateway"),
+        base_url_hints=("litellm",),
+        openai_compatible=True,
+        manages_model_routing=True,
     ),
     "minimax": ProviderProfile(
         name="minimax",

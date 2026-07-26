@@ -8,7 +8,9 @@ with available tools, handles tool-call loops, and returns the final response.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 from typing import Any
 
 from askme.telemetry.ota_bridge import OTABridgeMetrics
@@ -17,6 +19,8 @@ from askme.tools.core.tool_registry import ToolRegistry
 from .skill_model import SkillDefinition
 
 logger = logging.getLogger(__name__)
+
+_NAV_PREFLIGHT_TIMEOUT_S = 0.35
 
 
 class SkillExecutor:
@@ -39,6 +43,61 @@ class SkillExecutor:
         self._tools = tool_registry
         self._default_model = default_model
         self._metrics = metrics
+
+    async def preflight_skill(self, skill: SkillDefinition) -> tuple[bool, str]:
+        """Check deterministic runtime prerequisites before an audible preface.
+
+        Most skills have no cheap deterministic readiness probe and remain
+        executable. ``nav_query`` is different: saying that location is being
+        read before the navigation gateway or its pose is ready creates a
+        customer-visible dead end. Query the registered ``nav_status`` adapter
+        without invoking an LLM.
+        """
+
+        if str(getattr(skill, "name", "") or "") != "nav_query":
+            return True, "ready"
+
+        get_tool = getattr(self._tools, "get", None)
+        nav_status = get_tool("nav_status") if callable(get_tool) else None
+        if nav_status is None:
+            return False, "nav_status_tool_missing"
+
+        navigation_client = getattr(nav_status, "_navigation_client", None)
+        if navigation_client is not None:
+            is_configured = getattr(navigation_client, "is_configured", None)
+            if callable(is_configured) and not bool(is_configured()):
+                return False, "nav_gateway_unconfigured"
+            status = getattr(navigation_client, "status", None)
+            if not callable(status):
+                return False, "nav_status_unavailable"
+            try:
+                payload = await asyncio.wait_for(
+                    asyncio.to_thread(status),
+                    timeout=_NAV_PREFLIGHT_TIMEOUT_S,
+                )
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+                return False, "nav_gateway_unavailable"
+            except Exception as exc:
+                logger.warning("Navigation preflight failed: %s", exc)
+                return False, "nav_gateway_unavailable"
+        else:
+            if not str(os.environ.get("NAV_GATEWAY_URL", "") or "").strip():
+                return False, "nav_gateway_unconfigured"
+            execute = getattr(nav_status, "execute", None)
+            if not callable(execute):
+                return False, "nav_status_unavailable"
+            try:
+                payload = await asyncio.wait_for(
+                    asyncio.to_thread(execute),
+                    timeout=_NAV_PREFLIGHT_TIMEOUT_S,
+                )
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+                return False, "nav_gateway_unavailable"
+            except Exception as exc:
+                logger.warning("Navigation preflight failed: %s", exc)
+                return False, "nav_gateway_unavailable"
+
+        return _navigation_status_readiness(payload)
 
     async def execute(
         self,
@@ -247,3 +306,60 @@ class SkillExecutor:
             kwargs["tools"] = tool_definitions
             kwargs["tool_choice"] = "auto"
         return await self._llm.chat.completions.create(**kwargs)
+
+
+def _navigation_status_readiness(payload: Any) -> tuple[bool, str]:
+    """Interpret nav-gateway status conservatively for current-pose queries."""
+
+    if isinstance(payload, str):
+        text = payload.strip()
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            lowered = text.lower()
+            if "not configured" in lowered or "未配置" in text or "nav_gateway_url" in lowered:
+                return False, "nav_gateway_unconfigured"
+            if any(token in lowered for token in ("stale", "odometry_missing", "pose_not_ready")):
+                return False, "nav_pose_stale"
+            if "查询失败" in text or "[error]" in lowered or "unreachable" in lowered:
+                return False, "nav_gateway_unavailable"
+            return False, "nav_status_unrecognized"
+
+    if not isinstance(payload, dict):
+        return False, "nav_status_unrecognized"
+
+    for key, value in _walk_status_items(payload):
+        normalized_key = str(key or "").strip().lower()
+        if normalized_key == "error" and value:
+            lowered = str(value).lower()
+            if "not configured" in lowered or "nav_gateway_url" in lowered:
+                return False, "nav_gateway_unconfigured"
+            return False, "nav_gateway_unavailable"
+        if normalized_key in {"ready", "pose_fresh", "has_odometry"} and value is False:
+            return False, "nav_pose_stale"
+        if normalized_key in {"stale", "pose_stale", "odometry_stale"} and value is True:
+            return False, "nav_pose_stale"
+        if normalized_key in {"reason", "code"}:
+            lowered = str(value or "").lower()
+            if any(
+                token in lowered
+                for token in ("stale", "odometry_missing", "pose_not_ready", "localization_not_ready")
+            ):
+                return False, "nav_pose_stale"
+        if normalized_key in {"status", "state", "readiness"}:
+            lowered = str(value or "").strip().lower()
+            if lowered in {"stale", "not_ready", "unready", "unavailable", "offline"}:
+                return False, "nav_pose_stale"
+
+    return True, "ready"
+
+
+def _walk_status_items(payload: dict[str, Any]):
+    for key, value in payload.items():
+        yield key, value
+        if isinstance(value, dict):
+            yield from _walk_status_items(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    yield from _walk_status_items(item)

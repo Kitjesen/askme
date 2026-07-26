@@ -30,6 +30,8 @@ def test_voice_health_reports_ok_with_complete_local_models(monkeypatch, tmp_pat
     assert payload["hardware_required"] is False
     assert payload["checks"]["vad"]["configured_key"] == "model_path"
     assert payload["checks"]["dependencies"]["websocket_client"] is True
+    assert payload["realtime_voice_ok"] is True
+    assert payload["checks"]["realtime_voice"]["status"] == "skipped"
     assert "dashscope" not in payload["checks"]["dependencies"]
     assert payload["health_snapshot"]["pipeline_ok"] is True
     assert payload["health_snapshot"]["wake_word_enabled"] is True
@@ -93,6 +95,29 @@ def test_voice_health_reports_explicit_local_tts_fallback(monkeypatch, tmp_path:
     assert payload["tts_ok"] is True
     assert payload["checks"]["tts"]["effective_backend"] == "local"
     assert payload["checks"]["tts"]["fallback_backend"] == "local"
+
+
+def test_voice_health_accepts_complete_volcengine_tts(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(health_check, "_dependency_available", lambda _name: True)
+    monkeypatch.setattr(health_check, "_websocket_client_available", lambda: True)
+    config = _voice_config(tmp_path)
+    config["voice"]["tts"].update(
+        {
+            "backend": "volcengine",
+            "volcengine_tts_api_key": "secret",
+            "volcengine_tts_resource_id": "seed-tts-2.0",
+            "volcengine_tts_speaker": "speaker-a",
+            "volcengine_tts_audio_format": "pcm",
+        }
+    )
+    _write_voice_models(tmp_path)
+
+    payload = health_check.run_voice_health(config, root=tmp_path)
+
+    assert payload["tts_ok"] is True
+    assert payload["checks"]["tts"]["requested_backend"] == "volcengine"
+    assert payload["checks"]["tts"]["effective_backend"] == "volcengine"
+    assert payload["checks"]["tts"]["dependency_ok"]["websocket_client"] is True
 
 
 def test_websocket_client_check_rejects_legacy_websocket_package(monkeypatch) -> None:

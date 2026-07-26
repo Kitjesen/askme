@@ -285,7 +285,8 @@ class TestMemoryModule:
         mod.llm_client = None
         mod.build({}, ModuleRegistry())
         h = mod.health()
-        assert h["status"] == "ok"
+        assert h["status"] in {"ok", "catalog_only"}
+        assert h["ready"] is True
         assert "conversation_len" in h
         assert "episodic_buffer_len" in h
 
@@ -334,6 +335,12 @@ class TestComposition:
         assert "pulse" in h
         assert "memory" in h
         for name, status in h.items():
+            if name == "memory":
+                assert status["status"] in {"ok", "catalog_only"}, (
+                    f"{name} health not ready: {status}"
+                )
+                assert status["ready"] is True
+                continue
             assert status["status"] == "ok", f"{name} health not ok: {status}"
         await app.stop()
 

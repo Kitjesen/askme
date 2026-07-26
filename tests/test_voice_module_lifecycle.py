@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -18,6 +19,68 @@ from askme.runtime.modules.voice_stack import (
     runtime_voice_stack_from_module,
 )
 from askme.voice_gateway import VoiceGatewayService
+
+
+def test_voice_module_resolves_volcengine_tts_control_payload() -> None:
+    mod = VoiceModule()
+    mod._base_cfg = {
+        "voice": {
+            "tts": {
+                "backend": "minimax",
+                "volcengine_tts_api_key": "secret",
+                "volcengine_tts_resource_id": "seed-tts-2.0",
+                "volcengine_tts_speaker": "speaker-a",
+            }
+        }
+    }
+
+    resolved = mod._resolve_tts_config(
+        {
+            "backend": "volc",
+            "model": "seed-tts-2.0-metadata",
+            "voice_id": "speaker-b",
+        }
+    )
+
+    assert resolved["backend"] == "volcengine"
+    assert resolved["volcengine_tts_model"] == "seed-tts-2.0-metadata"
+    assert resolved["volcengine_tts_resource_id"] == "seed-tts-2.0-metadata"
+    assert resolved["volcengine_tts_speaker"] == "speaker-b"
+    assert resolved["volcengine_tts_api_key"] == "secret"
+
+
+@pytest.mark.asyncio
+async def test_voice_module_persists_volcengine_tts_selection() -> None:
+    mod = VoiceModule()
+    mod._base_cfg = {
+        "voice": {
+            "tts": {
+                "backend": "minimax",
+                "volcengine_tts_api_key": "secret",
+                "volcengine_tts_resource_id": "seed-tts-2.0",
+                "volcengine_tts_speaker": "speaker-a",
+                "volcengine_tts_model": "seed-tts-2.0",
+            }
+        }
+    }
+    mod._voice_cfg = {"tts": dict(mod._base_cfg["voice"]["tts"])}
+    mod._audio = MagicMock()
+    mod._audio.reconfigure_tts.return_value = {"updated": True}
+    mod._control_state = {}
+
+    await mod._switch_tts(
+        {
+            "backend": "volcengine",
+            "model": "seed-tts-2.0-runtime",
+            "voice_id": "speaker-b",
+        }
+    )
+
+    assert mod._control_state["tts"] == {
+        "backend": "volcengine",
+        "model": "seed-tts-2.0-runtime",
+        "voice_id": "speaker-b",
+    }
 
 
 @pytest.mark.asyncio
@@ -41,6 +104,239 @@ async def test_voice_module_uses_audio_input_lifecycle() -> None:
     mod._audio.start_input.assert_called_once_with()
     mod._audio.stop_input.assert_called_once_with()
     mod._audio.shutdown.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_voice_module_phrase_prime_is_background_and_harvested_on_stop(
+    monkeypatch,
+) -> None:
+    started = threading.Event()
+    released = threading.Event()
+    loop_started = asyncio.Event()
+    observed: dict[str, object] = {}
+
+    async def _run() -> None:
+        loop_started.set()
+        await asyncio.Event().wait()
+
+    def _prime(tts_config, entries, *, stop_event):
+        observed["tts_config"] = tts_config
+        observed["entries"] = entries
+        observed["stop_event"] = stop_event
+        started.set()
+        released.wait(timeout=2.0)
+        return []
+
+    monkeypatch.setattr(
+        "askme.runtime.modules.voice_module.prime_phrase_cache",
+        _prime,
+    )
+
+    mod = VoiceModule()
+    mod._audio = MagicMock()
+    mod._voice_loop = MagicMock(run=_run)
+    mod._task = None
+    mod._router = MagicMock()
+    mod._router._policy.quick_replies = {"好的": "好的。"}
+    mod._voice_cfg = {
+        "feedback": {
+            "spoken_wait_prompt_enabled": True,
+            "text": "收到，我来看看。",
+            "cache_key": "feedback-waiting",
+        },
+        "tts": {
+            "backend": "edge",
+            "phrase_cache_enabled": True,
+            "phrase_prime_enabled": True,
+            "phrase_prime_list": [
+                "好的。",
+                {"cache_key": "feedback-waiting", "text": "收到，我来看看。"},
+            ],
+        },
+    }
+    mod._phrase_prime_task = None
+    mod._phrase_prime_stop = threading.Event()
+
+    await mod.start()
+    await asyncio.wait_for(loop_started.wait(), timeout=1.0)
+    assert await asyncio.to_thread(started.wait, 1.0)
+    assert mod._phrase_prime_task is not None
+    assert not mod._phrase_prime_task.done()
+
+    released.set()
+    await mod.stop()
+
+    assert mod._phrase_prime_task.done()
+    assert observed["stop_event"] is mod._phrase_prime_stop
+    assert observed["tts_config"] == mod._voice_cfg["tts"]
+    assert [entry.text for entry in observed["entries"]] == ["好的。", "收到，我来看看。"]
+
+
+@pytest.mark.asyncio
+async def test_voice_module_phrase_prime_failure_does_not_fail_startup(monkeypatch) -> None:
+    loop_started = asyncio.Event()
+
+    async def _run() -> None:
+        loop_started.set()
+        await asyncio.Event().wait()
+
+    def _prime(*_args, **_kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(
+        "askme.runtime.modules.voice_module.prime_phrase_cache",
+        _prime,
+    )
+
+    mod = VoiceModule()
+    mod._audio = MagicMock()
+    mod._voice_loop = MagicMock(run=_run)
+    mod._task = None
+    mod._router = MagicMock()
+    mod._router._policy.quick_replies = {"好的": "好的。"}
+    mod._voice_cfg = {
+        "tts": {
+            "phrase_cache_enabled": True,
+            "phrase_prime_enabled": True,
+            "phrase_prime_list": ["好的。"],
+        }
+    }
+    mod._phrase_prime_task = None
+    mod._phrase_prime_stop = threading.Event()
+
+    await mod.start()
+    await asyncio.wait_for(loop_started.wait(), timeout=1.0)
+    await mod._phrase_prime_task
+    await mod.stop()
+
+    mod._audio.start_input.assert_called_once_with()
+    mod._audio.shutdown.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_voice_module_tts_provider_prewarm_is_background_and_harvested() -> None:
+    loop_started = asyncio.Event()
+    prewarm_started = threading.Event()
+    prewarm_released = threading.Event()
+    prewarm_finished = threading.Event()
+
+    async def _run() -> None:
+        loop_started.set()
+        await asyncio.Event().wait()
+
+    class FakeTTS:
+        def prewarm_provider_session(self) -> dict[str, object]:
+            prewarm_started.set()
+            prewarm_released.wait(timeout=2.0)
+            prewarm_finished.set()
+            return {"ok": True, "status": "opened"}
+
+    mod = VoiceModule()
+    mod._audio = MagicMock()
+    mod._audio.tts = FakeTTS()
+    mod._voice_loop = MagicMock(run=_run)
+    mod._task = None
+    mod._router = MagicMock()
+    mod._router._policy.quick_replies = {}
+    mod._voice_cfg = {"tts": {"phrase_prime_enabled": False}}
+    mod._phrase_prime_task = None
+    mod._phrase_prime_stop = threading.Event()
+    mod._tts_provider_prewarm_task = None
+
+    await mod.start()
+    await asyncio.wait_for(loop_started.wait(), timeout=1.0)
+    assert prewarm_started.wait(timeout=1.0)
+    assert mod._tts_provider_prewarm_task is not None
+    assert not mod._tts_provider_prewarm_task.done()
+
+    prewarm_released.set()
+    await mod.stop()
+
+    assert prewarm_finished.is_set()
+    assert mod._tts_provider_prewarm_task.done()
+    mod._audio.shutdown.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_voice_module_stop_bounds_uncooperative_provider_prewarm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import askme.runtime.modules.voice_module as voice_module
+
+    loop_started = asyncio.Event()
+    prewarm_started = threading.Event()
+    release_prewarm = threading.Event()
+    cancel_called = threading.Event()
+
+    async def _run() -> None:
+        loop_started.set()
+        await asyncio.Event().wait()
+
+    class SlowTTS:
+        def prewarm_provider_session(self) -> dict[str, object]:
+            prewarm_started.set()
+            release_prewarm.wait(timeout=2.0)
+            return {"ok": False, "status": "cancelled"}
+
+        def cancel_provider_prewarm(self) -> None:
+            cancel_called.set()
+
+    monkeypatch.setattr(
+        voice_module,
+        "_BACKGROUND_TASK_STOP_TIMEOUT_SECONDS",
+        0.05,
+    )
+    mod = VoiceModule()
+    mod._audio = MagicMock()
+    mod._audio.tts = SlowTTS()
+    mod._voice_loop = MagicMock(run=_run)
+    mod._task = None
+    mod._router = MagicMock()
+    mod._router._policy.quick_replies = {}
+    mod._voice_cfg = {"tts": {"phrase_prime_enabled": False}}
+    mod._phrase_prime_task = None
+    mod._phrase_prime_stop = threading.Event()
+    mod._tts_provider_prewarm_task = None
+
+    await mod.start()
+    await asyncio.wait_for(loop_started.wait(), timeout=1.0)
+    assert await asyncio.to_thread(prewarm_started.wait, 1.0)
+
+    started_at = asyncio.get_running_loop().time()
+    await mod.stop()
+    elapsed = asyncio.get_running_loop().time() - started_at
+    release_prewarm.set()
+
+    assert elapsed < 0.5
+    assert cancel_called.is_set()
+    mod._audio.shutdown.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_voice_module_tts_provider_prewarm_is_optional() -> None:
+    loop_started = asyncio.Event()
+
+    async def _run() -> None:
+        loop_started.set()
+        await asyncio.Event().wait()
+
+    mod = VoiceModule()
+    mod._audio = MagicMock()
+    mod._audio.tts = object()
+    mod._voice_loop = MagicMock(run=_run)
+    mod._task = None
+    mod._router = MagicMock()
+    mod._router._policy.quick_replies = {}
+    mod._voice_cfg = {"tts": {"phrase_prime_enabled": False}}
+    mod._phrase_prime_task = None
+    mod._phrase_prime_stop = threading.Event()
+    mod._tts_provider_prewarm_task = None
+
+    await mod.start()
+    await asyncio.wait_for(loop_started.wait(), timeout=1.0)
+    await mod.stop()
+
+    assert mod._tts_provider_prewarm_task is None
 
 
 def test_runtime_voice_stack_builds_shared_audio_router_and_gateway(monkeypatch) -> None:
@@ -226,6 +522,23 @@ def test_voice_product_readiness_requires_configured_wake_word() -> None:
 
     assert snapshot["ready"] is False
     assert snapshot["blockers"] == ["wake_word_not_ready"]
+
+
+def test_voice_product_readiness_exposes_kws_safety_only_degraded_mode() -> None:
+    snapshot = _voice_product_readiness(
+        {
+            "pipeline_ok": True,
+            "input_ready": True,
+            "output_ready": True,
+            "wake_word_enabled": False,
+            "kws_unavailable_safety_only": True,
+        },
+        {"enabled": False, "circuit_open": False},
+        {"product_readiness": {"require_wake_word": True}},
+    )
+
+    assert snapshot["ready"] is False
+    assert snapshot["degraded_mode"] == "kws_unavailable_safety_only"
 
 
 def test_voice_product_readiness_can_require_runtime_bridge() -> None:

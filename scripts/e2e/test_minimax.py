@@ -19,8 +19,8 @@ import httpx
 from openai import AsyncOpenAI
 
 API_KEY = os.environ.get("MINIMAX_API_KEY", "")
-BASE_URL = "https://api.minimax.chat/v1"
-LLM_MODEL = "MiniMax-M2.5-highspeed"
+BASE_URL = "https://api.minimaxi.com/v1"
+LLM_MODEL = "MiniMax-M2.7-highspeed"
 TTS_MODEL = "speech-2.8-turbo"
 
 

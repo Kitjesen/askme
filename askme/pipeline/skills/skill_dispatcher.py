@@ -24,9 +24,18 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from askme.config import project_root
+from askme.pipeline.skills.outcome import (
+    GENERIC_SKILL_FAILURE_MESSAGE,
+    GENERIC_SKILL_TIMEOUT_MESSAGE,
+    GENERIC_SKILL_UNAVAILABLE_MESSAGE,
+    NAV_LOCATION_UNAVAILABLE_MESSAGE,
+    SkillOutcome,
+    is_internal_skill_text,
+)
 
 if TYPE_CHECKING:
     from askme.pipeline.core.brain_pipeline import BrainPipeline
+    from askme.pipeline.core.protocols import CancellationToken
     from askme.pipeline.skills.planner_agent import PlannerAgent
     from askme.ports import AudioFrontendPort
     from askme.skills.core.skill_manager import SkillManager
@@ -156,10 +165,56 @@ class SkillDispatcher:
         """Speak text. In voice mode, also wait for playback to finish."""
         if source != "voice":
             return
+        if is_internal_skill_text(text):
+            logger.error("Suppressed internal skill marker from TTS: %s", text[:120])
+            text = GENERIC_SKILL_FAILURE_MESSAGE
         self._audio.speak(text)
         self._audio.start_playback()
         await asyncio.to_thread(self._audio.wait_speaking_done)
         self._audio.stop_playback()
+
+    async def can_execute(
+        self,
+        skill_name: str,
+        user_text: str = "",
+        *,
+        source: str = "voice",
+    ) -> SkillOutcome:
+        """Preflight a skill without creating a mission or speaking."""
+
+        skill = self._skill_manager.get(skill_name)
+        if skill is None:
+            available = self._skill_manager.get_skill_catalog()
+            return SkillOutcome.blocked(
+                code="not_found",
+                result=f"[Error] 技能不存在: {skill_name}。可用技能: {available}",
+                user_message=GENERIC_SKILL_UNAVAILABLE_MESSAGE,
+            )
+        if getattr(skill, "enabled", True) is False:
+            return SkillOutcome.blocked(
+                code="disabled",
+                result=f"[Skill] Disabled: {skill_name}",
+                user_message=(
+                    NAV_LOCATION_UNAVAILABLE_MESSAGE
+                    if skill_name == "nav_query"
+                    else GENERIC_SKILL_UNAVAILABLE_MESSAGE
+                ),
+            )
+
+        pipeline_state = getattr(self._pipeline, "__dict__", {})
+        gate = pipeline_state.get("_skill_gate") if isinstance(pipeline_state, dict) else None
+        gate_preflight = getattr(gate, "can_execute", None)
+        if callable(gate_preflight):
+            return await gate_preflight(
+                skill_name,
+                user_text,
+                source=source,
+            )
+        return SkillOutcome.ready()
+
+    async def _speak_outcome(self, outcome: SkillOutcome, *, source: str) -> None:
+        if outcome.should_speak and outcome.user_message:
+            await self._speak_voice(outcome.user_message, source)
 
     # ── Public API (called by loops) ──────────────────────────────
 
@@ -180,11 +235,19 @@ class SkillDispatcher:
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
 
-        # Fail fast for unknown skills — avoids a silent error step in mission history
-        if skill_name and not self._skill_manager.get(skill_name):
-            available = self._skill_manager.get_skill_catalog()
-            logger.warning("Dispatch called with unknown skill: '%s'", skill_name)
-            return f"[Error] 技能不存在: {skill_name}。可用技能: {available}"
+        preflight = await self.can_execute(
+            skill_name,
+            user_text,
+            source=source,
+        )
+        if not preflight.can_execute:
+            logger.warning(
+                "Dispatch blocked by skill preflight: skill=%s reason=%s",
+                skill_name,
+                preflight.code,
+            )
+            await self._speak_outcome(preflight, source=source)
+            return preflight.legacy_result
 
         # Start or continue mission
         if self._current_mission is None:
@@ -268,7 +331,7 @@ class SkillDispatcher:
                 self._current_mission.add_step(skill_name, user_text, result)
                 self._current_mission.shared_context[skill_name] = result[:500]
                 self.complete_mission()
-            await self._speak_voice(result, source)
+            await self._speak_voice(GENERIC_SKILL_TIMEOUT_MESSAGE, source)
             return result
         except Exception as exc:
             logger.error("Skill '%s' failed: %s", skill_name, exc)
@@ -277,6 +340,7 @@ class SkillDispatcher:
                 self._current_mission.state = MissionState.FAILED
                 self._current_mission.add_step(skill_name, user_text, result)
                 self.complete_mission()
+            await self._speak_voice(GENERIC_SKILL_FAILURE_MESSAGE, source)
             return result
 
         # Track step, store result in shared_context for cross-step data passing
@@ -299,6 +363,8 @@ class SkillDispatcher:
         source: str = "voice",
         memory_task: asyncio.Task[str] | None = None,
         conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
     ) -> str:
         """Handle a general (non-skill) turn.
 
@@ -309,6 +375,17 @@ class SkillDispatcher:
         Completes any active mission first (this turn breaks the skill chain).
         """
         self.complete_mission()
+
+        def _turn_cancelled() -> bool:
+            return bool(turn_cancel_token is not None and turn_cancel_token.is_set())
+
+        def _cancel_current_mission() -> None:
+            if self._current_mission is not None:
+                self._current_mission.state = MissionState.CANCELED
+                self.complete_mission()
+
+        if _turn_cancelled():
+            return ""
 
         # Attempt multi-step planning before handing off to the LLM.
         # 10 s timeout: if the planner LLM hangs, fall back to normal pipeline.
@@ -325,6 +402,9 @@ class SkillDispatcher:
                 logger.warning("PlannerAgent raised unexpectedly: %s", exc)
                 steps = None
 
+            if _turn_cancelled():
+                return ""
+
             if steps:
                 # Announce the plan so the user knows what's coming
                 _step_labels = [
@@ -337,16 +417,48 @@ class SkillDispatcher:
                 _plan_summary = "、".join(_step_labels)
                 await self._speak_voice(f"好的，分{len(steps)}步：{_plan_summary}", source)
 
+                if _turn_cancelled():
+                    return ""
+
                 results: list[str] = []
                 for step in steps:
+                    if _turn_cancelled():
+                        _cancel_current_mission()
+                        break
                     # Pass the original user request as extra_context so each skill has
                     # full intent beyond the planner's terse per-step instruction.
                     _orig_ctx = f"原始用户请求: {user_text}" if user_text else ""
-                    result = await self.dispatch(
-                        step.skill_name, step.intent, source=source,
-                        extra_context=_orig_ctx,
-                    )
+                    def _start_step_dispatch() -> asyncio.Task[str]:
+                        return asyncio.create_task(
+                            self.dispatch(
+                                step.skill_name,
+                                step.intent,
+                                source=source,
+                                extra_context=_orig_ctx,
+                            )
+                        )
+
+                    atomic_runner = getattr(turn_cancel_token, "try_run", None)
+                    if callable(atomic_runner):
+                        started, dispatch_task = atomic_runner(_start_step_dispatch)
+                        if not started or dispatch_task is None:
+                            _cancel_current_mission()
+                            break
+                        result = await dispatch_task
+                    else:
+                        if _turn_cancelled():
+                            _cancel_current_mission()
+                            break
+                        result = await self.dispatch(
+                            step.skill_name,
+                            step.intent,
+                            source=source,
+                            extra_context=_orig_ctx,
+                        )
                     results.append(result)
+                    if _turn_cancelled():
+                        _cancel_current_mission()
+                        break
                     # Stop plan execution if a step failed.
                     # The timeout result is stored but execute_skill() was cancelled,
                     # so the user has not heard it yet — speak it explicitly.
@@ -361,7 +473,12 @@ class SkillDispatcher:
                 _done_mission = self.complete_mission()
                 # Announce plan success and await TTS so it isn't eaten by the
                 # next turn's drain_buffers(). Only announce if all steps ran.
-                if _done_mission and len(_done_mission.steps) > 1:
+                if (
+                    not _turn_cancelled()
+                    and _done_mission
+                    and _done_mission.state != MissionState.CANCELED
+                    and len(_done_mission.steps) > 1
+                ):
                     _names = "、".join(
                         (self._skill_manager.get(s.skill_name).description
                          if self._skill_manager.get(s.skill_name)
@@ -373,18 +490,19 @@ class SkillDispatcher:
                 return "\n".join(results)
 
         # Single-step or conversational: delegate to LLM pipeline
-        if conversation_session_id is None:
-            return await self._pipeline.process(
-                user_text,
-                memory_task=memory_task,
-                source=source,
-            )
-        return await self._pipeline.process(
-            user_text,
-            memory_task=memory_task,
-            source=source,
-            conversation_session_id=conversation_session_id,
-        )
+        if _turn_cancelled():
+            return ""
+        pipeline_kwargs: dict[str, Any] = {
+            "memory_task": memory_task,
+            "source": source,
+        }
+        if conversation_session_id is not None:
+            pipeline_kwargs["conversation_session_id"] = conversation_session_id
+        if voice_turn_id is not None:
+            pipeline_kwargs["voice_turn_id"] = voice_turn_id
+        if turn_cancel_token is not None:
+            pipeline_kwargs["turn_cancel_token"] = turn_cancel_token
+        return await self._pipeline.process(user_text, **pipeline_kwargs)
 
     def get_skill(self, skill_name: str):
         """Return the SkillDefinition for a skill name, or None if not found."""

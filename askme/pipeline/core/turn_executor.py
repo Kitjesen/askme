@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import time
+from collections.abc import Coroutine
 from contextvars import ContextVar
 from copy import deepcopy
-from inspect import isawaitable, iscoroutinefunction
+from inspect import isawaitable, iscoroutinefunction, signature
 from typing import TYPE_CHECKING, Any
 
+from askme.llm.core.contracts import LLMCallContext
 from askme.pipeline.core.hooks import PipelineHooks
-from askme.pipeline.core.protocols import TurnContext
+from askme.pipeline.core.protocols import CancellationToken, TurnContext
 from askme.pipeline.core.trace import get_tracer
 from askme.pipeline.core.utils import classify_llm_error, set_log_context
 
@@ -47,10 +51,32 @@ class TurnExecutor:
         "图片",
         "眼前有什么",
     )
-    _REFLECT_DELAY_S = 5.0       # seconds to wait before post-turn reflection
+    _REFLECT_DELAY_S = 5.0  # seconds to wait before post-turn reflection
+    _VOICE_MEMORY_RETRIEVAL_DEADLINE_S = 0.25
+    _KNOWLEDGE_DEPENDENT_MARKERS = (
+        "在哪里",
+        "在哪",
+        "怎么走",
+        "路线",
+        "定位",
+        "位置",
+        "卫生间",
+        "厕所",
+        "设备",
+        "SOP",
+        "流程",
+        "faq",
+        "FAQ",
+        "手册",
+        "规程",
+        "warehouse",
+        "route",
+        "location",
+        "where",
+    )
 
     def _track_task(
-        self, coro: asyncio.Coroutine[Any, Any, Any], *, name: str | None = None
+        self, coro: Coroutine[Any, Any, Any], *, name: str | None = None
     ) -> asyncio.Task[Any]:
         """Create a background task, track it in _pending_tasks, log any exception.
 
@@ -88,7 +114,9 @@ class TurnExecutor:
         memory_system: MemorySystem | None = None,
         qp_memory: Any = None,
         voice_model: str | None = None,
-        cancel_token: asyncio.Event | None = None,
+        voice_memory_retrieval_deadline_s: float | None = None,
+        voice_llm_latency_budget_ms: int | None = None,
+        cancel_token: CancellationToken | None = None,
         hooks: PipelineHooks | None = None,
     ) -> None:
         self._llm = llm
@@ -103,6 +131,12 @@ class TurnExecutor:
         self._mem = memory_system
         self._qp_memory = qp_memory
         self._voice_model = voice_model
+        self._voice_memory_retrieval_deadline_s_config = voice_memory_retrieval_deadline_s
+        self._voice_llm_latency_budget_ms = (
+            int(voice_llm_latency_budget_ms)
+            if voice_llm_latency_budget_ms is not None and int(voice_llm_latency_budget_ms) > 0
+            else None
+        )
         self._cancel_token = cancel_token
         self._hooks = hooks
 
@@ -144,6 +178,41 @@ class TurnExecutor:
         """Late-bind AudioAgent (set by VoiceModule/TextModule after build)."""
         self._audio = audio
 
+    def _start_playback_for_turn(self, voice_turn_id: str | None) -> Any:
+        """Bind playback when the frontend exposes the optional owner fence."""
+
+        start: Any = self._audio.start_playback
+        try:
+            parameters = signature(start).parameters.values()
+        except (TypeError, ValueError):
+            return start()
+        supports_owner = any(
+            parameter.name == "voice_turn_id"
+            for parameter in parameters
+        )
+        if supports_owner and voice_turn_id:
+            token = start(voice_turn_id=voice_turn_id)
+            if token is None:
+                raise RuntimeError("playback ownership admission failed")
+            return token
+        return start()
+
+    def _stop_playback_for_owner(self, token: Any) -> None:
+        """Release an explicit playback owner when the frontend supports it."""
+
+        stop: Any = self._audio.stop_playback
+        if token is None:
+            stop()
+            return
+        try:
+            supports_token = "token" in signature(stop).parameters
+        except (TypeError, ValueError):
+            supports_token = False
+        if supports_token:
+            stop(token)
+        else:
+            stop()
+
     # Core turn orchestration.
 
     def _log_episode(self, kind: str, text: str) -> None:
@@ -154,14 +223,15 @@ class TurnExecutor:
 
     def start_idle_reflection(self, idle_seconds: float = 300.0) -> asyncio.Task[None] | None:
         """Start an idle-time reflection background task (dream consolidation)."""
-        _ep = (self._mem.episodic if self._mem is not None else self._episodic)
+        _ep = self._mem.episodic if self._mem is not None else self._episodic
         if not _ep:
             return None
 
         async def _idle_reflect() -> None:
             await asyncio.sleep(idle_seconds)
             _should = (
-                self._mem.should_reflect() if self._mem is not None
+                self._mem.should_reflect()
+                if self._mem is not None
                 else (_ep.should_reflect() if _ep else False)
             )
             if not _should:
@@ -193,11 +263,18 @@ class TurnExecutor:
         return asyncio.create_task(self._memory.retrieve(user_text))
 
     async def process(
-        self, user_text: str, *, memory_task: asyncio.Task[Any] | None = None,
+        self,
+        user_text: str,
+        *,
+        memory_task: asyncio.Task[Any] | None = None,
         source: str = "voice",
         conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_epoch: int | None = None,
+        turn_cancel_token: CancellationToken | None = None,
     ) -> str:
         """Run the full brain pipeline for *user_text*. Returns assistant reply."""
+        _turn_started_at = time.perf_counter()
         self._turn_rag_context.set(None)
         session_scope = str(conversation_session_id or "").strip() or None
         # Set structured log context for this turn so all log records carry
@@ -209,24 +286,81 @@ class TurnExecutor:
             _trace = _tracer.start_trace("voice_turn" if source == "voice" else "text_turn")
         log_session_id = f"{source}:{session_scope}" if session_scope else source
         set_log_context(trace_id=_trace.id, session_id=log_session_id)
-        logger.info("Processing: %s", user_text[:60])
+        logger.info("Processing turn (chars=%d)", len(user_text))
         is_voice = source == "voice"
 
-        if self._cancel_token is not None and self._cancel_token.is_set():
+        def _turn_is_cancelled() -> bool:
+            return bool(
+                (self._cancel_token is not None and self._cancel_token.is_set())
+                or (turn_cancel_token is not None and turn_cancel_token.is_set())
+            )
+
+        if _turn_is_cancelled():
             logger.warning("[TurnExecutor] cancel_token set; skipping turn")
             return ""
 
         # pre_turn hook (Claude Code: UserPromptSubmit).
         # Build a lightweight TurnContext snapshot for hooks; the token is
         # shared with sub-components so hooks can also trigger E-STOP.
-        _token = self._cancel_token if self._cancel_token is not None else asyncio.Event()
+        _token = (
+            turn_cancel_token
+            if turn_cancel_token is not None
+            else self._cancel_token
+            if self._cancel_token is not None
+            else asyncio.Event()
+        )
         _ctx = TurnContext(
             user_text=user_text,
             source=source,
             cancel_token=_token,
             voice_model=self._voice_model,
             conversation_session_id=session_scope,
+            voice_turn_id=voice_turn_id,
+            turn_epoch=turn_epoch,
         )
+
+        def _settle_assistant(
+            content: str,
+            *,
+            evidence: list[dict[str, Any]] | None = None,
+            rag: dict[str, Any] | None = None,
+        ) -> bool:
+            """Commit assistant history at one cancellation linearization point."""
+
+            if _turn_is_cancelled():
+                return False
+
+            committed = False
+
+            def _commit() -> None:
+                nonlocal committed
+                self._add_assistant_message(
+                    content,
+                    conversation_session_id=session_scope,
+                    evidence=evidence,
+                    rag=rag,
+                )
+                committed = True
+
+            try_run = getattr(_token, "try_run", None)
+            if callable(try_run):
+                accepted, _ = try_run(_commit)
+                if not accepted:
+                    return False
+            else:
+                _commit()
+
+            # Plain Event-like tokens cannot linearize set() against _commit().
+            # Roll back synchronously if cancellation landed during that seam.
+            if _turn_is_cancelled():
+                if committed:
+                    self._remove_latest_assistant_message(
+                        content,
+                        conversation_session_id=session_scope,
+                    )
+                return False
+            return committed
+
         if self._hooks:
             skip = await self._hooks.fire_pre_turn(_ctx)
             if skip:
@@ -234,7 +368,11 @@ class TurnExecutor:
                 return ""
 
         if is_voice:
-            self._audio.drain_buffers()
+            prepare_turn = getattr(self._audio, "prepare_turn", None)
+            if callable(prepare_turn):
+                prepare_turn()
+            else:
+                self._audio.drain_buffers()
 
         if self._dog_safety and self._dog_safety.is_configured():
             self._track_task(
@@ -248,8 +386,11 @@ class TurnExecutor:
 
         try:
             with _tracer.span("memory_retrieve"):
-                retrieval = await memory_task
-            context_str, turn_rag = self._coerce_memory_retrieval(retrieval)
+                context_str, turn_rag = await self._resolve_memory_context(
+                    memory_task,
+                    user_text=user_text,
+                    is_voice=is_voice,
+                )
             if turn_rag is not None:
                 self._turn_rag_context.set(turn_rag)
         except Exception as _me:
@@ -257,6 +398,13 @@ class TurnExecutor:
             context_str = ""
             turn_rag = self._unavailable_memory_context(_me)
             self._turn_rag_context.set(turn_rag)
+
+        if _turn_is_cancelled():
+            if vision_task is not None and not vision_task.done():
+                vision_task.cancel()
+            if is_voice:
+                self._audio.drain_buffers()
+            return ""
 
         scene_desc = ""
         if vision_task:
@@ -271,6 +419,11 @@ class TurnExecutor:
         if scene_desc:
             self._log_episode("perception", scene_desc)
 
+        if _turn_is_cancelled():
+            if is_voice:
+                self._audio.drain_buffers()
+            return ""
+
         # A visual question is already answered by the configured VLM.  Do not
         # send that evidence through the ordinary chat model again: it can
         # contradict the image result (for example, changing "桌子" to
@@ -282,18 +435,21 @@ class TurnExecutor:
                 else "我暂时无法读取当前摄像头画面。"
             )
             self._add_user_message(user_text, conversation_session_id=session_scope)
-            self._add_assistant_message(
-                visual_reply, conversation_session_id=session_scope
-            )
-            self._last_spoken_text = visual_reply
             if is_voice:
-                self._audio.start_playback()
+                visual_playback_token = self._start_playback_for_turn(voice_turn_id)
                 self._audio.speak(visual_reply)
                 await asyncio.to_thread(self._audio.wait_speaking_done)
                 # This branch returns before the normal process finally block;
                 # explicitly release TTS state so VAD is not gated forever.
-                self._audio.stop_playback()
+                self._stop_playback_for_owner(visual_playback_token)
                 self._audio.drain_buffers()
+                if _turn_is_cancelled():
+                    return ""
+            if not _settle_assistant(visual_reply):
+                if is_voice:
+                    self._audio.drain_buffers()
+                return ""
+            self._last_spoken_text = visual_reply
             self._log_episode("action", f"视觉回复: {visual_reply[:100]}")
             return visual_reply
 
@@ -311,27 +467,24 @@ class TurnExecutor:
         forced_rag_reply = self._prompt_builder.build_forced_rag_reply(rag_policy)
         if forced_rag_reply:
             logger.info("[TurnExecutor] RAG policy forced deterministic reply")
-            self._add_assistant_message(
+            if is_voice:
+                forced_playback_token = self._start_playback_for_turn(voice_turn_id)
+                self._audio.speak(forced_rag_reply)
+                await asyncio.to_thread(self._audio.wait_speaking_done)
+                self._stop_playback_for_owner(forced_playback_token)
+                if _turn_is_cancelled():
+                    self._audio.drain_buffers()
+                    return ""
+            if not _settle_assistant(
                 forced_rag_reply,
-                conversation_session_id=session_scope,
                 **self._assistant_rag_metadata(),
-            )
+            ):
+                if is_voice:
+                    self._audio.drain_buffers()
+                return ""
             self._last_spoken_text = forced_rag_reply
             if self._hooks:
                 await self._hooks.fire_post_turn(_ctx, forced_rag_reply)
-            if self._mem is not None:
-                self._track_task(
-                    self._mem.save_to_vector(user_text, forced_rag_reply),
-                    name="mem_save",
-                )
-            elif self._memory is not None:
-                self._track_task(
-                    self._memory.save(user_text, forced_rag_reply),
-                    name="mem_save",
-                )
-            if is_voice:
-                self._audio.speak(forced_rag_reply)
-                await asyncio.to_thread(self._audio.wait_speaking_done)
             self._log_episode("action", f"回复: {forced_rag_reply[:100]}")
             return forced_rag_reply
 
@@ -357,15 +510,48 @@ class TurnExecutor:
 
         self._log_episode("command", f"用户说: {user_text}")
 
+        playback_token: Any = None
         if is_voice:
-            self._audio.start_playback()
+            playback_token = self._start_playback_for_turn(voice_turn_id)
+        llm_call_context = LLMCallContext(
+            trace_id=_trace.id,
+            session_id=session_scope,
+            turn_id=str(voice_turn_id or _trace.id),
+            call_id=self._build_llm_call_id(_trace.id, str(voice_turn_id or _trace.id)),
+            purpose="assistant_response",
+            channel=source,
+            request_class="voice_fast" if is_voice else "text",
+            latency_budget_ms=(
+                max(
+                    1,
+                    int(self._voice_llm_latency_budget_ms)
+                    - int((time.perf_counter() - _turn_started_at) * 1000),
+                )
+                if is_voice and self._voice_llm_latency_budget_ms is not None
+                else None
+            ),
+            privacy_class="conversation",
+            allow_cache=False,
+        )
         try:
             async with self._llm_semaphore:
                 full_response = await self._stream_processor.stream_with_tools(
-                    messages, system_prompt, model=self._voice_model,
+                    messages,
+                    system_prompt,
+                    model=self._voice_model,
                     source=source,
                     conversation_session_id=session_scope,
+                    turn_cancel_token=_token,
+                    llm_call_context=llm_call_context,
                 )
+            if _turn_is_cancelled():
+                logger.info(
+                    "[TurnExecutor] interrupted turn dropped before settlement: %s",
+                    voice_turn_id or "legacy",
+                )
+                if is_voice:
+                    self._audio.drain_buffers()
+                return ""
             if self._contains_internal_protocol(full_response):
                 logger.error("Blocked internal tool protocol from assistant response")
                 full_response = self._INTERNAL_PROTOCOL_FALLBACK
@@ -384,49 +570,34 @@ class TurnExecutor:
                 )
                 return ""
 
-            self._add_assistant_message(
+            if is_voice:
+                await asyncio.to_thread(self._audio.wait_speaking_done)
+                if _turn_is_cancelled():
+                    logger.info(
+                        "[TurnExecutor] interrupted playback omitted from history: %s",
+                        voice_turn_id or "legacy",
+                    )
+                    self._audio.drain_buffers()
+                    return ""
+
+            if not _settle_assistant(
                 full_response,
-                conversation_session_id=session_scope,
                 **self._assistant_rag_metadata(),
-            )
+            ):
+                if is_voice:
+                    self._audio.drain_buffers()
+                return ""
             self._last_spoken_text = full_response
 
             # post_turn hook (Claude Code: Stop hook / notification).
             if self._hooks:
                 await self._hooks.fire_post_turn(_ctx, full_response)
 
-            if self._mem is not None:
-                self._track_task(
-                    self._mem.save_to_vector(user_text, full_response), name="mem_save"
-                )
-            elif self._memory is not None:
-                self._track_task(
-                    self._memory.save(user_text, full_response), name="mem_save"
-                )
-
-            if is_voice:
-                await asyncio.to_thread(self._audio.wait_speaking_done)
-
             self._log_episode("action", f"回复: {full_response[:100]}")
 
-            if self._qp_memory is not None:
-                _qp = self._qp_memory
-                _resp = full_response
-
-                async def _qp_voice_bg():
-                    try:
-                        await asyncio.to_thread(_qp.record_observation, "voice", user_text)
-                        await asyncio.to_thread(_qp.process_turn, user_text, _resp)
-                        if self._qp_turn_count % 10 == 0:
-                            await asyncio.to_thread(_qp.save)
-                    except Exception:
-                        pass
-
-                self._qp_turn_count += 1
-                self._track_task(_qp_voice_bg(), name="qp_memory")
-
             _should = (
-                self._mem.should_reflect() if self._mem is not None
+                self._mem.should_reflect()
+                if self._mem is not None
                 else (self._episodic.should_reflect() if self._episodic else False)
             )
             if _should:
@@ -445,6 +616,10 @@ class TurnExecutor:
 
             return full_response
         except Exception as exc:
+            if _turn_is_cancelled():
+                if is_voice:
+                    self._audio.drain_buffers()
+                return ""
             logger.error("LLM pipeline error: %s", exc)
             self._log_episode("error", f"LLM错误: {exc}")
             if is_voice:
@@ -455,13 +630,21 @@ class TurnExecutor:
                     "[系统错误恢复]",
                     conversation_session_id=session_scope,
                 )
-            self._add_assistant_message(error_msg, conversation_session_id=session_scope)
+            if not _settle_assistant(error_msg):
+                if is_voice:
+                    self._audio.drain_buffers()
+                return ""
             return error_msg
         finally:
             if is_voice:
-                self._audio.stop_playback()
+                self._stop_playback_for_owner(playback_token)
             if _owns_trace:
                 _tracer.finish_trace()
+
+    @staticmethod
+    def _build_llm_call_id(trace_id: str, turn_id: str) -> str:
+        base = f"{trace_id}:{turn_id}".encode()
+        return f"sha256:{hashlib.sha256(base).hexdigest()[:24]}"
 
     async def shutdown(self) -> None:
         """Cancel all in-flight background tasks (delayed reflections, etc.)."""
@@ -484,9 +667,7 @@ class TurnExecutor:
         if not self._vision or not self._vision.available:
             return None
         auto_capture_enabled = getattr(self._vision, "auto_capture_enabled", None)
-        auto_capture = bool(
-            callable(auto_capture_enabled) and auto_capture_enabled()
-        )
+        auto_capture = bool(callable(auto_capture_enabled) and auto_capture_enabled())
         visual_query = self._is_visual_query(user_text)
         if not auto_capture and not visual_query:
             return None
@@ -494,6 +675,104 @@ class TurnExecutor:
         if visual_query and callable(targeted):
             return asyncio.create_task(targeted(user_text))
         return asyncio.create_task(self._vision.describe_scene())
+
+    def _voice_memory_retrieval_deadline_s(self) -> float:
+        value = self._voice_memory_retrieval_deadline_s_config
+        if value is None:
+            value = getattr(
+                self._memory,
+                "voice_retrieval_deadline_s",
+                self._VOICE_MEMORY_RETRIEVAL_DEADLINE_S,
+            )
+        if isinstance(value, bool):
+            return self._VOICE_MEMORY_RETRIEVAL_DEADLINE_S
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return self._VOICE_MEMORY_RETRIEVAL_DEADLINE_S
+        if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+            return self._VOICE_MEMORY_RETRIEVAL_DEADLINE_S
+        return max(0.0, parsed)
+
+    @classmethod
+    def _is_knowledge_dependent_query(cls, text: str) -> bool:
+        normalized = str(text or "").strip()
+        folded = normalized.lower()
+        return any(marker.lower() in folded for marker in cls._KNOWLEDGE_DEPENDENT_MARKERS)
+
+    async def _resolve_memory_context(
+        self,
+        memory_task: asyncio.Task[Any],
+        *,
+        user_text: str,
+        is_voice: bool,
+    ) -> tuple[str, dict[str, Any] | None]:
+        if not is_voice:
+            retrieval = await memory_task
+            return self._coerce_memory_retrieval(retrieval)
+
+        deadline_s = self._voice_memory_retrieval_deadline_s()
+        done, pending = await asyncio.wait({memory_task}, timeout=deadline_s)
+        if memory_task in done:
+            retrieval = memory_task.result()
+            return self._coerce_memory_retrieval(retrieval)
+
+        for pending_task in pending:
+            self._cancel_and_consume_memory_task(pending_task)
+        turn_rag = self._latency_budget_memory_context(
+            user_text,
+            deadline_s=deadline_s,
+        )
+        return "", turn_rag
+
+    @staticmethod
+    def _cancel_and_consume_memory_task(memory_task: asyncio.Task[Any]) -> None:
+        if not memory_task.done():
+            memory_task.cancel()
+
+        def _consume(task: asyncio.Task[Any]) -> None:
+            if task.cancelled():
+                return
+            try:
+                task.exception()
+            except (asyncio.CancelledError, Exception):
+                return
+
+        memory_task.add_done_callback(_consume)
+
+    def _latency_budget_memory_context(
+        self,
+        user_text: str,
+        *,
+        deadline_s: float,
+    ) -> dict[str, Any]:
+        knowledge_required = self._is_knowledge_dependent_query(user_text)
+        if knowledge_required:
+            answer_policy = {
+                "state": "unavailable",
+                "action": "refuse",
+                "reason": "memory_retrieval_deadline_exceeded",
+                "deadline_s": deadline_s,
+            }
+        else:
+            answer_policy = {
+                "state": "latency_budget_exhausted",
+                "action": "answer_without_memory",
+                "reason": "memory_retrieval_deadline_exceeded",
+                "deadline_s": deadline_s,
+            }
+        return {
+            "evidence": [],
+            "rag": {
+                "turn_scoped": True,
+                "enabled": True,
+                "fallback_reason": "latency_budget_exhausted",
+                "dropped_evidence": [],
+                "used_in_answer": False,
+                "retrieval_deadline_s": deadline_s,
+                "answer_policy": answer_policy,
+            },
+        }
 
     async def _memory_answer_policy(self) -> dict[str, Any] | None:
         health = getattr(self._memory, "health", None)
@@ -645,6 +924,31 @@ class TurnExecutor:
             if m.get("role") == "user" and m.get("content") == user_text:
                 history.pop(i)
                 break
+
+    def _remove_latest_assistant_message(
+        self,
+        content: str,
+        *,
+        conversation_session_id: str | None,
+    ) -> None:
+        remove = getattr(self._conversation, "remove_latest_assistant_message", None)
+        if callable(remove):
+            if conversation_session_id is None:
+                remove(content)
+            else:
+                remove(content, conversation_session_id=conversation_session_id)
+            return
+
+        # Compatibility fallback for lightweight conversation adapters. The
+        # production ConversationManager exposes the method above for sessions.
+        history = getattr(self._conversation, "history", None)
+        if not isinstance(history, list) or conversation_session_id is not None:
+            return
+        for i in range(len(history) - 1, -1, -1):
+            message = history[i]
+            if message.get("role") == "assistant" and message.get("content") == content:
+                history.pop(i)
+                return
 
     def _latest_history_role(
         self,

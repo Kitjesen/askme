@@ -8,6 +8,7 @@ from askme.llm.providers.domestic import (
     ZhipuProvider,
 )
 from askme.llm.providers.fake import FakeLLMProvider
+from askme.llm.providers.litellm import LiteLLMProxyProvider
 from askme.llm.providers.openai_compatible import OpenAICompatibleProvider
 from askme.llm.providers.profiles import (
     PROVIDER_PROFILES,
@@ -22,6 +23,7 @@ __all__ = [
     "DeepSeekProvider",
     "DoubaoProvider",
     "FakeLLMProvider",
+    "LiteLLMProxyProvider",
     "MiniMaxProvider",
     "OpenAICompatibleProvider",
     "PROVIDER_PROFILES",

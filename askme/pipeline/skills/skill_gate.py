@@ -13,6 +13,12 @@ from typing import TYPE_CHECKING
 from askme.pipeline.core.hooks import PipelineHooks, ToolCallRecord
 from askme.pipeline.core.trace import get_tracer
 from askme.pipeline.core.utils import classify_skill_error, strip_think_blocks
+from askme.pipeline.skills.outcome import (
+    GENERIC_SKILL_UNAVAILABLE_MESSAGE,
+    NAV_LOCATION_UNAVAILABLE_MESSAGE,
+    SkillOutcome,
+    SkillOutcomeStatus,
+)
 from askme.skills.governance.audit import SkillAuditLog
 
 if TYPE_CHECKING:
@@ -25,6 +31,8 @@ if TYPE_CHECKING:
     from askme.skills.core.skill_manager import SkillManager
 
 logger = logging.getLogger(__name__)
+
+_NAV_PREFLIGHT_CACHE_S = 1.5
 
 
 class SkillGate:
@@ -64,6 +72,7 @@ class SkillGate:
         self._cancel_token = cancel_token
         self._hooks = hooks
         self._audit = SkillAuditLog()
+        self._preflight_cache: dict[str, tuple[float, SkillOutcome]] = {}
 
     # Helpers
 
@@ -140,6 +149,99 @@ class SkillGate:
             self._audio.play_thinking()
         return asyncio.create_task(_thinking_indicator()), None
 
+    async def can_execute(
+        self,
+        skill_name: str,
+        user_text: str = "",
+        *,
+        source: str = "voice",
+    ) -> SkillOutcome:
+        """Return a side-effect-free readiness outcome for preface gating."""
+
+        del user_text, source
+        if self._cancel_token is not None and self._cancel_token.is_set():
+            return SkillOutcome(
+                SkillOutcomeStatus.CANCELLED,
+                "cancel_token",
+                result="",
+            )
+
+        skill = self._skill_manager.get(skill_name)
+        if skill is None:
+            return SkillOutcome.blocked(
+                code="not_found",
+                result=f"[Skill] Not found: {skill_name}",
+                user_message=GENERIC_SKILL_UNAVAILABLE_MESSAGE,
+            )
+        if getattr(skill, "enabled", True) is False:
+            return SkillOutcome.blocked(
+                code="disabled",
+                result=f"[Skill] Disabled: {skill_name}",
+                user_message=(
+                    NAV_LOCATION_UNAVAILABLE_MESSAGE
+                    if skill_name == "nav_query"
+                    else GENERIC_SKILL_UNAVAILABLE_MESSAGE
+                ),
+            )
+
+        if self._dog_safety and self._dog_safety.is_configured():
+            estop_state = await asyncio.to_thread(self._dog_safety.query_estop_state)
+            if estop_state is not None and estop_state.get("enabled"):
+                message = f"急停已激活，无法执行 {skill_name}。请先解除急停。"
+                return SkillOutcome.blocked(
+                    code="estop_active",
+                    result=f"[安全锁定] {message}",
+                    user_message=message,
+                )
+
+        if skill_name == "nav_query":
+            cached = self._preflight_cache.get(skill_name)
+            if cached is not None and cached[0] > _time.monotonic():
+                return cached[1]
+            preflight_impl = getattr(type(self._skill_executor), "preflight_skill", None)
+            if callable(preflight_impl):
+                try:
+                    ready, reason = await preflight_impl(self._skill_executor, skill)
+                except Exception as exc:
+                    logger.warning("[SkillGate] nav preflight failed closed: %s", exc)
+                    ready, reason = False, "nav_preflight_error"
+                if not ready:
+                    outcome = SkillOutcome.blocked(
+                        code=str(reason or "nav_not_ready"),
+                        result=f"[Skill] Unavailable: {skill_name} ({reason})",
+                        user_message=NAV_LOCATION_UNAVAILABLE_MESSAGE,
+                    )
+                    self._preflight_cache[skill_name] = (
+                        _time.monotonic() + _NAV_PREFLIGHT_CACHE_S,
+                        outcome,
+                    )
+                    return outcome
+
+        outcome = SkillOutcome.ready()
+        if skill_name == "nav_query":
+            self._preflight_cache[skill_name] = (
+                _time.monotonic() + _NAV_PREFLIGHT_CACHE_S,
+                outcome,
+            )
+        return outcome
+
+    async def _speak_outcome(self, outcome: SkillOutcome, *, source: str) -> None:
+        """Speak only the customer-safe field, exactly once, for voice calls."""
+
+        if source != "voice" or not outcome.should_speak or not outcome.user_message:
+            return
+        message = outcome.user_message
+        speak_and_wait = getattr(self._audio, "speak_and_wait", None)
+        declared_speak_and_wait = getattr(type(self._audio), "speak_and_wait", None)
+        if callable(speak_and_wait) and callable(declared_speak_and_wait):
+            await speak_and_wait(message)
+        else:
+            self._audio.speak(message)
+            self._audio.start_playback()
+            await asyncio.to_thread(self._audio.wait_speaking_done)
+            self._audio.stop_playback()
+        self._last_spoken_text = message
+
     # Core
 
     async def execute_skill(
@@ -148,55 +250,31 @@ class SkillGate:
     ) -> str:
         """Execute a named skill and speak the result."""
         audit_start = _time.perf_counter()
-        if self._cancel_token is not None and self._cancel_token.is_set():
-            logger.warning("[SkillGate] cancel_token set; skipping skill '%s'", skill_name)
-            self._audit.append(
-                skill_name=skill_name,
-                status="blocked",
-                user_text=user_text,
-                source=source,
-                reason="cancel_token",
-            )
-            return ""
-
+        preflight = await self.can_execute(skill_name, user_text, source=source)
         skill = self._skill_manager.get(skill_name)
-        if not skill:
-            self._audit.append(
-                skill_name=skill_name,
-                status="blocked",
-                user_text=user_text,
-                source=source,
-                reason="not_found",
+        if not preflight.can_execute:
+            logger.warning(
+                "[SkillGate] skill '%s' blocked by preflight: %s",
+                skill_name,
+                preflight.code,
             )
-            return f"[Skill] Not found: {skill_name}"
-        if getattr(skill, "enabled", True) is False:
-            logger.warning("[SkillGate] disabled skill blocked: %s", skill_name)
-            self._audit.append(
-                skill_name=skill_name,
-                status="blocked",
-                user_text=user_text,
-                source=source,
-                safety_level=skill.safety_level,
-                execution=skill.execution,
-                reason="disabled",
-            )
-            return f"[Skill] Disabled: {skill_name}"
+            audit_fields = {
+                "skill_name": skill_name,
+                "status": "blocked",
+                "user_text": user_text,
+                "source": source,
+                "reason": preflight.code,
+            }
+            if skill is not None:
+                audit_fields["safety_level"] = skill.safety_level
+                audit_fields["execution"] = skill.execution
+            self._audit.append(**audit_fields)
+            await self._speak_outcome(preflight, source=source)
+            return preflight.legacy_result
 
-        if self._dog_safety and self._dog_safety.is_configured():
-            estop_state = await asyncio.to_thread(self._dog_safety.query_estop_state)
-            if estop_state is not None and estop_state.get("enabled"):
-                msg = f"[安全锁定] 急停已激活，无法执行 {skill_name}。请先解除急停。"
-                logger.warning("Safety gate blocked skill '%s': estop is active", skill_name)
-                self._audit.append(
-                    skill_name=skill_name,
-                    status="blocked",
-                    user_text=user_text,
-                    source=source,
-                    safety_level=skill.safety_level,
-                    execution=skill.execution,
-                    reason="estop_active",
-                )
-                return msg
+        # A ready outcome guarantees the definition was present and enabled.
+        if skill is None:  # pragma: no cover - defensive against a racy manager swap
+            return ""
 
         if skill.depends:
             for dep in skill.depends:
@@ -359,6 +437,34 @@ class SkillGate:
                     elapsed_ms=elapsed_ms,
                 )
                 result = await self._hooks.fire_post_tool(record)
+
+            execution_outcome = SkillOutcome.from_legacy_result(
+                result,
+                skill_name=skill_name,
+            )
+            if execution_outcome.status in {
+                SkillOutcomeStatus.FAILED,
+                SkillOutcomeStatus.TIMED_OUT,
+            }:
+                await self._speak_outcome(execution_outcome, source=source)
+                self._conversation.add_user_message(user_text)
+                self._conversation.add_assistant_message(execution_outcome.user_message)
+                self._log_episode(
+                    "error",
+                    f"技能返回内部错误 {skill_name}: {result[:100]}",
+                )
+                self._audit.append(
+                    skill_name=skill_name,
+                    status="failed",
+                    user_text=user_text,
+                    source=source,
+                    safety_level=skill.safety_level,
+                    execution=skill.execution,
+                    elapsed_ms=(_time.perf_counter() - audit_start) * 1000,
+                    reason=execution_outcome.code,
+                    result_preview=result,
+                )
+                return result
 
             self._audio.speak(result)
             self._last_spoken_text = result

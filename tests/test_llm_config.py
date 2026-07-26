@@ -126,8 +126,10 @@ class TestFromCfg:
     def test_empty_dict_uses_defaults(self):
         cfg = LLMConfig.from_cfg({})
         assert cfg.api_key == ""
+        assert cfg.base_url == "https://api.minimaxi.com/v1"
         assert cfg.model == "MiniMax-M2.7-highspeed"
         assert cfg.fallback_models == []
+        assert cfg.minimax_base_url == "https://api.minimaxi.com/v1"
 
     def test_partial_override(self):
         cfg = LLMConfig.from_cfg({"api_key": "sk-x", "model": "custom"})

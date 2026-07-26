@@ -1,6 +1,8 @@
 """Tests for MicInput module."""
 
 import io
+import queue
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -134,6 +136,134 @@ class TestMicInputOpen:
             pass
         router.wait_for_input_ready.assert_called_once_with(timeout=10.0)
 
+    @patch("askme.voice.mic_input.sd.InputStream")
+    def test_router_permission_precedes_physical_stream_open(self, mock_stream_cls):
+        order: list[str] = []
+        router = MagicMock()
+        router.wait_for_input_ready.side_effect = lambda **kwargs: order.append("wait") or True
+        mock_stream = MagicMock()
+        mock_stream_cls.side_effect = lambda **kwargs: order.append("open") or mock_stream
+
+        mic = MicInput(audio_router=router, input_transport="sounddevice")
+        with mic.open():
+            pass
+
+        assert order[:2] == ["wait", "open"]
+
+    @patch("askme.voice.mic_input.sd.InputStream")
+    def test_exclusive_output_waits_for_inflight_microphone_open(
+        self,
+        mock_stream_cls,
+    ):
+        import threading
+
+        from askme.voice.audio_router import AudioRouter
+
+        start_entered = threading.Event()
+        release_start = threading.Event()
+        output_entered = threading.Event()
+        lifecycle: list[str] = []
+
+        class _BlockingStream:
+            def start(self):
+                lifecycle.append("start")
+                start_entered.set()
+                assert release_start.wait(timeout=1.0)
+
+            def stop(self):
+                lifecycle.append("stop")
+
+            def close(self):
+                lifecycle.append("close")
+
+        router = AudioRouter()
+        mic = MicInput(
+            audio_router=router,
+            input_transport="sounddevice",
+        )
+        mock_stream_cls.return_value = _BlockingStream()
+        router.set_input_controller(suspend=mic.stop, resume=None)
+
+        start_thread = threading.Thread(target=mic.start)
+
+        def _take_output() -> None:
+            with router.output_session():
+                assert mic.is_open is False
+                output_entered.set()
+
+        output_thread = threading.Thread(target=_take_output)
+        start_thread.start()
+        assert start_entered.wait(timeout=1.0)
+        output_thread.start()
+        assert not output_entered.wait(timeout=0.05)
+
+        release_start.set()
+        start_thread.join(timeout=1.0)
+        output_thread.join(timeout=1.0)
+
+        assert not start_thread.is_alive()
+        assert not output_thread.is_alive()
+        assert output_entered.is_set()
+        assert lifecycle == ["start", "stop", "close"]
+
+    def test_stop_releases_stream_even_when_driver_stop_raises(self):
+        lifecycle: list[str] = []
+
+        class _BrokenStream:
+            def stop(self):
+                lifecycle.append("stop")
+                raise RuntimeError("device disappeared")
+
+            def close(self):
+                lifecycle.append("close")
+
+        mic = MicInput(input_transport="sounddevice")
+        mic._stream = _BrokenStream()
+
+        mic.stop()
+
+        assert mic._stream is None
+        assert lifecycle == ["stop", "close"]
+
+    @patch("askme.voice.mic_input.sd.InputStream")
+    def test_start_closes_partial_stream_when_driver_start_fails(
+        self,
+        mock_stream_cls,
+    ):
+        lifecycle: list[str] = []
+
+        class _FailedStartStream:
+            def start(self):
+                lifecycle.append("start")
+                raise RuntimeError("no such device")
+
+            def close(self):
+                lifecycle.append("close")
+
+        mock_stream_cls.return_value = _FailedStartStream()
+        mic = MicInput(input_transport="sounddevice")
+
+        with pytest.raises(RuntimeError, match="no such device"):
+            mic.start()
+
+        assert mic._stream is None
+        assert lifecycle == ["start", "close"]
+
+    def test_read_chunk_raises_after_callback_starvation(self):
+        mic = MicInput(input_transport="sounddevice")
+        stream = SimpleNamespace(active=True)
+        audio_queue = MagicMock()
+        audio_queue.get.side_effect = queue.Empty
+        mic._stream = stream
+        mic._audio_queue = audio_queue
+
+        assert np.count_nonzero(mic.read_chunk()) == 0
+        assert np.count_nonzero(mic.read_chunk()) == 0
+        with pytest.raises(RuntimeError, match="callback stopped"):
+            mic.read_chunk()
+
+        assert audio_queue.get.call_count == 3
+
 
 class TestMicInputUsbDirect:
     def test_usb_direct_read_chunk_from_helper(self, monkeypatch):
@@ -206,7 +336,13 @@ class TestMicInputUsbDirect:
     def test_alsa_input_requires_configured_channel_count(self, monkeypatch):
         mic = MicInput(mic_native_rate=48000, mic_channels=2)
 
-        monkeypatch.setattr("askme.voice.mic_input.os.name", "posix")
+        # Patch only the module-local platform probe. Mutating the process-wide
+        # ``os.name`` makes pathlib try to construct PosixPath on Windows and
+        # can crash pytest's own failure reporting before this assertion runs.
+        monkeypatch.setattr(
+            "askme.voice.mic_input.os",
+            SimpleNamespace(name="posix"),
+        )
         monkeypatch.setattr(
             "askme.voice.mic_input.Path.read_text",
             lambda self, **_kwargs: " 1 [MCP01 ]: USB-Audio - MCP01\n",
@@ -221,7 +357,10 @@ class TestMicInputUsbDirect:
     def test_alsa_input_accepts_matching_channel_count(self, monkeypatch):
         mic = MicInput(mic_native_rate=48000, mic_channels=2)
 
-        monkeypatch.setattr("askme.voice.mic_input.os.name", "posix")
+        monkeypatch.setattr(
+            "askme.voice.mic_input.os",
+            SimpleNamespace(name="posix"),
+        )
         monkeypatch.setattr(
             "askme.voice.mic_input.Path.read_text",
             lambda self, **_kwargs: " 0 [HKMIC ]: USB-Audio - HKMIC\n",

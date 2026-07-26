@@ -47,7 +47,14 @@ class SlotCollectorAgent(ProactiveAgent):
         question = self._build_question(skill, hint)
 
         for attempt in range(_MAX_ATTEMPTS):
-            answer = await ask_and_listen(question, audio)
+            if context.listen_once is None:
+                answer = await ask_and_listen(question, audio)
+            else:
+                answer = await ask_and_listen(
+                    question,
+                    audio,
+                    listen_once=context.listen_once,
+                )
 
             if answer and len(answer.strip()) >= _MIN_SLOT_CHARS:
                 enriched = user_text.rstrip() + " " + answer.strip()

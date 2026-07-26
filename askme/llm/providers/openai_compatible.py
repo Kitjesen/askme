@@ -15,6 +15,7 @@ from typing import Any
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from askme.llm.core.config import LLMConfig
+from askme.llm.core.contracts import LLMCallContext
 from askme.llm.streaming.retry import RETRYABLE_STATUS, default_backoff
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ class OpenAICompatibleProvider:
             self._minimax_client = _create_async_client(
                 api_key=config.minimax_api_key,
                 base_url=config.minimax_base_url,
-                model="MiniMax-M2.5-highspeed",
+                model="MiniMax-M2.7-highspeed",
                 timeout=config.timeout,
             )
             logger.info("MiniMax LLM client enabled: %s", config.minimax_base_url)
@@ -72,9 +73,11 @@ class OpenAICompatibleProvider:
         kwargs: dict[str, Any],
         *,
         cancel_token: asyncio.Event | None = None,
+        context: LLMCallContext | None = None,
     ) -> AsyncIterator[Any]:
         """Retry a streaming call until chunks begin flowing."""
 
+        _ = context
         last_exc: Exception | None = None
         for attempt in range(self._max_retries + 1):
             if cancel_token is not None and cancel_token.is_set():
@@ -83,7 +86,7 @@ class OpenAICompatibleProvider:
 
             try:
                 client = self.client_for_model(kwargs.get("model", ""))
-                response = await client.chat.completions.create(**kwargs)
+                response = await self._invoke_with_timeout(client, kwargs)
             except (APITimeoutError, APIConnectionError) as exc:
                 last_exc = exc
                 if attempt < self._max_retries:
@@ -106,14 +109,20 @@ class OpenAICompatibleProvider:
         if last_exc is not None:
             raise last_exc
 
-    async def completion_with_retry(self, kwargs: dict[str, Any]) -> Any:
+    async def completion_with_retry(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        context: LLMCallContext | None = None,
+    ) -> Any:
         """Retry a non-streaming completion call."""
 
+        _ = context
         last_exc: Exception | None = None
         for attempt in range(self._max_retries + 1):
             try:
                 client = self.client_for_model(kwargs.get("model", ""))
-                return await client.chat.completions.create(**kwargs)
+                return await self._invoke_with_timeout(client, kwargs)
             except (APITimeoutError, APIConnectionError) as exc:
                 last_exc = exc
                 if attempt < self._max_retries:
@@ -130,6 +139,35 @@ class OpenAICompatibleProvider:
             raise last_exc
         raise RuntimeError("completion_with_retry exhausted all attempts without an exception")
 
+    @staticmethod
+    def _extract_request_timeout(kwargs: dict[str, Any]) -> float | None:
+        """Extract request timeout from kwargs when present."""
+
+        timeout_value = kwargs.get("timeout")
+        if timeout_value is None:
+            return None
+        try:
+            timeout_value_float = float(timeout_value)
+        except (TypeError, ValueError):
+            return None
+        return timeout_value_float if timeout_value_float > 0 else None
+
+    async def _invoke_with_timeout(self, client: Any, kwargs: dict[str, Any]) -> Any:
+        """Run chat completion call with timeout applied per request."""
+
+        timeout_seconds = self._extract_request_timeout(kwargs)
+        call_kwargs = dict(kwargs)
+        call_kwargs.pop("timeout", None)
+        if timeout_seconds is None:
+            return await client.chat.completions.create(**call_kwargs)
+
+        with_options = getattr(client, "with_options", None)
+        if callable(with_options):
+            client_for_call = with_options(timeout=timeout_seconds)
+        else:
+            client_for_call = client
+        return await client_for_call.chat.completions.create(**call_kwargs)
+
     async def _sleep_before_retry(
         self,
         attempt: int,
@@ -139,7 +177,9 @@ class OpenAICompatibleProvider:
     ) -> None:
         wait = self._backoff(attempt)
         if status_code is None:
-            logger.warning("[LLM] Retry %d/%d after %.1fs (%s)", attempt + 1, self._max_retries, wait, exc)
+            logger.warning(
+                "[LLM] Retry %d/%d after %.1fs (%s)", attempt + 1, self._max_retries, wait, exc
+            )
         else:
             logger.warning(
                 "[LLM] Retry %d/%d after %.1fs (HTTP %d)",

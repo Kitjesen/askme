@@ -24,9 +24,11 @@ from askme.api.services.conversation_service import (
     EmptyChatText,
 )
 from askme.api.services.http_helpers import require_json_object
+from askme.conversation import TurnInProgress, canonical_thread_id
 
 DispatchRuntime = Callable[..., Awaitable[dict[str, Any]]]
 CorsOptions = Callable[[str], Response]
+Authorize = Callable[[Request, dict[str, Any], str], JSONResponse | None]
 
 _NO_STORE_HEADERS = {"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"}
 _CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
@@ -40,6 +42,7 @@ def register_conversation_routes(
     dispatch_runtime: DispatchRuntime,
     cors_options_response: CorsOptions,
     logger: logging.Logger,
+    authorize: Authorize,
     runtime_voice_turn_timeout_s: float | None = 30.0,
 ) -> None:
     """Register chat and voice-turn routes."""
@@ -51,6 +54,7 @@ def register_conversation_routes(
             dispatch_runtime=dispatch_runtime,
             cors_options_response=cors_options_response,
             logger=logger,
+            authorize=authorize,
             runtime_voice_turn_timeout_s=runtime_voice_turn_timeout_s,
         )
     )
@@ -63,6 +67,7 @@ def create_conversation_router(
     dispatch_runtime: DispatchRuntime,
     cors_options_response: CorsOptions,
     logger: logging.Logger,
+    authorize: Authorize,
     runtime_voice_turn_timeout_s: float | None = 30.0,
 ) -> APIRouter:
     """Create the conversation router without binding it to an app factory."""
@@ -102,6 +107,16 @@ def create_conversation_router(
                 status_code=504,
                 headers=trace_headers,
             )
+        except TurnInProgress as exc:
+            return JSONResponse(
+                {
+                    "error": "conversation turn in progress",
+                    "conversation_thread_id": exc.thread_id,
+                    "blocking_turn_id": exc.blocking_turn_id,
+                },
+                status_code=409,
+                headers=trace_headers,
+            )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=trace_headers)
         except ChatUnavailable as exc:
@@ -130,14 +145,17 @@ def create_conversation_router(
     )
     async def runtime_voice_turn(request: Request) -> JSONResponse:
         """Route a final voice transcript to runtime controls only."""
-        if not runtime_available:
-            return JSONResponse(
-                {"error": "runtime handler not configured"},
-                status_code=503,
-                headers=_CORS_HEADERS,
-            )
         try:
             body = require_json_object(await request.json())
+            failure = authorize(request, body, "runtime:submit")
+            if failure is not None:
+                return failure
+            if not runtime_available:
+                return JSONResponse(
+                    {"error": "runtime handler not configured"},
+                    status_code=503,
+                    headers=_CORS_HEADERS,
+                )
             raw_text = body.get("text") or body.get("message") or body.get("transcript") or ""
             text = str(raw_text).strip()
             if not text:
@@ -161,10 +179,17 @@ def create_conversation_router(
                 confidence=body.get("asr_confidence", body.get("confidence")),
                 is_final=bool(body.get("is_final", True)),
                 channel=str(body.get("channel") or "voice"),
-                conversation_session_id=_clean_optional_text(
-                    body.get("conversation_session_id")
-                    or body.get("conversation_id")
-                    or body.get("chat_session_id")
+                conversation_session_id=canonical_thread_id(
+                    thread_id=_clean_optional_text(body.get("thread_id")),
+                    conversation_thread_id=_clean_optional_text(
+                        body.get("conversation_thread_id")
+                    ),
+                    conversation_session_id=_clean_optional_text(
+                        body.get("conversation_session_id")
+                    ),
+                    conversation_id=_clean_optional_text(body.get("conversation_id")),
+                    chat_session_id=_clean_optional_text(body.get("chat_session_id")),
+                    session_id=_clean_optional_text(body.get("session_id")),
                 ),
                 planning_session_id=_clean_optional_text(body.get("planning_session_id")),
             )
@@ -181,6 +206,16 @@ def create_conversation_router(
                     "timeout_s": runtime_voice_turn_timeout_s,
                 },
                 status_code=504,
+                headers=_CORS_HEADERS,
+            )
+        except TurnInProgress as exc:
+            return JSONResponse(
+                {
+                    "error": "conversation turn in progress",
+                    "conversation_thread_id": exc.thread_id,
+                    "blocking_turn_id": exc.blocking_turn_id,
+                },
+                status_code=409,
                 headers=_CORS_HEADERS,
             )
         except ValueError as exc:

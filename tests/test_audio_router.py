@@ -24,6 +24,74 @@ def test_output_session_blocks_input() -> None:
         assert r.wait_for_input_ready(timeout=0) is False
 
 
+def test_exclusive_output_suspends_and_resumes_persistent_microphone() -> None:
+    r = AudioRouter()
+    lifecycle: list[str] = []
+    r.set_input_controller(
+        suspend=lambda: lifecycle.append("suspend"),
+        resume=lambda: lifecycle.append("resume"),
+    )
+
+    with r.output_session():
+        assert lifecycle == ["suspend"]
+        assert r.wait_for_input_ready(timeout=0) is False
+
+    assert lifecycle == ["suspend", "resume"]
+
+
+def test_full_duplex_output_does_not_suspend_persistent_microphone() -> None:
+    r = AudioRouter(mode="full_duplex")
+    lifecycle: list[str] = []
+    r.set_input_controller(
+        suspend=lambda: lifecycle.append("suspend"),
+        resume=lambda: lifecycle.append("resume"),
+    )
+
+    with r.output_session():
+        pass
+
+    assert lifecycle == []
+
+
+def test_full_duplex_mode_keeps_input_ready_during_output() -> None:
+    """A verified duplex route must not serialize capture behind playback."""
+
+    r = AudioRouter(mode="full_duplex")
+
+    with r.output_session():
+        assert r.is_output_active is True
+        assert r.wait_for_input_ready(timeout=0) is True
+
+
+def test_router_can_enable_full_duplex_before_audio_activity() -> None:
+    r = AudioRouter()
+
+    r.set_mode("full_duplex")
+
+    assert r.mode == "full_duplex"
+    with r.output_session():
+        assert r.wait_for_input_ready(timeout=0) is True
+
+
+def test_fail_closed_restores_exclusive_routing_during_active_output() -> None:
+    r = AudioRouter(mode="full_duplex")
+    lifecycle: list[str] = []
+    r.set_input_controller(
+        suspend=lambda: lifecycle.append("suspend"),
+        resume=lambda: lifecycle.append("resume"),
+    )
+
+    with r.output_session():
+        r.fail_closed()
+
+        assert r.mode == "exclusive"
+        assert r.wait_for_input_ready(timeout=0) is False
+        assert lifecycle == ["suspend"]
+
+    assert r.wait_for_input_ready(timeout=0) is True
+    assert lifecycle == ["suspend", "resume"]
+
+
 def test_output_session_releases_on_exit() -> None:
     r = AudioRouter()
     with r.output_session():
@@ -102,6 +170,7 @@ def test_wait_for_input_ready_timeout() -> None:
     # DEVICE_LOST
     ("ALSA lib confmisc.c: Cannot get card index for 1", AudioErrorKind.DEVICE_LOST),
     ("No such device hw:1,0", AudioErrorKind.DEVICE_LOST),
+    ("Microphone input callback stopped", AudioErrorKind.DEVICE_LOST),
     # DEVICE_BUSY
     ("Invalid number of channels [PaErrorCode -9998]", AudioErrorKind.DEVICE_BUSY),
     ("Device or resource busy (EBUSY)", AudioErrorKind.DEVICE_BUSY),

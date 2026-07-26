@@ -6,7 +6,7 @@
   <title>小算 · 现场运行总览</title>
   <link rel="stylesheet" href="/dashboard/app.css">
   <link rel="stylesheet" href="/dashboard/voice.css?v=20260712-5">
-  <link rel="stylesheet" href="/dashboard/product.css?v=20260712-8">
+  <link rel="stylesheet" href="/dashboard/product.css?v=20260713-16">
 </head>
 <body>
   <button id="nav-toggle" class="nav-toggle" type="button" aria-label="打开页面导航" aria-controls="nav-drawer" aria-expanded="false" title="页面导航">
@@ -15,14 +15,38 @@
   <button id="nav-backdrop" class="nav-backdrop" type="button" aria-label="关闭页面导航" tabindex="-1"></button>
   <div class="product-shell">
     <aside id="nav-drawer" class="nav-rail" aria-label="页面导航" aria-hidden="true">
+      <button class="brand" type="button" data-route="/dashboard" aria-label="返回 AskMe 总览">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" role="img"><path d="M16 7V3m-7 8-3-3m17 3 3-3M7 13h18v11a4 4 0 0 1-4 4H11a4 4 0 0 1-4-4V13Z"/><path d="M11 18h.01M21 18h.01M12 23h8"/></svg>
+        </span>
+        <span class="brand-copy"><strong>AskMe</strong><small>Voice OS</small></span>
+      </button>
       <header class="nav-drawer-head">
         <div>
-          <strong>页面导航</strong>
-          <small>聚龙科创 e 谷</small>
+          <strong>聚龙科创e谷</strong>
+          <small>现场智能服务</small>
         </div>
         <button id="nav-close" class="nav-close" type="button" aria-label="关闭页面导航" title="关闭">×</button>
       </header>
       <nav id="dashboard-nav" class="nav-list"></nav>
+      <div class="nav-actions" aria-label="快捷操作">
+        <button type="button" class="nav-icon-button" data-route="/dashboard" aria-label="返回总览" title="总览">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10M9 20v-6h6v6"/></svg>
+        </button>
+        <button type="button" class="nav-icon-button" data-route="/dashboard/knowledge" aria-label="搜索知识库" title="搜索知识库">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+        </button>
+        <button type="button" class="nav-icon-button has-notice" data-route="/dashboard/field" aria-label="查看现场通知" title="现场通知">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
+        </button>
+        <button type="button" class="nav-icon-button" data-route="/dashboard/audit" aria-label="查看操作审计" title="操作审计">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+        </button>
+        <button class="nav-primary-action" type="button" data-route="/dashboard/conversation">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/><path d="M8 10h.01M12 10h.01M16 10h.01"/></svg>
+          <span>开始对话</span>
+        </button>
+      </div>
       <div class="nav-footer">
         <span id="global-status-dot" class="status-dot warn"></span>
         <span id="global-status-text">正在连接服务</span>
@@ -30,14 +54,20 @@
     </aside>
 
     <main class="page-shell">
+      <div class="workspace-bar" aria-label="当前项目">
+        <div class="workspace-project">
+          <strong>聚龙科创e谷</strong>
+        </div>
+        <div class="workspace-actions">
+          <span class="workspace-scope">导览与巡检</span>
+          <button class="primary-button" data-route="/dashboard/conversation">开始对话</button>
+        </div>
+      </div>
       <header class="page-header">
         <div>
           <p id="page-kicker" class="page-kicker">运行总览</p>
           <h1 id="page-title">现场运行总览</h1>
-          <p id="page-description">集中查看对话链路、现场事件、园区场景和交付门禁。</p>
-        </div>
-        <div class="header-actions">
-          <button class="primary-button" data-route="/dashboard/conversation">开始对话</button>
+          <p id="page-description">查看当前状态、待办事件和交付阻塞。</p>
         </div>
       </header>
 
@@ -47,6 +77,6 @@
     </main>
   </div>
 
-  <script src="/dashboard/app.js?v=20260712-2" defer></script>
+  <script src="/dashboard/app.js?v=20260713-6" defer></script>
 </body>
 </html>

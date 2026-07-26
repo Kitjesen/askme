@@ -2,12 +2,34 @@
 
 `askme.memory` is split by product responsibility:
 
-- `core/`: conversation, session, episodic, procedural, admission policy, and memory service orchestration.
-- `retrieval/`: knowledge catalog, import, RAG bridge, semantic/vector indexes, map and site knowledge.
+- `core/`: conversation, session, episodic, procedural, admission policy, and
+  memory service orchestration.
+- `retrieval/`: knowledge catalog, import, RAG bridge, semantic/vector indexes,
+  map and site knowledge.
 - `backends/`: optional external memory providers such as RobotMem and MemPalace.
-- `intelligence/`: trend analysis, association graph, extraction adapter, and suggestion strategy.
+- `intelligence/`: trend analysis, association graph, extraction adapter, and
+  suggestion strategy.
 
 Product boundary:
+
+- `askme.conversation` owns durable conversation identity and the authoritative
+  Thread/Turn/Generation lifecycle. `core/conversation.py` remains the
+  prompt-context and legacy-history projection during the compatibility phase;
+  it must not mint a second business turn or treat a provider socket/session as
+  a product conversation.
+- Target boundary: Memory consumes committed conversation events and may
+  summarize, retrieve, rank, expire, or erase memory records without settling
+  conversation turns. `ConversationMemoryConsumer` is the committed-event
+  projection path: it reads ordered `CommittedTurnEvent` records, submits only
+  user-authored text through the governed memory admission seam, and writes an
+  atomic checkpoint after each acknowledged event.
+
+- Product gate: the committed-event consumer is fail-closed until erased-thread
+  deletion propagation exists end to end. Runtime wiring exposes
+  `memory_committed_event_consumer.processing_allowed=false` and
+  `blocked_reason=erasure_deletion_unsupported` by default. Do not enable
+  processing for production until Memory can delete or invalidate records for
+  later Conversation Core erasures.
 
 - Customer knowledge RAG is the evidence source for answers shown to customers.
   Configure it with `memory.customer_knowledge_backend`; `memory.backend` remains
@@ -21,6 +43,7 @@ New code should import from the owner package, for example:
 
 ```python
 from askme.memory.core import EpisodicMemory
+from askme.memory.core import ConversationMemoryConsumer
 from askme.memory.retrieval import MemoryBridge
 ```
 

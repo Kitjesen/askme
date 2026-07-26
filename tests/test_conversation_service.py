@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 
 import pytest
 
@@ -173,6 +174,72 @@ async def test_bound_text_handler_exposes_turn_scoped_rag_to_service() -> None:
     assert payload["reply"] == "bound reply"
     assert payload["evidence"][0]["record_id"] == "bound-turn"
     assert payload["rag"]["turn_scoped"] is True
+
+
+async def test_timeout_child_tasks_return_their_own_turn_scoped_rag() -> None:
+    class TextHandler:
+        def __init__(self) -> None:
+            self._turn_rag: ContextVar[dict[str, object] | None] = ContextVar(
+                "test_turn_rag",
+                default=None,
+            )
+            self._both_started = asyncio.Event()
+            self._started = 0
+
+        @property
+        def current_turn_rag(self) -> dict[str, object] | None:
+            return self._turn_rag.get()
+
+        async def process_turn(self, text: str) -> str:
+            self._turn_rag.set(
+                {
+                    "evidence": [{"record_id": f"evidence-{text}", "text": text}],
+                    "rag": {
+                        "turn_scoped": True,
+                        "answer_policy": {"state": "grounded"},
+                    },
+                }
+            )
+            self._started += 1
+            if self._started == 2:
+                self._both_started.set()
+            await self._both_started.wait()
+            await asyncio.sleep(0)
+            return f"reply:{text}"
+
+    class SharedMemoryHealth:
+        def health(self) -> dict[str, object]:
+            return {
+                "last_evidence": [{"record_id": "wrong-shared-evidence"}],
+                "last_answer_policy": {
+                    "state": "stale",
+                    "action": "refuse_and_request_update",
+                },
+            }
+
+    handler = TextHandler()
+    service = ConversationService(
+        chat_handler=handler.process_turn,
+        memory_handler=SharedMemoryHealth(),
+        chat_timeout_s=1.0,
+        chat_max_concurrency=2,
+    )
+
+    first, second = await asyncio.gather(
+        service.chat_payload_from_body(
+            {"text": "one", "conversation_thread_id": "thread-one"}
+        ),
+        service.chat_payload_from_body(
+            {"text": "two", "conversation_thread_id": "thread-two"}
+        ),
+    )
+
+    assert first["reply"] == "reply:one"
+    assert second["reply"] == "reply:two"
+    assert first["evidence"] == [{"record_id": "evidence-one", "text": "one"}]
+    assert second["evidence"] == [{"record_id": "evidence-two", "text": "two"}]
+    assert first["rag"]["turn_scoped"] is True
+    assert second["rag"]["turn_scoped"] is True
 
 
 async def test_chat_payload_accepts_conversation_id_aliases() -> None:

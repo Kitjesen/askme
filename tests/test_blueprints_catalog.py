@@ -450,6 +450,45 @@ def test_blueprint_startup_commands_support_no_io_preflight(startup_command: str
     assert payload["modules"]
 
 
+@pytest.mark.parametrize(
+    "startup_command",
+    [
+        spec.startup_command
+        for spec in BLUEPRINTS
+        if spec.startup_command.startswith("python -m askme.blueprints.presets.")
+    ],
+)
+@pytest.mark.parametrize("cli_args", [("--help",), ("--preflight", "--json")])
+def test_blueprint_preset_cli_paths_do_not_import_runtime_io_modules(
+    startup_command: str,
+    cli_args: tuple[str, ...],
+) -> None:
+    module_name = _module_name_from_python_m(startup_command)
+    probe = (
+        "import json, runpy, sys; "
+        f"sys.argv = [{module_name!r}, *{list(cli_args)!r}]; "
+        f"runpy.run_module({module_name!r}, run_name='__main__'); "
+        "bad = sorted(name for name in sys.modules "
+        "if name == 'askme.runtime.modules' "
+        "or name.startswith('askme.runtime.modules.') "
+        "or name == 'askme.voice.output.tts' "
+        "or name.startswith('askme.voice.output.tts.')); "
+        "print(json.dumps(bad))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", probe],
+        cwd=".",
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    bad_modules = json.loads(result.stdout.strip().splitlines()[-1])
+    assert bad_modules == []
+
+
 def test_blueprint_runner_preflight_payload_matches_catalog_inspection() -> None:
     runtime = load_blueprint_runtime("text")
     inspection = inspect_blueprint("text")

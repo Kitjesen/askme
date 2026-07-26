@@ -207,6 +207,13 @@ class ConversationSessionManager:
                         raise ValueError(
                             f"Conversation session is not active: {requested_session_id}"
                         )
+                    _validate_session_identity(
+                        existing,
+                        channel=channel,
+                        operator_id=operator_id,
+                        robot_id=robot_id,
+                        site_id=site_id,
+                    )
                     existing.last_activity_at = now
                     existing.updated_at = now
                     if metadata:
@@ -219,7 +226,9 @@ class ConversationSessionManager:
                         existing.handoff_id = handoff_id
                     return existing
 
-            if requested_session_id is None:
+            if requested_session_id is None and any(
+                _has_identity(value) for value in (operator_id, robot_id, site_id)
+            ):
                 existing = self._store.find_active(
                     channel=channel,
                     operator_id=operator_id,
@@ -497,3 +506,33 @@ class ConversationSessionManager:
         if turn.assistant_text:
             parts.append(f"Assistant: {turn.assistant_text}")
         return " | ".join(parts)
+
+
+def _has_identity(value: str | None) -> bool:
+    return bool(str(value or "").strip())
+
+
+def _validate_session_identity(
+    session: ConversationSession,
+    *,
+    channel: str,
+    operator_id: str | None,
+    robot_id: str | None,
+    site_id: str | None,
+) -> None:
+    """Reject attempts to reuse an explicit session under a different identity."""
+
+    if session.channel != channel:
+        raise ValueError(
+            f"Conversation session identity conflict for {session.session_id}: channel"
+        )
+    for field_name, supplied in (
+        ("operator_id", operator_id),
+        ("robot_id", robot_id),
+        ("site_id", site_id),
+    ):
+        if _has_identity(supplied) and getattr(session, field_name) != supplied:
+            raise ValueError(
+                "Conversation session identity conflict for "
+                f"{session.session_id}: {field_name}"
+            )

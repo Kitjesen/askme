@@ -55,7 +55,14 @@ class ConfirmationAgent(ProactiveAgent):
             session.transition(ClarificationState.AWAITING_CONFIRMATION)
 
         prompt = f"即将执行{skill.description}，说'确认'继续，说'取消'停止。"
-        answer = await ask_and_listen(prompt, audio)
+        if context.listen_once is None:
+            answer = await ask_and_listen(prompt, audio)
+        else:
+            answer = await ask_and_listen(
+                prompt,
+                audio,
+                listen_once=context.listen_once,
+            )
 
         # ESTOP — abort immediately, no cancellation message needed
         if self._is_estop(answer):

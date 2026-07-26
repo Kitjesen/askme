@@ -131,7 +131,14 @@ API_SURFACES: tuple[ApiSurfaceSpec, ...] = (
         package="askme.api.admin",
         registrar="register_admin_routes",
         audience="supervisors, delivery engineers, and product operators",
-        owns=("identity readiness", "authorization", "audit", "skill governance", "agent profiles"),
+        owns=(
+            "identity readiness",
+            "authorization",
+            "audit",
+            "skill governance",
+            "agent profiles",
+            "voice hardware lab",
+        ),
         route_modules=(
             "askme.api.routes.agent_profiles",
             "askme.api.routes.audit",
@@ -139,6 +146,7 @@ API_SURFACES: tuple[ApiSurfaceSpec, ...] = (
             "askme.api.routes.field_delivery_resources",
             "askme.api.routes.governance",
             "askme.api.routes.skills",
+            "askme.api.routes.voice_lab",
         ),
         customer_boundary="面向主管、交付和产品管理员；高风险配置、审批和审计不应出现在游客或普通客户入口。",
     ),

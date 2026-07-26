@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from askme.robot_interaction.routing.fast_voice_intents import (
+    FastVoiceIntentKind,
+    match_fast_voice_intent,
+    normalize_fast_voice_text,
+)
 from askme.robot_interaction.routing_policy import DEFAULT_ROUTING_POLICY, RoutingPolicy
 from askme.robot_interaction.scenario_intents import classify_scenario_intent
 
@@ -48,6 +53,10 @@ class Intent:
     scenario_id: str | None = None
     confidence: float | None = None
     route_evidence: dict[str, Any] | None = None
+    cached_audio_key: str | None = None
+    preface_text: str | None = None
+    preface_audio_key: str | None = None
+    fast_path: bool = False
 
 
 class IntentRouter:
@@ -59,8 +68,9 @@ class IntentRouter:
     _VISUAL_QUERY_MARKERS = (
         "看见",
         "看到",
-        "看一下",
-        "看看",
+        "看看周围",
+        "看一下环境",
+        "描述环境",
         "前面有什么",
         "周围有什么",
         "周围看到",
@@ -130,7 +140,38 @@ class IntentRouter:
             )
 
         # 2. Quick replies — simple greetings, skip LLM entirely
+        fast_intent = match_fast_voice_intent(
+            stripped,
+            quick_replies=self._policy.quick_replies,
+            estop_keywords=self._policy.estop_keywords,
+        )
+        if (
+            fast_intent is not None
+            and fast_intent.kind is FastVoiceIntentKind.READ_ONLY_SKILL
+        ):
+            logger.info(
+                "Read-only fast voice intent: '%s' -> skill '%s'",
+                stripped,
+                fast_intent.skill_name,
+            )
+            return Intent(
+                type=IntentType.VOICE_TRIGGER,
+                skill_name=fast_intent.skill_name,
+                raw_text=stripped,
+                trigger_phrase=stripped,
+                reason="read_only_fast_path",
+                preface_text=fast_intent.preface_text,
+                preface_audio_key=fast_intent.cache_key,
+                fast_path=True,
+            )
+
         quick = self._policy.quick_replies.get(stripped)
+        if (
+            quick is None
+            and fast_intent is not None
+            and fast_intent.kind is FastVoiceIntentKind.QUICK_REPLY
+        ):
+            quick = fast_intent.reply_text
         if quick:
             logger.info("Quick reply: '%s' → '%s'", stripped, quick)
             return Intent(
@@ -140,6 +181,10 @@ class IntentRouter:
                 # Compatibility: older loops read the quick reply from skill_name.
                 skill_name=quick,
                 reason="quick_reply",
+                cached_audio_key=(
+                    fast_intent.cache_key if fast_intent is not None else None
+                ),
+                fast_path=fast_intent is not None,
             )
 
         # 3. Built-in commands
@@ -212,7 +257,11 @@ class IntentRouter:
 
     def _estop_reason(self, text: str) -> str | None:
         """Return the ESTOP source when text is a hard-stop command."""
-        if text.lower() in self._policy.estop_keywords:
+        normalized = normalize_fast_voice_text(text)
+        if normalized and any(
+            normalize_fast_voice_text(keyword) == normalized
+            for keyword in self._policy.estop_keywords
+        ):
             return "estop_keyword"
 
         checker = self._safety

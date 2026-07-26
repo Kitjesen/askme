@@ -8,6 +8,7 @@ Extracted from audio_agent.py for independent testing.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -68,6 +69,15 @@ class ASRResult:
     latency_ms: float = 0.0
 
 
+@dataclass(frozen=True)
+class ASRPartial:
+    """Best non-final transcript available during the active ASR session."""
+
+    text: str
+    source: str
+    age_ms: float = 0.0
+
+
 class ASRManager:
     """ASR backend manager with local/cloud fallback and noise filtering.
 
@@ -112,6 +122,13 @@ class ASRManager:
         # State
         self._recognition_active: bool = False
         self._start_time: float = 0.0
+        self._last_local_partial: str = ""
+        self._last_local_partial_at: float = 0.0
+        # Cloud connection setup is blocking.  An abort advances this epoch so
+        # a late successful start cannot resurrect ownership after the capture
+        # cycle that requested it has already been cancelled.
+        self._session_lock = threading.RLock()
+        self._session_epoch = 0
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -123,21 +140,55 @@ class ASRManager:
         Called at listen-start so the connection is warm when speech arrives.
         Audio fed before start_session() is silently accepted by the cloud.
         """
-        if self._cloud_preconnect and self._cloud.available and not self._cloud_active:
-            self._cloud_active = self._cloud.start_session()
+        with self._session_lock:
+            if (
+                not self._cloud_preconnect
+                or not self._cloud.available
+                or self._cloud_active
+            ):
+                return
+            session_epoch = self._session_epoch
+
+        started = self._cloud.start_session()
+        with self._session_lock:
+            stale_start = session_epoch != self._session_epoch
+            self._cloud_active = bool(started and not stale_start)
+        if stale_start and started:
+            # The provider socket was created after abort_session() had already
+            # cancelled the old handle.  Close this late handle as well.
+            self._cloud.cancel_session()
 
     def start_session(self) -> None:
         """Start a new recognition session (both local + cloud if available)."""
-        self._recognition_active = True
-        self._start_time = time.monotonic()
+        with self._session_lock:
+            self._recognition_active = True
+            self._start_time = time.monotonic()
+            self._last_local_partial = ""
+            self._last_local_partial_at = 0.0
+            session_epoch = self._session_epoch
 
         # Always reset local stream for a clean slate
         self._asr.reset(self._stream)
         self._stream = self._asr.create_stream()
 
         # Start cloud session if not already pre-connected
-        if self._cloud.available and not self._cloud_active:
-            self._cloud_active = self._cloud.start_session()
+        with self._session_lock:
+            if (
+                session_epoch != self._session_epoch
+                or not self._recognition_active
+            ):
+                return
+            should_start_cloud = self._cloud.available and not self._cloud_active
+        if should_start_cloud:
+            started = self._cloud.start_session()
+            with self._session_lock:
+                stale_start = (
+                    session_epoch != self._session_epoch
+                    or not self._recognition_active
+                )
+                self._cloud_active = bool(started and not stale_start)
+            if stale_start and started:
+                self._cloud.cancel_session()
         # If preconnect already opened, just keep it
 
     def feed_cloud_only(self, samples_int16: np.ndarray) -> None:
@@ -201,6 +252,83 @@ class ASRManager:
         latency = (time.monotonic() - self._start_time) * 1000
         return ASRResult(text=text, source="local", latency_ms=latency)
 
+    def partial_result(self) -> ASRPartial | None:
+        """Return the latest cloud or local partial without ending the session."""
+
+        if not self._recognition_active:
+            return None
+
+        snapshot = getattr(self._cloud, "status_snapshot", None)
+        if self._cloud_active and callable(snapshot):
+            try:
+                cloud_status = snapshot()
+            except Exception:
+                cloud_status = {}
+            if isinstance(cloud_status, dict):
+                cloud_text = str(
+                    cloud_status.get("partial_text")
+                    or cloud_status.get("final_text")
+                    or ""
+                ).strip()
+                if cloud_text:
+                    age = cloud_status.get("partial_age_ms")
+                    if cloud_status.get("final_text"):
+                        age = cloud_status.get("final_age_ms", age)
+                    try:
+                        age_ms = max(0.0, float(age or 0.0))
+                    except (TypeError, ValueError):
+                        age_ms = 0.0
+                    return ASRPartial(
+                        text=cloud_text,
+                        source="cloud_partial",
+                        age_ms=age_ms,
+                    )
+
+        local_text = self._asr.get_result(self._stream).strip()
+        if not local_text:
+            return None
+        now = time.monotonic()
+        if local_text != self._last_local_partial:
+            self._last_local_partial = local_text
+            self._last_local_partial_at = now
+        age_ms = (
+            (now - self._last_local_partial_at) * 1000.0
+            if self._last_local_partial_at > 0
+            else 0.0
+        )
+        return ASRPartial(text=local_text, source="local_partial", age_ms=age_ms)
+
+    def commit_partial(
+        self,
+        partial: ASRPartial,
+        awaiting_confirmation: bool = False,
+    ) -> ASRResult | None:
+        """End ASR immediately using an explicitly admitted safe partial."""
+
+        if not self._recognition_active or not partial.text.strip():
+            return None
+        latency = (time.monotonic() - self._start_time) * 1000.0
+        if self._cloud_active:
+            self._cloud_active = False
+            try:
+                self._cloud.cancel_session()
+            except Exception as exc:
+                logger.debug("Cloud ASR cancel after fast endpoint failed: %s", exc)
+        self._recognition_active = False
+        text = partial.text.strip()
+        if self._filter_noise(text, awaiting_confirmation):
+            return ASRResult(
+                text=text,
+                source=partial.source,
+                is_noise=True,
+                latency_ms=latency,
+            )
+        return ASRResult(
+            text=self._restore_punctuation(text),
+            source=partial.source,
+            latency_ms=latency,
+        )
+
     def finish_and_get_result(
         self, awaiting_confirmation: bool = False
     ) -> ASRResult | None:
@@ -232,6 +360,12 @@ class ASRManager:
             except Exception as exc:
                 logger.warning("Cloud ASR finish failed, using local: %s", exc)
                 cloud_text = ""
+
+        # A stop request may close the cloud session from another thread to
+        # release the bounded provider wait above.  Do not decode or publish a
+        # local fallback after ownership of this recognition turn was revoked.
+        if not self._recognition_active:
+            return None
 
         # Get local ASR result (fallback)
         while self._asr.is_ready(self._stream):
@@ -303,8 +437,28 @@ class ASRManager:
         self._recognition_active = False
         self._cloud_active = False
         self._start_time = 0.0
+        self._last_local_partial = ""
+        self._last_local_partial_at = 0.0
         self._asr.reset(self._stream)
         self._stream = self._asr.create_stream()
+
+    def abort_session(self) -> None:
+        """Abort provider I/O without mutating a local stream in another thread.
+
+        ``AudioAgent.stop_listening`` may call this while the capture worker is
+        blocked in cloud connection setup or final-result collection.  Closing
+        the provider socket releases that wait; the next listen cycle performs
+        the normal local-stream reset from its owning capture thread.
+        """
+
+        with self._session_lock:
+            self._session_epoch += 1
+            self._recognition_active = False
+            self._cloud_active = False
+            try:
+                self._cloud.cancel_session()
+            except Exception as exc:
+                logger.debug("Cloud ASR cancel during listener abort failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Public API

@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from unittest.mock import patch
 
 import askme.pipeline.text_loop as text_loop_module
@@ -341,7 +342,10 @@ async def test_text_loop_calls_runtime_bridge_without_session_when_manager_unava
 
     assert await loop._maybe_handle_runtime_bridge("status") is True
 
-    assert bridge.calls == [{"text": "status"}]
+    assert bridge.calls[0]["text"] == "status"
+    degraded_session_id = bridge.calls[0]["conversation_session_id"]
+    assert str(degraded_session_id).startswith("text-degraded-")
+    assert bridge.calls[0]["session_id"] == degraded_session_id
 
 
 @pytest.mark.asyncio
@@ -384,7 +388,8 @@ async def test_text_loop_falls_back_to_local_pipeline_when_runtime_bridge_fails(
 
     assert [call["text"] for call in bridge.calls] == ["status?"]
     assert pipeline.process_calls == ["status?"]
-    assert pipeline.process_conversation_session_ids == [None]
+    assert len(pipeline.process_conversation_session_ids) == 1
+    assert pipeline.process_conversation_session_ids[0]
 
 
 @pytest.mark.asyncio
@@ -485,11 +490,118 @@ async def test_process_turn_can_use_runtime_bridge_when_explicitly_requested() -
         voice_runtime_bridge=bridge,
     )
 
-    reply = await loop.process_turn("status?", runtime_policy="runtime_first")
+    reply = await loop.process_turn(
+        "status?",
+        runtime_policy="runtime_first",
+        conversation_session_id="conv-explicit",
+    )
 
     assert reply == "runtime handled"
     assert bridge.calls[0]["text"] == "status?"
+    assert bridge.calls[0]["conversation_session_id"] == "conv-explicit"
+    assert bridge.calls[0]["session_id"] == "conv-explicit"
     assert pipeline.process_calls == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_runtime_first_turns_keep_their_explicit_sessions() -> None:
+    bridge = _Bridge()
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+        voice_runtime_bridge=bridge,
+    )
+
+    replies = await asyncio.gather(
+        loop.process_turn(
+            "request-a",
+            runtime_policy="runtime_first",
+            conversation_session_id="conv-a",
+        ),
+        loop.process_turn(
+            "request-b",
+            runtime_policy="runtime_first",
+            conversation_session_id="conv-b",
+        ),
+    )
+
+    assert replies == ["runtime handled", "runtime handled"]
+    sessions_by_text = {
+        str(call["text"]): call["conversation_session_id"]
+        for call in bridge.calls
+    }
+    assert sessions_by_text == {"request-a": "conv-a", "request-b": "conv-b"}
+
+
+@pytest.mark.asyncio
+async def test_runtime_fallback_cognition_keeps_each_explicit_session() -> None:
+    class _BarrierUnhandledBridge:
+        def __init__(self) -> None:
+            self.first_started = threading.Event()
+            self.release_first = threading.Event()
+
+        def handle_text_input(self, text: str, **_kwargs):
+            if text == "巡检 A 区":
+                self.first_started.set()
+                assert self.release_first.wait(timeout=2.0)
+            return {"handled": False}
+
+    class _CapturingCognition:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def plan_from_payload(self, payload: dict) -> dict:
+            self.calls.append(dict(payload))
+            return {
+                "planned": True,
+                "plan": {
+                    "planning_session_id": f"plan-{payload['conversation_session_id']}",
+                    "interaction_state": "awaiting_confirmation",
+                    "next_prompt": f"reply-{payload['conversation_session_id']}",
+                    "handoff_ready": False,
+                },
+            }
+
+    bridge = _BarrierUnhandledBridge()
+    cognition = _CapturingCognition()
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+        voice_runtime_bridge=bridge,
+        cognition_handler=cognition,
+    )
+    first = asyncio.create_task(
+        loop.process_turn(
+            "巡检 A 区",
+            runtime_policy="runtime_first",
+            conversation_session_id="conv-a",
+        )
+    )
+    assert await asyncio.to_thread(bridge.first_started.wait, 1.0)
+    second = asyncio.create_task(
+        loop.process_turn(
+            "巡检 B 区",
+            runtime_policy="runtime_first",
+            conversation_session_id="conv-b",
+        )
+    )
+    assert await second == "reply-conv-b"
+    bridge.release_first.set()
+    assert await first == "reply-conv-a"
+
+    session_by_text = {
+        str(call["text"]): call["conversation_session_id"]
+        for call in cognition.calls
+    }
+    assert session_by_text == {"巡检 A 区": "conv-a", "巡检 B 区": "conv-b"}
 
 
 @pytest.mark.asyncio
@@ -582,6 +694,130 @@ async def test_process_turn_routes_robot_task_to_cognition_before_llm() -> None:
     assert pipeline.process_calls == []
     assert cognition.calls[0]["text"] == "巡检 A 区"
     assert loop.last_cognition_result["plan"]["planning_session_id"] == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cognition_results_are_task_local() -> None:
+    class _PerRequestCognition:
+        async def plan_from_payload(self, payload: dict) -> dict:
+            text = str(payload["text"])
+            suffix = "a" if "A" in text else "b"
+            return {
+                "planned": True,
+                "plan": {
+                    "planning_session_id": f"plan-{suffix}",
+                    "conversation_session_id": payload["conversation_session_id"],
+                    "interaction_state": "awaiting_confirmation",
+                    "next_prompt": f"reply-{suffix}",
+                    "handoff_ready": False,
+                },
+            }
+
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+        cognition_handler=_PerRequestCognition(),
+    )
+    first_speaking = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def _controlled_speak(reply: str) -> None:
+        if reply == "reply-a":
+            first_speaking.set()
+            await release_first.wait()
+
+    loop._speak_reply = _controlled_speak  # type: ignore[method-assign]
+
+    async def _invoke(text: str, session_id: str) -> tuple[str, dict]:
+        reply = await loop.process_turn(
+            text,
+            speak=True,
+            conversation_session_id=session_id,
+        )
+        return reply, dict(loop.last_cognition_result or {})
+
+    first = asyncio.create_task(_invoke("巡检 A 区", "conv-a"))
+    await asyncio.wait_for(first_speaking.wait(), timeout=1.0)
+    second_result = await _invoke("巡检 B 区", "conv-b")
+    release_first.set()
+    first_result = await first
+
+    assert first_result[0] == "reply-a"
+    assert second_result[0] == "reply-b"
+    assert first_result[1]["plan"]["planning_session_id"] == "plan-a"
+    assert second_result[1]["plan"]["planning_session_id"] == "plan-b"
+    assert first_result[1]["plan"]["conversation_session_id"] == "conv-a"
+    assert second_result[1]["plan"]["conversation_session_id"] == "conv-b"
+
+
+@pytest.mark.asyncio
+async def test_same_thread_cognition_turns_wait_for_prior_plan_state() -> None:
+    class _BlockingCognition:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def plan_from_payload(self, payload: dict) -> dict:
+            self.calls.append(dict(payload))
+            if len(self.calls) == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+                return {
+                    "planned": True,
+                    "plan": {
+                        "planning_session_id": "plan-shared",
+                        "interaction_state": "awaiting_confirmation",
+                        "next_prompt": "confirm shared plan",
+                        "handoff_ready": False,
+                    },
+                }
+            return {
+                "planned": True,
+                "plan": {
+                    "planning_session_id": payload.get("planning_session_id"),
+                    "interaction_state": "ready_for_arbiter",
+                    "next_prompt": "shared plan confirmed",
+                    "handoff_ready": True,
+                },
+            }
+
+    cognition = _BlockingCognition()
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+        cognition_handler=cognition,
+    )
+    first = asyncio.create_task(
+        loop.process_turn(
+            "巡检 A 区",
+            conversation_session_id="shared-cognition-thread",
+        )
+    )
+    await asyncio.wait_for(cognition.first_started.wait(), timeout=1.0)
+    confirmation = asyncio.create_task(
+        loop.process_turn(
+            "确认",
+            conversation_session_id="shared-cognition-thread",
+        )
+    )
+    await asyncio.sleep(0.02)
+    assert len(cognition.calls) == 1
+
+    cognition.release_first.set()
+    replies = await asyncio.gather(first, confirmation)
+
+    assert replies == ["confirm shared plan", "shared plan confirmed"]
+    assert cognition.calls[1]["planning_session_id"] == "plan-shared"
+    assert cognition.calls[1]["operator_confirmation"] is True
 
 
 @pytest.mark.asyncio

@@ -461,6 +461,7 @@ def test_conversation_route_exposes_router_factory_for_app_composition() -> None
         dispatch_runtime=lambda *_args, **_kwargs: None,  # type: ignore[arg-type,return-value]
         cors_options_response=lambda methods: JSONResponse({"methods": methods}),
         logger=logging.getLogger("tests.conversation_router_factory"),
+        authorize=lambda *_args: None,
         runtime_voice_turn_timeout_s=0.1,
     )
 

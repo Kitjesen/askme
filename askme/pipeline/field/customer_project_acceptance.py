@@ -222,8 +222,19 @@ def register_customer_project_onsite_evidence(
             "reason": "unsupported_onsite_evidence_status",
             "allowed_statuses": sorted(ONSITE_ACCEPTANCE_STATUSES),
         }
+    tier = _manual_onsite_evidence_tier(evidence.get("evidence_tier"))
+    if tier == "":
+        return {
+            "accepted": False,
+            "reason": "unsupported_onsite_evidence_trust_tier",
+            "allowed_tiers": ["acceptance_candidate"],
+        }
     evidence_path = str(evidence.get("path") or evidence.get("evidence_path") or "").strip()
-    inventory = _evidence_file_inventory(evidence_path, evidence_url=_evidence_url(evidence_path)) if evidence_path else {}
+    inventory = (
+        _evidence_file_inventory(evidence_path, evidence_url=_evidence_url(evidence_path))
+        if evidence_path
+        else {}
+    )
     trust = _customer_project_onsite_evidence_trust(
         evidence_type=evidence_type,
         status=status,
@@ -235,13 +246,6 @@ def register_customer_project_onsite_evidence(
             "accepted": False,
             "reason": trust["reason"],
             "trust": trust,
-        }
-    tier = _manual_onsite_evidence_tier(evidence.get("evidence_tier"))
-    if tier == "":
-        return {
-            "accepted": False,
-            "reason": "unsupported_onsite_evidence_trust_tier",
-            "allowed_tiers": ["acceptance_candidate"],
         }
     profile = _normalize_customer_project_profile(load_field_site_profile(path))
     _snapshot_customer_project_revision(
@@ -356,7 +360,9 @@ def customer_project_acceptance_closure(
                 f"manual={site_checklist.get('manual_check_count') or 0}; "
                 f"blocked={site_checklist.get('blocked_count') or 0}"
             ),
-            "next_step": str(site_checklist.get("customer_message") or "Review site acceptance checklist."),
+            "next_step": str(
+                site_checklist.get("customer_message") or "Review site acceptance checklist."
+            ),
         },
         review_gate,
         {
@@ -364,21 +370,31 @@ def customer_project_acceptance_closure(
             "label": "Dossier verification",
             "status": "ready" if dossier_verification.get("valid") else "blocked",
             "evidence": str(dossier_verification.get("reason") or "unknown"),
-            "next_step": "Regenerate the acceptance dossier." if not dossier_verification.get("valid") else "Dossier manifest is self-consistent.",
+            "next_step": "Regenerate the acceptance dossier."
+            if not dossier_verification.get("valid")
+            else "Dossier manifest is self-consistent.",
         },
         {
             "gate_id": "proposal_verification",
             "label": "Proposal verification",
             "status": str(proposal_verification.get("status") or "manual_check"),
-            "evidence": str(proposal_verification.get("evidence") or "No matching proposal bundle found."),
-            "next_step": str(proposal_verification.get("next_step") or "Export and verify the customer proposal bundle."),
+            "evidence": str(
+                proposal_verification.get("evidence") or "No matching proposal bundle found."
+            ),
+            "next_step": str(
+                proposal_verification.get("next_step")
+                or "Export and verify the customer proposal bundle."
+            ),
         },
         {
             "gate_id": "audit_export",
             "label": "Audit export",
             "status": str(audit_export.get("status") or "manual_check"),
             "evidence": str(audit_export.get("evidence") or "No matching audit export found."),
-            "next_step": str(audit_export.get("next_step") or "Create a scoped audit export for customer handoff."),
+            "next_step": str(
+                audit_export.get("next_step")
+                or "Create a scoped audit export for customer handoff."
+            ),
         },
     ]
     pre_signoff_statuses = {str(gate.get("status") or "") for gate in pre_signoff_gates}
@@ -439,7 +455,9 @@ def customer_project_acceptance_closure(
             "proposal_bundle": proposal_verification,
             "audit_export": audit_export,
         },
-        "evidence_timeline": _customer_project_acceptance_evidence_timeline(onsite, reviews, signoffs),
+        "evidence_timeline": _customer_project_acceptance_evidence_timeline(
+            onsite, reviews, signoffs
+        ),
         "blocked_uses": (
             [
                 "无人值守生产上线",
@@ -503,7 +521,9 @@ def register_customer_project_acceptance_review(
         "risk_acknowledgement": review.get("risk_acknowledgement") is True,
         "evidence_refs": [
             str(item)
-            for item in (review.get("evidence_refs") if isinstance(review.get("evidence_refs"), list) else [])
+            for item in (
+                review.get("evidence_refs") if isinstance(review.get("evidence_refs"), list) else []
+            )
             if str(item).strip()
         ],
         "project_scope": _delivery_scope_payload(profile),
@@ -602,7 +622,9 @@ def register_customer_project_customer_signoff(
         }
     evidence_refs = [
         str(item)
-        for item in (signoff.get("evidence_refs") if isinstance(signoff.get("evidence_refs"), list) else [])
+        for item in (
+            signoff.get("evidence_refs") if isinstance(signoff.get("evidence_refs"), list) else []
+        )
         if str(item).strip()
     ]
     evidence_ref_assessment = _customer_project_customer_signoff_evidence_ref_assessment(
@@ -696,9 +718,7 @@ def customer_project_acceptance_report(
     )["onsite_acceptance_evidence"]
     onsite_summary = _mapping(onsite_evidence.get("summary"))
     env_refs = site_profile_env_references(profile)
-    missing_env = [
-        item for item in env_refs if item.get("required") and not item.get("configured")
-    ]
+    missing_env = [item for item in env_refs if item.get("required") and not item.get("configured")]
     delivery_workflow = _customer_project_delivery_workflow(
         profile=profile,
         report=report,
@@ -713,7 +733,9 @@ def customer_project_acceptance_report(
             "label": "Site profile",
             "status": "ready" if report.get("status") == "passed" else "blocked",
             "evidence": str(path),
-            "next_step": "Fix site profile validation errors." if errors else "Site profile schema is valid.",
+            "next_step": "Fix site profile validation errors."
+            if errors
+            else "Site profile schema is valid.",
         },
         {
             "gate_id": "managed_object_acceptance",
@@ -730,10 +752,7 @@ def customer_project_acceptance_report(
                 f"{execution_summary.get('ready_object_count') or 0}/"
                 f"{execution_summary.get('object_count') or 0} 个对象具备可执行接入计划"
             ),
-            "next_step": str(
-                execution_bindings.get("next_step")
-                or "客户签收前先生成执行绑定。"
-            ),
+            "next_step": str(execution_bindings.get("next_step") or "客户签收前先生成执行绑定。"),
         },
         {
             "gate_id": "deployment_credentials",
@@ -756,8 +775,7 @@ def customer_project_acceptance_report(
                 f"个必需现场证据回执已通过；回执总数={onsite_summary.get('receipt_count') or 0}"
             ),
             "next_step": str(
-                onsite_summary.get("next_step")
-                or "生产上线声明前先完成现场真实冒烟测试。"
+                onsite_summary.get("next_step") or "生产上线声明前先完成现场真实冒烟测试。"
             ),
         },
         *field_readiness_gates,
@@ -861,8 +879,12 @@ def _customer_project_launch_readiness(
             status=_customer_project_launch_gate_status(
                 _mapping(gate_by_id.get("managed_object_execution_bindings")).get("status")
             ),
-            evidence=str(_mapping(gate_by_id.get("managed_object_execution_bindings")).get("evidence") or ""),
-            next_step=str(_mapping(gate_by_id.get("managed_object_execution_bindings")).get("next_step") or ""),
+            evidence=str(
+                _mapping(gate_by_id.get("managed_object_execution_bindings")).get("evidence") or ""
+            ),
+            next_step=str(
+                _mapping(gate_by_id.get("managed_object_execution_bindings")).get("next_step") or ""
+            ),
         ),
         _launch_readiness_gate(
             gate_id="deployment_credentials",
@@ -919,7 +941,9 @@ def _customer_project_launch_readiness(
         _launch_readiness_gate(
             gate_id="site_acceptance_checklist",
             label="客户现场验收清单",
-            status=_customer_project_launch_gate_status(site_acceptance_checklist.get("overall_status")),
+            status=_customer_project_launch_gate_status(
+                site_acceptance_checklist.get("overall_status")
+            ),
             evidence=(
                 f"ready={site_acceptance_checklist.get('ready_count') or 0}, "
                 f"manual={site_acceptance_checklist.get('manual_check_count') or 0}, "
@@ -973,7 +997,9 @@ def _customer_project_launch_readiness(
             "manual_check_count": len(
                 [gate for gate in launch_gates if gate.get("status") == "manual_check"]
             ),
-            "blocked_count": len([gate for gate in launch_gates if gate.get("status") == "blocked"]),
+            "blocked_count": len(
+                [gate for gate in launch_gates if gate.get("status") == "blocked"]
+            ),
             "missing_env_count": len(missing_env),
             "onsite_receipt_count": int(onsite_summary.get("receipt_count") or 0),
         },
@@ -1054,9 +1080,21 @@ def _launch_readiness_gate(
 
 def _customer_project_launch_gate_status(value: Any) -> str:
     text = str(value or "").strip().lower()
-    if text in {"ready", "ok", "healthy", "passed", "production_ready", "ready_for_onsite_acceptance"}:
+    if text in {
+        "ready",
+        "ok",
+        "healthy",
+        "passed",
+        "production_ready",
+        "ready_for_onsite_acceptance",
+    }:
         return "ready"
-    if text in {"manual_check", "ready_for_lab", "ready_for_acceptance", "ready_for_customer_signoff"}:
+    if text in {
+        "manual_check",
+        "ready_for_lab",
+        "ready_for_acceptance",
+        "ready_for_customer_signoff",
+    }:
         return "manual_check"
     if text in {"blocked", "failed", "missing", "invalid", "error"}:
         return "blocked"
@@ -1091,41 +1129,51 @@ def _execution_binding_report_contracts(execution_bindings: dict[str, Any]) -> l
         if not isinstance(plan, dict):
             continue
         adapters = []
-        for adapter in plan.get("input_adapters") if isinstance(plan.get("input_adapters"), list) else []:
+        for adapter in (
+            plan.get("input_adapters") if isinstance(plan.get("input_adapters"), list) else []
+        ):
             if not isinstance(adapter, dict):
                 continue
             contract = _mapping(adapter.get("adapter_contract"))
-            adapters.append({
-                "protocol_id": str(adapter.get("protocol_id") or ""),
-                "adapter": str(adapter.get("adapter") or ""),
-                "status": str(adapter.get("status") or ""),
-                "bridge": str(contract.get("bridge") or ""),
-                "ingest_endpoint": str(contract.get("ingest_endpoint") or ""),
-                "device_signature_required": bool(contract.get("device_signature_required")),
-                "device_secret_envs": _string_list(contract.get("device_secret_envs")),
-                "dry_run_command": str(contract.get("dry_run_command") or ""),
-                "live_command": str(contract.get("live_command") or ""),
-                "sample_fixture": str(contract.get("sample_fixture") or ""),
-            })
+            adapters.append(
+                {
+                    "protocol_id": str(adapter.get("protocol_id") or ""),
+                    "adapter": str(adapter.get("adapter") or ""),
+                    "status": str(adapter.get("status") or ""),
+                    "bridge": str(contract.get("bridge") or ""),
+                    "ingest_endpoint": str(contract.get("ingest_endpoint") or ""),
+                    "device_signature_required": bool(contract.get("device_signature_required")),
+                    "device_secret_envs": _string_list(contract.get("device_secret_envs")),
+                    "dry_run_command": str(contract.get("dry_run_command") or ""),
+                    "live_command": str(contract.get("live_command") or ""),
+                    "sample_fixture": str(contract.get("sample_fixture") or ""),
+                }
+            )
         skill_routes = []
         for route in plan.get("skill_routes") if isinstance(plan.get("skill_routes"), list) else []:
             if not isinstance(route, dict):
                 continue
-            skill_routes.append({
-                "capability": str(route.get("capability") or route.get("resource_id") or ""),
-                "tool": str(route.get("tool") or ""),
-                "output_contract": str(route.get("output_contract") or ""),
-                "approval_policy": str(route.get("approval_policy") or ""),
-                "hardware_boundary": str(route.get("hardware_boundary") or route.get("safety_boundary") or ""),
-            })
-        contracts.append({
-            "object_id": str(plan.get("object_id") or ""),
-            "display_name": str(plan.get("display_name") or plan.get("object_id") or ""),
-            "overall_status": str(plan.get("overall_status") or ""),
-            "input_adapters": adapters,
-            "bridge_contract": _mapping(plan.get("bridge_contract")),
-            "skill_routes": skill_routes,
-        })
+            skill_routes.append(
+                {
+                    "capability": str(route.get("capability") or route.get("resource_id") or ""),
+                    "tool": str(route.get("tool") or ""),
+                    "output_contract": str(route.get("output_contract") or ""),
+                    "approval_policy": str(route.get("approval_policy") or ""),
+                    "hardware_boundary": str(
+                        route.get("hardware_boundary") or route.get("safety_boundary") or ""
+                    ),
+                }
+            )
+        contracts.append(
+            {
+                "object_id": str(plan.get("object_id") or ""),
+                "display_name": str(plan.get("display_name") or plan.get("object_id") or ""),
+                "overall_status": str(plan.get("overall_status") or ""),
+                "input_adapters": adapters,
+                "bridge_contract": _mapping(plan.get("bridge_contract")),
+                "skill_routes": skill_routes,
+            }
+        )
     return contracts
 
 
@@ -1184,8 +1232,12 @@ def _compact_field_readiness(payload: dict[str, Any]) -> dict[str, Any]:
     gates = payload.get("gates") if isinstance(payload.get("gates"), dict) else {}
     blockers = payload.get("blockers") if isinstance(payload.get("blockers"), list) else []
     warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
-    next_actions = payload.get("next_actions") if isinstance(payload.get("next_actions"), list) else []
-    delivery_brief = payload.get("delivery_brief") if isinstance(payload.get("delivery_brief"), dict) else {}
+    next_actions = (
+        payload.get("next_actions") if isinstance(payload.get("next_actions"), list) else []
+    )
+    delivery_brief = (
+        payload.get("delivery_brief") if isinstance(payload.get("delivery_brief"), dict) else {}
+    )
     device_onboarding = _mapping(payload.get("device_onboarding"))
     device_onboarding_summary = _mapping(device_onboarding.get("summary"))
     return {
@@ -1231,7 +1283,9 @@ def _compact_field_readiness(payload: dict[str, Any]) -> dict[str, Any]:
             "scenario": _compact_evidence_report(payload.get("scenario_report")),
             "ingest_smoke": _compact_evidence_report(payload.get("smoke_report")),
             "voice_smoke": _compact_evidence_report(payload.get("voice_smoke_report")),
-            "notification_smoke": _compact_evidence_report(payload.get("notification_smoke_report")),
+            "notification_smoke": _compact_evidence_report(
+                payload.get("notification_smoke_report")
+            ),
             "runtime_roundtrip": _compact_evidence_report(payload.get("runtime_roundtrip_report")),
         },
         "archive": {
@@ -1239,12 +1293,22 @@ def _compact_field_readiness(payload: dict[str, Any]) -> dict[str, Any]:
             "event_count": _mapping(payload.get("archive")).get("event_count") or 0,
             "scenario_ids": _mapping(payload.get("archive")).get("scenario_ids") or [],
             "sources": _mapping(payload.get("archive")).get("sources") or [],
-            "trusted_device_event_count": _mapping(payload.get("archive")).get("trusted_device_event_count") or 0,
+            "trusted_device_event_count": _mapping(payload.get("archive")).get(
+                "trusted_device_event_count"
+            )
+            or 0,
         },
         "device_trust": {
-            "registered_device_count": _mapping(payload.get("device_trust")).get("registered_device_count") or 0,
-            "signed_device_count": _mapping(payload.get("device_trust")).get("signed_device_count") or 0,
-            "unsigned_device_count": _mapping(payload.get("device_trust")).get("unsigned_device_count") or 0,
+            "registered_device_count": _mapping(payload.get("device_trust")).get(
+                "registered_device_count"
+            )
+            or 0,
+            "signed_device_count": _mapping(payload.get("device_trust")).get("signed_device_count")
+            or 0,
+            "unsigned_device_count": _mapping(payload.get("device_trust")).get(
+                "unsigned_device_count"
+            )
+            or 0,
             "all_registered_devices_signature_ready": _mapping(payload.get("device_trust")).get(
                 "all_registered_devices_signature_ready"
             )
@@ -1525,14 +1589,20 @@ def _customer_project_auto_onsite_evidence_receipt(
 def _customer_project_onsite_evidence_receipts(profile: dict[str, Any]) -> list[dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
     for item in _customer_project_raw_onsite_evidence(profile):
-        evidence_type = _normalize_onsite_evidence_type(item.get("evidence_type") or item.get("type"))
+        evidence_type = _normalize_onsite_evidence_type(
+            item.get("evidence_type") or item.get("type")
+        )
         status = _normalize_onsite_evidence_status(item.get("status"))
         path = str(item.get("path") or item.get("evidence_path") or "").strip()
         inventory = _evidence_file_inventory(path, evidence_url=_evidence_url(path)) if path else {}
         receipt = {
-            "receipt_type": str(item.get("receipt_type") or "askme.customer_project_onsite_evidence"),
+            "receipt_type": str(
+                item.get("receipt_type") or "askme.customer_project_onsite_evidence"
+            ),
             "receipt_version": int(item.get("receipt_version") or 1),
-            "receipt_id": str(item.get("receipt_id") or _slug(f"{evidence_type}-{item.get('recorded_at') or ''}")),
+            "receipt_id": str(
+                item.get("receipt_id") or _slug(f"{evidence_type}-{item.get('recorded_at') or ''}")
+            ),
             "recorded_at": _float_value(item.get("recorded_at")),
             "operator_id": str(item.get("operator_id") or "system"),
             "reason": str(item.get("reason") or ""),
@@ -1542,7 +1612,9 @@ def _customer_project_onsite_evidence_receipts(profile: dict[str, Any]) -> list[
             "label": str(item.get("label") or evidence_type.replace("_", " ").title()),
             "summary": str(item.get("summary") or item.get("note") or ""),
             "path": path,
-            "evidence_url": str(inventory.get("evidence_url") or item.get("evidence_url") or _evidence_url(path)),
+            "evidence_url": str(
+                inventory.get("evidence_url") or item.get("evidence_url") or _evidence_url(path)
+            ),
             "exists": bool(inventory.get("exists")) if path else bool(item.get("exists")),
             "size_bytes": int(inventory.get("size_bytes") or item.get("size_bytes") or 0),
             "sha256": str(inventory.get("sha256") or item.get("sha256") or ""),
@@ -1728,9 +1800,14 @@ def _customer_project_acceptance_reviews(profile: dict[str, Any]) -> list[dict[s
     reviews: list[dict[str, Any]] = []
     for item in _customer_project_raw_acceptance_reviews(profile):
         review = {
-            "review_type": str(item.get("review_type") or "askme.customer_project_acceptance_review"),
+            "review_type": str(
+                item.get("review_type") or "askme.customer_project_acceptance_review"
+            ),
             "review_version": int(item.get("review_version") or 1),
-            "review_id": str(item.get("review_id") or _slug(f"{item.get('decision')}-{item.get('reviewed_at') or ''}")),
+            "review_id": str(
+                item.get("review_id")
+                or _slug(f"{item.get('decision')}-{item.get('reviewed_at') or ''}")
+            ),
             "reviewed_at": _float_value(item.get("reviewed_at")),
             "operator_id": str(item.get("operator_id") or "system"),
             "decision": _normalize_acceptance_review_decision(item.get("decision")),
@@ -1738,7 +1815,9 @@ def _customer_project_acceptance_reviews(profile: dict[str, Any]) -> list[dict[s
             "risk_acknowledgement": item.get("risk_acknowledgement") is True,
             "evidence_refs": [
                 str(ref)
-                for ref in (item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else [])
+                for ref in (
+                    item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else []
+                )
                 if str(ref).strip()
             ],
             "project_scope": _mapping(item.get("project_scope")),
@@ -1765,7 +1844,9 @@ def _customer_project_acceptance_review_gate(latest_review: dict[str, Any]) -> d
     else:
         status = "manual_check"
         evidence = f"{decision or 'review'} by {latest_review.get('operator_id') or 'system'}"
-        next_step = str(latest_review.get("reason") or "Resolve review notes before customer signoff.")
+        next_step = str(
+            latest_review.get("reason") or "Resolve review notes before customer signoff."
+        )
     return {
         "gate_id": "manual_acceptance_review",
         "label": "Manual acceptance review",
@@ -1788,7 +1869,9 @@ def _customer_project_customer_signoffs(profile: dict[str, Any]) -> list[dict[st
     signoffs: list[dict[str, Any]] = []
     for item in _customer_project_raw_customer_signoffs(profile):
         signoff = {
-            "signoff_type": str(item.get("signoff_type") or "askme.customer_project_customer_signoff"),
+            "signoff_type": str(
+                item.get("signoff_type") or "askme.customer_project_customer_signoff"
+            ),
             "signoff_version": int(item.get("signoff_version") or 1),
             "signoff_id": str(
                 item.get("signoff_id")
@@ -1806,7 +1889,9 @@ def _customer_project_customer_signoffs(profile: dict[str, Any]) -> list[dict[st
             "credential_sha256": _normalize_sha256_hex(item.get("credential_sha256")),
             "evidence_refs": [
                 str(ref)
-                for ref in (item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else [])
+                for ref in (
+                    item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else []
+                )
                 if str(ref).strip()
             ],
             "gate_snapshot": _mapping(item.get("gate_snapshot")),
@@ -1825,8 +1910,8 @@ def _customer_project_customer_signoffs(profile: dict[str, Any]) -> list[dict[st
         stored_sha = str(signoff.get("signoff_payload_sha256") or "")
         signoff["integrity_valid"] = not stored_sha or stored_sha == expected_sha
         if signoff["decision"] == "accepted" and not stored_evidence_assessment:
-            signoff["evidence_ref_assessment"] = (
-                _legacy_customer_signoff_evidence_ref_assessment(signoff)
+            signoff["evidence_ref_assessment"] = _legacy_customer_signoff_evidence_ref_assessment(
+                signoff
             )
         signoffs.append(signoff)
     signoffs.sort(key=lambda item: float(item.get("signed_at") or 0), reverse=True)
@@ -1958,7 +2043,11 @@ def _legacy_customer_signoff_evidence_ref_assessment(signoff: dict[str, Any]) ->
         "resolved_refs": [],
         "unresolved_refs": [
             str(item)
-            for item in (signoff.get("evidence_refs") if isinstance(signoff.get("evidence_refs"), list) else [])
+            for item in (
+                signoff.get("evidence_refs")
+                if isinstance(signoff.get("evidence_refs"), list)
+                else []
+            )
             if str(item).strip()
         ],
         "missing_onsite_evidence_types": list(ONSITE_ACCEPTANCE_REQUIRED_EVIDENCE_TYPES),
@@ -2112,7 +2201,9 @@ def _customer_project_customer_signoff_gate(
         next_step = str(latest_signoff.get("reason") or "处理客户拒收意见后重新提交验收。")
     else:
         status = "manual_check"
-        evidence = f"{decision or 'signoff'} by {latest_signoff.get('signatory_name') or 'customer'}"
+        evidence = (
+            f"{decision or 'signoff'} by {latest_signoff.get('signatory_name') or 'customer'}"
+        )
         next_step = str(latest_signoff.get("reason") or "处理客户整改意见后重新提交签收。")
     return {
         "gate_id": "customer_signoff",
@@ -2133,34 +2224,40 @@ def _customer_project_acceptance_evidence_timeline(
     timeline: list[dict[str, Any]] = []
     for receipt in receipts:
         item = _mapping(receipt)
-        timeline.append({
-            "timestamp": item.get("recorded_at"),
-            "type": "onsite_evidence",
-            "status": item.get("status"),
-            "label": item.get("label") or item.get("evidence_type"),
-            "summary": item.get("summary") or item.get("path"),
-            "ref": item.get("receipt_id"),
-        })
+        timeline.append(
+            {
+                "timestamp": item.get("recorded_at"),
+                "type": "onsite_evidence",
+                "status": item.get("status"),
+                "label": item.get("label") or item.get("evidence_type"),
+                "summary": item.get("summary") or item.get("path"),
+                "ref": item.get("receipt_id"),
+            }
+        )
     for review in reviews:
         item = _mapping(review)
-        timeline.append({
-            "timestamp": item.get("reviewed_at"),
-            "type": "acceptance_review",
-            "status": item.get("decision"),
-            "label": f"review by {item.get('operator_id') or 'system'}",
-            "summary": item.get("reason"),
-            "ref": item.get("review_id"),
-        })
+        timeline.append(
+            {
+                "timestamp": item.get("reviewed_at"),
+                "type": "acceptance_review",
+                "status": item.get("decision"),
+                "label": f"review by {item.get('operator_id') or 'system'}",
+                "summary": item.get("reason"),
+                "ref": item.get("review_id"),
+            }
+        )
     for signoff in signoffs or []:
         item = _mapping(signoff)
-        timeline.append({
-            "timestamp": item.get("signed_at"),
-            "type": "customer_signoff",
-            "status": item.get("decision"),
-            "label": f"signoff by {item.get('signatory_name') or 'customer'}",
-            "summary": item.get("reason"),
-            "ref": item.get("signoff_id"),
-        })
+        timeline.append(
+            {
+                "timestamp": item.get("signed_at"),
+                "type": "customer_signoff",
+                "status": item.get("decision"),
+                "label": f"signoff by {item.get('signatory_name') or 'customer'}",
+                "summary": item.get("reason"),
+                "ref": item.get("signoff_id"),
+            }
+        )
     timeline.sort(key=lambda item: float(item.get("timestamp") or 0), reverse=True)
     return timeline[:30]
 
@@ -2352,7 +2449,9 @@ def _customer_project_field_readiness_gates(readiness: dict[str, Any]) -> list[d
     gates = _mapping(readiness.get("gates"))
     blockers = readiness.get("blockers") if isinstance(readiness.get("blockers"), list) else []
     warnings = readiness.get("warnings") if isinstance(readiness.get("warnings"), list) else []
-    next_actions = readiness.get("next_actions") if isinstance(readiness.get("next_actions"), list) else []
+    next_actions = (
+        readiness.get("next_actions") if isinstance(readiness.get("next_actions"), list) else []
+    )
     reports = _mapping(readiness.get("reports"))
     return [
         {
@@ -2363,7 +2462,11 @@ def _customer_project_field_readiness_gates(readiness: dict[str, Any]) -> list[d
                 f"status={readiness.get('status') or 'unknown'}; "
                 f"blockers={len(blockers)} warnings={len(warnings)}"
             ),
-            "next_step": str(next_actions[0] if next_actions else _mapping(readiness.get("delivery_brief")).get("release_claim") or "-"),
+            "next_step": str(
+                next_actions[0]
+                if next_actions
+                else _mapping(readiness.get("delivery_brief")).get("release_claim") or "-"
+            ),
         },
         {
             "gate_id": "field_smoke_evidence",
@@ -2374,7 +2477,9 @@ def _customer_project_field_readiness_gates(readiness: dict[str, Any]) -> list[d
                 manual=("uses_real_hardware",),
             ),
             "evidence": _reports_evidence(reports, ("scenario", "ingest_smoke")),
-            "next_step": "Run the bridge against real camera, sensor, and robot diagnostic input." if not gates.get("uses_real_hardware") else "Scenario and ingest smoke evidence is ready.",
+            "next_step": "Run the bridge against real camera, sensor, and robot diagnostic input."
+            if not gates.get("uses_real_hardware")
+            else "Scenario and ingest smoke evidence is ready.",
         },
         {
             "gate_id": "voice_notification_evidence",
@@ -2470,9 +2575,7 @@ def _customer_project_site_acceptance_checklist(
     missing_env: list[dict[str, Any]],
 ) -> dict[str, Any]:
     receipts = (
-        onsite_evidence.get("receipts")
-        if isinstance(onsite_evidence.get("receipts"), list)
-        else []
+        onsite_evidence.get("receipts") if isinstance(onsite_evidence.get("receipts"), list) else []
     )
     latest_by_type = _latest_onsite_receipts_by_type(receipts)
     gates = _mapping(field_readiness.get("gates"))
@@ -2485,7 +2588,9 @@ def _customer_project_site_acceptance_checklist(
             "owner": "delivery",
             "status": "ready" if report.get("status") == "passed" else "blocked",
             "evidence": str(report.get("profile_path") or ""),
-            "next_step": "Fix site profile validation errors." if report.get("status") != "passed" else "Site profile is valid.",
+            "next_step": "Fix site profile validation errors."
+            if report.get("status") != "passed"
+            else "Site profile is valid.",
             "required_for_customer_acceptance": True,
             "project_scope": scope,
         },
@@ -2584,7 +2689,10 @@ def _customer_project_site_acceptance_checklist(
             fallback_evidence=_reports_evidence(reports, ("runtime_roundtrip",)),
             fallback_status=_boolean_gate_status(
                 gates,
-                required=("runtime_roundtrip_smoke_passed", "runtime_roundtrip_final_status_verified"),
+                required=(
+                    "runtime_roundtrip_smoke_passed",
+                    "runtime_roundtrip_final_status_verified",
+                ),
                 manual=("trusted_device_events_observed",),
             ),
             next_step="Run signed runtime callback roundtrip against the lab or site runtime arbiter.",
@@ -2736,9 +2844,7 @@ def _customer_project_acceptance_delivery_chain(report: dict[str, Any]) -> dict[
         else []
     )
     workflow_by_id = {
-        str(item.get("step_id") or ""): item
-        for item in workflow_steps
-        if isinstance(item, dict)
+        str(item.get("step_id") or ""): item for item in workflow_steps if isinstance(item, dict)
     }
     runtime_step = _mapping(workflow_by_id.get("runtime_bindings"))
     runtime_gate = _find_gate(launch_readiness, "managed_object_execution_bindings")
@@ -2797,9 +2903,7 @@ def _customer_project_acceptance_delivery_chain(report: dict[str, Any]) -> dict[
             step_id="capability_resource_binding",
             label="Capability and resource binding",
             status=str(
-                execution_summary.get("overall_status")
-                or runtime_step.get("status")
-                or "blocked"
+                execution_summary.get("overall_status") or runtime_step.get("status") or "blocked"
             ),
             customer_question=(
                 "Are every object's vision model, sensor protocol, skill package, "
@@ -2823,17 +2927,30 @@ def _customer_project_acceptance_delivery_chain(report: dict[str, Any]) -> dict[
         _delivery_chain_step(
             step_id="runtime_blueprint",
             label="Runtime blueprint",
-            status=str(runtime_gate.get("status") or launch_readiness.get("overall_status") or "manual_check"),
+            status=str(
+                runtime_gate.get("status")
+                or launch_readiness.get("overall_status")
+                or "manual_check"
+            ),
             customer_question="Which robot runtime plan can execute this customer project?",
-            evidence=str(runtime_gate.get("evidence") or "Runtime evidence is taken from launch readiness gates."),
-            next_step=str(runtime_gate.get("next_step") or "Bind the customer project to a runtime blueprint."),
+            evidence=str(
+                runtime_gate.get("evidence")
+                or "Runtime evidence is taken from launch readiness gates."
+            ),
+            next_step=str(
+                runtime_gate.get("next_step") or "Bind the customer project to a runtime blueprint."
+            ),
             endpoint="/api/blueprints",
             source_surface_id="runtime_blueprint_binding",
         ),
         _delivery_chain_step(
             step_id="acceptance_package",
             label="Acceptance and handoff package",
-            status=str(site_checklist.get("overall_status") or field_device_gate.get("status") or "manual_check"),
+            status=str(
+                site_checklist.get("overall_status")
+                or field_device_gate.get("status")
+                or "manual_check"
+            ),
             customer_question="Can the customer verify acceptance from evidence rather than internal code?",
             evidence=(
                 f"site_checklist={site_checklist.get('overall_status') or 'unknown'}; "
@@ -2966,7 +3083,10 @@ def _customer_project_acceptance_dossier_verification(report: dict[str, Any]) ->
 
 def verify_customer_project_proposal_bundle(proposal: dict[str, Any]) -> dict[str, Any]:
     """Verify the integrity metadata of a customer project proposal bundle."""
-    if not isinstance(proposal, dict) or proposal.get("proposal_type") != "askme.customer_project_proposal":
+    if (
+        not isinstance(proposal, dict)
+        or proposal.get("proposal_type") != "askme.customer_project_proposal"
+    ):
         return {"valid": False, "reason": "invalid_customer_project_proposal_bundle"}
     manifest = _mapping(proposal.get("manifest"))
     expected = str(manifest.get("payload_sha256") or "")
@@ -2983,7 +3103,9 @@ def verify_customer_project_proposal_bundle(proposal: dict[str, Any]) -> dict[st
     dossier = _mapping(proposal.get("acceptance_dossier"))
     release_bundle = _mapping(proposal.get("approved_template_release_bundle"))
     proposal_scope = _delivery_scope_payload_from_customer_site(customer, site)
-    manifest_scope = _delivery_scope_payload_from_customer_site(manifest, {"site_id": manifest.get("site_id")})
+    manifest_scope = _delivery_scope_payload_from_customer_site(
+        manifest, {"site_id": manifest.get("site_id")}
+    )
     for field in ("tenant_id", "delivery_namespace", "customer_id", "project_id", "site_id"):
         manifest_value = str(manifest_scope.get(field) or "")
         proposal_value = str(proposal_scope.get(field) or "")
@@ -3018,11 +3140,17 @@ def verify_customer_project_proposal_bundle(proposal: dict[str, Any]) -> dict[st
         readable_chain.get("steps") if isinstance(readable_chain.get("steps"), list) else []
     )
     manifest_chain_count = manifest.get("proposal_delivery_chain_step_count")
-    if manifest_chain_count not in (None, "") and int(manifest_chain_count or 0) != len(readable_chain_steps):
+    if manifest_chain_count not in (None, "") and int(manifest_chain_count or 0) != len(
+        readable_chain_steps
+    ):
         errors.append("manifest.proposal_delivery_chain_step_count mismatch")
     manifest_chain_status = str(manifest.get("proposal_delivery_chain_status") or "")
     readable_chain_status = str(readable_chain.get("overall_status") or "")
-    if manifest_chain_status and readable_chain_status and manifest_chain_status != readable_chain_status:
+    if (
+        manifest_chain_status
+        and readable_chain_status
+        and manifest_chain_status != readable_chain_status
+    ):
         errors.append("manifest.proposal_delivery_chain_status mismatch")
 
     return {
@@ -3040,7 +3168,10 @@ def verify_customer_project_proposal_bundle(proposal: dict[str, Any]) -> dict[st
 
 def verify_customer_project_acceptance_dossier(dossier: dict[str, Any]) -> dict[str, Any]:
     """Verify the manifest for a customer acceptance dossier."""
-    if not isinstance(dossier, dict) or dossier.get("dossier_type") != "askme.customer_project_acceptance":
+    if (
+        not isinstance(dossier, dict)
+        or dossier.get("dossier_type") != "askme.customer_project_acceptance"
+    ):
         return {"valid": False, "reason": "invalid_customer_acceptance_dossier"}
     manifest = _mapping(dossier.get("manifest"))
     expected = str(manifest.get("payload_sha256") or "")
@@ -3069,11 +3200,17 @@ def verify_customer_project_acceptance_dossier(dossier: dict[str, Any]) -> dict[
         delivery_chain.get("steps") if isinstance(delivery_chain.get("steps"), list) else []
     )
     manifest_chain_count = manifest.get("delivery_chain_step_count")
-    if manifest_chain_count not in (None, "") and int(manifest_chain_count or 0) != len(delivery_chain_steps):
+    if manifest_chain_count not in (None, "") and int(manifest_chain_count or 0) != len(
+        delivery_chain_steps
+    ):
         errors.append("manifest.delivery_chain_step_count mismatch")
     manifest_chain_status = str(manifest.get("delivery_chain_status") or "")
     dossier_chain_status = str(delivery_chain.get("overall_status") or "")
-    if manifest_chain_status and dossier_chain_status and manifest_chain_status != dossier_chain_status:
+    if (
+        manifest_chain_status
+        and dossier_chain_status
+        and manifest_chain_status != dossier_chain_status
+    ):
         errors.append("manifest.delivery_chain_status mismatch")
     return {
         "valid": not errors,

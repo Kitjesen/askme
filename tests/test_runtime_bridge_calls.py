@@ -1,10 +1,12 @@
 import pytest
 
+from askme.conversation import VoiceTurnLedger
 from askme.pipeline.channels.runtime_bridge_calls import (
     call_bridge_turn,
     handle_runtime_bridge_result,
     try_runtime_bridge_turn,
 )
+from askme.voice_gateway import VoiceGatewayService
 
 
 def test_call_bridge_turn_maps_conversation_session_to_session_id() -> None:
@@ -100,6 +102,88 @@ async def test_handle_runtime_bridge_result_records_spoken_reply() -> None:
         ("user", "status"),
         ("assistant", "runtime ok"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_reply_is_not_committed_when_delivery_fails(tmp_path) -> None:
+    class Conversation:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str]] = []
+
+        def add_user_message(self, text: str) -> None:
+            self.messages.append(("user", text))
+
+        def add_assistant_message(self, text: str) -> None:
+            self.messages.append(("assistant", text))
+
+    class Pipeline:
+        def __init__(self) -> None:
+            self._turn_ledger = VoiceTurnLedger(tmp_path / "runtime-delivery.jsonl")
+            self._conversation = Conversation()
+            self._episodic = None
+
+    async def fail_delivery(_reply: str) -> None:
+        raise RuntimeError("speaker failed")
+
+    pipeline = Pipeline()
+    with pytest.raises(RuntimeError, match="speaker failed"):
+        await handle_runtime_bridge_result(
+            {"handled": True, "turn": {"spoken_reply": "not delivered"}},
+            user_text="status",
+            conversation_session_id="thread-runtime",
+            pipeline=pipeline,
+            on_spoken_reply=fail_delivery,
+            label="Voice",
+        )
+
+    turn = pipeline._turn_ledger.list_turns(thread_id="thread-runtime")[0]
+    assert turn.status.value == "cancelled"
+    assert turn.assistant_text == ""
+    assert pipeline._conversation.messages == [("user", "status")]
+
+
+@pytest.mark.asyncio
+async def test_gateway_history_waits_for_runtime_reply_delivery() -> None:
+    class Bridge:
+        def handle_voice_text(self, text: str, **kwargs):
+            return {"handled": True, "turn": {"spoken_reply": f"reply:{text}"}}
+
+        def status_snapshot(self):
+            return {"enabled": True}
+
+    gateway = VoiceGatewayService(Bridge())
+
+    async def fail_delivery(_reply: str) -> None:
+        raise RuntimeError("speaker failed")
+
+    with pytest.raises(RuntimeError, match="speaker failed"):
+        await try_runtime_bridge_turn(
+            gateway.handle_voice_text,
+            "first",
+            conversation_session_id="thread-gateway-delivery",
+            pipeline=object(),
+            on_spoken_reply=fail_delivery,
+            label="Voice",
+        )
+
+    failed_snapshot = gateway.conversation_snapshot("thread-gateway-delivery")
+    assert failed_snapshot is not None
+    assert failed_snapshot.turns == ()
+
+    outcome = await try_runtime_bridge_turn(
+        gateway.handle_voice_text,
+        "second",
+        conversation_session_id="thread-gateway-delivery",
+        pipeline=object(),
+        on_spoken_reply=lambda _reply: None,
+        label="Voice",
+    )
+
+    assert outcome.handled is True
+    delivered_snapshot = gateway.conversation_snapshot("thread-gateway-delivery")
+    assert delivered_snapshot is not None
+    assert len(delivered_snapshot.turns) == 1
+    assert delivered_snapshot.turns[0].assistant_text == "reply:second"
 
 
 @pytest.mark.asyncio

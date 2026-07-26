@@ -19,6 +19,8 @@ customer signoff != production readiness.
 For a new contributor, read the root `README.md` first for runnable entry
 points, then use `askme/README.md` for package ownership and
 `docs/MULTI_AGENT_WORKFLOW.md` for parallel work rules.
+Use `CONTEXT.md` for the accepted domain language and `docs/adr/` for durable
+architecture decisions.
 
 ## Root Map
 
@@ -27,6 +29,7 @@ points, then use `askme/README.md` for package ownership and
 | `askme/` | Product Python package and runtime implementation. |
 | `tests/` | Automated tests and architecture guards. |
 | `docs/` | Architecture, operations, ownership, and workflow docs. |
+| `CONTEXT.md` | Accepted domain vocabulary shared by product and engineering. |
 | `scripts/` | Operator scripts, smoke checks, demos, benchmarks, maintenance. |
 | `deploy/` | Install files, service units, site profiles, delivery templates. |
 | `docker/` | Dockerfiles, Compose stacks, and container entrypoints. |
@@ -48,6 +51,7 @@ Inside `askme/`, use owner packages and keep this dependency direction:
 ```text
 blueprints
   -> runtime / pipeline / voice_gateway / robot_interaction / api / mcp
+  -> conversation
   -> ports / interfaces / contracts / schemas
   -> providers
   -> robot / perception / voice / llm / memory backends / external services
@@ -69,6 +73,7 @@ Use disjoint write scopes:
 | --- | --- |
 | Runtime composition | `askme/runtime/`, `askme/blueprints/` |
 | Voice middle layer | `askme/voice_gateway/`, `askme/robot_interaction/` |
+| Conversation Domain | `askme/conversation/` |
 | Provider boundary | `askme/ports/`, `askme/providers/` |
 | Robot/perception adapters | `askme/robot/`, `askme/perception/` |
 | API/MCP/tools | `askme/api/`, `askme/mcp/`, `askme/tools/` |

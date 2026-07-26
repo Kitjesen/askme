@@ -16,7 +16,7 @@ class MockLLMClient:
         from openai import AsyncOpenAI
         self._client = AsyncOpenAI(
             api_key=os.environ["MINIMAX_API_KEY"],
-            base_url="https://api.minimax.chat/v1",
+            base_url="https://api.minimaxi.com/v1",
         )
 
     async def chat(self, messages, **kwargs):

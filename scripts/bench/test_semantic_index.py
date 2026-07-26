@@ -34,7 +34,7 @@ async def main():
     # LLM client
     client = AsyncOpenAI(
         api_key=os.environ["MINIMAX_API_KEY"],
-        base_url="https://api.minimax.chat/v1",
+        base_url="https://api.minimaxi.com/v1",
     )
 
     class FakeLLM:

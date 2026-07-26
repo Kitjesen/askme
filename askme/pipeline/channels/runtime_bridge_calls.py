@@ -14,7 +14,11 @@ from dataclasses import dataclass
 from inspect import Parameter, isawaitable, signature
 from typing import Any
 
-from askme.pipeline.channels.external_turns import record_external_turn
+from askme.pipeline.channels.external_turns import (
+    begin_external_turn,
+    cancel_external_turn,
+    complete_external_turn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,7 @@ def call_bridge_turn(
     robot_id: str | None = None,
     site_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    defer_recording: bool = False,
 ) -> dict[str, Any] | None:
     """Call a bridge method with only the kwargs it declares."""
     context = {
@@ -46,6 +51,8 @@ def call_bridge_turn(
         "site_id": site_id,
         "metadata": metadata,
     }
+    if defer_recording:
+        context["defer_recording"] = True
     return method(text, **_supported_kwargs(method, context))
 
 
@@ -88,22 +95,50 @@ async def try_runtime_bridge_turn(
         method,
         user_text,
         conversation_session_id=conversation_session_id,
+        defer_recording=True,
     )
 
-    return await runtime_bridge_result_outcome(
+    outcome = await runtime_bridge_result_outcome(
         bridge_result,
         user_text=user_text,
+        conversation_session_id=conversation_session_id,
         pipeline=pipeline,
         dispatcher=dispatcher,
         on_spoken_reply=on_spoken_reply,
         label=label,
     )
+    if (
+        outcome.handled
+        and isinstance(bridge_result, dict)
+        and bridge_result.get("conversation_recording_deferred") is True
+    ):
+        gateway = getattr(method, "__self__", None)
+        record_local_turn = getattr(gateway, "record_local_turn", None)
+        session_id = str(
+            bridge_result.get("conversation_thread_id")
+            or bridge_result.get("conversation_session_id")
+            or conversation_session_id
+            or ""
+        ).strip()
+        if session_id and callable(record_local_turn):
+            record_local_turn(
+                session_id,
+                user_text=user_text,
+                assistant_text=outcome.reply,
+                metadata={
+                    "bridge_handled": True,
+                    "local_fallback": False,
+                    "delivery_confirmed": True,
+                },
+            )
+    return outcome
 
 
 async def handle_runtime_bridge_result(
     bridge_result: Any,
     *,
     user_text: str,
+    conversation_session_id: str | None = None,
     pipeline: Any,
     dispatcher: Any | None = None,
     on_spoken_reply: ReplyHandler | None = None,
@@ -113,6 +148,7 @@ async def handle_runtime_bridge_result(
     outcome = await runtime_bridge_result_outcome(
         bridge_result,
         user_text=user_text,
+        conversation_session_id=conversation_session_id,
         pipeline=pipeline,
         dispatcher=dispatcher,
         on_spoken_reply=on_spoken_reply,
@@ -125,6 +161,7 @@ async def runtime_bridge_result_outcome(
     bridge_result: Any,
     *,
     user_text: str,
+    conversation_session_id: str | None = None,
     pipeline: Any,
     dispatcher: Any | None = None,
     on_spoken_reply: ReplyHandler | None = None,
@@ -161,16 +198,37 @@ async def runtime_bridge_result_outcome(
     spoken_reply = turn.get("spoken_reply")
     if isinstance(spoken_reply, str) and spoken_reply.strip():
         reply = spoken_reply.strip()
-        record_external_turn(
+        external_turn = begin_external_turn(
             pipeline,
             user_text,
-            reply,
             source="runtime",
+            conversation_session_id=conversation_session_id,
+            provider="runtime_bridge",
+            response_text=reply,
         )
-        if on_spoken_reply is not None:
-            maybe_awaitable = on_spoken_reply(reply)
-            if isawaitable(maybe_awaitable):
-                await maybe_awaitable
+        try:
+            if on_spoken_reply is not None:
+                maybe_awaitable = on_spoken_reply(reply)
+                if isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+        except BaseException:
+            cancel_external_turn(
+                pipeline,
+                external_turn,
+                user_text=user_text,
+                source="runtime",
+                reason="runtime_reply_delivery_failed",
+                conversation_session_id=conversation_session_id,
+            )
+            raise
+        complete_external_turn(
+            pipeline,
+            external_turn,
+            user_text=user_text,
+            assistant_text=reply,
+            source="runtime",
+            conversation_session_id=conversation_session_id,
+        )
         return RuntimeBridgeOutcome(handled=True, reply=reply)
 
     logger.warning(

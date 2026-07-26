@@ -140,6 +140,21 @@ class TestCommandVerbs:
         det = _make_detector()
         assert det.is_addressed("开始巡检") is True
 
+    def test_strict_public_mode_does_not_treat_command_shape_as_address(self):
+        det = _make_detector(
+            names=["小算"],
+            uncertain_policy="ignore",
+            allow_pronoun_address=False,
+        )
+
+        for background_speech in (
+            "老王说帮我查一下天气",
+            "他们说导航到仓库就好",
+            "我们去检查一下温度",
+            "告诉我现在几点",
+        ):
+            assert det.is_addressed(background_speech) is False
+
 
 class TestQuestionPatterns:
     def test_几点_addressed(self):

@@ -175,3 +175,26 @@ class TestStopOrderReversesStartOrder:
         await app.stop()
         stop_log = [e for e in log if e.startswith("stop:")]
         assert stop_log == ["stop:c", "stop:b", "stop:a"]
+
+    @pytest.mark.asyncio
+    async def test_failed_start_rolls_back_attempted_modules(self) -> None:
+        log: list[str] = []
+        runtime = Runtime.use(_ModuleA) + Runtime.use(_ModuleB) + Runtime.use(_ModuleC)
+        app = await runtime.build({"_log": log})
+
+        async def fail_after_allocating() -> None:
+            log.append("start:b")
+            raise RuntimeError("startup failed")
+
+        app.modules["b"].start = fail_after_allocating
+        log.clear()
+
+        with pytest.raises(RuntimeError, match="startup failed"):
+            await app.start()
+
+        assert log == ["start:a", "start:b", "stop:b", "stop:a"]
+        assert app._started is False
+
+        log.clear()
+        await app.stop()
+        assert log == []

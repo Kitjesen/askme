@@ -7,6 +7,7 @@ from copy import deepcopy
 from inspect import Parameter, signature
 from typing import Any
 
+from askme.conversation import canonical_thread_id
 from askme.ports import VoiceTurnBridgePort
 from askme.voice_gateway.session import (
     ConversationSessionManager,
@@ -57,48 +58,74 @@ class VoiceGatewayService:
         self,
         text: str,
         *,
+        thread_id: str | None = None,
+        conversation_thread_id: str | None = None,
         conversation_session_id: str | None = None,
+        conversation_id: str | None = None,
+        chat_session_id: str | None = None,
         session_id: str | None = None,
         operator_id: str | None = None,
         robot_id: str | None = None,
         site_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         include_session: bool = False,
+        defer_recording: bool = False,
     ) -> dict[str, Any] | None:
         return self._handle_turn(
             "voice",
             "handle_voice_text",
             text,
-            conversation_session_id=conversation_session_id or session_id,
+            conversation_session_id=canonical_thread_id(
+                thread_id=thread_id,
+                conversation_thread_id=conversation_thread_id,
+                conversation_session_id=conversation_session_id,
+                conversation_id=conversation_id,
+                chat_session_id=chat_session_id,
+                session_id=session_id,
+            ),
             operator_id=operator_id,
             robot_id=robot_id,
             site_id=site_id,
             metadata=metadata,
             include_session=include_session,
+            defer_recording=defer_recording,
         )
 
     def handle_text_input(
         self,
         text: str,
         *,
+        thread_id: str | None = None,
+        conversation_thread_id: str | None = None,
         conversation_session_id: str | None = None,
+        conversation_id: str | None = None,
+        chat_session_id: str | None = None,
         session_id: str | None = None,
         operator_id: str | None = None,
         robot_id: str | None = None,
         site_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         include_session: bool = False,
+        defer_recording: bool = False,
     ) -> dict[str, Any] | None:
         return self._handle_turn(
             "text",
             "handle_text_input",
             text,
-            conversation_session_id=conversation_session_id or session_id,
+            conversation_session_id=canonical_thread_id(
+                thread_id=thread_id,
+                conversation_thread_id=conversation_thread_id,
+                conversation_session_id=conversation_session_id,
+                conversation_id=conversation_id,
+                chat_session_id=chat_session_id,
+                session_id=session_id,
+            ),
             operator_id=operator_id,
             robot_id=robot_id,
             site_id=site_id,
             metadata=metadata,
             include_session=include_session,
+            defer_recording=defer_recording,
         )
 
     def conversation_snapshot(self, session_id: str) -> SessionSnapshot | None:
@@ -113,11 +140,15 @@ class VoiceGatewayService:
     ) -> dict[str, Any]:
         """Return a compact conversation context for prompt/runtime assembly."""
 
-        return self._session_manager.context_payload(
+        payload = self._session_manager.context_payload(
             session_id,
             recent_turn_limit=recent_turn_limit,
             max_chars=max_chars,
         )
+        if payload:
+            payload.setdefault("thread_id", session_id)
+            payload.setdefault("conversation_thread_id", session_id)
+        return payload
 
     def record_local_turn(
         self,
@@ -180,6 +211,7 @@ class VoiceGatewayService:
         site_id: str | None,
         metadata: dict[str, Any] | None,
         include_session: bool,
+        defer_recording: bool,
     ) -> dict[str, Any] | None:
         if self._bridge is None:
             return None
@@ -194,6 +226,7 @@ class VoiceGatewayService:
         )
         bridge_context = {
             "session_id": session.session_id,
+            "conversation_thread_id": session.session_id,
             "conversation_session_id": session.session_id,
             "conversation_context": self._session_manager.context_payload(
                 session.session_id,
@@ -211,14 +244,36 @@ class VoiceGatewayService:
             text,
             bridge_context,
         )
+        recording_deferred = False
         if isinstance(result, dict) and result.get("handled"):
-            self._record_handled_turn(session.session_id, text, result, metadata=metadata)
-        if include_session and isinstance(result, dict):
-            enriched = dict(result)
-            enriched["conversation_session_id"] = session.session_id
-            enriched["conversation_session"] = _snapshot_payload(
-                self._session_manager.snapshot(session.session_id)
+            turn = result.get("turn")
+            spoken_reply = (
+                turn.get("spoken_reply")
+                if isinstance(turn, dict)
+                else result.get("reply")
             )
+            recording_deferred = bool(
+                defer_recording
+                and isinstance(spoken_reply, str)
+                and spoken_reply.strip()
+            )
+            if not recording_deferred:
+                self._record_handled_turn(
+                    session.session_id,
+                    text,
+                    result,
+                    metadata=metadata,
+                )
+        if (include_session or recording_deferred) and isinstance(result, dict):
+            enriched = dict(result)
+            enriched["conversation_thread_id"] = session.session_id
+            enriched["conversation_session_id"] = session.session_id
+            if recording_deferred:
+                enriched["conversation_recording_deferred"] = True
+            if include_session:
+                enriched["conversation_session"] = _snapshot_payload(
+                    self._session_manager.snapshot(session.session_id)
+                )
             return enriched
         return result
 
@@ -309,6 +364,8 @@ def _snapshot_payload(snapshot: SessionSnapshot | None) -> dict[str, Any]:
     if snapshot is None:
         return {}
     return {
+        "thread_id": snapshot.session_id,
+        "conversation_thread_id": snapshot.session_id,
         "session_id": snapshot.session_id,
         "channel": snapshot.channel,
         "operator_id": snapshot.operator_id,

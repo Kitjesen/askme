@@ -6,6 +6,8 @@ import pytest
 from askme.memory.episode import Episode
 from askme.memory.trend_analyzer import Trend, TrendAnalyzer
 
+import askme.memory.intelligence.trend_analyzer as trend_analyzer_module
+
 
 def _make_episode(event_type: str, hours_ago: float = 0.0, description: str = "") -> Episode:
     """Create an Episode with a controlled timestamp."""
@@ -34,6 +36,24 @@ class TestAnalyze:
             episodes.append(_make_episode("perception", hours_ago=h))
         trends = analyzer.analyze(episodes, window_hours=1, baseline_hours=24)
         assert len(trends) == 0
+
+    def test_window_start_boundary_counts_as_baseline_not_recent(self, monkeypatch):
+        """The event exactly one window old must not create a fake spike."""
+        now = 1_800_000_000.0
+        monkeypatch.setattr(trend_analyzer_module.time, "time", lambda: now)
+        analyzer = TrendAnalyzer()
+        episodes = []
+        recent = _make_episode("perception")
+        recent.timestamp = now
+        episodes.append(recent)
+        for hour in range(1, 24):
+            episode = _make_episode("perception")
+            episode.timestamp = now - hour * 3600
+            episodes.append(episode)
+
+        trends = analyzer.analyze(episodes, window_hours=1, baseline_hours=24)
+
+        assert trends == []
 
     def test_spike_detected(self):
         """10 events in the last hour vs 1/hour baseline should spike."""

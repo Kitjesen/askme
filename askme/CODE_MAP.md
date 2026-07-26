@@ -28,6 +28,8 @@ The current architecture is owner-package based:
 
 - `blueprints`: product runtime packages and readiness gates.
 - `runtime`: module graph, dependency wiring, task runtime, and handoff.
+- `conversation`: authoritative conversation threads, turns, provider
+  generations, lifecycle events, and compatibility identity aliases.
 - `pipeline`: user turn orchestration, skill routing, and field workflows.
 - `voice_gateway`: unified voice middle-layer service and runtime bridge.
 - `robot_interaction`: address detection, interaction gate, user intent routing,
@@ -70,7 +72,7 @@ short rule for `robot_interaction`, `ports`, `providers`, and `robot`.
 | --- | --- | --- |
 | 1. Audio preprocessing | `voice/input`, `voice/diagnostics` | mic input, VAD, KWS, noise reduction, device checks, calibration |
 | 2. Voice capabilities | `voice/input/asr*`, `voice/output/tts*`, `interfaces/asr.py`, `interfaces/tts.py`, `llm` | ASR, TTS, NLU/intent, translation/provider routing, speech capability metadata |
-| 3. Voice Gateway | `voice_gateway`, `runtime/modules/voice_module.py`, `ports/voice.py`, `providers/voice.py`, `providers/voice_runtime.py`, `api/routes/voice.py`, parts of `pipeline/core` | unified ASR/TTS access, turn lifecycle, context, routing, logging, quality/cost boundaries |
+| 3. Voice Gateway | `conversation`, `voice_gateway`, `runtime/modules/voice_module.py`, `ports/voice.py`, `providers/voice.py`, `providers/voice_runtime.py`, `api/routes/voice.py`, parts of `pipeline/core` | authoritative thread/turn/generation lifecycle, unified ASR/TTS access, context, routing, logging, quality/cost boundaries |
 | 4. Robot interaction | `robot_interaction`, `pipeline/channels`, `pipeline/skills`, `api/routes/conversation.py`, `api/routes/field_events.py` | address detection, interaction gate, perception snapshot normalization, natural dialogue, task dialogue, status broadcast, customer/operator interaction |
 | 5. Robot execution system | `runtime/core`, `runtime/task`, `runtime/modules`, `tools/robot`, `skills/builtin` | task state machine, handoff, safety preflight, command dispatch, runtime callbacks |
 | 6. Providers and hardware | `providers`, `robot`, `perception`, `llm/providers`, `memory/backends` | hardware clients, cloud SDKs, local services, serial bridges, WebRTC/sounddevice/cv2 adapters |
@@ -92,6 +94,7 @@ runtime, pipeline, API, or interaction layers.
 | Voice input, ASR, VAD, KWS | `ports/voice.py`, `providers/voice.py` | `voice/input`, `voice/orchestration/audio_agent.py`, `voice/core` | voice/input unit tests and voice loop tests |
 | TTS or audio output | `ports/voice.py`, `providers/voice.py` | `voice/output`, `voice/orchestration/audio_agent.py` | TTS/audio router tests |
 | Addressing, wake/ignore/refuse, interaction gating | `robot_interaction` | `pipeline/channels/voice_loop.py`, `contracts/adapters.py` | interaction gate and voice loop tests |
+| Conversation identity, turn settlement, provider generation recovery | `conversation` | `pipeline/core/brain_pipeline.py`, `pipeline/channels/external_turns.py`, `runtime/modules/pipeline_module.py` | `tests/test_voice_turn_ledger.py` and conversation integration tests |
 | One user turn flow | `pipeline/core/brain_pipeline.py` | `turn_executor.py`, `stream_processor.py`, `tool_executor.py`, `pipeline/skills/skill_gate.py` | conversation/voice loop tests |
 | Skill execution or tool dispatch | `pipeline/skills` | `skills/core`, `tools/core`, `tools/robot` | skill gate/tool tests |
 | Runtime module wiring | `runtime/modules/*.py` | `runtime/core/module.py`, relevant blueprint preset | runtime module tests |
@@ -112,6 +115,7 @@ blueprint preset
         -> AddressDetector / InteractionGate
         -> providers.build_audio_frontend()
         -> BrainPipeline
+          -> Conversation Core (Thread / Turn / Generation ledger)
           -> PromptBuilder / StreamProcessor / SkillGate / TurnExecutor
             -> tools or runtime handoff
               -> RuntimeHandoffService / robot control service / field event APIs
@@ -132,6 +136,8 @@ health_server.create_health_app
 
 - The code still has compatibility facades, so old imports can hide the real
   owner package.
+- `memory/core/conversation.py` remains a prompt-context compatibility
+  projection during migration; new lifecycle truth belongs to `conversation`.
 - Some route modules still use direct `app.*` decorators instead of APIRouter
   factories.
 - Some upper layers still reference low-level audio/camera packages through

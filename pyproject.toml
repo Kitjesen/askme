@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "askme"
 version = "4.1.0"
 description = "Voice AI Assistant with Skills, Robot Control, and Memory"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "Shanghai Inovxio Technology Co., Ltd."},
@@ -17,7 +17,6 @@ classifiers = [
     "Intended Audience :: Manufacturing",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",

@@ -93,6 +93,7 @@ _PROJECT_RELATIVE_CONFIG_PATHS = (
     ("voice", "punctuation", "model_path"),
     ("voice", "kws", "model_dir"),
     ("voice", "tts", "model_dir"),
+    ("voice", "tts", "phrase_cache_dir"),
     ("voice", "tts", "voice_profile_state_path"),
     ("voice", "control_state_path"),
     ("vision", "model_path"),
@@ -588,6 +589,15 @@ def validate_config(config: dict | None = None) -> list[str]:
                         f"tools.priority_by_safety.{level} must be an integer, "
                         f"got {priority!r}"
                     )
+
+    # Optional realtime speech-to-speech lane.  Validation is offline and
+    # never attempts to use credentials or open a provider connection.
+    try:
+        from askme.voice.realtime.config import resolve_realtime_voice_config
+
+        errors.extend(resolve_realtime_voice_config(config).validation_errors())
+    except (TypeError, ValueError) as exc:
+        errors.append(str(exc))
 
     # Voice TTS (no validation needed -- edge-tts requires no API key)
 

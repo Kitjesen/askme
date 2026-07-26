@@ -1,0 +1,27 @@
+{
+  "schema_version": "askme.tts_latency_corpus.v1",
+  "corpus_id": "askme-tts-zh-20-v1",
+  "language": "zh-CN",
+  "cases": [
+    {"case_id": "tts-zh-01", "text": "你好。", "tags": ["short", "greeting"]},
+    {"case_id": "tts-zh-02", "text": "我在，请说。", "tags": ["short", "assistant"]},
+    {"case_id": "tts-zh-03", "text": "请稍等。", "tags": ["short", "service"]},
+    {"case_id": "tts-zh-04", "text": "当前任务已暂停。", "tags": ["status", "robot"]},
+    {"case_id": "tts-zh-05", "text": "前方通道暂时关闭。", "tags": ["status", "navigation"]},
+    {"case_id": "tts-zh-06", "text": "请确认是否继续执行。", "tags": ["question", "approval"]},
+    {"case_id": "tts-zh-07", "text": "正在读取当前位置。", "tags": ["status", "location"]},
+    {"case_id": "tts-zh-08", "text": "电量还剩百分之二十。", "tags": ["number", "status"]},
+    {"case_id": "tts-zh-09", "text": "三号设备温度为四十二度。", "tags": ["number", "inspection"]},
+    {"case_id": "tts-zh-10", "text": "A区巡检已经完成。", "tags": ["latin", "inspection"]},
+    {"case_id": "tts-zh-11", "text": "请沿右侧通道前行。", "tags": ["navigation", "instruction"]},
+    {"case_id": "tts-zh-12", "text": "现在是下午三点二十分。", "tags": ["time", "number"]},
+    {"case_id": "tts-zh-13", "text": "WiFi连接正常。", "tags": ["latin", "status"]},
+    {"case_id": "tts-zh-14", "text": "网络连接正在恢复，请稍候。", "tags": ["status", "compound"]},
+    {"case_id": "tts-zh-15", "text": "请问你想去哪个区域？", "tags": ["question", "navigation"]},
+    {"case_id": "tts-zh-16", "text": "我没有收到明确目的地，请再说一次。", "tags": ["clarification", "compound"]},
+    {"case_id": "tts-zh-17", "text": "检测到有人靠近，机器人保持原地等待。", "tags": ["safety", "compound"]},
+    {"case_id": "tts-zh-18", "text": "抱歉，这项操作需要管理员确认后才能执行。", "tags": ["approval", "long"]},
+    {"case_id": "tts-zh-19", "text": "巡检结果已保存，稍后可以查看完整报告。", "tags": ["inspection", "long"]},
+    {"case_id": "tts-zh-20", "text": "我会先确认路线是否安全，然后再向你汇报。", "tags": ["robot", "long"]}
+  ]
+}

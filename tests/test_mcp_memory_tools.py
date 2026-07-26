@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -119,20 +120,40 @@ class TestMemorySave:
     async def test_saves_to_bridge(self):
         _, memory_save = _import_tools()
         bridge = AsyncMock()
-        bridge.save = AsyncMock()
+        bridge.admit_turn = AsyncMock(
+            return_value=SimpleNamespace(
+                admitted=True,
+                persisted_count=1,
+                rejected_reason="",
+                persistence_errors=(),
+            )
+        )
         ctx = _make_ctx(memory_bridge=bridge)
 
-        result = await memory_save("warehouse-a temperature normal", ctx=ctx)
+        result = await memory_save(
+            "A区卫生间位于一楼",
+            customer_id="customer-a",
+            project_id="project-a",
+            ctx=ctx,
+        )
 
         data = json.loads(result)
         assert data["status"] == "ok"
-        bridge.save.assert_called_once()
+        bridge.admit_turn.assert_awaited_once_with(
+            "A区卫生间位于一楼",
+            source="external",
+            source_turn_id="",
+            confidence=1.0,
+            customer_id="customer-a",
+            project_id="project-a",
+            user_id="",
+        )
 
     @pytest.mark.asyncio
     async def test_save_exception_returns_error(self):
         _, memory_save = _import_tools()
         bridge = AsyncMock()
-        bridge.save = AsyncMock(side_effect=OSError("save failed"))
+        bridge.admit_turn = AsyncMock(side_effect=OSError("save failed"))
         ctx = _make_ctx(memory_bridge=bridge)
 
         result = await memory_save("fact", ctx=ctx)
@@ -144,10 +165,41 @@ class TestMemorySave:
     async def test_result_includes_saved_text_truncated(self):
         _, memory_save = _import_tools()
         bridge = AsyncMock()
-        bridge.save = AsyncMock()
+        bridge.admit_turn = AsyncMock(
+            return_value=SimpleNamespace(
+                admitted=True,
+                persisted_count=1,
+                rejected_reason="",
+                persistence_errors=(),
+            )
+        )
         ctx = _make_ctx(memory_bridge=bridge)
 
         result = await memory_save("short fact", ctx=ctx)
 
         data = json.loads(result)
         assert "short fact" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_governed_rejection_is_not_reported_as_saved(self):
+        _, memory_save = _import_tools()
+        bridge = AsyncMock()
+        bridge.admit_turn = AsyncMock(
+            return_value=SimpleNamespace(
+                admitted=False,
+                persisted_count=0,
+                rejected_reason="sensitive_or_pii",
+                persistence_errors=(),
+            )
+        )
+        ctx = _make_ctx(memory_bridge=bridge)
+
+        result = await memory_save(
+            "我的密码是123456",
+            user_id="user-a",
+            ctx=ctx,
+        )
+
+        data = json.loads(result)
+        assert data["status"] == "rejected"
+        assert data["reason"] == "sensitive_or_pii"

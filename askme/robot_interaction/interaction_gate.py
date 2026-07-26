@@ -94,6 +94,60 @@ _SAFETY_TERMS = (
     "别动",
 )
 
+_TOOL_ROUTE_TERMS = (
+    "查一下",
+    "查一查",
+    "帮我查",
+    "查询",
+    "搜索",
+    "搜一下",
+    "联网",
+    "最新",
+    "实时",
+    "打开文件",
+    "读取文件",
+    "文件",
+    "目录",
+    "发送",
+    "保存",
+    "下载",
+    "上传",
+    "创建",
+    "删除",
+    "调用工具",
+    "运行脚本",
+    "执行脚本",
+    "计算",
+)
+
+
+def contains_robot_task_intent(text: str) -> bool:
+    """Return whether an utterance asks the physical robot to act.
+
+    This check intentionally stays independent from :meth:`InteractionGate.evaluate`.
+    An explicit wake word is strong evidence that speech is addressed to the robot,
+    but it must not turn a command such as ``小算，暂停一下`` into ordinary chat.
+    Realtime S2S admission therefore reuses this vocabulary as a separate safety
+    dimension after the normal interaction gate has admitted the speaker.
+    """
+
+    clean = " ".join(str(text or "").strip().lower().split())
+    return bool(clean and InteractionGate._contains_any(clean, _ROBOT_TASK_TERMS))
+
+
+def contains_emergency_intent(text: str) -> bool:
+    """Return whether an utterance contains a local safety-stop instruction."""
+
+    clean = " ".join(str(text or "").strip().lower().split())
+    return bool(clean and InteractionGate._contains_any(clean, _SAFETY_TERMS))
+
+
+def contains_tool_route_intent(text: str) -> bool:
+    """Fail closed when an utterance explicitly asks for external/tool data."""
+
+    clean = " ".join(str(text or "").strip().lower().split())
+    return bool(clean and InteractionGate._contains_any(clean, _TOOL_ROUTE_TERMS))
+
 _CASUAL_TERMS = (
     "\u6211\u4eec",
     "\u54c8\u54c8",

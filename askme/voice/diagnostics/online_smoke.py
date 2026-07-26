@@ -65,6 +65,7 @@ async def _check_minimax_tts(tts_cfg: dict[str, Any], *, text: str) -> dict[str,
             samples = int(sum(len(chunk) for chunk in engine.tts_buffer))
         return {
             "status": "ok" if ok and samples > 0 else "degraded",
+            "provider": "minimax",
             "ok": bool(ok),
             "samples": samples,
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -86,6 +87,76 @@ async def _check_minimax_tts(tts_cfg: dict[str, Any], *, text: str) -> dict[str,
     finally:
         if engine is not None:
             engine.shutdown()
+
+
+async def _check_volcengine_tts(
+    tts_cfg: dict[str, Any], *, text: str
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    engine: TTSEngine | None = None
+    try:
+        engine = TTSEngine(dict(tts_cfg))
+        generation = engine._get_generation()
+        ok = await asyncio.to_thread(engine._generate_volcengine, text, generation)
+        with engine._buffer_lock:
+            samples = int(sum(len(chunk) for chunk in engine.tts_buffer))
+        return {
+            "status": "ok" if ok and samples > 0 else "degraded",
+            "provider": "volcengine",
+            "ok": bool(ok),
+            "samples": samples,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "voice_id": getattr(engine, "_volcengine_tts_speaker", ""),
+            "model": getattr(engine, "_volcengine_tts_model", ""),
+            "resource_id": getattr(engine, "_volcengine_tts_resource_id", ""),
+            "transport": "websocket_bidirectional_v3",
+            "audio_format": getattr(engine, "_volcengine_tts_audio_format", ""),
+        }
+    except Exception as exc:  # pragma: no cover - network/runtime path
+        return {
+            "status": "error",
+            "provider": "volcengine",
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "voice_id": str(tts_cfg.get("volcengine_tts_speaker", "")),
+            "model": str(tts_cfg.get("volcengine_tts_model", "")),
+            "resource_id": str(tts_cfg.get("volcengine_tts_resource_id", "")),
+            "error": str(exc)[:300],
+        }
+    finally:
+        if engine is not None:
+            engine.shutdown()
+
+
+async def _check_tts(tts_cfg: dict[str, Any], *, text: str) -> dict[str, Any]:
+    backend = str(tts_cfg.get("backend") or "local").strip().lower()
+    if backend == "volc":
+        backend = "volcengine"
+    if backend == "volcengine":
+        return await _check_volcengine_tts(tts_cfg, text=text)
+    if backend == "minimax":
+        return await _check_minimax_tts(tts_cfg, text=text)
+    return {
+        "status": "skipped",
+        "provider": backend,
+        "reason": "selected TTS backend has no cloud connectivity check",
+    }
+
+
+def _tts_credentials_present(tts_cfg: dict[str, Any]) -> bool:
+    backend = str(tts_cfg.get("backend") or "local").strip().lower()
+    if backend == "volc":
+        backend = "volcengine"
+    if backend == "volcengine":
+        return bool(
+            str(tts_cfg.get("volcengine_tts_api_key", "")).strip()
+            or (
+                str(tts_cfg.get("volcengine_tts_app_id", "")).strip()
+                and str(tts_cfg.get("volcengine_tts_access_key", "")).strip()
+            )
+        )
+    if backend == "minimax":
+        return bool(str(tts_cfg.get("minimax_api_key", "")).strip())
+    return True
 
 
 def _check_cloud_asr(cloud_cfg: dict[str, Any], *, silence_seconds: float) -> dict[str, Any]:
@@ -148,7 +219,7 @@ async def run_voice_online_smoke(
     cloud_cfg = voice_cfg.get("cloud_asr", {}) if isinstance(voice_cfg, dict) else {}
     checks = {
         "llm": await _check_llm(),
-        "minimax_tts": await _check_minimax_tts(tts_cfg, text=text),
+        "tts": await _check_tts(tts_cfg, text=text),
         "cloud_asr": _check_cloud_asr(
             cloud_cfg,
             silence_seconds=silence_seconds,
@@ -156,10 +227,14 @@ async def run_voice_online_smoke(
     }
     keys_present = {
         "llm": bool(str(cfg.get("brain", {}).get("api_key", "")).strip()),
-        "minimax_tts": bool(str(tts_cfg.get("minimax_api_key", "")).strip()),
+        "tts": _tts_credentials_present(tts_cfg),
         "cloud_asr": cloud_asr_credentials_present(cloud_cfg),
     }
-    status = "ok" if all(check.get("status") == "ok" for check in checks.values()) else "degraded"
+    status = (
+        "ok"
+        if all(check.get("status") in {"ok", "skipped"} for check in checks.values())
+        else "degraded"
+    )
     return {
         "status": status,
         "text": text,

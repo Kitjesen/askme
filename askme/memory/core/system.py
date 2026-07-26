@@ -105,10 +105,16 @@ class MemorySystem:
         self._conversation.add_user_message(user_text)
         self._conversation.add_assistant_message(assistant_text)
 
-    async def save_to_vector(self, user_text: str, assistant_text: str) -> None:
-        """Fire-and-forget save to L4 vector memory."""
-        if self._vector:
-            await self._vector.save(user_text, assistant_text)
+    async def admit_turn(self, user_text: str, **kwargs: Any) -> Any:
+        """Apply governed long-term admission to user-authored text only."""
+        if not self._vector:
+            return None
+        return await self._vector.admit_turn(user_text, **kwargs)
+
+    async def save_to_vector(self, user_text: str, assistant_text: str) -> Any:
+        """Deprecated compatibility alias; assistant text is intentionally ignored."""
+        del assistant_text
+        return await self.admit_turn(user_text)
 
     # -- Retrieve --
 

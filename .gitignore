@@ -10,6 +10,7 @@ build/
 
 # Environment
 .env
+docker/.env.litellm
 .venv/
 venv/
 
@@ -37,7 +38,7 @@ Thumbs.db
 # Temp / dev artifacts
 archive/
 artifacts/
-output/
+/output/
 .codex/
 .tmp/
 .omc/
@@ -70,6 +71,10 @@ _remote_*/
 *-key.json
 credentials*
 secrets/
+.codex-ssh-askpass.cmd
+
+# Local patch probes (never commit)
+.tmp_patch_probe
 
 # Frontend/video generated artifacts
 video-lab/node_modules/

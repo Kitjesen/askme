@@ -18,12 +18,12 @@ from openai import AsyncOpenAI
 
 RELAY_URL = os.environ.get("LLM_BASE_URL", "https://cursor.scihub.edu.kg/api/v1")
 API_KEY = os.environ.get("LLM_API_KEY", "")
-MINIMAX_URL = "https://api.minimax.chat/v1"
+MINIMAX_URL = "https://api.minimaxi.com/v1"
 MINIMAX_KEY = os.environ.get("MINIMAX_API_KEY", "")
 
 # (model_name, base_url, api_key) tuples
 MODELS = [
-    ("MiniMax-M2.5-highspeed", MINIMAX_URL, MINIMAX_KEY),
+    ("MiniMax-M2.7-highspeed", MINIMAX_URL, MINIMAX_KEY),
     ("claude-haiku-4-5-20251001", RELAY_URL, API_KEY),
     ("claude-sonnet-4-5-20250929", RELAY_URL, API_KEY),
     ("claude-opus-4-6", RELAY_URL, API_KEY),

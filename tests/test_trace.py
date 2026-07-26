@@ -1,8 +1,10 @@
 """Tests for the pipeline tracing module."""
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+import askme.pipeline.trace as trace_module
 import pytest
 from askme.pipeline.trace import PipelineTracer, Span, Trace, get_tracer
 
@@ -66,6 +68,16 @@ class TestPipelineTracer:
         assert trace.name == "test"
         assert trace.id == "t00001"
         result = tracer.finish_trace()
+        assert result is trace
+        assert result.total_ms > 0
+
+    def test_start_and_finish_trace_has_positive_duration_when_clock_tick_matches(self, monkeypatch):
+        monkeypatch.setattr(trace_module.time, "monotonic", lambda: 123.0)
+
+        tracer = PipelineTracer()
+        trace = tracer.start_trace("test")
+        result = tracer.finish_trace()
+
         assert result is trace
         assert result.total_ms > 0
 
@@ -165,6 +177,39 @@ class TestPipelineTracer:
         tracer.finish_trace()
         assert t1.id == "t00001"
         assert t2.id == "t00002"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_tasks_keep_current_trace_and_spans_isolated(self):
+        tracer = PipelineTracer()
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def first_turn() -> Trace | None:
+            tracer.start_trace("turn-a")
+            with tracer.span("span-a"):
+                first_started.set()
+                await release_first.wait()
+            return tracer.finish_trace()
+
+        async def second_turn() -> Trace | None:
+            await first_started.wait()
+            tracer.start_trace("turn-b")
+            with tracer.span("span-b"):
+                await asyncio.sleep(0)
+            result = tracer.finish_trace()
+            release_first.set()
+            return result
+
+        first, second = await asyncio.gather(first_turn(), second_turn())
+
+        assert first is not None and second is not None
+        assert [span.name for span in first.spans] == ["span-a"]
+        assert [span.name for span in second.spans] == ["span-b"]
+        assert {item["name"] for item in tracer.get_history()} == {
+            "turn-a",
+            "turn-b",
+        }
+        assert tracer.current_trace is None
 
 
 class TestGetTracer:

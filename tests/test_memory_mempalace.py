@@ -93,6 +93,33 @@ class TestMemPalaceBackend:
         }
 
     @pytest.mark.asyncio
+    async def test_retrieve_items_applies_metadata_filter_without_swallowing_results(
+        self,
+        tmp_path,
+    ):
+        collection = _FakeCollection()
+        backend = MemPalaceBackend(
+            {
+                "mempalace_palace_path": str(tmp_path / "palace"),
+                "mempalace_wing": "askme",
+                "mempalace_room": "robot",
+            }
+        )
+        with _patch_mempalace(collection):
+            items = await backend.retrieve_items(
+                "卫生间在哪里",
+                metadata_filter={"approval_status": "published"},
+            )
+        assert len(items) == 2
+        assert collection.query_calls[0]["where"] == {
+            "$and": [
+                {"wing": "askme"},
+                {"room": "robot"},
+                {"approval_status": "published"},
+            ]
+        }
+
+    @pytest.mark.asyncio
     async def test_save_fact_upserts_drawer_with_sanitized_metadata(self, tmp_path):
         collection = _FakeCollection()
         backend = MemPalaceBackend(
@@ -217,9 +244,15 @@ class TestMemoryBridgeMemPalace:
         store = MagicMock()
         store.available = True
         store.size = 1
-        store.search = MagicMock(return_value=[
-            {"text": "vector fallback", "score": 0.9, "metadata": {}},
-        ])
+        store.search = MagicMock(
+            return_value=[
+                {
+                    "text": "vector fallback",
+                    "score": 0.9,
+                    "metadata": {"type": "knowledge", "approval_status": "published"},
+                },
+            ]
+        )
         bridge._store = store
 
         with patch.object(bridge, "_ensure_mempalace", return_value=False):
@@ -239,9 +272,15 @@ class TestMemoryBridgeMemPalace:
         store = MagicMock()
         store.available = True
         store.size = 1
-        store.search = MagicMock(return_value=[
-            {"text": "vector answer", "score": 0.91, "metadata": {}},
-        ])
+        store.search = MagicMock(
+            return_value=[
+                {
+                    "text": "vector answer",
+                    "score": 0.91,
+                    "metadata": {"type": "knowledge", "approval_status": "published"},
+                },
+            ]
+        )
         bridge._store = store
 
         with patch.object(bridge, "_ensure_mempalace", return_value=True):
@@ -261,9 +300,15 @@ class TestMemoryBridgeMemPalace:
         store = MagicMock()
         store.available = True
         store.size = 1
-        store.search = MagicMock(return_value=[
-            {"text": "vector recovery", "score": 0.88, "metadata": {}},
-        ])
+        store.search = MagicMock(
+            return_value=[
+                {
+                    "text": "vector recovery",
+                    "score": 0.88,
+                    "metadata": {"type": "knowledge", "approval_status": "published"},
+                },
+            ]
+        )
         bridge._store = store
 
         with patch.object(bridge, "_ensure_mempalace", return_value=True):

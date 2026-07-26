@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
 from askme.voice.asr_manager import (
     _SINGLE_CHAR_COMMANDS,
     ASRManager,
+    ASRPartial,
 )
 
 # ---------------------------------------------------------------------------
@@ -303,6 +305,117 @@ class TestForceEndpoint:
         assert result is None
 
 
+def test_abort_session_cancels_provider_without_resetting_local_stream() -> None:
+    mgr = _make_manager(cloud_available=True)
+    mocks = mgr._test_mocks  # type: ignore[attr-defined]
+    mgr._recognition_active = True
+    # finish_and_get_result hands this flag off before it waits for cloud I/O.
+    mgr._cloud_active = False
+    mocks["asr"].reset.reset_mock()
+    mocks["asr"].create_stream.reset_mock()
+
+    mgr.abort_session()
+
+    assert mgr._recognition_active is False
+    assert mgr._cloud_active is False
+    mocks["cloud"].cancel_session.assert_called_once_with()
+    mocks["asr"].reset.assert_not_called()
+    mocks["asr"].create_stream.assert_not_called()
+
+
+def test_abort_during_cloud_finish_suppresses_local_fallback() -> None:
+    mgr = _make_manager(cloud_available=True)
+    mocks = mgr._test_mocks  # type: ignore[attr-defined]
+    finish_entered = threading.Event()
+    release_finish = threading.Event()
+    result: list[object] = []
+
+    def blocking_finish(*, timeout: float) -> str:
+        del timeout
+        finish_entered.set()
+        release_finish.wait(timeout=1.0)
+        return "stale cloud result"
+
+    mocks["cloud"].finish_session.side_effect = blocking_finish
+    mgr.start_session()
+    worker = threading.Thread(target=lambda: result.append(mgr.finish_and_get_result()))
+    worker.start()
+    assert finish_entered.wait(timeout=1.0)
+
+    mgr.abort_session()
+    release_finish.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert result == [None]
+    mocks["asr"].get_result.assert_not_called()
+
+
+def test_abort_linearizes_against_late_preconnect_success() -> None:
+    mgr = _make_manager(cloud_available=True)
+    mocks = mgr._test_mocks  # type: ignore[attr-defined]
+    start_entered = threading.Event()
+    release_start = threading.Event()
+
+    def blocked_start() -> bool:
+        start_entered.set()
+        release_start.wait(timeout=1.0)
+        return True
+
+    mocks["cloud"].start_session.side_effect = blocked_start
+    worker = threading.Thread(target=mgr.preconnect_cloud)
+    worker.start()
+    assert start_entered.wait(timeout=1.0)
+
+    mgr.abort_session()
+    release_start.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert mgr._recognition_active is False
+    assert mgr._cloud_active is False
+    assert mocks["cloud"].cancel_session.call_count == 2
+
+    mocks["cloud"].start_session.side_effect = None
+    mocks["cloud"].start_session.return_value = True
+    mgr.preconnect_cloud()
+    assert mgr._cloud_active is True
+    assert mocks["cloud"].start_session.call_count == 2
+
+
+def test_abort_linearizes_against_late_start_session_success() -> None:
+    mgr = _make_manager(cloud_available=True)
+    mocks = mgr._test_mocks  # type: ignore[attr-defined]
+    start_entered = threading.Event()
+    release_start = threading.Event()
+
+    def blocked_start() -> bool:
+        start_entered.set()
+        release_start.wait(timeout=1.0)
+        return True
+
+    mocks["cloud"].start_session.side_effect = blocked_start
+    worker = threading.Thread(target=mgr.start_session)
+    worker.start()
+    assert start_entered.wait(timeout=1.0)
+
+    mgr.abort_session()
+    release_start.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert mgr._recognition_active is False
+    assert mgr._cloud_active is False
+    assert mocks["cloud"].cancel_session.call_count == 2
+
+    mocks["cloud"].start_session.side_effect = None
+    mocks["cloud"].start_session.return_value = True
+    mgr.start_session()
+    assert mgr._recognition_active is True
+    assert mgr._cloud_active is True
+    assert mocks["cloud"].start_session.call_count == 2
+
+
 # ---------------------------------------------------------------------------
 # Check endpoint (local streaming)
 # ---------------------------------------------------------------------------
@@ -348,6 +461,42 @@ class TestCheckEndpoint:
         assert mgr._cloud_active is True
         assert result is None
         mocks["asr"].get_result.assert_not_called()
+
+
+class TestPartialResult:
+    def test_cloud_partial_is_exposed_without_finishing_session(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+        mocks["cloud"].status_snapshot.return_value = {
+            "partial_text": "\u4f60\u597d",
+            "partial_age_ms": 180.0,
+        }
+
+        mgr.start_session()
+        partial = mgr.partial_result()
+
+        assert partial == ASRPartial(
+            text="\u4f60\u597d",
+            source="cloud_partial",
+            age_ms=180.0,
+        )
+        mocks["cloud"].finish_session.assert_not_called()
+
+    def test_commit_partial_cancels_cloud_without_waiting_for_final(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+        mgr.start_session()
+
+        result = mgr.commit_partial(
+            ASRPartial(text="\u4f60\u597d", source="cloud_partial", age_ms=200.0)
+        )
+
+        assert result is not None
+        assert result.source == "cloud_partial"
+        assert result.text.startswith("\u4f60\u597d")
+        assert mgr._recognition_active is False
+        mocks["cloud"].cancel_session.assert_called_once()
+        mocks["cloud"].finish_session.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

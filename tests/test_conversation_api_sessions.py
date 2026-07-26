@@ -59,6 +59,38 @@ def test_askme_health_server_chat_wrapper_forwards_session_and_runtime_policy() 
     }
 
 
+def test_anonymous_chat_requests_receive_distinct_thread_ids() -> None:
+    seen_thread_ids: list[str | None] = []
+
+    async def chat_handler(
+        text: str,
+        *,
+        conversation_session_id: str | None = None,
+    ) -> dict[str, str]:
+        seen_thread_ids.append(conversation_session_id)
+        return {"reply": f"reply:{text}"}
+
+    server = AskmeHealthServer({}, health_provider=lambda: _runtime_snapshot())
+    server.set_chat_handler(chat_handler)
+    client = TestClient(server._app)
+
+    first = client.post("/api/chat", json={"text": "first anonymous request"})
+    second = client.post("/api/chat", json={"text": "second anonymous request"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_payload = first.json()
+    second_payload = second.json()
+    first_thread_id = first_payload["conversation_thread_id"]
+    second_thread_id = second_payload["conversation_thread_id"]
+    assert first_thread_id
+    assert second_thread_id
+    assert first_thread_id != second_thread_id
+    assert first_payload["conversation_session_id"] == first_thread_id
+    assert second_payload["conversation_session_id"] == second_thread_id
+    assert seen_thread_ids == [first_thread_id, second_thread_id]
+
+
 def test_chat_endpoint_keeps_text_loop_plans_scoped_by_conversation_session_id() -> None:
     class Cognition:
         def __init__(self) -> None:
@@ -257,3 +289,58 @@ def test_runtime_voice_turn_accepts_conversation_session_aliases() -> None:
     assert runtime.calls[1]["conversation_session_id"] == "conv-chat"
     assert by_conversation_id.json()["voice_turn"]["conversation_session_id"] == "conv-alias"
     assert by_chat_session_id.json()["voice_turn"]["conversation_session_id"] == "conv-chat"
+
+
+def test_runtime_voice_turn_accepts_canonical_thread_id_and_rejects_conflicts() -> None:
+    class DummyRuntimeHandler:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def voice_turn_payload(
+            self,
+            text,
+            *,
+            conversation_session_id=None,
+            **kwargs,
+        ):
+            self.calls.append(
+                {
+                    "text": text,
+                    "conversation_session_id": conversation_session_id,
+                    **kwargs,
+                }
+            )
+            return {
+                "handled": True,
+                "voice_turn": {
+                    "recognized_text": text,
+                    "conversation_session_id": conversation_session_id,
+                    "safety_bypass_allowed": False,
+                },
+            }
+
+    runtime = DummyRuntimeHandler()
+    client = TestClient(
+        create_health_app(
+            lambda: _runtime_snapshot(),
+            runtime_handler=runtime,
+        )
+    )
+
+    accepted = client.post(
+        "/api/runtime/voice-turn",
+        json={"text": "暂停", "conversation_thread_id": "thread-new"},
+    )
+    rejected = client.post(
+        "/api/runtime/voice-turn",
+        json={
+            "text": "暂停",
+            "conversation_thread_id": "thread-a",
+            "thread_id": "thread-b",
+        },
+    )
+
+    assert accepted.status_code == 200
+    assert runtime.calls[0]["conversation_session_id"] == "thread-new"
+    assert rejected.status_code == 400
+    assert len(runtime.calls) == 1

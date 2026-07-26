@@ -44,6 +44,12 @@ class TestTTSRegistry:
         cls = tts_registry._backends.get("minimax")
         assert cls is TTSEngine
 
+    def test_all_product_tts_backends_registered(self):
+        from askme.voice.tts import TTSEngine
+
+        for name in ("volcengine", "volc", "edge", "local"):
+            assert tts_registry._backends.get(name) is TTSEngine
+
 
 class TestBusRegistry:
     def test_pulse_registered(self):

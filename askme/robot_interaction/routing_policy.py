@@ -18,12 +18,44 @@ DEFAULT_BUILTIN_COMMANDS: frozenset[str] = frozenset({
 })
 
 DEFAULT_ESTOP_KEYWORDS: frozenset[str] = frozenset({
+    "停",
+    "停下",
+    "停下来",
+    "别动",
+    "不要动",
+    "立即停止",
+    "马上停止",
+    "危险",
     "紧急停止",
     "急停",
     "emergency stop",
     "estop",
     "e-stop",
+    "halt",
+    "freeze",
 })
+
+_LOCAL_SAFETY_CONTROL_UTTERANCES: frozenset[str] = frozenset({
+    "静音",
+    "别说了",
+    "不说了",
+    "停止说话",
+    "停止播放",
+    "不要说了",
+    "够了",
+    "闭麦",
+    "关闭麦克风",
+    "关麦",
+    "闭嘴停止",
+    "进入静默",
+    "开麦",
+    "打开麦克风",
+    "开启麦克风",
+    "重新开启",
+    "恢复监听",
+})
+
+_LOCAL_SAFETY_EDGE_PUNCTUATION = "。！？!?，,；;：:、…"
 
 DEFAULT_QUICK_REPLIES: Mapping[str, str] = MappingProxyType({
     "你好": "你好，有什么需要帮忙的？",
@@ -35,6 +67,20 @@ DEFAULT_QUICK_REPLIES: Mapping[str, str] = MappingProxyType({
     "你在吗": "在的，说吧。",
     "嗯": "嗯，我在听。",
     "好的": "好的。",
+    "\u60a8\u597d": "\u60a8\u597d\uff0c\u6709\u4ec0\u4e48\u53ef\u4ee5\u5e2e\u60a8\uff1f",
+    "\u55e8": "\u55ef\uff0c\u6211\u5728\u542c\u3002",
+    "\u4f60\u662f\u8c01": (
+        "\u6211\u662f\u5c0f\u7b97\uff0c\u4e00\u53ea\u667a\u80fd\u670d\u52a1\u673a\u5668\u72d7\uff0c"
+        "\u53ef\u4ee5\u8fdb\u884c\u5bf9\u8bdd\u3001\u5de1\u68c0\u3001\u5bfc\u822a\u548c\u73b0\u573a\u4fe1\u606f\u67e5\u8be2\u3002"
+    ),
+    "\u4ecb\u7ecd\u4e00\u4e0b\u81ea\u5df1": (
+        "\u6211\u662f\u5c0f\u7b97\uff0c\u4e00\u53ea\u667a\u80fd\u670d\u52a1\u673a\u5668\u72d7\uff0c"
+        "\u53ef\u4ee5\u8fdb\u884c\u5bf9\u8bdd\u3001\u5de1\u68c0\u3001\u5bfc\u822a\u548c\u73b0\u573a\u4fe1\u606f\u67e5\u8be2\u3002"
+    ),
+    "\u81ea\u6211\u4ecb\u7ecd\u4e00\u4e0b": (
+        "\u6211\u662f\u5c0f\u7b97\uff0c\u4e00\u53ea\u667a\u80fd\u670d\u52a1\u673a\u5668\u72d7\uff0c"
+        "\u53ef\u4ee5\u8fdb\u884c\u5bf9\u8bdd\u3001\u5de1\u68c0\u3001\u5bfc\u822a\u548c\u73b0\u573a\u4fe1\u606f\u67e5\u8be2\u3002"
+    ),
 })
 
 DEFAULT_NEGATION_PREFIXES: tuple[str, ...] = (
@@ -71,6 +117,30 @@ DEFAULT_QUESTION_SAFE_SKILLS: frozenset[str] = frozenset({
 
 def _normalize_ascii(text: str) -> str:
     return str(text).strip().lower()
+
+
+def _normalize_local_safety_text(text: str) -> str:
+    """Normalize an utterance for narrow, exact local-safety matching."""
+
+    normalized = " ".join(str(text).strip().lower().split())
+    return normalized.strip(_LOCAL_SAFETY_EDGE_PUNCTUATION)
+
+
+def is_local_safety_utterance(text: str) -> bool:
+    """Return whether *text* is an exact locally actionable safety command.
+
+    This deliberately does not use substring or fuzzy matching: in wake-word
+    failure mode the classifier is the last barrier preventing bystander speech
+    from reaching skills, memory, or a model.
+    """
+
+    normalized = _normalize_local_safety_text(text)
+    if not normalized:
+        return False
+    return normalized in {
+        *DEFAULT_ESTOP_KEYWORDS,
+        *_LOCAL_SAFETY_CONTROL_UTTERANCES,
+    }
 
 
 @dataclass(frozen=True)

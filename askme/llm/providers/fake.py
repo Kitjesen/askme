@@ -7,6 +7,8 @@ from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 
+from askme.llm.core.contracts import LLMCallContext
+
 
 class FakeLLMProvider:
     """Small provider that mimics OpenAI chat completion objects.
@@ -30,7 +32,9 @@ class FakeLLMProvider:
         kwargs: dict[str, Any],
         *,
         cancel_token: asyncio.Event | None = None,
+        context: LLMCallContext | None = None,
     ) -> AsyncIterator[Any]:
+        _ = context
         self.calls.append(dict(kwargs))
         if cancel_token is not None and cancel_token.is_set():
             return
@@ -44,7 +48,13 @@ class FakeLLMProvider:
             ]
         )
 
-    async def completion_with_retry(self, kwargs: dict[str, Any]) -> Any:
+    async def completion_with_retry(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        context: LLMCallContext | None = None,
+    ) -> Any:
+        _ = context
         self.calls.append(dict(kwargs))
         return SimpleNamespace(
             choices=[

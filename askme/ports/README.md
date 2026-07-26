@@ -37,7 +37,10 @@ Current contract modules:
   dispatch.
 - `safety.py`: `SafetyPort` for E-STOP state and notification.
 - `voice.py`: `AudioFrontendPort`, `AudioRouterPort`, `ASRProviderPort`,
-  `TTSProviderPort`, `VoiceTurnBridgePort`, and `VoiceIOPort`.
+  `TTSProviderPort`, `RealtimeVoiceFrontendPort`, `RealtimeApprovalPort`,
+  `VoiceTurnBridgePort`, and `VoiceIOPort`. The realtime pair is the explicit
+  optional S2S boundary; pipeline code must not discover those methods with
+  ad-hoc `getattr` checks.
 
 ## Boundary Rules
 

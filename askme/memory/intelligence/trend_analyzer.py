@@ -64,7 +64,7 @@ class TrendAnalyzer:
 
         for ep in episodes:
             ts = ep.timestamp
-            if ts >= window_start:
+            if ts > window_start:
                 recent_counts[ep.event_type] += 1
             elif ts >= baseline_start:
                 baseline_counts[ep.event_type] += 1

@@ -58,6 +58,61 @@ def test_get_or_create_honors_new_explicit_session_id() -> None:
     assert first.session_id != second.session_id
 
 
+def test_anonymous_sessions_are_fail_new_instead_of_reusing_process_history() -> None:
+    manager = ConversationSessionManager(clock=StepClock())
+
+    first = manager.get_or_create(channel="voice")
+    manager.append_turn(
+        first.session_id,
+        user_text="private first request",
+        assistant_text="private first response",
+    )
+    second = manager.get_or_create(channel="voice")
+
+    assert second.session_id != first.session_id
+    assert manager.context_payload(second.session_id)["turn_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "conflicting_field"),
+    [
+        ({"channel": "text"}, "channel"),
+        ({"operator_id": "operator-2"}, "operator_id"),
+        ({"robot_id": "robot-2"}, "robot_id"),
+        ({"site_id": "site-b"}, "site_id"),
+    ],
+)
+def test_explicit_session_id_rejects_identity_takeover(
+    overrides: dict[str, str],
+    conflicting_field: str,
+) -> None:
+    manager = ConversationSessionManager(clock=StepClock())
+    original = manager.get_or_create(
+        channel="voice",
+        session_id="private-session",
+        operator_id="operator-1",
+        robot_id="robot-1",
+        site_id="site-a",
+    )
+    request = {
+        "channel": "voice",
+        "session_id": original.session_id,
+        "operator_id": "operator-1",
+        "robot_id": "robot-1",
+        "site_id": "site-a",
+        **overrides,
+    }
+
+    with pytest.raises(ValueError, match=conflicting_field):
+        manager.get_or_create(**request)
+
+    snapshot = manager.snapshot(original.session_id)
+    assert snapshot is not None
+    assert snapshot.operator_id == "operator-1"
+    assert snapshot.robot_id == "robot-1"
+    assert snapshot.site_id == "site-a"
+
+
 def test_append_turn_updates_timestamp_and_summary() -> None:
     clock = StepClock()
     manager = ConversationSessionManager(clock=clock)
@@ -262,6 +317,34 @@ def test_gateway_service_passes_conversation_session_to_bridge() -> None:
     assert snapshot.turns[0].assistant_text == "ready"
     assert context["recent_turns"][0]["sequence"] == 1
     assert "inspect area A" in context["text"]
+
+
+def test_gateway_anonymous_requests_do_not_share_conversation_context() -> None:
+    class Bridge:
+        def __init__(self) -> None:
+            self.contexts: list[dict[str, object]] = []
+
+        def status_snapshot(self) -> dict[str, object]:
+            return {"enabled": True}
+
+        def handle_text_input(self, text: str, **kwargs) -> dict[str, object]:
+            self.contexts.append(dict(kwargs["conversation_context"]))
+            return {
+                "handled": True,
+                "turn": {"spoken_reply": f"reply:{text}"},
+            }
+
+    bridge = Bridge()
+    gateway = VoiceGatewayService(bridge)
+
+    first = gateway.handle_text_input("first private request", include_session=True)
+    second = gateway.handle_text_input("second private request", include_session=True)
+
+    assert first is not None
+    assert second is not None
+    assert first["conversation_session_id"] != second["conversation_session_id"]
+    assert [context["turn_count"] for context in bridge.contexts] == [0, 0]
+    assert all(context["text"] == "" for context in bridge.contexts)
 
 
 def test_gateway_service_records_local_fallback_turns() -> None:

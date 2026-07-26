@@ -32,6 +32,12 @@ class TestGetConfig:
         sr = cfg.get("voice", {}).get("tts", {}).get("sample_rate")
         assert isinstance(sr, (int, float))
 
+    def test_minimax_runtime_endpoints_use_canonical_china_domain(self):
+        cfg = get_config(reload=True)
+
+        assert cfg["brain"]["minimax_base_url"] == "https://api.minimaxi.com/v1"
+        assert cfg["voice"]["tts"]["minimax_tts_url"] == "https://api.minimaxi.com/v1"
+
     @pytest.mark.skipif(os.name != "nt", reason="Windows audio override")
     def test_windows_audio_profile_uses_verified_realtek_route(self):
         cfg = get_config(reload=True)

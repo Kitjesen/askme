@@ -50,6 +50,7 @@ class VoiceProfile:
     label: str
     use_case: str
     voice_id: str
+    volcengine_voice_id: str = ""
     speed: float = 1.0
     volume: float = 1.0
     pitch: int = 0
@@ -88,13 +89,22 @@ def build_voice_profiles(
             if not pid:
                 continue
             base = profiles.get(pid)
+            volume_value = raw.get("volume")
+            if volume_value is None:
+                volume_value = raw.get("vol")
+            if volume_value is None:
+                volume_value = base.volume if base else 1.0
             profiles[pid] = VoiceProfile(
                 profile_id=pid,
                 label=_profile_text(raw.get("label"), base.label if base else pid),
                 use_case=_profile_text(raw.get("use_case"), base.use_case if base else ""),
                 voice_id=str(raw.get("voice_id") or (base.voice_id if base else default_voice)),
+                volcengine_voice_id=str(
+                    raw.get("volcengine_voice_id")
+                    or (base.volcengine_voice_id if base else "")
+                ),
                 speed=float(raw.get("speed", base.speed if base else 1.0)),
-                volume=float(raw.get("volume", raw.get("vol", base.volume if base else 1.0))),
+                volume=float(volume_value),
                 pitch=int(raw.get("pitch", base.pitch if base else 0)),
                 emotion=str(raw.get("emotion", base.emotion if base else "")),
                 sample_text=_profile_text(

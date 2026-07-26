@@ -14,12 +14,8 @@ import re
 # Context vars for structured log fields injected per-turn.
 # Set at the start of TurnExecutor.process() so all log records within a turn
 # automatically carry trace_id and session_id without manual thread-local tricks.
-_log_trace_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "log_trace_id", default="-"
-)
-_log_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "log_session_id", default="-"
-)
+_log_trace_id: contextvars.ContextVar[str] = contextvars.ContextVar("log_trace_id", default="-")
+_log_session_id: contextvars.ContextVar[str] = contextvars.ContextVar("log_session_id", default="-")
 
 
 class PipelineLogFilter(logging.Filter):
@@ -47,6 +43,7 @@ def set_log_context(*, trace_id: str = "-", session_id: str = "-") -> None:
     _log_trace_id.set(trace_id)
     _log_session_id.set(session_id)
 
+
 # Compiled once; shared across StreamProcessor, SkillGate, BrainPipeline, etc.
 _RE_THINK = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
 
@@ -65,10 +62,16 @@ def is_timeout_error(exc: BaseException) -> bool:
 # Error message factory (item 27) — consistent user-facing voice messages
 # ---------------------------------------------------------------------------
 
+
 def classify_llm_error(exc: Exception) -> str:
     """Return a user-facing voice message for an LLM pipeline error."""
+    from askme.llm.core.contracts import LLMNoSemanticResponse
+
+    if isinstance(exc, LLMNoSemanticResponse):
+        return "这次没有生成回答，你再说一遍？"
     try:
         from openai import APIConnectionError, APITimeoutError
+
         if is_timeout_error(exc) or isinstance(exc, APITimeoutError):
             return "想了一下没想出来，你再说一遍？"
         if isinstance(exc, APIConnectionError):

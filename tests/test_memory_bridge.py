@@ -90,7 +90,7 @@ class TestInit:
         }
 
         def fake_find_spec(name):
-            return object() if name == "sentence_transformers" else None
+            return object() if name == "fastembed" else None
 
         vs_patch, vs_mock = _patch_vector_store()
         with patch("askme.memory.bridge.get_config", return_value=cfg), \
@@ -152,12 +152,12 @@ class TestInit:
         }
 
         def fake_find_spec(name):
-            return object() if name in {"mempalace", "sentence_transformers"} else None
+            return object() if name in {"mempalace", "fastembed"} else None
 
         def fake_version(package):
             versions = {
                 "mempalace": "3.3.5",
-                "sentence-transformers": "5.2.3",
+                "fastembed": "0.8.0",
             }
             if package not in versions:
                 from importlib.metadata import PackageNotFoundError
@@ -178,7 +178,7 @@ class TestInit:
         assert health["selected_backend_dependency"]["installed"] is True
         assert health["selected_backend_dependency"]["version"] == "3.3.5"
         assert health["fallback_backend_dependency"]["backend"] == "vector"
-        assert health["fallback_backend_dependency"]["version"] == "5.2.3"
+        assert health["fallback_backend_dependency"]["version"] == "0.8.0"
         assert health["backend_dependencies"]["robotmem"]["installed"] is False
         assert (
             health["product_memory_roles"]["customer_knowledge"]["dependency"]["backend"]
@@ -306,7 +306,7 @@ class TestRetrieve:
         bridge._mem0_failed = True
         vs.available = True
         vs.search = MagicMock(return_value=[
-            {"text": "fallback result", "score": 0.8, "metadata": {}},
+            {"text": "fallback result", "score": 0.8, "metadata": {"type": "knowledge", "approval_status": "published"}},
         ])
 
         result = await bridge.retrieve("test")

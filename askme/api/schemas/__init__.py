@@ -191,7 +191,12 @@ from askme.api.schemas.vision import (
     VisionCaptureListResponse,
     VisionSnapshotResponse,
 )
-from askme.api.schemas.voice import VoiceProfileCatalogResponse, VoiceProfileUpdateResponse
+from askme.api.schemas.voice import (
+    VoiceLabDevicesResponse,
+    VoiceLabRunResponse,
+    VoiceProfileCatalogResponse,
+    VoiceProfileUpdateResponse,
+)
 
 __all__ = [
     "ApiRouteInventoryResponse",
@@ -343,6 +348,8 @@ __all__ = [
     "TraceSnapshotResponse",
     "VoiceProfileCatalogResponse",
     "VoiceProfileUpdateResponse",
+    "VoiceLabDevicesResponse",
+    "VoiceLabRunResponse",
     "VisionAnalyzeResponse",
     "VisionCaptureDeleteResponse",
     "VisionCaptureDetailResponse",

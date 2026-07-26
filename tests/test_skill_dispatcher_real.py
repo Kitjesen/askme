@@ -419,6 +419,20 @@ class TestDispatchEdgeCases:
         )
         mock_pipeline.process.assert_called_once()
 
+    async def test_handle_general_propagates_voice_turn_cancel_token(self):
+        import threading
+
+        dispatcher, mock_pipeline, _, _ = _make_dispatcher(skill=_make_skill())
+        token = threading.Event()
+
+        await dispatcher.handle_general(
+            "continue conversation",
+            source="voice",
+            turn_cancel_token=token,
+        )
+
+        assert mock_pipeline.process.await_args.kwargs["turn_cancel_token"] is token
+
 
 class TestBindRuntimeMission:
     async def test_bind_sets_runtime_mission_id(self):
@@ -515,6 +529,66 @@ class TestHandleGeneralPlanOriginalContext:
             assert original_text in extra_context, (
                 f"original user_text not found in extra_context: {extra_context!r}"
             )
+
+    async def test_barge_in_stops_undispatched_plan_steps(self):
+        import threading
+
+        from askme.pipeline.planner_agent import PlanStep
+
+        skill = _make_skill()
+        dispatcher, mock_pipeline, _, _ = _make_dispatcher(skill=skill)
+        planner = MagicMock()
+        planner.plan = AsyncMock(
+            return_value=[
+                PlanStep(skill_name="navigate", intent="first"),
+                PlanStep(skill_name="navigate", intent="second"),
+            ]
+        )
+        dispatcher._planner = planner
+        cancelled = threading.Event()
+
+        async def execute_first_then_cancel(*args, **kwargs):
+            cancelled.set()
+            return "first dispatched"
+
+        mock_pipeline.execute_skill.side_effect = execute_first_then_cancel
+
+        await dispatcher.handle_general(
+            "run both steps",
+            source="voice",
+            turn_cancel_token=cancelled,
+        )
+
+        assert mock_pipeline.execute_skill.await_count == 1
+
+    async def test_barge_in_wins_at_physical_dispatch_handoff(self):
+        from askme.pipeline.planner_agent import PlanStep
+
+        from askme.pipeline.core.turn_control import AtomicCancellationToken
+
+        skill = _make_skill()
+        dispatcher, mock_pipeline, _, _ = _make_dispatcher(skill=skill)
+        planner = MagicMock()
+        planner.plan = AsyncMock(
+            return_value=[PlanStep(skill_name="navigate", intent="first")]
+        )
+        dispatcher._planner = planner
+        token = AtomicCancellationToken()
+        atomic_try_run = token.try_run
+
+        def _cancel_at_handoff(callback):
+            token.set()
+            return atomic_try_run(callback)
+
+        token.try_run = _cancel_at_handoff  # type: ignore[method-assign]
+
+        await dispatcher.handle_general(
+            "run the step",
+            source="voice",
+            turn_cancel_token=token,
+        )
+
+        mock_pipeline.execute_skill.assert_not_awaited()
 
 
 # ── TestAgentTaskBackground ─────────────────────────────────────────────────

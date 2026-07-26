@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from askme.interfaces.core.registry import BackendRegistry
+
+if TYPE_CHECKING:
+    from askme.llm.core.contracts import LLMCallContext
 
 
 class LLMBackend(ABC):
@@ -24,11 +28,12 @@ class LLMBackend(ABC):
         temperature: float | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | None = None,
+        context: LLMCallContext | None = None,
     ) -> str:
         """Single-turn chat completion. Returns response text."""
 
     @abstractmethod
-    async def chat_stream(
+    def chat_stream(
         self,
         messages: Sequence[dict[str, Any]],
         *,
@@ -36,7 +41,10 @@ class LLMBackend(ABC):
         tool_choice: str | None = None,
         model: str | None = None,
         temperature: float | None = None,
-        thinking: bool = True,
+        max_tokens: int | None = None,
+        thinking: bool = False,
+        cancel_token: asyncio.Event | None = None,
+        context: LLMCallContext | None = None,
     ) -> AsyncIterator[Any]:
         """Streaming chat completion. Yields ``ChatCompletionChunk``."""
 

@@ -143,6 +143,7 @@ class MemoryModule(Module):
             session_memory=self._session_memory,
             episodic=self._episodic,
             vector_memory=self._memory_bridge,
+            config=cfg,
         )
         self._knowledge_job_store = KnowledgeIndexJobStore(config=cfg)
         self._warmup_task: asyncio.Task[None] | None = None
@@ -211,8 +212,10 @@ class MemoryModule(Module):
         bridge_health = self._memory_bridge.health()
         catalog_health = self._knowledge_catalog.health()
         index_jobs_health = self._knowledge_job_store.health()
+        status = self._runtime_health_status(bridge_health, catalog_health)
         return {
-            "status": "ok",
+            "status": status,
+            "ready": status in {"ok", "catalog_only"},
             "conversation_len": len(self._conversation.history),
             "episodic_buffer_len": len(self._episodic._buffer),
             "rag": bridge_health,
@@ -221,6 +224,23 @@ class MemoryModule(Module):
             "knowledge_index_jobs": index_jobs_health,
             **bridge_health,
         }
+
+    @staticmethod
+    def _runtime_health_status(
+        bridge_health: dict[str, Any],
+        catalog_health: dict[str, Any],
+    ) -> str:
+        if not isinstance(bridge_health, dict) or not isinstance(catalog_health, dict):
+            return "ok"
+        if bridge_health.get("enabled") is False:
+            return "disabled"
+        if bridge_health.get("selected_backend_ready"):
+            return "ok"
+        if int(catalog_health.get("prompt_eligible") or 0) > 0:
+            return "catalog_only"
+        if bridge_health.get("fallback_ready") or bridge_health.get("available"):
+            return "degraded"
+        return "not_ready"
 
     async def health_payload(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return product-facing memory backend readiness for Dashboard/API."""
@@ -1167,15 +1187,26 @@ class MemoryModule(Module):
                 "deleted_reason": record.get("deleted_reason") or metadata.get("deleted_reason") or "",
                 "restored_at": record.get("restored_at") or metadata.get("restored_at") or "",
             }
-            if record_id:
-                try:
-                    result = self._memory_bridge.update_knowledge_metadata(record_id, patch)
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as exc:  # pragma: no cover - bridge should degrade
-                    errors.append(f"catalog sync metadata {index}: {type(exc).__name__}: {exc}")
-
-            if not self._knowledge_catalog.is_prompt_eligible(record):
+            index_metadata = {
+                **metadata,
+                **patch,
+                "record_id": record_id or str(metadata.get("record_id") or "").strip(),
+                "type": "knowledge",
+            }
+            prompt_eligible = self._knowledge_catalog.is_prompt_eligible(record)
+            if not prompt_eligible:
+                if record_id:
+                    try:
+                        result = self._memory_bridge.update_knowledge_metadata(
+                            record_id,
+                            patch,
+                        )
+                        if inspect.isawaitable(result):
+                            await result
+                    except Exception as exc:  # pragma: no cover - bridge should degrade
+                        errors.append(
+                            f"catalog sync metadata {index}: {type(exc).__name__}: {exc}"
+                        )
                 skipped += 1
                 continue
             text = str(record.get("memory_text") or record.get("text") or "").strip()
@@ -1183,8 +1214,20 @@ class MemoryModule(Module):
                 skipped += 1
                 continue
             try:
-                await self._memory_bridge.save_fact(text, metadata)
+                indexed_result = await self._memory_bridge.save_fact(text, index_metadata)
+                if indexed_result is False:
+                    skipped += 1
+                    errors.append(
+                        f"catalog sync record {index}: backend rejected or unavailable"
+                    )
+                    continue
                 if record_id:
+                    metadata_result = self._memory_bridge.update_knowledge_metadata(
+                        record_id,
+                        patch,
+                    )
+                    if inspect.isawaitable(metadata_result):
+                        await metadata_result
                     self._knowledge_catalog.mark_indexed(record_id)
                 indexed += 1
             except Exception as exc:  # pragma: no cover - bridge should degrade

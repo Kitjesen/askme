@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ def imports_by_module(tree: ast.AST) -> dict[str, set[str]]:
 
 def route_paths(app: Any, prefix: str) -> list[str]:
     paths: list[str] = []
-    for route in app.router.routes:
+    for route in _iter_effective_routes(app):
         path = getattr(route, "path", "")
         if path.startswith(prefix):
             paths.append(path)
@@ -46,7 +46,7 @@ def route_method_counts(
 ) -> dict[tuple[str, str], int]:
     ignored = set(ignored_methods)
     route_methods: dict[tuple[str, str], int] = {}
-    for route in app.router.routes:
+    for route in _iter_effective_routes(app):
         path = getattr(route, "path", "")
         methods = getattr(route, "methods", set()) or set()
         if not path.startswith(prefix):
@@ -67,3 +67,12 @@ def duplicate_route_methods(
 ) -> dict[tuple[str, str], int]:
     counts = route_method_counts(app, prefix, ignored_methods=ignored_methods)
     return {key: count for key, count in counts.items() if count != 1}
+
+
+def _iter_effective_routes(app: Any) -> Iterator[Any]:
+    for route in app.router.routes:
+        contexts = getattr(route, "effective_route_contexts", None)
+        if callable(contexts):
+            yield from contexts()
+        else:
+            yield route

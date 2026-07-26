@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -14,16 +15,24 @@ import tempfile
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from askme.interfaces.tts import TTSBackend
+from askme.voice.output.phrase_cache import PhraseAudioCache
 from askme.voice.output.voice_profiles import (
     VoiceProfile,
     build_voice_profiles,
     resolve_voice_profile_id,
+)
+from askme.voice.output.volcengine_tts_client import (
+    VolcengineTTSClient,
+    VolcengineTTSClientError,
+    VolcengineTTSConfig,
 )
 
 try:
@@ -54,6 +63,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+RenderReferenceCallback = Callable[[np.ndarray, int], None]
+RenderReferenceFailureCallback = Callable[[BaseException], None]
+RenderReferenceResetCallback = Callable[[], None]
+
+
+@dataclass(frozen=True, slots=True)
+class _RenderReferenceItem:
+    callback: RenderReferenceCallback
+    samples: np.ndarray
+    sample_rate: int
+    epoch: int
+    start_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackHoldToken:
+    """Opaque identity for one generation-bound playback hold."""
+
+    generation: int
+    epoch: int
+
 
 class TTSEngine(TTSBackend):
     """Text-to-speech engine with three backends:
@@ -79,6 +109,8 @@ class TTSEngine(TTSBackend):
         minimax_tts_model: str - TTS model name (default "speech-2.8-hd")
         minimax_voice_id: str - Voice ID (default "male-qn-qingse")
         minimax_sample_rate: int - MiniMax output sample rate (default 24000)
+        minimax_stream_first_chunk_ms: float - first audible PCM flush threshold
+        minimax_stream_later_chunk_ms: float - subsequent PCM flush threshold
         # Common
         sample_rate: int      - playback sample rate (default 24000)
         output_device: int|str - sounddevice output device
@@ -89,6 +121,8 @@ class TTSEngine(TTSBackend):
     # bypassed for _MINIMAX_BACKOFF_SECONDS seconds to avoid per-call timeout.
     _MINIMAX_FAIL_THRESHOLD = 3
     _MINIMAX_BACKOFF_SECONDS = 300.0  # 5 minutes
+    _VOLCENGINE_FAIL_THRESHOLD = 3
+    _VOLCENGINE_BACKOFF_SECONDS = 300.0  # 5 minutes
     _MINIMAX_MIN_STREAM_SAMPLES = 2400
     _SOUND_CUE_SPECS: dict[str, tuple[tuple[float, float], ...]] = {
         "soft_chime": ((659.25, 0.08), (783.99, 0.1)),
@@ -117,8 +151,15 @@ class TTSEngine(TTSBackend):
         "TOOL_CALLS>",
     )
 
+    @staticmethod
+    def _normalize_backend(value: object) -> str:
+        backend = str(value or "local").strip().lower()
+        if backend == "volc":
+            return "volcengine"
+        return backend
+
     def __init__(self, config: dict[str, Any], *, audio_router: AudioRouter | None = None) -> None:
-        self._backend: str = config.get("backend", "local")
+        self._backend: str = self._normalize_backend(config.get("backend", "local"))
         self._fallback_backend: str = str(
             config.get("fallback_backend", "edge")
         ).strip().lower()
@@ -137,6 +178,11 @@ class TTSEngine(TTSBackend):
         self._tts_text_coalesce_max_chars: int = max(
             1, int(config.get("text_coalesce_max_chars", 160))
         )
+        self._phrase_cache = PhraseAudioCache(
+            config.get("phrase_cache_dir", "~/.cache/askme/voice_phrases"),
+            enabled=bool(config.get("phrase_cache_enabled", True)),
+        )
+        self._phrase_prime_lock = threading.Lock()
 
         # Local backend config
         self._model_dir: str = config.get("model_dir", "models/tts/vits-melo-tts-zh_en")
@@ -150,13 +196,16 @@ class TTSEngine(TTSBackend):
 
         # MiniMax backend config
         self._minimax_api_key: str = config.get("minimax_api_key", "")
-        self._minimax_tts_url: str = config.get("minimax_tts_url", "https://api.minimax.chat/v1")
+        self._minimax_tts_url: str = config.get("minimax_tts_url", "https://api.minimaxi.com/v1")
         self._minimax_tts_ws_url: str = config.get(
             "minimax_tts_ws_url", "wss://api.minimax.io/ws/v1/t2a_v2"
         )
         self._minimax_tts_transport: str = str(
             config.get("minimax_tts_transport", "sse")
         ).lower()
+        self._minimax_live_session_prewarm_enabled: bool = bool(
+            config.get("minimax_live_session_prewarm_enabled", False)
+        )
         self._minimax_tts_model: str = config.get("minimax_tts_model", "speech-2.8-hd")
         self._minimax_voice_id: str = config.get("minimax_voice_id", "male-qn-qingse")
         self._minimax_sample_rate: int = int(config.get("minimax_sample_rate", 24000))
@@ -168,6 +217,55 @@ class TTSEngine(TTSBackend):
         self._minimax_pitch: int = int(config.get("minimax_pitch", 0))
         # Emotion: "" (auto), happy, sad, angry, fearful, disgusted, surprised, calm
         self._minimax_emotion: str = config.get("minimax_emotion", "")
+
+        # Volcengine/Doubao bidirectional TTS backend config.  This path is
+        # explicitly opt-in via backend=volcengine (or alias backend=volc); it
+        # keeps the project default unchanged and fails closed to local/edge
+        # when credentials or PCM settings are incomplete.
+        self._volcengine_tts_ws_url: str = str(
+            config.get(
+                "volcengine_tts_ws_url",
+                "wss://openspeech.bytedance.com/api/v3/tts/bidirection",
+            )
+        )
+        self._volcengine_tts_api_key: str = str(config.get("volcengine_tts_api_key", ""))
+        self._volcengine_tts_app_id: str = str(config.get("volcengine_tts_app_id", ""))
+        self._volcengine_tts_access_key: str = str(
+            config.get("volcengine_tts_access_key", "")
+        )
+        self._volcengine_tts_resource_id: str = str(
+            config.get("volcengine_tts_resource_id", "")
+        )
+        self._volcengine_tts_speaker: str = str(config.get("volcengine_tts_speaker", ""))
+        self._volcengine_tts_model: str = str(
+            config.get("volcengine_tts_model")
+            or self._volcengine_tts_resource_id
+            or "seed-tts-2.0"
+        )
+        self._volcengine_tts_sample_rate: int = int(
+            config.get("volcengine_tts_sample_rate", self._sample_rate)
+        )
+        self._volcengine_tts_audio_format: str = str(
+            config.get("volcengine_tts_audio_format", "pcm")
+        ).lower()
+        self._volcengine_tts_connect_timeout_seconds: float = max(
+            0.1,
+            float(config.get("volcengine_tts_connect_timeout_seconds", 10.0)),
+        )
+        self._volcengine_tts_session_timeout_seconds: float = max(
+            0.1,
+            float(config.get("volcengine_tts_session_timeout_seconds", 30.0)),
+        )
+        self._volcengine_tts_idle_timeout_seconds: float = max(
+            1.0,
+            min(
+                110.0,
+                float(config.get("volcengine_tts_idle_timeout_seconds", 30.0)),
+            ),
+        )
+        self._volcengine_live_session_prewarm_enabled: bool = bool(
+            config.get("volcengine_tts_live_session_prewarm_enabled", False)
+        )
         self._voice_profile_cues_enabled = bool(config.get("voice_profile_cues_enabled", True))
         self._voice_profiles: dict[str, VoiceProfile] = build_voice_profiles(
             config,
@@ -185,12 +283,32 @@ class TTSEngine(TTSBackend):
         if persisted_profile_id:
             self._active_voice_profile_id = persisted_profile_id
         if self._active_voice_profile_id in self._voice_profiles:
-            self._apply_voice_profile(self._voice_profiles[self._active_voice_profile_id])
+            active_profile = self._voice_profiles[self._active_voice_profile_id]
+            self._apply_voice_profile(active_profile)
+            # A persisted profile is restored before any provider client is
+            # created.  Apply its explicit Volcengine speaker mapping here as
+            # well; otherwise a profile selected in the previous process would
+            # silently fall back to the base speaker after restart.
+            if self._backend == "volcengine":
+                provider_voice_id = str(active_profile.volcengine_voice_id or "").strip()
+                if provider_voice_id:
+                    self._volcengine_tts_speaker = provider_voice_id
         self._minimax_leading_silence_preserve_seconds: float = float(
             config.get("minimax_leading_silence_preserve_seconds", 0.16)
         )
         self._minimax_onset_threshold: float = float(
             config.get("minimax_onset_threshold", 0.0005)
+        )
+        legacy_stream_ms = (
+            1000.0 * self._MINIMAX_MIN_STREAM_SAMPLES / max(1, self._sample_rate)
+        )
+        self._minimax_stream_first_chunk_ms = max(
+            1.0,
+            float(config.get("minimax_stream_first_chunk_ms", legacy_stream_ms)),
+        )
+        self._minimax_stream_later_chunk_ms = max(
+            1.0,
+            float(config.get("minimax_stream_later_chunk_ms", legacy_stream_ms)),
         )
         self._output_tail_silence_seconds: float = max(
             0.0,
@@ -211,6 +329,46 @@ class TTSEngine(TTSBackend):
         # Consecutive failure tracking for MiniMax auto-disable
         self._minimax_fail_count: int = 0
         self._minimax_disabled_until: float = 0.0  # monotonic time
+        # MiniMax's WebSocket protocol permits many task_continue events after
+        # one task_start.  Keep that task warm for short conversational gaps,
+        # but stay comfortably below the provider's 120-second idle close.
+        self._minimax_ws_idle_timeout_seconds: float = max(
+            1.0,
+            min(
+                110.0,
+                float(config.get("minimax_ws_idle_timeout_seconds", 30.0)),
+            ),
+        )
+        self._minimax_ws_use_lock = threading.Lock()
+        self._minimax_ws_state_lock = threading.Lock()
+        self._minimax_ws_connection: Any | None = None
+        self._minimax_ws_signature: tuple[Any, ...] | None = None
+        self._minimax_ws_last_used: float = 0.0
+        self._minimax_ws_epoch: int = 0
+        self._minimax_last_complete_generation: int | None = None
+        # Live prewarm builds a provisional socket without holding the real
+        # synthesis lock.  A user request therefore always wins; the
+        # provisional socket is promoted only during a short non-blocking
+        # critical section after its handshake is complete.
+        self._minimax_prewarm_lock = threading.Lock()
+        self._minimax_prewarm_candidate_lock = threading.Lock()
+        self._minimax_prewarm_candidate: Any | None = None
+        self._minimax_prewarm_cancel = threading.Event()
+        self._shutdown_requested = threading.Event()
+
+        self._volcengine_fail_count: int = 0
+        self._volcengine_disabled_until: float = 0.0
+        self._volcengine_use_lock = threading.Lock()
+        self._volcengine_state_lock = threading.Lock()
+        self._volcengine_client: VolcengineTTSClient | None = None
+        self._volcengine_client_signature: tuple[Any, ...] | None = None
+        self._volcengine_client_last_used: float = 0.0
+        self._volcengine_client_epoch: int = 0
+        self._volcengine_last_complete_generation: int | None = None
+        self._volcengine_prewarm_lock = threading.Lock()
+        self._volcengine_prewarm_candidate_lock = threading.Lock()
+        self._volcengine_prewarm_candidate: VolcengineTTSClient | None = None
+        self._volcengine_prewarm_cancel = threading.Event()
 
         # Volume multiplier applied to all PCM output (0.0–1.0)
         self._volume: float = float(config.get("volume", 1.0))
@@ -223,6 +381,18 @@ class TTSEngine(TTSBackend):
         self._buffer_lock = threading.Lock()
         self._generation_lock = threading.Lock()
         self._generation = 0
+        self._streaming_pcm_final_generation: int | None = None
+        # Provider PCM progress is measured on the physical render timeline,
+        # not when bytes merely enter ``tts_buffer``.  State is generation
+        # bound so an interrupted turn can never leak progress into its
+        # successor.
+        self._streaming_pcm_playback_lock = threading.Lock()
+        self._streaming_pcm_playback_generation: int | None = None
+        self._streaming_pcm_queued_samples = 0
+        self._streaming_pcm_claimed_samples = 0
+        self._streaming_pcm_leading_samples = 0
+        self._streaming_pcm_render_segments: list[tuple[float, float]] = []
+        self._streaming_pcm_render_next_at = 0.0
 
         # Playback state — guarded by _playback_lock
         self._playback_lock = threading.Lock()
@@ -233,6 +403,58 @@ class TTSEngine(TTSBackend):
         self._aplay_lock = threading.Lock()  # guards _aplay_proc r/w across threads
         self._aplay_bin: str | None = shutil.which("aplay")
         self._playback_busy = threading.Event()
+        # Lossless playback holds are supported only by the continuous
+        # sounddevice callback path.  The callback owns the PCM cursor, so it
+        # can render silence without consuming queued samples.  Blocking
+        # aplay/USB writes cannot make that guarantee and fail closed.
+        self._playback_hold_condition = threading.Condition()
+        self._playback_hold_token: PlaybackHoldToken | None = None
+        self._playback_hold_acknowledged = False
+        self._playback_hold_waiters: dict[PlaybackHoldToken, int] = {}
+        self._playback_render_mode = "stopped"
+        self._playback_hold_epoch = 0
+        self._playback_hold_attempts = 0
+        self._playback_hold_acquired = 0
+        self._playback_hold_resumed = 0
+        self._playback_hold_aborted = 0
+        self._playback_hold_invalidated = 0
+        self._playback_hold_timeouts = 0
+        self._playback_hold_rejected = 0
+        self._playback_hold_silent_callbacks = 0
+        self._playback_hold_last_reason = "startup"
+        # AEC render reference delivery is isolated from the audio callback so
+        # a slow or faulty consumer can never stall physical playback.
+        self._render_reference_lock = threading.Lock()
+        self._render_reference_delivery_lock = threading.Lock()
+        self._render_reference_callback: RenderReferenceCallback | None = None
+        self._render_reference_failure_callback: (
+            RenderReferenceFailureCallback | None
+        ) = None
+        self._render_transport_failure_callback: (
+            RenderReferenceFailureCallback | None
+        ) = None
+        self._render_transport_failure_latched = False
+        self._render_reference_reset_callback: RenderReferenceResetCallback | None = None
+        self._render_reference_queue: queue.Queue[_RenderReferenceItem | None] = queue.Queue(
+            maxsize=max(1, int(config.get("render_reference_queue_size", 8)))
+        )
+        self._render_reference_epoch = 0
+        self._render_reference_next_at = 0.0
+        self._render_reference_failure_latched = False
+        self._render_reference_dropped_items = 0
+        self._render_reference_stale_items = 0
+        self._render_reference_delivered_frames = 0
+        self._render_reference_callback_failures = 0
+        self._render_reference_timing_failures = 0
+        self._render_reference_last_lag_ms = 0.0
+        self._render_reference_last_reset_reason = "startup"
+        self._render_reference_pending_resets: list[RenderReferenceResetCallback] = []
+        self._render_reference_max_lag_ms = max(
+            20.0,
+            float(config.get("render_reference_max_lag_ms", 120.0)),
+        )
+        self._render_reference_stop = threading.Event()
+        self._render_reference_thread: threading.Thread | None = None
         self._usb_audio_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         self._usb_audio_stream_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         self._usb_audio_stream_ready_at: float = 0.0
@@ -471,6 +693,503 @@ class TTSEngine(TTSBackend):
             logger.info("speak queued: %r", clean[:60])
             self.tts_text_queue.put((self._get_generation(), clean))
 
+    def begin_streaming_pcm(self) -> int:
+        """Capture the cancellation generation for a provider PCM stream.
+
+        ``prepare_turn()``, ``drain_buffers()``, and ``shutdown()`` invalidate
+        the returned token, fencing any late provider chunks.
+        """
+
+        with self._generation_lock:
+            generation = self._generation
+            with self._buffer_lock:
+                leading_samples = sum(len(chunk) for chunk in self.tts_buffer)
+            with self._streaming_pcm_playback_lock:
+                self._streaming_pcm_playback_generation = generation
+                self._streaming_pcm_queued_samples = 0
+                self._streaming_pcm_claimed_samples = 0
+                self._streaming_pcm_leading_samples = int(leading_samples)
+                self._streaming_pcm_render_segments.clear()
+                self._streaming_pcm_render_next_at = 0.0
+            return generation
+
+    def streaming_pcm_played_ms(self, generation: int) -> int:
+        """Return physically rendered provider speech for one generation.
+
+        Future DAC buffers, cold-start preroll, and configured tail silence do
+        not contribute.  Invalidated or superseded generations return zero.
+        """
+
+        now = time.monotonic()
+        with self._streaming_pcm_playback_lock:
+            if generation != self._streaming_pcm_playback_generation:
+                return 0
+            played_seconds = sum(
+                max(0.0, min(now, end_at) - start_at)
+                for start_at, end_at in self._streaming_pcm_render_segments
+                if now > start_at
+            )
+        return max(0, int((played_seconds * 1_000.0) + 1e-6))
+
+    def queue_streaming_pcm(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        *,
+        generation: int,
+        final: bool = False,
+    ) -> bool:
+        """Queue one provider PCM chunk through the normal playback buffer.
+
+        Non-final chunks never add tail silence.  The first final update marks
+        its generation terminal and appends at most one configured tail.  The
+        method returns ``False`` for invalid audio, stale generations, or any
+        update received after that generation was finalized.
+        """
+
+        audio = np.asarray(samples, dtype=np.float32)
+        if (
+            audio.ndim != 1
+            or int(sample_rate) <= 0
+            or not np.all(np.isfinite(audio))
+            or (len(audio) == 0 and not final)
+        ):
+            return False
+
+        chunks: list[np.ndarray] = []
+        if len(audio) > 0:
+            prepared = self._resample(audio, int(sample_rate), self._sample_rate)
+            if len(prepared) == 0:
+                return False
+            chunks.append(prepared.astype(np.float32, copy=True))
+        if final:
+            tail_count = int(
+                self._sample_rate * self._output_tail_silence_seconds
+            )
+            if tail_count > 0:
+                chunks.append(np.zeros(tail_count, dtype=np.float32))
+        return self._append_streaming_audio_for_generation(
+            generation,
+            chunks,
+            final=final,
+            provider_samples=len(chunks[0]) if len(audio) > 0 else 0,
+        )
+
+    def queue_cached_pcm(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        *,
+        cache_key: str = "",
+    ) -> bool:
+        """Queue cached mono PCM through the normal cancellable speech path."""
+
+        audio = np.asarray(samples, dtype=np.float32)
+        if (
+            audio.ndim != 1
+            or len(audio) == 0
+            or int(sample_rate) <= 0
+            or not np.all(np.isfinite(audio))
+        ):
+            return False
+
+        generation = self._get_generation()
+        prepared = self._resample(audio, int(sample_rate), self._sample_rate)
+        if len(prepared) == 0:
+            return False
+        tail_count = int(self._sample_rate * self._output_tail_silence_seconds)
+
+        # Lock order matches generation-sensitive TTS paths: generation first,
+        # then audio buffer.  drain_buffers() either wins before this block or
+        # clears the freshly queued data after advancing the generation.
+        with self._generation_lock:
+            if generation != self._generation:
+                return False
+            with self._buffer_lock:
+                self.tts_buffer.append(prepared.astype(np.float32, copy=True))
+                if tail_count > 0:
+                    self.tts_buffer.append(np.zeros(tail_count, dtype=np.float32))
+        logger.info(
+            "TTS phrase cache queued: key=%s samples=%d",
+            cache_key or "anonymous",
+            len(prepared),
+        )
+        return True
+
+    def queue_cached_phrase(self, text: str, *, cache_key: str) -> bool:
+        """Queue a persisted phrase without invoking any TTS provider."""
+
+        storage_key = self._phrase_cache_storage_key(text, cache_key)
+        cached = self._phrase_cache.get(storage_key)
+        if cached is None:
+            logger.info("TTS phrase cache miss: key=%s", cache_key)
+            return False
+        return self.queue_cached_pcm(
+            cached.samples,
+            cached.sample_rate,
+            cache_key=storage_key,
+        )
+
+    def cached_phrase_pcm(
+        self,
+        text: str,
+        *,
+        cache_key: str,
+        target_sample_rate: int | None = None,
+    ) -> tuple[np.ndarray, int] | None:
+        """Return cached phrase PCM without queueing audio or invoking TTS."""
+
+        storage_key = self._phrase_cache_storage_key(text, cache_key)
+        cached = self._phrase_cache.get(storage_key)
+        if cached is None:
+            logger.info("TTS phrase cache miss: key=%s", cache_key)
+            return None
+        sample_rate = int(cached.sample_rate)
+        samples = cached.samples.astype(np.float32, copy=True)
+        if target_sample_rate is not None and int(target_sample_rate) > 0:
+            target_rate = int(target_sample_rate)
+            samples = self._resample(samples, sample_rate, target_rate).astype(
+                np.float32,
+                copy=True,
+            )
+            sample_rate = target_rate
+        return samples, sample_rate
+
+    def prime_cached_phrase(self, text: str, *, cache_key: str) -> dict[str, Any]:
+        """Synthesize one phrase off-line from playback and persist its PCM."""
+
+        storage_key = self._phrase_cache_storage_key(text, cache_key)
+        existing = self._phrase_cache.get(storage_key)
+        if existing is not None:
+            return {
+                "cached": True,
+                "created": False,
+                "cache_key": storage_key,
+                "samples": len(existing.samples),
+                "sample_rate": existing.sample_rate,
+            }
+
+        with self._phrase_prime_lock:
+            if self.is_active() or self.tts_text_queue.unfinished_tasks:
+                return {
+                    "cached": False,
+                    "created": False,
+                    "cache_key": storage_key,
+                    "reason": "tts_busy",
+                }
+            with self._buffer_lock:
+                if self.tts_buffer:
+                    return {
+                        "cached": False,
+                        "created": False,
+                        "cache_key": storage_key,
+                        "reason": "audio_buffer_not_empty",
+                    }
+
+            generation = self._get_generation()
+            generated_backend = self._generate_audio(text, generation)
+            with self._buffer_lock:
+                chunks = list(self.tts_buffer)
+                self.tts_buffer.clear()
+            if generated_backend != self._backend:
+                return {
+                    "cached": False,
+                    "created": False,
+                    "cache_key": storage_key,
+                    "reason": "backend_fallback_not_cached",
+                    "generated_backend": generated_backend or "incomplete",
+                }
+            if not chunks:
+                return {
+                    "cached": False,
+                    "created": False,
+                    "cache_key": storage_key,
+                    "reason": "synthesis_empty",
+                }
+            audio = np.concatenate(chunks).astype(np.float32, copy=False)
+            tail_count = int(self._sample_rate * self._output_tail_silence_seconds)
+            if tail_count > 0 and len(audio) >= tail_count:
+                audio = audio[:-tail_count]
+            if len(audio) == 0:
+                return {
+                    "cached": False,
+                    "created": False,
+                    "cache_key": storage_key,
+                    "reason": "synthesis_empty",
+                }
+            created = self._phrase_cache.put(storage_key, audio, self._sample_rate)
+            return {
+                "cached": created,
+                "created": created,
+                "cache_key": storage_key,
+                "samples": len(audio),
+                "sample_rate": self._sample_rate,
+                "reason": "" if created else "cache_write_failed",
+            }
+
+    def prewarm_provider_session(self) -> dict[str, Any]:
+        """Open/reuse the live provider session without sending text.
+
+        For MiniMax WebSocket this warms the exact socket used by real
+        streaming synthesis.  The handshake uses a provisional connection so
+        it never holds ``_minimax_ws_use_lock`` while waiting on the network;
+        real synthesis always wins.  It sends ``task_start`` but never
+        ``task_continue`` and never writes PCM into ``tts_buffer``.
+        """
+
+        if self._backend == "volcengine":
+            return self._prewarm_volcengine_provider_session()
+        if self._backend != "minimax":
+            return {"ok": False, "status": "skipped", "reason": "backend_not_minimax"}
+        if self._minimax_tts_transport not in {"websocket", "ws"}:
+            return {"ok": False, "status": "skipped", "reason": "transport_not_websocket"}
+        if not self._minimax_api_key:
+            return {"ok": False, "status": "skipped", "reason": "missing_minimax_api_key"}
+        if not self._minimax_live_session_prewarm_enabled:
+            return {"ok": False, "status": "skipped", "reason": "disabled"}
+
+        try:
+            import websocket
+        except ModuleNotFoundError:
+            return {"ok": False, "status": "skipped", "reason": "missing_websocket_client"}
+        if getattr(websocket, "create_connection", None) is None:
+            return {"ok": False, "status": "skipped", "reason": "missing_websocket_client"}
+
+        if self._shutdown_requested.is_set():
+            return {"ok": False, "status": "skipped", "reason": "shutdown"}
+        if not self._minimax_prewarm_lock.acquire(blocking=False):
+            return {"ok": False, "status": "skipped", "reason": "already_running"}
+
+        started_at = time.monotonic()
+        try:
+            self._minimax_prewarm_cancel.clear()
+            # Inspect provider state only while the real synthesis lock is
+            # immediately available.  Never wait behind a user request.
+            if not self._minimax_ws_use_lock.acquire(blocking=False):
+                return {"ok": False, "status": "skipped", "reason": "synthesis_busy"}
+            try:
+                generation = self._get_generation()
+                signature = self._minimax_ws_configuration_signature()
+                now = time.monotonic()
+                with self._minimax_ws_state_lock:
+                    existing = self._minimax_ws_connection
+                    reusable = (
+                        existing is not None
+                        and self._minimax_ws_signature == signature
+                        and now - self._minimax_ws_last_used
+                        <= self._minimax_ws_idle_timeout_seconds
+                        and getattr(existing, "connected", True) is not False
+                    )
+                    last_used = self._minimax_ws_last_used
+                if reusable:
+                    return self._minimax_prewarm_result(
+                        started_at=started_at,
+                        status="reused",
+                        reused=True,
+                        last_used=last_used,
+                    )
+                if existing is not None:
+                    self._invalidate_minimax_websocket(
+                        expected=existing,
+                        graceful=True,
+                    )
+                with self._minimax_ws_state_lock:
+                    open_epoch = self._minimax_ws_epoch
+            finally:
+                self._minimax_ws_use_lock.release()
+
+            candidate = self._open_minimax_websocket_candidate(
+                websocket,
+                cancel_event=self._minimax_prewarm_cancel,
+                track_as_prewarm=True,
+            )
+            if candidate is None:
+                return {"ok": False, "status": "cancelled", "reason": "cancelled"}
+
+            # Promotion is opportunistic.  If synthesis started while the
+            # handshake was in flight, close this duplicate immediately.
+            if not self._minimax_ws_use_lock.acquire(blocking=False):
+                self._close_minimax_ws_connection(candidate, graceful=True)
+                return {
+                    "ok": False,
+                    "status": "superseded",
+                    "reason": "synthesis_started",
+                }
+            try:
+                accepted = False
+                with self._minimax_ws_state_lock:
+                    current = self._minimax_ws_connection
+                    current_reusable = (
+                        current is not None
+                        and self._minimax_ws_signature == signature
+                        and time.monotonic() - self._minimax_ws_last_used
+                        <= self._minimax_ws_idle_timeout_seconds
+                        and getattr(current, "connected", True) is not False
+                    )
+                    current_last_used = self._minimax_ws_last_used
+                    if (
+                        not self._minimax_prewarm_cancel.is_set()
+                        and not self._shutdown_requested.is_set()
+                        and self._minimax_ws_epoch == open_epoch
+                        and current is None
+                        and self._is_generation_current(generation)
+                    ):
+                        self._minimax_ws_connection = candidate
+                        self._minimax_ws_signature = signature
+                        self._minimax_ws_last_used = time.monotonic()
+                        current_last_used = self._minimax_ws_last_used
+                        accepted = True
+                if accepted:
+                    return self._minimax_prewarm_result(
+                        started_at=started_at,
+                        status="opened",
+                        reused=False,
+                        last_used=current_last_used,
+                    )
+                self._close_minimax_ws_connection(candidate, graceful=True)
+                if current_reusable:
+                    return self._minimax_prewarm_result(
+                        started_at=started_at,
+                        status="superseded_by_live_session",
+                        reused=True,
+                        last_used=current_last_used,
+                    )
+                return {
+                    "ok": False,
+                    "status": "superseded",
+                    "reason": "provider_state_changed",
+                }
+            finally:
+                self._minimax_ws_use_lock.release()
+        except Exception as exc:
+            if self._minimax_prewarm_cancel.is_set() or self._shutdown_requested.is_set():
+                return {"ok": False, "status": "cancelled", "reason": "cancelled"}
+            logger.warning("MiniMax TTS WS live prewarm failed: %s", exc)
+            return {
+                "ok": False,
+                "status": "failed",
+                "reason": exc.__class__.__name__,
+            }
+        finally:
+            self._minimax_prewarm_lock.release()
+
+    def _minimax_prewarm_result(
+        self,
+        *,
+        started_at: float,
+        status: str,
+        reused: bool,
+        last_used: float,
+    ) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "status": status,
+            "reused": bool(reused),
+            "elapsed_ms": round((time.monotonic() - started_at) * 1000.0, 2),
+            "buffered_samples_delta": 0,
+            "last_used_age_ms": round(
+                max(0.0, time.monotonic() - last_used) * 1000.0,
+                2,
+            ),
+        }
+
+    def cancel_provider_prewarm(self) -> None:
+        """Cancel a provisional provider handshake without touching live speech."""
+
+        self._minimax_prewarm_cancel.set()
+        with self._minimax_prewarm_candidate_lock:
+            candidate = self._minimax_prewarm_candidate
+            self._minimax_prewarm_candidate = None
+        if candidate is not None:
+            self._close_minimax_ws_connection(candidate, graceful=False)
+        self._volcengine_prewarm_cancel.set()
+        with self._volcengine_prewarm_candidate_lock:
+            volc_candidate = self._volcengine_prewarm_candidate
+            self._volcengine_prewarm_candidate = None
+        if volc_candidate is not None:
+            volc_candidate.interrupt()
+            volc_candidate.close()
+
+    def _phrase_cache_storage_key(self, text: str, cache_key: str) -> str:
+        backend_settings: dict[str, Any]
+        if self._backend == "local":
+            backend_settings = self._local_acoustic_model_signature()
+        elif self._backend == "minimax":
+            backend_settings = {
+                "model": self._minimax_tts_model,
+                "voice": self._minimax_voice_id,
+                "speed": self._minimax_speed,
+                "volume": self._minimax_vol,
+                "pitch": self._minimax_pitch,
+                "emotion": self._minimax_emotion,
+                "provider_sample_rate": self._minimax_sample_rate,
+                "bitrate": self._minimax_bitrate,
+                "audio_format": self._minimax_audio_format,
+                "transport": self._minimax_tts_transport,
+                "endpoint": (
+                    self._minimax_tts_ws_url
+                    if self._minimax_tts_transport in {"websocket", "ws"}
+                    else self._minimax_tts_url
+                ),
+            }
+        elif self._backend == "volcengine":
+            backend_settings = {
+                "provider": "volcengine",
+                "model": self._volcengine_tts_model,
+                "resource_id": self._volcengine_tts_resource_id,
+                "speaker": self._volcengine_tts_speaker,
+                "provider_sample_rate": self._volcengine_tts_sample_rate,
+                "audio_format": self._volcengine_tts_audio_format,
+                "endpoint": self._volcengine_tts_ws_url,
+            }
+        else:
+            backend_settings = {
+                "voice": self._voice,
+                "rate": self._rate,
+            }
+        signature = {
+            "schema": 2,
+            "cache_key": cache_key,
+            "text": text,
+            "backend": self._backend,
+            "voice_profile": self._active_voice_profile_id,
+            "backend_settings": backend_settings,
+            "playback": {
+                "sample_rate": self._sample_rate,
+                "output_transport": self._output_transport,
+                "output_volume": self._volume,
+            },
+        }
+        digest = hashlib.sha256(
+            json.dumps(signature, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+        return f"{cache_key}-v2-{digest}"
+
+    def _local_acoustic_model_signature(self) -> dict[str, Any]:
+        model_dir = Path(self._model_dir).expanduser()
+        candidates = [
+            model_dir / "model.onnx",
+            model_dir / "vits-aishell3.onnx",
+            model_dir / "vits-aishell3.int8.onnx",
+        ]
+        model_file = next((path for path in candidates if path.exists()), candidates[0])
+        try:
+            stat = model_file.stat()
+            model_identity = {
+                "path": str(model_file.resolve()),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+        except OSError:
+            model_identity = {"path": str(model_file), "size": None, "mtime_ns": None}
+        return {
+            "model": model_identity,
+            "speaker_id": self._sid,
+            "speed": self._speed,
+            "threads": self._num_threads,
+            "model_sample_rate": self._local_sample_rate,
+        }
+
     @staticmethod
     def _is_speakable_text(text: str) -> bool:
         """Return True for normal text and short numeric/CJK utterances."""
@@ -490,7 +1209,130 @@ class TTSEngine(TTSBackend):
                 return
             self._is_playing = True
             self._playback_thread = threading.Thread(target=self._playback_loop, daemon=True)
+            self._set_playback_render_mode("starting")
             self._playback_thread.start()
+
+    def pause_playback(self, timeout_s: float = 0.25) -> PlaybackHoldToken | None:
+        """Hold callback playback without consuming its current PCM cursor.
+
+        The returned token is issued only after the continuous sounddevice
+        callback has rendered a silent block.  Blocking or inactive output
+        paths return ``None``.  A timeout cancels only the still-current hold
+        request, leaving playback in a coherent, unheld state.
+        """
+
+        timeout_s = max(0.0, float(timeout_s))
+        deadline = time.monotonic() + timeout_s
+        # Generation capture and hold publication share the same lock order as
+        # generation invalidation.  A drain therefore linearizes either before
+        # this request (new-generation token) or after it (token invalidated).
+        with self._generation_lock:
+            generation = self._generation
+            with self._playback_hold_condition:
+                self._playback_hold_attempts += 1
+                if (
+                    self._stop_requested.is_set()
+                    or self._playback_render_mode
+                    not in {"starting", "sounddevice_callback"}
+                ):
+                    self._playback_hold_rejected += 1
+                    self._playback_hold_last_reason = "unsupported_output_path"
+                    return None
+
+                token = self._playback_hold_token
+                if token is None:
+                    self._playback_hold_epoch += 1
+                    token = PlaybackHoldToken(
+                        generation=generation,
+                        epoch=self._playback_hold_epoch,
+                    )
+                    self._playback_hold_token = token
+                    self._playback_hold_acknowledged = False
+                    self._playback_hold_last_reason = "pending_callback_ack"
+                    self._playback_hold_condition.notify_all()
+                elif token.generation != generation:
+                    self._invalidate_playback_hold_locked("stale_generation")
+                    self._playback_hold_rejected += 1
+                    return None
+                waiting_for_ack = not self._playback_hold_acknowledged
+                if waiting_for_ack:
+                    self._playback_hold_waiters[token] = (
+                        self._playback_hold_waiters.get(token, 0) + 1
+                    )
+
+        with self._playback_hold_condition:
+            while (
+                self._playback_hold_token == token
+                and not self._playback_hold_acknowledged
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._playback_hold_timeouts += 1
+                    self._release_playback_hold_waiter_locked(token)
+                    if (
+                        self._playback_hold_token == token
+                        and not self._playback_hold_acknowledged
+                        and self._playback_hold_waiters.get(token, 0) == 0
+                    ):
+                        self._invalidate_playback_hold_locked("pause_timeout")
+                    else:
+                        self._playback_hold_last_reason = "pause_waiter_timeout"
+                    return None
+                self._playback_hold_condition.wait(timeout=remaining)
+
+            if waiting_for_ack:
+                self._release_playback_hold_waiter_locked(token)
+            if (
+                self._playback_hold_token == token
+                and self._playback_hold_acknowledged
+            ):
+                return token
+            return None
+
+    def resume_playback(self, token: PlaybackHoldToken) -> bool:
+        """Release exactly the hold identified by *token*."""
+
+        if not isinstance(token, PlaybackHoldToken):
+            with self._playback_hold_condition:
+                self._playback_hold_rejected += 1
+                self._playback_hold_last_reason = "invalid_resume_token"
+            return False
+        with self._generation_lock:
+            generation = self._generation
+            with self._playback_hold_condition:
+                if (
+                    token.generation != generation
+                    or self._playback_hold_token != token
+                    or not self._playback_hold_acknowledged
+                ):
+                    self._playback_hold_rejected += 1
+                    self._playback_hold_last_reason = "stale_resume_token"
+                    return False
+                self._playback_hold_token = None
+                self._playback_hold_acknowledged = False
+                self._playback_hold_resumed += 1
+                self._playback_hold_last_reason = "resumed"
+                self._playback_hold_condition.notify_all()
+                return True
+
+    def abort_playback_hold(self, token: PlaybackHoldToken) -> bool:
+        """Invalidate one active hold without accepting stale tokens."""
+
+        if not isinstance(token, PlaybackHoldToken):
+            with self._playback_hold_condition:
+                self._playback_hold_rejected += 1
+                self._playback_hold_last_reason = "invalid_abort_token"
+            return False
+        with self._generation_lock:
+            generation = self._generation
+            with self._playback_hold_condition:
+                if token.generation != generation or self._playback_hold_token != token:
+                    self._playback_hold_rejected += 1
+                    self._playback_hold_last_reason = "stale_abort_token"
+                    return False
+                self._playback_hold_aborted += 1
+                self._invalidate_playback_hold_locked("aborted")
+                return True
 
     def stop_playback(self) -> None:
         """Stop playback immediately."""
@@ -498,10 +1340,46 @@ class TTSEngine(TTSBackend):
             self._is_playing = False
             thread = self._playback_thread
             self._playback_thread = None
+        self._set_playback_render_mode("stopped")
         self._kill_aplay()
         self._kill_usb_audio()
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+
+    def _set_playback_render_mode(self, mode: str) -> None:
+        with self._playback_hold_condition:
+            self._playback_render_mode = mode
+            if mode in {"stopped", "unsupported"}:
+                self._invalidate_playback_hold_locked(f"render_mode_{mode}")
+            self._playback_hold_condition.notify_all()
+
+    def _invalidate_playback_hold(self, reason: str) -> bool:
+        with self._playback_hold_condition:
+            return self._invalidate_playback_hold_locked(reason)
+
+    def _invalidate_playback_hold_locked(self, reason: str) -> bool:
+        if self._playback_hold_token is None:
+            return False
+        self._playback_hold_token = None
+        self._playback_hold_acknowledged = False
+        self._playback_hold_invalidated += 1
+        self._playback_hold_last_reason = reason
+        self._playback_hold_condition.notify_all()
+        return True
+
+    def _release_playback_hold_waiter_locked(
+        self,
+        token: PlaybackHoldToken,
+    ) -> None:
+        waiters = self._playback_hold_waiters.get(token, 0)
+        if waiters <= 1:
+            self._playback_hold_waiters.pop(token, None)
+        else:
+            self._playback_hold_waiters[token] = waiters - 1
+
+    def _playback_hold_is_active(self) -> bool:
+        with self._playback_hold_condition:
+            return self._playback_hold_token is not None
 
     def is_active(self) -> bool:
         """Return True if audio is buffered or playback is in progress."""
@@ -528,7 +1406,11 @@ class TTSEngine(TTSBackend):
                     )
                     return False
                 self.tts_text_queue.all_tasks_done.wait(timeout=min(0.05, remaining))
-        while self._has_buffered_audio() or self._playback_busy.is_set():
+        while (
+            self._has_buffered_audio()
+            or self._playback_busy.is_set()
+            or self._playback_hold_is_active()
+        ):
             if time.monotonic() >= deadline:
                 logger.warning("wait_done: timed out after %.1fs waiting for buffer drain", timeout)
                 return False
@@ -546,6 +1428,15 @@ class TTSEngine(TTSBackend):
                 logger.warning("wait_done: timed out after %.1fs waiting for MCP01 USB audio", timeout)
                 return False
             time.sleep(0.02)
+        while self._playback_hold_is_active():
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "wait_done: timed out after %.1fs waiting for playback hold",
+                    timeout,
+                )
+                return False
+            with self._playback_hold_condition:
+                self._playback_hold_condition.wait(timeout=0.02)
         return True
         # Fallback: wait for any sounddevice stream (non-aplay systems).
         try:
@@ -561,6 +1452,10 @@ class TTSEngine(TTSBackend):
         feedback during LLM/TTS latency gaps.
         """
         if not self._should_use_usb_direct():
+            # AudioAgent owns the physical sounddevice/aplay fallback.  It
+            # publishes the render reference only after that device path has
+            # accepted its first frame, so process startup is not mistaken
+            # for speaker latency.
             return False
 
         samples = np.asarray(audio, dtype=np.float32)
@@ -578,9 +1473,423 @@ class TTSEngine(TTSBackend):
         finally:
             self._playback_busy.clear()
 
+    def cancel_feedback_audio(self) -> None:
+        """Stop only the direct transport currently used by a feedback cue.
+
+        ``AudioAgent`` calls this before queuing semantic speech.  It does not
+        advance the playback generation or clear semantic text/PCM buffers.
+        """
+
+        self._kill_usb_audio()
+
+    def publish_feedback_render_reference(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        *,
+        render_at: float | None = None,
+    ) -> None:
+        """Publish fallback feedback PCM after physical playback has started."""
+
+        self._publish_render_reference(
+            np.asarray(audio, dtype=np.float32),
+            sample_rate=sample_rate,
+            render_at=render_at,
+        )
+
+    def set_render_reference_callback(
+        self,
+        callback: RenderReferenceCallback | None,
+        *,
+        on_failure: RenderReferenceFailureCallback | None = None,
+        on_reset: RenderReferenceResetCallback | None = None,
+        reset_existing: bool = True,
+    ) -> None:
+        """Register the mono float32 render-reference consumer.
+
+        Delivery runs on a dedicated daemon thread and uses a bounded queue, so
+        the playback callback never waits for AEC.  Audio is paced in 10 ms
+        frames against a monotonic render timeline.  Queue overflow, excessive
+        timing lag, or callback failure is reported exactly once through
+        ``on_failure`` so the caller can fail closed to half duplex.
+        """
+
+        if callback is not None and not callable(callback):
+            raise TypeError("render reference callback must be callable or None")
+        if on_failure is not None and not callable(on_failure):
+            raise TypeError("render reference failure callback must be callable or None")
+        if on_reset is not None and not callable(on_reset):
+            raise TypeError("render reference reset callback must be callable or None")
+        with self._render_reference_lock:
+            if reset_existing:
+                self._queue_render_reference_reset_locked(
+                    self._render_reference_reset_callback
+                )
+            self._render_reference_epoch += 1
+            self._render_reference_next_at = 0.0
+            self._render_reference_stale_items += (
+                self._discard_render_reference_queue_locked()
+            )
+            self._render_reference_callback = callback
+            self._render_reference_failure_callback = on_failure
+            self._render_reference_reset_callback = on_reset
+            self._render_reference_failure_latched = False
+            self._render_reference_last_reset_reason = "callback_changed"
+            thread = self._render_reference_thread
+            if callback is not None and (thread is None or not thread.is_alive()):
+                self._render_reference_stop.clear()
+                thread = threading.Thread(
+                    target=self._render_reference_loop,
+                    name="tts-render-reference",
+                    daemon=True,
+                )
+                self._render_reference_thread = thread
+                thread.start()
+        self._run_pending_render_reference_resets_if_idle()
+
+    def _publish_render_reference(
+        self,
+        chunk: np.ndarray,
+        *,
+        sample_rate: int | None = None,
+        render_at: float | None = None,
+    ) -> None:
+        """Queue final playback PCM on the monotonic render timeline."""
+
+        samples = np.asarray(chunk, dtype=np.float32)
+        if samples.ndim != 1 or len(samples) == 0:
+            return
+        render_sample_rate = self._sample_rate if sample_rate is None else int(sample_rate)
+        if render_sample_rate <= 0:
+            return
+        payload = np.ascontiguousarray(samples).copy()
+        now = time.monotonic() if render_at is None else float(render_at)
+        failure: BaseException | None = None
+        with self._render_reference_lock:
+            callback = self._render_reference_callback
+            if callback is None or self._render_reference_failure_latched:
+                return
+            epoch = self._render_reference_epoch
+            start_at = max(now, self._render_reference_next_at)
+            self._render_reference_next_at = start_at + (
+                len(payload) / float(render_sample_rate)
+            )
+            try:
+                self._render_reference_queue.put_nowait(
+                    _RenderReferenceItem(
+                        callback=callback,
+                        samples=payload,
+                        sample_rate=render_sample_rate,
+                        epoch=epoch,
+                        start_at=start_at,
+                    )
+                )
+            except queue.Full:
+                self._render_reference_dropped_items += 1
+                failure = RuntimeError("TTS render-reference queue overflow")
+        if failure is not None:
+            self._notify_render_reference_failure(failure)
+
+    def set_render_transport_failure_callback(
+        self,
+        callback: RenderReferenceFailureCallback | None,
+    ) -> None:
+        """Register output-device failure handling independent of native AEC."""
+
+        if callback is not None and not callable(callback):
+            raise TypeError("render transport failure callback must be callable or None")
+        with self._render_reference_lock:
+            self._render_transport_failure_callback = callback
+            self._render_transport_failure_latched = False
+
+    def report_render_transport_failure(
+        self,
+        reason: str,
+        exc: BaseException | None = None,
+    ) -> None:
+        """Invalidate uncertain speaker timing and request half-duplex safety."""
+
+        with self._render_reference_lock:
+            render_reference_configured = (
+                self._render_reference_callback is not None
+                and not self._render_reference_failure_latched
+            )
+            transport_callback = self._render_transport_failure_callback
+            if self._render_transport_failure_latched:
+                return
+            configured = render_reference_configured or transport_callback is not None
+            if configured:
+                self._render_transport_failure_latched = True
+        if not configured:
+            return
+        detail = f"TTS render transport failed: {reason}"
+        if exc is not None:
+            detail = f"{detail}: {exc}"
+        failure = RuntimeError(detail)
+        self._invalidate_render_reference("transport_failure")
+
+        # Output-device failures and AEC/render-reference failures are
+        # different safety signals.  When both handlers are installed, route
+        # transport failures through the dedicated handler so full-duplex
+        # telemetry retains the physical-output failure reason.  The AEC
+        # handler remains a compatibility fallback for integrations that have
+        # not registered the dedicated transport seam.
+        failure_callback = transport_callback
+        callback_label = "render-transport"
+        if failure_callback is None:
+            if not render_reference_configured:
+                return
+            failure_callback = self._render_reference_failure_callback
+            callback_label = "render-reference"
+            with self._render_reference_lock:
+                if self._render_reference_failure_latched:
+                    return
+                self._render_reference_failure_latched = True
+        if failure_callback is None:
+            return
+
+        def _invoke_transport_failure_callback() -> None:
+            try:
+                failure_callback(failure)
+            except Exception as callback_exc:
+                logger.error(
+                    "TTS %s failure handler failed: %s",
+                    callback_label,
+                    callback_exc,
+                )
+
+        threading.Thread(
+            target=_invoke_transport_failure_callback,
+            name="tts-render-transport-fail-closed",
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _sounddevice_render_time(time_info: Any) -> float:
+        """Map PortAudio's DAC clock estimate onto the monotonic clock."""
+
+        now = time.monotonic()
+        if time_info is None:
+            return now
+
+        def _read(name: str) -> float | None:
+            value = (
+                time_info.get(name)
+                if isinstance(time_info, dict)
+                else getattr(time_info, name, None)
+            )
+            if value is None:
+                return None
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if np.isfinite(parsed) else None
+
+        current_time = _read("currentTime")
+        dac_time = _read("outputBufferDacTime")
+        if current_time is None or dac_time is None:
+            return now
+        # PortAudio times share a host clock, while this worker schedules on
+        # Python's monotonic clock.  Only carry across the bounded delta.
+        delay = max(0.0, min(1.0, dac_time - current_time))
+        return now + delay
+
+    def _render_reference_loop(self) -> None:
+        while True:
+            try:
+                item = self._render_reference_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if item is None:
+                self._render_reference_queue.task_done()
+                break
+            try:
+                self._deliver_render_reference_item(item)
+            except Exception as exc:
+                with self._render_reference_lock:
+                    self._render_reference_callback_failures += 1
+                self._notify_render_reference_failure(exc)
+            finally:
+                self._render_reference_queue.task_done()
+
+    def _deliver_render_reference_item(self, item: _RenderReferenceItem) -> None:
+        frame_samples = max(1, round(item.sample_rate / 100.0))
+        for offset in range(0, len(item.samples), frame_samples):
+            deadline = item.start_at + (offset / float(item.sample_rate))
+            if not self._wait_for_render_reference_deadline(deadline, item.epoch):
+                return
+            frame = np.ascontiguousarray(
+                item.samples[offset : offset + frame_samples],
+                dtype=np.float32,
+            )
+            failure: BaseException | None = None
+            with self._render_reference_delivery_lock:
+                self._run_pending_render_reference_resets_locked()
+                lag_ms = max(0.0, (time.monotonic() - deadline) * 1000.0)
+                with self._render_reference_lock:
+                    if item.epoch != self._render_reference_epoch:
+                        self._render_reference_stale_items += 1
+                        return
+                    self._render_reference_last_lag_ms = lag_ms
+                    if lag_ms > self._render_reference_max_lag_ms:
+                        self._render_reference_timing_failures += 1
+                        failure = RuntimeError(
+                            "TTS render-reference clock lag "
+                            f"{lag_ms:.1f}ms exceeds "
+                            f"{self._render_reference_max_lag_ms:.1f}ms"
+                        )
+                if failure is None:
+                    try:
+                        item.callback(frame, item.sample_rate)
+                    finally:
+                        self._run_pending_render_reference_resets_locked()
+                    with self._render_reference_lock:
+                        self._render_reference_delivered_frames += 1
+            if failure is not None:
+                self._notify_render_reference_failure(failure)
+                return
+
+    def _wait_for_render_reference_deadline(self, deadline: float, epoch: int) -> bool:
+        while not self._render_reference_stop.is_set():
+            with self._render_reference_lock:
+                if epoch != self._render_reference_epoch:
+                    self._render_reference_stale_items += 1
+                    return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            self._render_reference_stop.wait(timeout=min(0.01, remaining))
+        return False
+
+    def _notify_render_reference_failure(self, exc: BaseException) -> None:
+        with self._render_reference_lock:
+            if self._render_reference_failure_latched:
+                return
+            self._render_reference_failure_latched = True
+            failure_callback = self._render_reference_failure_callback
+        logger.error("TTS render reference failed; full duplex is unsafe: %s", exc)
+        if failure_callback is None:
+            return
+
+        def _invoke_failure_callback() -> None:
+            try:
+                failure_callback(exc)
+            except Exception as callback_exc:
+                logger.error(
+                    "TTS render-reference failure handler failed: %s",
+                    callback_exc,
+                )
+
+        threading.Thread(
+            target=_invoke_failure_callback,
+            name="tts-render-reference-fail-closed",
+            daemon=True,
+        ).start()
+
+    def _invalidate_render_reference(self, reason: str) -> None:
+        with self._render_reference_lock:
+            self._render_reference_epoch += 1
+            self._render_reference_next_at = 0.0
+            self._render_reference_last_reset_reason = reason
+            self._queue_render_reference_reset_locked(
+                self._render_reference_reset_callback
+            )
+            self._render_reference_stale_items += (
+                self._discard_render_reference_queue_locked()
+            )
+        self._run_pending_render_reference_resets_if_idle()
+
+    def _queue_render_reference_reset_locked(
+        self,
+        callback: RenderReferenceResetCallback | None,
+    ) -> None:
+        if callback is None:
+            return
+        if not any(pending is callback for pending in self._render_reference_pending_resets):
+            self._render_reference_pending_resets.append(callback)
+
+    def _run_pending_render_reference_resets_if_idle(self) -> None:
+        if not self._render_reference_delivery_lock.acquire(blocking=False):
+            return
+        try:
+            self._run_pending_render_reference_resets_locked()
+        finally:
+            self._render_reference_delivery_lock.release()
+
+    def _run_pending_render_reference_resets_locked(self) -> None:
+        while True:
+            with self._render_reference_lock:
+                if not self._render_reference_pending_resets:
+                    return
+                reset_callback = self._render_reference_pending_resets.pop(0)
+            try:
+                reset_callback()
+            except Exception as exc:
+                self._notify_render_reference_failure(exc)
+
+    def _discard_render_reference_queue_locked(self) -> int:
+        discarded = 0
+        while True:
+            try:
+                item = self._render_reference_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._render_reference_queue.task_done()
+            if item is not None:
+                discarded += 1
+        return discarded
+
+    def _shutdown_render_reference_worker(self) -> None:
+        with self._render_reference_lock:
+            self._render_reference_epoch += 1
+            self._render_reference_next_at = 0.0
+            self._render_reference_stale_items += (
+                self._discard_render_reference_queue_locked()
+            )
+            self._render_reference_callback = None
+            self._render_reference_failure_callback = None
+            self._render_reference_reset_callback = None
+            self._render_transport_failure_callback = None
+            thread = self._render_reference_thread
+            self._render_reference_stop.set()
+            if thread is not None and thread.is_alive():
+                self._render_reference_queue.put_nowait(None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+            if thread.is_alive():
+                logger.error("TTS render-reference worker did not stop within 1 second")
+
+    def prepare_turn(self) -> None:
+        """Clear stale PCM for a normal turn while preserving warm providers."""
+
+        self._clear_pending_audio(invalidate_provider_session=False)
+
     def drain_buffers(self) -> None:
-        """Clear all pending TTS text and audio buffers."""
+        """Abort the current turn and invalidate its provider session."""
+
+        self._clear_pending_audio(invalidate_provider_session=True)
+
+    def _clear_pending_audio(
+        self,
+        *,
+        invalidate_provider_session: bool,
+        graceful_provider_session: bool = False,
+    ) -> None:
         self._advance_generation()
+        # Stop the physical sink before potentially blocking on a cloud
+        # transport teardown.  Keep the render clock alive until the sink has
+        # been stopped, then invalidate/reset the AEC timeline.
+        self._kill_aplay()
+        self._kill_usb_audio()
+        self._invalidate_render_reference(
+            "turn_aborted" if invalidate_provider_session else "turn_prepared"
+        )
+        if invalidate_provider_session:
+            self._invalidate_minimax_websocket(
+                graceful=graceful_provider_session,
+            )
+            self._invalidate_volcengine_client()
         while not self.tts_text_queue.empty():
             try:
                 self.tts_text_queue.get_nowait()
@@ -588,8 +1897,12 @@ class TTSEngine(TTSBackend):
             except queue.Empty:
                 break
         self._clear_audio_buffer()
-        self._kill_aplay()
-        self._kill_usb_audio()
+        # A concurrent pause that began after generation advancement but
+        # before the buffers were cleared belongs to the new generation; the
+        # drain operation still wins until this final invalidation point.
+        self._invalidate_playback_hold(
+            "turn_aborted" if invalidate_provider_session else "turn_prepared"
+        )
 
     def stop_immediately(self) -> None:
         """Signal the playback loop to abort the current chunk immediately.
@@ -599,17 +1912,24 @@ class TTSEngine(TTSBackend):
         The _playback_loop checks _stop_requested and exits the current
         chunk early.  The flag is auto-cleared when _playback_loop resumes.
         """
+        self._invalidate_playback_hold("stop_immediately")
         self._stop_requested.set()
         self._kill_aplay()
         self._kill_usb_audio()
 
     def shutdown(self) -> None:
         """Signal the worker thread to exit and stop playback."""
-        self.drain_buffers()
+        self._shutdown_requested.set()
+        self.cancel_provider_prewarm()
+        self._clear_pending_audio(
+            invalidate_provider_session=True,
+            graceful_provider_session=True,
+        )
         self.tts_text_queue.put(None)
         self.stop_playback()
         if self._worker_thread.is_alive():
             self._worker_thread.join(timeout=1.0)
+        self._shutdown_render_reference_worker()
 
     @property
     def backend(self) -> str:
@@ -623,8 +1943,59 @@ class TTSEngine(TTSBackend):
         with self._buffer_lock:
             buffered_chunks = len(self.tts_buffer)
             buffered_samples = int(sum(len(chunk) for chunk in self.tts_buffer))
+        with self._playback_hold_condition:
+            hold_token = self._playback_hold_token
+            playback_hold = {
+                "supported": self._playback_render_mode == "sounddevice_callback",
+                "render_mode": self._playback_render_mode,
+                "active": hold_token is not None,
+                "acknowledged": (
+                    hold_token is not None and self._playback_hold_acknowledged
+                ),
+                "waiting_callers": (
+                    self._playback_hold_waiters.get(hold_token, 0)
+                    if hold_token is not None
+                    else 0
+                ),
+                "generation": hold_token.generation if hold_token is not None else None,
+                "epoch": hold_token.epoch if hold_token is not None else None,
+                "attempts": self._playback_hold_attempts,
+                "acquired": self._playback_hold_acquired,
+                "resumed": self._playback_hold_resumed,
+                "aborted": self._playback_hold_aborted,
+                "invalidated": self._playback_hold_invalidated,
+                "timeouts": self._playback_hold_timeouts,
+                "rejected": self._playback_hold_rejected,
+                "silent_callbacks": self._playback_hold_silent_callbacks,
+                "last_reason": self._playback_hold_last_reason,
+            }
+        with self._render_reference_lock:
+            render_reference = {
+                "configured": self._render_reference_callback is not None,
+                "healthy": (
+                    self._render_reference_callback is not None
+                    and not self._render_reference_failure_latched
+                ),
+                "epoch": self._render_reference_epoch,
+                "queued_items": self._render_reference_queue.qsize(),
+                "delivered_frames": self._render_reference_delivered_frames,
+                "dropped_items": self._render_reference_dropped_items,
+                "stale_items": self._render_reference_stale_items,
+                "callback_failures": self._render_reference_callback_failures,
+                "timing_failures": self._render_reference_timing_failures,
+                "last_lag_ms": round(self._render_reference_last_lag_ms, 2),
+                "max_lag_ms": self._render_reference_max_lag_ms,
+                "last_reset_reason": self._render_reference_last_reset_reason,
+                "transport_failure_handler": (
+                    self._render_transport_failure_callback is not None
+                ),
+                "transport_failure_latched": self._render_transport_failure_latched,
+            }
         minimax_disabled_remaining_s = max(
             0.0, self._minimax_disabled_until - time.monotonic()
+        )
+        volcengine_disabled_remaining_s = max(
+            0.0, self._volcengine_disabled_until - time.monotonic()
         )
         return {
             "backend": self._backend,
@@ -637,6 +2008,8 @@ class TTSEngine(TTSBackend):
             "queued_text_items": self.tts_text_queue.qsize(),
             "buffered_chunks": buffered_chunks,
             "buffered_samples": buffered_samples,
+            "playback_hold": playback_hold,
+            "render_reference": render_reference,
             "minimax": {
                 "configured": bool(self._minimax_api_key),
                 "transport": self._minimax_tts_transport,
@@ -653,6 +2026,19 @@ class TTSEngine(TTSBackend):
                 "ws_url": self._minimax_tts_ws_url,
                 "failure_count": self._minimax_fail_count,
                 "disabled_remaining_s": round(minimax_disabled_remaining_s, 2),
+                "live_session_prewarm_enabled": self._minimax_live_session_prewarm_enabled,
+            },
+            "volcengine": {
+                "configured": self._is_volcengine_configured(),
+                "endpoint": self._volcengine_tts_ws_url,
+                "model": self._volcengine_tts_model,
+                "resource_id": self._volcengine_tts_resource_id,
+                "speaker": self._volcengine_tts_speaker,
+                "sample_rate": self._volcengine_tts_sample_rate,
+                "format": self._volcengine_tts_audio_format,
+                "failure_count": self._volcengine_fail_count,
+                "disabled_remaining_s": round(volcengine_disabled_remaining_s, 2),
+                "live_session_prewarm_enabled": self._volcengine_live_session_prewarm_enabled,
             },
         }
 
@@ -686,6 +2072,11 @@ class TTSEngine(TTSBackend):
                 "available": list(self._voice_profiles),
             }
         self._apply_voice_profile(profile)
+        if self._backend == "volcengine":
+            provider_voice_id = str(profile.volcengine_voice_id or "").strip()
+            if provider_voice_id and provider_voice_id != self._volcengine_tts_speaker:
+                self._volcengine_tts_speaker = provider_voice_id
+                self._invalidate_volcengine_client()
         self._persist_voice_profile(profile)
         if body.get("speak_sample"):
             sound_cue = self.queue_sound_cue(profile.cue)
@@ -740,7 +2131,7 @@ class TTSEngine(TTSBackend):
             tone = np.sin(2.0 * np.pi * float(freq) * t).astype(np.float32)
             envelope = np.sin(np.linspace(0.0, np.pi, count, dtype=np.float32))
             chunks.append((tone * envelope * 0.22).astype(np.float32))
-        gap = np.zeros(max(1, int(self._sample_rate * 0.025)), dtype=np.float32)
+        gap: np.ndarray = np.zeros(max(1, int(self._sample_rate * 0.025)), dtype=np.float32)
         interleaved: list[np.ndarray] = []
         for chunk in chunks:
             interleaved.append(chunk)
@@ -775,7 +2166,13 @@ class TTSEngine(TTSBackend):
             "profile_id": profile.profile_id,
             "label": profile.label,
             "use_case": profile.use_case,
-            "voice_id": profile.voice_id,
+            "voice_id": (
+                self._volcengine_tts_speaker
+                if self._backend == "volcengine"
+                else profile.voice_id
+            ),
+            "catalog_voice_id": profile.voice_id,
+            "volcengine_voice_id": profile.volcengine_voice_id,
             "speed": profile.speed,
             "volume": profile.volume,
             "pitch": profile.pitch,
@@ -886,6 +2283,36 @@ class TTSEngine(TTSBackend):
         """Callback for ``sd.OutputStream``."""
         if status:
             logger.debug("Playback status: %s", status)
+            self.report_render_transport_failure(
+                "sounddevice_callback_status",
+                RuntimeError(str(status)),
+            )
+
+        render_at = self._sounddevice_render_time(time_info)
+        held = False
+        with self._buffer_lock:
+            has_pcm_to_preserve = bool(self.tts_buffer)
+        with self._playback_hold_condition:
+            if self._playback_hold_token is not None:
+                outdata.fill(0)
+                held = True
+                self._playback_hold_silent_callbacks += 1
+                if (
+                    not has_pcm_to_preserve
+                    and self.tts_text_queue.unfinished_tasks <= 0
+                ):
+                    self._invalidate_playback_hold_locked("playback_completed")
+                elif not self._playback_hold_acknowledged:
+                    self._playback_hold_acknowledged = True
+                    self._playback_hold_acquired += 1
+                    self._playback_hold_last_reason = "callback_silence_acknowledged"
+                    self._playback_hold_condition.notify_all()
+        if held:
+            self._publish_render_reference(
+                outdata[:, 0],
+                render_at=render_at,
+            )
+            return
 
         n = 0
         with self._buffer_lock:
@@ -911,6 +2338,14 @@ class TTSEngine(TTSBackend):
         if self._volume != 1.0:
             outdata[:, 0] *= self._volume
             np.clip(outdata[:, 0], -1.0, 1.0, out=outdata[:, 0])
+        self._publish_render_reference(
+            outdata[:, 0],
+            render_at=render_at,
+        )
+        self._record_streaming_pcm_render(
+            n,
+            render_at=render_at,
+        )
 
     # ------------------------------------------------------------------
     # Internal — worker thread
@@ -988,17 +2423,22 @@ class TTSEngine(TTSBackend):
             logger.info("TTS: coalesced %d text fragments", merged_items)
         return merged, acknowledgements, stop_after_item
 
-    def _generate_audio(self, text: str, generation: int) -> None:
+    def _generate_audio(self, text: str, generation: int) -> str | None:
         """Dispatch to local, edge, or minimax backend."""
         if not self._is_generation_current(generation):
             logger.debug("TTS: dropping stale request before synthesis")
-            return
+            return None
 
         logger.info("TTS [%s] generating: %r", self._backend, text[:80])
+        generated_backend: str | None = None
 
         if self._backend == "local":
             self._generate_local(text, generation)
+            generated_backend = "local"
         elif self._backend == "minimax":
+            with self._generation_lock:
+                if generation == self._generation:
+                    self._minimax_last_complete_generation = None
             # If MiniMax is temporarily disabled due to consecutive failures,
             # skip directly to fallback without attempting the API call.
             if time.monotonic() < self._minimax_disabled_until:
@@ -1007,7 +2447,7 @@ class TTSEngine(TTSBackend):
                     "TTS: MiniMax temporarily disabled (%.0fs remaining), using fallback",
                     remaining,
                 )
-                self._use_minimax_fallback(text, generation)
+                generated_backend = self._use_minimax_fallback(text, generation)
             elif not self._run_async(self._generate_minimax_transport(text, generation)):
                 # MiniMax failed — track and possibly disable temporarily
                 self._minimax_fail_count += 1
@@ -1027,7 +2467,7 @@ class TTSEngine(TTSBackend):
                         self._minimax_fail_count,
                         self._MINIMAX_FAIL_THRESHOLD,
                     )
-                self._use_minimax_fallback(text, generation)
+                generated_backend = self._use_minimax_fallback(text, generation)
             else:
                 # Success — reset failure counter
                 if self._minimax_fail_count > 0:
@@ -1036,9 +2476,52 @@ class TTSEngine(TTSBackend):
                         self._minimax_fail_count,
                     )
                     self._minimax_fail_count = 0
+                if self._minimax_last_complete_generation == generation:
+                    generated_backend = "minimax"
+        elif self._backend == "volcengine":
+            with self._generation_lock:
+                if generation == self._generation:
+                    self._volcengine_last_complete_generation = None
+            if time.monotonic() < self._volcengine_disabled_until:
+                remaining = self._volcengine_disabled_until - time.monotonic()
+                logger.info(
+                    "TTS: Volcengine temporarily disabled (%.0fs remaining), using fallback",
+                    remaining,
+                )
+                generated_backend = self._use_cloud_tts_fallback(text, generation)
+            elif not self._generate_volcengine(text, generation):
+                self._volcengine_fail_count += 1
+                if self._volcengine_fail_count >= self._VOLCENGINE_FAIL_THRESHOLD:
+                    self._volcengine_disabled_until = (
+                        time.monotonic() + self._VOLCENGINE_BACKOFF_SECONDS
+                    )
+                    logger.warning(
+                        "TTS: Volcengine failed %d consecutive times — "
+                        "disabling for %.0f seconds",
+                        self._volcengine_fail_count,
+                        self._VOLCENGINE_BACKOFF_SECONDS,
+                    )
+                else:
+                    logger.warning(
+                        "TTS: Volcengine failed (%d/%d), falling back",
+                        self._volcengine_fail_count,
+                        self._VOLCENGINE_FAIL_THRESHOLD,
+                    )
+                generated_backend = self._use_cloud_tts_fallback(text, generation)
+            else:
+                if self._volcengine_fail_count > 0:
+                    logger.info(
+                        "TTS: Volcengine recovered after %d failure(s)",
+                        self._volcengine_fail_count,
+                    )
+                    self._volcengine_fail_count = 0
+                if self._volcengine_last_complete_generation == generation:
+                    generated_backend = "volcengine"
         else:
             self._run_async(self._generate_edge(text, generation))
+            generated_backend = "edge"
         self._queue_output_tail_silence(generation)
+        return generated_backend
 
     def _queue_output_tail_silence(self, generation: int) -> None:
         """Keep USB playback fed briefly so the device does not swallow the final phoneme."""
@@ -1047,12 +2530,19 @@ class TTSEngine(TTSBackend):
         sample_count = int(self._sample_rate * self._output_tail_silence_seconds)
         if sample_count <= 0:
             return
-        with self._buffer_lock:
-            self.tts_buffer.append(np.zeros(sample_count, dtype=np.float32))
+        if not self._append_audio_for_generation(
+            generation,
+            np.zeros(sample_count, dtype=np.float32),
+        ):
+            return
         logger.debug("TTS: queued %.3fs output tail silence", self._output_tail_silence_seconds)
 
-    def _use_minimax_fallback(self, text: str, generation: int) -> None:
+    def _use_minimax_fallback(self, text: str, generation: int) -> str:
         """Use local or edge TTS as a fallback when MiniMax is unavailable."""
+        return self._use_cloud_tts_fallback(text, generation)
+
+    def _use_cloud_tts_fallback(self, text: str, generation: int) -> str:
+        """Use local or edge TTS as a fallback when a cloud provider is unavailable."""
         if (
             self._local_tts is None
             and self._fallback_backend == "local"
@@ -1061,8 +2551,9 @@ class TTSEngine(TTSBackend):
             self._init_local_tts()
         if self._local_tts is not None:
             self._generate_local(text, generation)
-        else:
-            self._run_async(self._generate_edge(text, generation))
+            return "local"
+        self._run_async(self._generate_edge(text, generation))
+        return "edge"
 
     def _run_async(self, coro) -> bool:
         """Run an async coroutine in a dedicated event loop on this worker thread.
@@ -1125,8 +2616,7 @@ class TTSEngine(TTSBackend):
         samples = self._resample(samples, self._local_sample_rate, self._sample_rate)
 
         if self._is_generation_current(generation) and len(samples) > 0:
-            with self._buffer_lock:
-                self.tts_buffer.append(samples)
+            self._append_audio_for_generation(generation, samples)
 
     # ------------------------------------------------------------------
     # Edge backend (network)
@@ -1153,9 +2643,7 @@ class TTSEngine(TTSBackend):
         try:
             decoded = miniaudio.decode(bytes(mp3_acc), nchannels=1, sample_rate=self._sample_rate)
             samples = np.frombuffer(decoded.samples, dtype=np.int16).astype(np.float32) / 32768.0
-            if self._is_generation_current(generation):
-                with self._buffer_lock:
-                    self.tts_buffer.append(samples)
+            self._append_audio_for_generation(generation, samples)
         except Exception as exc:
             logger.error("TTS edge decode error: %s", exc)
 
@@ -1230,6 +2718,25 @@ class TTSEngine(TTSBackend):
         if pending:
             self._flush_minimax_pending(pending, state)
 
+    def _new_minimax_stream_state(self) -> dict[str, int | bool]:
+        return {
+            "pending_len": 0,
+            "queued_samples": 0,
+            "first_flush": True,
+        }
+
+    def _minimax_stream_chunk_samples(self, *, first: bool) -> int:
+        threshold_ms = (
+            self._minimax_stream_first_chunk_ms
+            if first
+            else self._minimax_stream_later_chunk_ms
+        )
+        return max(1, round(self._sample_rate * threshold_ms / 1000.0))
+
+    def _minimax_pending_has_onset(self, pending: list[np.ndarray]) -> bool:
+        threshold = max(0.0, self._minimax_onset_threshold)
+        return any(np.any(np.abs(chunk) > threshold) for chunk in pending)
+
     def _queue_minimax_samples(
         self,
         samples: np.ndarray,
@@ -1241,8 +2748,36 @@ class TTSEngine(TTSBackend):
             return
         pending.append(samples)
         state["pending_len"] = int(state["pending_len"]) + len(samples)
-        if int(state["pending_len"]) >= self._MINIMAX_MIN_STREAM_SAMPLES:
-            self._flush_minimax_pending(pending, state)
+        first = bool(state["first_flush"])
+        threshold_samples = self._minimax_stream_chunk_samples(first=first)
+        if int(state["pending_len"]) < threshold_samples:
+            return
+        # A small first threshold is only useful after audible onset arrives.
+        # Holding provider-leading silence avoids waking the sink with a silent
+        # packet and keeps onset trimming common to SSE and WebSocket paths.
+        if first and not self._minimax_pending_has_onset(pending):
+            return
+        self._flush_minimax_pending(pending, state)
+
+    def _commit_minimax_samples_for_generation(
+        self,
+        generation: int,
+        pending: list[np.ndarray],
+        state: dict[str, int | bool],
+        *,
+        samples: np.ndarray | None = None,
+        flush: bool = False,
+    ) -> bool:
+        """Commit decoded audio only while its generation still owns playback."""
+
+        with self._generation_lock:
+            if generation != self._generation:
+                return False
+            if samples is not None:
+                self._queue_minimax_samples(samples, pending, state)
+            if flush and pending:
+                self._flush_minimax_pending(pending, state)
+        return True
 
     def _flush_minimax_pending(
         self,
@@ -1256,11 +2791,11 @@ class TTSEngine(TTSBackend):
             state["first_flush"] = False
             threshold = max(0.0, self._minimax_onset_threshold)
             nonzero = np.where(np.abs(chunk) > threshold)[0]
-            if len(nonzero) > 0 and nonzero[0] > 100:
-                preserve = int(
-                    self._sample_rate
-                    * max(0.0, self._minimax_leading_silence_preserve_seconds)
-                )
+            preserve = int(
+                self._sample_rate
+                * max(0.0, self._minimax_leading_silence_preserve_seconds)
+            )
+            if len(nonzero) > 0 and nonzero[0] > preserve:
                 trim = max(0, nonzero[0] - preserve)
                 chunk = chunk[trim:]
                 logger.debug("TTS: trimmed %d leading silence samples", trim)
@@ -1281,37 +2816,17 @@ class TTSEngine(TTSBackend):
             "Authorization": f"Bearer {self._minimax_api_key}",
             "Content-Type": "application/json",
         }
-        voice_setting: dict[str, Any] = {"voice_id": self._minimax_voice_id}
-        if self._minimax_speed != 1.0:
-            voice_setting["speed"] = self._minimax_speed
-        if self._minimax_vol != 1.0:
-            voice_setting["vol"] = self._minimax_vol
-        if self._minimax_pitch != 0:
-            voice_setting["pitch"] = self._minimax_pitch
-        if self._minimax_emotion:
-            voice_setting["emotion"] = self._minimax_emotion
-
         body = {
             "model": self._minimax_tts_model,
             "text": text,
             "stream": True,
-            "voice_setting": voice_setting,
-            "audio_setting": {
-                "sample_rate": self._minimax_sample_rate,
-                "format": "pcm",
-                "channel": 1,
-            },
+            "voice_setting": self._minimax_voice_setting(),
+            "audio_setting": self._minimax_audio_setting(),
             "output_format": "hex",
         }
 
-        need_resample = self._minimax_sample_rate != self._sample_rate
-        # Minimum chunk size for immediate playback (150ms @ 16kHz = 2400 samples).
-        # Smaller chunks cause excessive context-switching in the playback loop.
-        _MIN_SAMPLES = 2400
         pending: list[np.ndarray] = []
-        pending_len = 0
-        queued_samples = 0
-        _first_flush = True  # trim leading silence from MiniMax's first chunk
+        state = self._new_minimax_stream_state()
         encoded_audio = bytearray()
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1344,63 +2859,237 @@ class TTSEngine(TTSBackend):
                         if self._minimax_audio_format != "pcm":
                             encoded_audio.extend(bytes.fromhex(hex_audio))
                             continue
-                        pcm_bytes = bytes.fromhex(hex_audio)
-                        samples = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
-                        if need_resample:
-                            samples = self._resample(
-                                samples, self._minimax_sample_rate, self._sample_rate,
-                            )
-                        if len(samples) > 0:
-                            pending.append(samples)
-                            pending_len += len(samples)
-                            # Flush to playback buffer once we have enough samples
-                            if pending_len >= _MIN_SAMPLES:
-                                chunk = np.concatenate(pending) if len(pending) > 1 else pending[0]
-                                # Trim leading silence from first chunk —
-                                # MiniMax TTS prepends ~120ms of zeros that
-                                # cause the first word to be inaudible.
-                                if _first_flush:
-                                    _first_flush = False
-                                    threshold = max(0.0, self._minimax_onset_threshold)
-                                    nonzero = np.where(np.abs(chunk) > threshold)[0]
-                                    if len(nonzero) > 0 and nonzero[0] > 100:
-                                        preserve = int(
-                                            self._sample_rate
-                                            * max(0.0, self._minimax_leading_silence_preserve_seconds)
-                                        )
-                                        trim = max(0, nonzero[0] - preserve)
-                                        chunk = chunk[trim:]
-                                        logger.debug("TTS: trimmed %d leading silence samples", trim)
-                                with self._buffer_lock:
-                                    self.tts_buffer.append(chunk)
-                                queued_samples += len(chunk)
-                                pending.clear()
-                                pending_len = 0
+                        samples = self._minimax_decode_audio_chunk(hex_audio)
+                        if not self._commit_minimax_samples_for_generation(
+                            generation,
+                            pending,
+                            state,
+                            samples=samples,
+                        ):
+                            return True
                     except (_json.JSONDecodeError, ValueError) as exc:
                         logger.debug("MiniMax TTS chunk parse: %s", exc)
 
         # Flush any remaining samples
-        if encoded_audio and self._is_generation_current(generation):
-            samples = self._decode_minimax_encoded_audio(bytes(encoded_audio))
-            if len(samples) > 0:
-                pending.append(samples)
-                pending_len += len(samples)
-        if pending and self._is_generation_current(generation):
-            chunk = np.concatenate(pending) if len(pending) > 1 else pending[0]
-            with self._buffer_lock:
-                self.tts_buffer.append(chunk)
-            queued_samples += len(chunk)
-
-        if not self._is_generation_current(generation):
+        encoded_samples = None
+        if encoded_audio:
+            encoded_samples = self._decode_minimax_encoded_audio(bytes(encoded_audio))
+        if not self._commit_minimax_samples_for_generation(
+            generation,
+            pending,
+            state,
+            samples=encoded_samples,
+            flush=True,
+        ):
             return True
-        if queued_samples <= 0:
+        if int(state["queued_samples"]) <= 0:
             logger.warning("MiniMax TTS produced no playable audio; using fallback")
             return False
+        self._mark_minimax_generation_complete(generation)
         return True
 
+    def _mark_minimax_generation_complete(self, generation: int) -> None:
+        with self._generation_lock:
+            if generation == self._generation:
+                self._minimax_last_complete_generation = generation
+
+    def _minimax_ws_configuration_signature(self) -> tuple[Any, ...]:
+        """Return every task_start input that makes a warm task reusable."""
+
+        return (
+            self._minimax_tts_ws_url,
+            self._minimax_api_key,
+            self._minimax_tts_model,
+            json.dumps(self._minimax_voice_setting(), sort_keys=True),
+            json.dumps(self._minimax_audio_setting(), sort_keys=True),
+        )
+
+    @staticmethod
+    def _close_minimax_ws_connection(ws: Any, *, graceful: bool) -> None:
+        """Close one provider socket; abort first on barge-in/generation change."""
+
+        if graceful:
+            try:
+                ws.send(json.dumps({"event": "task_finish"}))
+            except Exception:
+                pass
+        else:
+            abort = getattr(ws, "abort", None)
+            shutdown = getattr(ws, "shutdown", None)
+            try:
+                if callable(abort):
+                    abort()
+                elif callable(shutdown):
+                    shutdown()
+            except Exception:
+                pass
+        close = getattr(ws, "close", None)
+        if not callable(close):
+            return
+        try:
+            close(timeout=0)
+        except TypeError:
+            try:
+                close()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _invalidate_minimax_websocket(
+        self,
+        *,
+        expected: Any | None = None,
+        graceful: bool = False,
+    ) -> None:
+        """Atomically detach a warm task, then close it outside the state lock."""
+
+        with self._minimax_ws_state_lock:
+            if expected is not None and self._minimax_ws_connection is not expected:
+                return
+            ws = self._minimax_ws_connection
+            self._minimax_ws_connection = None
+            self._minimax_ws_signature = None
+            self._minimax_ws_last_used = 0.0
+            self._minimax_ws_epoch += 1
+        if ws is not None:
+            self._close_minimax_ws_connection(ws, graceful=graceful)
+
+    def _open_minimax_websocket_candidate(
+        self,
+        websocket_module: Any,
+        *,
+        cancel_event: threading.Event | None = None,
+        track_as_prewarm: bool = False,
+    ) -> Any | None:
+        """Complete a provider handshake without publishing the socket."""
+
+        create_connection = getattr(websocket_module, "create_connection", None)
+        if create_connection is None:
+            raise RuntimeError("websocket-client create_connection is unavailable")
+
+        ws = create_connection(
+            self._minimax_tts_ws_url,
+            header=[f"Authorization: Bearer {self._minimax_api_key}"],
+            timeout=10,
+        )
+        if track_as_prewarm:
+            with self._minimax_prewarm_candidate_lock:
+                if (
+                    (cancel_event is not None and cancel_event.is_set())
+                    or self._shutdown_requested.is_set()
+                ):
+                    self._close_minimax_ws_connection(ws, graceful=False)
+                    return None
+                self._minimax_prewarm_candidate = ws
+        try:
+            if cancel_event is not None and cancel_event.is_set():
+                self._close_minimax_ws_connection(ws, graceful=False)
+                return None
+            connected = json.loads(ws.recv())
+            connected_status = int(
+                (connected.get("base_resp") or {}).get("status_code", 0) or 0
+            )
+            if connected.get("event") != "connected_success" or connected_status != 0:
+                raise RuntimeError(f"MiniMax TTS WS connect failed: {connected}")
+
+            if cancel_event is not None and cancel_event.is_set():
+                self._close_minimax_ws_connection(ws, graceful=False)
+                return None
+            ws.send(json.dumps({
+                "event": "task_start",
+                "model": self._minimax_tts_model,
+                "language_boost": "auto",
+                "voice_setting": self._minimax_voice_setting(),
+                "audio_setting": self._minimax_audio_setting(),
+            }))
+            started = json.loads(ws.recv())
+            started_status = int(
+                (started.get("base_resp") or {}).get("status_code", 0) or 0
+            )
+            if started.get("event") != "task_started" or started_status != 0:
+                raise RuntimeError(f"MiniMax TTS WS start failed: {started}")
+            if cancel_event is not None and cancel_event.is_set():
+                self._close_minimax_ws_connection(ws, graceful=False)
+                return None
+            return ws
+        except Exception:
+            self._close_minimax_ws_connection(ws, graceful=False)
+            raise
+        finally:
+            if track_as_prewarm:
+                with self._minimax_prewarm_candidate_lock:
+                    if self._minimax_prewarm_candidate is ws:
+                        self._minimax_prewarm_candidate = None
+
+    def _get_or_open_minimax_websocket(
+        self,
+        websocket_module: Any,
+        generation: int,
+    ) -> Any | None:
+        """Return a compatible warm task or establish and start one."""
+
+        signature = self._minimax_ws_configuration_signature()
+        now = time.monotonic()
+        with self._minimax_ws_state_lock:
+            current = self._minimax_ws_connection
+            reusable = (
+                current is not None
+                and self._minimax_ws_signature == signature
+                and now - self._minimax_ws_last_used
+                <= self._minimax_ws_idle_timeout_seconds
+                and getattr(current, "connected", True) is not False
+            )
+        if reusable:
+            return current
+        if current is not None:
+            self._invalidate_minimax_websocket(
+                expected=current,
+                graceful=True,
+            )
+
+        if not self._is_generation_current(generation):
+            return None
+        with self._minimax_ws_state_lock:
+            open_epoch = self._minimax_ws_epoch
+
+        ws = self._open_minimax_websocket_candidate(websocket_module)
+        if ws is None:  # Only cancellable prewarm candidates can return None.
+            return None
+        try:
+            accepted = False
+            with self._minimax_ws_state_lock:
+                if (
+                    self._minimax_ws_epoch == open_epoch
+                    and self._minimax_ws_connection is None
+                    and self._is_generation_current(generation)
+                ):
+                    self._minimax_ws_connection = ws
+                    self._minimax_ws_signature = signature
+                    self._minimax_ws_last_used = time.monotonic()
+                    accepted = True
+            if not accepted:
+                self._close_minimax_ws_connection(ws, graceful=False)
+                return None
+            return ws
+        except Exception:
+            self._close_minimax_ws_connection(ws, graceful=False)
+            raise
+
+    def _mark_minimax_websocket_used(self, ws: Any) -> None:
+        with self._minimax_ws_state_lock:
+            if self._minimax_ws_connection is ws:
+                self._minimax_ws_last_used = time.monotonic()
+
     async def _generate_minimax_websocket(self, text: str, generation: int) -> bool:
-        """Synthesise via MiniMax T2A WebSocket hex audio stream."""
-        import json as _json
+        """Stream one fragment through a reusable MiniMax WebSocket task.
+
+        MiniMax permits sequential ``task_continue`` events after a single
+        ``task_start``.  Access is serialized because response events are not
+        independently correlated.  A transport failure is retried once only
+        when no audio from the fragment has reached playback, avoiding audible
+        duplication after partial delivery.
+        """
 
         try:
             import websocket
@@ -1408,94 +3097,475 @@ class TTSEngine(TTSBackend):
             logger.warning("MiniMax TTS WebSocket requires websocket-client package")
             return False
 
-        pending: list[np.ndarray] = []
-        state: dict[str, int | bool] = {
-            "pending_len": 0,
-            "queued_samples": 0,
-            "first_flush": True,
-        }
-        encoded_audio = bytearray()
-        ws = None
+        if getattr(websocket, "create_connection", None) is None:
+            logger.warning("MiniMax TTS WebSocket requires websocket-client")
+            return False
 
-        try:
-            create_connection = getattr(websocket, "create_connection", None)
-            if create_connection is None:
-                logger.warning("MiniMax TTS WebSocket requires websocket-client")
-                return False
-            ws = create_connection(
-                self._minimax_tts_ws_url,
-                header=[f"Authorization: Bearer {self._minimax_api_key}"],
-                timeout=10,
-            )
-            connected = _json.loads(ws.recv())
-            if connected.get("event") != "connected_success":
-                logger.error("MiniMax TTS WS connect failed: %s", connected)
-                return False
+        with self._minimax_ws_use_lock:
+            for attempt in range(2):
+                pending: list[np.ndarray] = []
+                state = self._new_minimax_stream_state()
+                encoded_audio = bytearray()
+                ws = None
+                try:
+                    if not self._is_generation_current(generation):
+                        return True
+                    ws = self._get_or_open_minimax_websocket(websocket, generation)
+                    if ws is None:
+                        return not self._is_generation_current(generation)
 
-            ws.send(_json.dumps({
-                "event": "task_start",
-                "model": self._minimax_tts_model,
-                "language_boost": "auto",
-                "voice_setting": self._minimax_voice_setting(),
-                "audio_setting": self._minimax_audio_setting(),
-            }))
-            started = _json.loads(ws.recv())
-            if started.get("event") != "task_started":
-                logger.error("MiniMax TTS WS start failed: %s", started)
-                return False
+                    ws.send(json.dumps({"event": "task_continue", "text": text}))
+                    while self._is_generation_current(generation):
+                        payload = json.loads(ws.recv())
+                        if not self._is_generation_current(generation):
+                            return True
+                        base_resp = payload.get("base_resp") or {}
+                        if int(base_resp.get("status_code", 0) or 0) != 0:
+                            raise RuntimeError(f"MiniMax TTS WS error: {base_resp}")
+                        if payload.get("event") == "task_failed":
+                            raise RuntimeError(
+                                f"MiniMax TTS WS task failed: {payload}"
+                            )
 
-            ws.send(_json.dumps({"event": "task_continue", "text": text}))
+                        data = payload.get("data") or {}
+                        hex_audio = data.get("audio", "")
+                        if hex_audio:
+                            if self._minimax_audio_format == "pcm":
+                                samples = self._minimax_decode_audio_chunk(hex_audio)
+                                if not self._commit_minimax_samples_for_generation(
+                                    generation,
+                                    pending,
+                                    state,
+                                    samples=samples,
+                                ):
+                                    return True
+                            else:
+                                encoded_audio.extend(bytes.fromhex(hex_audio))
+                        if payload.get("is_final") is True:
+                            break
 
-            while self._is_generation_current(generation):
-                payload = _json.loads(ws.recv())
-                base_resp = payload.get("base_resp", {})
-                if int(base_resp.get("status_code", 0) or 0) != 0:
-                    logger.error("MiniMax TTS WS error: %s", base_resp)
-                    return False
-                if payload.get("event") == "task_failed":
-                    logger.error("MiniMax TTS WS task failed: %s", payload)
-                    return False
+                    if not self._is_generation_current(generation):
+                        return True
+                    encoded_samples = None
+                    if encoded_audio:
+                        encoded_samples = self._decode_minimax_encoded_audio(
+                            bytes(encoded_audio)
+                        )
+                    if not self._commit_minimax_samples_for_generation(
+                        generation,
+                        pending,
+                        state,
+                        samples=encoded_samples,
+                        flush=True,
+                    ):
+                        return True
+                    if int(state["queued_samples"]) <= 0:
+                        raise RuntimeError(
+                            "MiniMax TTS WS produced no playable audio"
+                        )
 
-                data = payload.get("data") or {}
-                hex_audio = data.get("audio", "")
-                if hex_audio:
-                    if self._minimax_audio_format == "pcm":
-                        samples = self._minimax_decode_audio_chunk(hex_audio)
-                        self._queue_minimax_samples(samples, pending, state)
+                    self._mark_minimax_websocket_used(ws)
+                    self._mark_minimax_generation_complete(generation)
+                    return True
+                except Exception as exc:
+                    if ws is not None:
+                        self._invalidate_minimax_websocket(expected=ws)
+                    if not self._is_generation_current(generation):
+                        return True
+                    if int(state["queued_samples"]) > 0:
+                        logger.warning(
+                            "MiniMax TTS WS ended after partial audio; "
+                            "not retrying to avoid duplicate speech: %s",
+                            exc,
+                        )
+                        return True
+                    if attempt == 0:
+                        logger.warning(
+                            "MiniMax TTS WS failed before audio; reconnecting once: %s",
+                            exc,
+                        )
                     else:
-                        encoded_audio.extend(bytes.fromhex(hex_audio))
-                if payload.get("is_final") is True:
-                    break
+                        logger.warning(
+                            "MiniMax TTS WS retry failed; using fallback: %s",
+                            exc,
+                        )
+            return False
+
+    # ------------------------------------------------------------------
+    # Volcengine backend (bidirectional WebSocket streaming)
+    # ------------------------------------------------------------------
+
+    def _is_volcengine_configured(self) -> bool:
+        return (
+            bool(self._volcengine_tts_ws_url)
+            and bool(
+                self._volcengine_tts_api_key
+                or (
+                    self._volcengine_tts_app_id
+                    and self._volcengine_tts_access_key
+                )
+            )
+            and bool(self._volcengine_tts_resource_id)
+            and bool(self._volcengine_tts_speaker)
+            and self._volcengine_tts_audio_format == "pcm"
+            and self._volcengine_tts_sample_rate > 0
+        )
+
+    def _volcengine_configuration_signature(self) -> tuple[Any, ...]:
+        return (
+            self._volcengine_tts_ws_url,
+            self._volcengine_tts_api_key,
+            self._volcengine_tts_app_id,
+            self._volcengine_tts_access_key,
+            self._volcengine_tts_resource_id,
+            self._volcengine_tts_speaker,
+            self._volcengine_tts_model,
+            self._volcengine_tts_sample_rate,
+            self._volcengine_tts_audio_format,
+            self._volcengine_tts_connect_timeout_seconds,
+            self._volcengine_tts_session_timeout_seconds,
+        )
+
+    def _volcengine_client_config(self) -> VolcengineTTSConfig:
+        return VolcengineTTSConfig(
+            endpoint=self._volcengine_tts_ws_url,
+            api_key=self._volcengine_tts_api_key,
+            app_id=self._volcengine_tts_app_id,
+            access_key=self._volcengine_tts_access_key,
+            resource_id=self._volcengine_tts_resource_id,
+            speaker=self._volcengine_tts_speaker,
+            sample_rate=self._volcengine_tts_sample_rate,
+            audio_format=self._volcengine_tts_audio_format,
+            connect_timeout=self._volcengine_tts_connect_timeout_seconds,
+            session_timeout=self._volcengine_tts_session_timeout_seconds,
+        )
+
+    def _new_volcengine_client(self) -> VolcengineTTSClient:
+        return VolcengineTTSClient(self._volcengine_client_config())
+
+    @staticmethod
+    def _close_volcengine_client(client: VolcengineTTSClient) -> None:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    def _invalidate_volcengine_client(
+        self,
+        *,
+        expected: VolcengineTTSClient | None = None,
+    ) -> None:
+        with self._volcengine_state_lock:
+            if expected is not None and self._volcengine_client is not expected:
+                return
+            client = self._volcengine_client
+            self._volcengine_client = None
+            self._volcengine_client_signature = None
+            self._volcengine_client_last_used = 0.0
+            self._volcengine_client_epoch += 1
+        if client is not None:
+            client.interrupt()
+            self._close_volcengine_client(client)
+
+    def _get_or_create_volcengine_client(
+        self,
+        generation: int,
+    ) -> VolcengineTTSClient | None:
+        signature = self._volcengine_configuration_signature()
+        now = time.monotonic()
+        with self._volcengine_state_lock:
+            current = self._volcengine_client
+            reusable = (
+                current is not None
+                and self._volcengine_client_signature == signature
+                and now - self._volcengine_client_last_used
+                <= self._volcengine_tts_idle_timeout_seconds
+            )
+        if reusable:
+            return current
+        if current is not None:
+            self._invalidate_volcengine_client(expected=current)
+        if not self._is_generation_current(generation):
+            return None
+        with self._volcengine_state_lock:
+            open_epoch = self._volcengine_client_epoch
+
+        client = self._new_volcengine_client()
+        accepted = False
+        try:
+            with self._volcengine_state_lock:
+                if (
+                    self._volcengine_client_epoch == open_epoch
+                    and self._volcengine_client is None
+                    and self._is_generation_current(generation)
+                ):
+                    self._volcengine_client = client
+                    self._volcengine_client_signature = signature
+                    self._volcengine_client_last_used = time.monotonic()
+                    accepted = True
+            if not accepted:
+                self._close_volcengine_client(client)
+                return None
+            return client
+        except Exception:
+            self._close_volcengine_client(client)
+            raise
+
+    def _mark_volcengine_client_used(self, client: VolcengineTTSClient) -> None:
+        with self._volcengine_state_lock:
+            if self._volcengine_client is client:
+                self._volcengine_client_last_used = time.monotonic()
+
+    def _decode_volcengine_pcm_chunk(self, audio_bytes: bytes) -> np.ndarray:
+        if not audio_bytes:
+            return np.empty(0, dtype=np.float32)
+        samples = np.frombuffer(audio_bytes, dtype="<i2").astype(np.float32) / 32768.0
+        if self._volcengine_tts_sample_rate != self._sample_rate:
+            samples = self._resample(
+                samples,
+                self._volcengine_tts_sample_rate,
+                self._sample_rate,
+            )
+        return samples
+
+    def _mark_volcengine_generation_complete(self, generation: int) -> None:
+        with self._generation_lock:
+            if generation == self._generation:
+                self._volcengine_last_complete_generation = generation
+
+    def _generate_volcengine(self, text: str, generation: int) -> bool:
+        """Synthesize through Volcengine TTS and queue streaming PCM.
+
+        If provider audio has already arrived, later errors return success so
+        fallback speech cannot duplicate a partially-audible utterance.
+        """
+
+        if not self._is_volcengine_configured():
+            logger.warning("Volcengine TTS is not fully configured for PCM output")
+            return False
+        if self._shutdown_requested.is_set():
+            return True
+
+        with self._volcengine_use_lock:
+            pending: list[np.ndarray] = []
+            state = self._new_minimax_stream_state()
+            audio_seen = False
+            client: VolcengineTTSClient | None = None
+
+            def should_continue() -> bool:
+                return (
+                    not self._shutdown_requested.is_set()
+                    and self._is_generation_current(generation)
+                )
+
+            def on_audio(payload: bytes) -> None:
+                nonlocal audio_seen
+                audio_seen = audio_seen or bool(payload)
+                if not should_continue():
+                    return
+                samples = self._decode_volcengine_pcm_chunk(payload)
+                if len(samples) <= 0:
+                    return
+                self._commit_minimax_samples_for_generation(
+                    generation,
+                    pending,
+                    state,
+                    samples=samples,
+                )
 
             try:
-                ws.send(_json.dumps({"event": "task_finish"}))
-                while True:
-                    payload = _json.loads(ws.recv())
-                    if payload.get("event") in {"task_finished", "task_failed"}:
-                        break
+                if not should_continue():
+                    return True
+                client = self._get_or_create_volcengine_client(generation)
+                if client is None:
+                    return not self._is_generation_current(generation)
+                result = client.synthesize(
+                    text,
+                    on_audio=on_audio,
+                    should_continue=should_continue,
+                )
+                if not should_continue() or result.status == "cancelled":
+                    return True
+                if not self._commit_minimax_samples_for_generation(
+                    generation,
+                    pending,
+                    state,
+                    flush=True,
+                ):
+                    return True
+                if int(state["queued_samples"]) <= 0:
+                    logger.warning("Volcengine TTS produced no playable audio")
+                    return False
+                self._mark_volcengine_client_used(client)
+                self._mark_volcengine_generation_complete(generation)
+                return True
             except Exception as exc:
-                logger.debug("MiniMax TTS WS finish ignored: %s", exc)
+                if client is not None:
+                    self._invalidate_volcengine_client(expected=client)
+                if not self._is_generation_current(generation):
+                    return True
+                if audio_seen:
+                    self._commit_minimax_samples_for_generation(
+                        generation,
+                        pending,
+                        state,
+                        flush=True,
+                    )
+                    logger.warning(
+                        "Volcengine TTS ended after partial audio; "
+                        "not falling back to avoid duplicate speech: %s",
+                        exc,
+                    )
+                    return True
+                if isinstance(exc, VolcengineTTSClientError):
+                    logger.warning("Volcengine TTS failed before audio: %s", exc)
+                else:
+                    logger.warning(
+                        "Volcengine TTS failed before audio: %s",
+                        exc.__class__.__name__,
+                    )
+                return False
 
-        except (_json.JSONDecodeError, ValueError, OSError) as exc:
-            logger.warning("MiniMax TTS WS failed: %s", exc)
-            return False
+    def _prewarm_volcengine_provider_session(self) -> dict[str, Any]:
+        if not self._volcengine_live_session_prewarm_enabled:
+            return {"ok": False, "status": "skipped", "reason": "disabled"}
+        if not self._is_volcengine_configured():
+            return {"ok": False, "status": "skipped", "reason": "not_configured"}
+        if self._shutdown_requested.is_set():
+            return {"ok": False, "status": "skipped", "reason": "shutdown"}
+        if not self._volcengine_prewarm_lock.acquire(blocking=False):
+            return {"ok": False, "status": "skipped", "reason": "already_running"}
+
+        started_at = time.monotonic()
+        try:
+            self._volcengine_prewarm_cancel.clear()
+            signature = self._volcengine_configuration_signature()
+            if not self._volcengine_use_lock.acquire(blocking=False):
+                return {"ok": False, "status": "skipped", "reason": "synthesis_busy"}
+            try:
+                now = time.monotonic()
+                with self._volcengine_state_lock:
+                    current = self._volcengine_client
+                    reusable = (
+                        current is not None
+                        and self._volcengine_client_signature == signature
+                        and now - self._volcengine_client_last_used
+                        <= self._volcengine_tts_idle_timeout_seconds
+                    )
+                    last_used = self._volcengine_client_last_used
+                    open_epoch = self._volcengine_client_epoch
+                if reusable:
+                    return self._volcengine_prewarm_result(
+                        started_at=started_at,
+                        status="reused",
+                        reused=True,
+                        last_used=last_used,
+                    )
+            finally:
+                self._volcengine_use_lock.release()
+
+            candidate = self._new_volcengine_client()
+            with self._volcengine_prewarm_candidate_lock:
+                if self._volcengine_prewarm_cancel.is_set() or self._shutdown_requested.is_set():
+                    self._close_volcengine_client(candidate)
+                    return {"ok": False, "status": "cancelled", "reason": "cancelled"}
+                self._volcengine_prewarm_candidate = candidate
+            try:
+                result = candidate.prewarm()
+            finally:
+                with self._volcengine_prewarm_candidate_lock:
+                    if self._volcengine_prewarm_candidate is candidate:
+                        self._volcengine_prewarm_candidate = None
+            if not result.get("ok"):
+                self._close_volcengine_client(candidate)
+                return {
+                    "ok": False,
+                    "status": result.get("status", "failed"),
+                    "reason": result.get("reason", "prewarm_failed"),
+                }
+
+            if not self._volcengine_use_lock.acquire(blocking=False):
+                self._close_volcengine_client(candidate)
+                return {
+                    "ok": False,
+                    "status": "superseded",
+                    "reason": "synthesis_started",
+                }
+            try:
+                accepted = False
+                with self._volcengine_state_lock:
+                    current = self._volcengine_client
+                    current_reusable = (
+                        current is not None
+                        and self._volcengine_client_signature == signature
+                        and time.monotonic() - self._volcengine_client_last_used
+                        <= self._volcengine_tts_idle_timeout_seconds
+                    )
+                    current_last_used = self._volcengine_client_last_used
+                    if (
+                        not self._volcengine_prewarm_cancel.is_set()
+                        and not self._shutdown_requested.is_set()
+                        and self._volcengine_client_epoch == open_epoch
+                        and current is None
+                    ):
+                        self._volcengine_client = candidate
+                        self._volcengine_client_signature = signature
+                        self._volcengine_client_last_used = time.monotonic()
+                        current_last_used = self._volcengine_client_last_used
+                        accepted = True
+                if accepted:
+                    return self._volcengine_prewarm_result(
+                        started_at=started_at,
+                        status="opened",
+                        reused=False,
+                        last_used=current_last_used,
+                    )
+                self._close_volcengine_client(candidate)
+                if current_reusable:
+                    return self._volcengine_prewarm_result(
+                        started_at=started_at,
+                        status="superseded_by_live_session",
+                        reused=True,
+                        last_used=current_last_used,
+                    )
+                return {
+                    "ok": False,
+                    "status": "superseded",
+                    "reason": "provider_state_changed",
+                }
+            finally:
+                self._volcengine_use_lock.release()
+        except Exception as exc:
+            if self._volcengine_prewarm_cancel.is_set() or self._shutdown_requested.is_set():
+                return {"ok": False, "status": "cancelled", "reason": "cancelled"}
+            logger.warning("Volcengine TTS live prewarm failed: %s", exc)
+            return {
+                "ok": False,
+                "status": "failed",
+                "reason": exc.__class__.__name__,
+            }
         finally:
-            if ws is not None:
-                try:
-                    ws.close()
-                except Exception:
-                    pass
+            self._volcengine_prewarm_lock.release()
 
-        if encoded_audio and self._is_generation_current(generation):
-            self._queue_minimax_encoded_audio(encoded_audio, pending, state)
-        if pending and self._is_generation_current(generation):
-            self._flush_minimax_pending(pending, state)
-        if not self._is_generation_current(generation):
-            return True
-        if int(state["queued_samples"]) <= 0:
-            logger.warning("MiniMax TTS WS produced no playable audio; using fallback")
-            return False
-        return True
+    def _volcengine_prewarm_result(
+        self,
+        *,
+        started_at: float,
+        status: str,
+        reused: bool,
+        last_used: float,
+    ) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "status": status,
+            "reused": bool(reused),
+            "elapsed_ms": round((time.monotonic() - started_at) * 1000.0, 2),
+            "buffered_samples_delta": 0,
+            "last_used_age_ms": round(
+                max(0.0, time.monotonic() - last_used) * 1000.0,
+                2,
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Playback
@@ -1512,18 +3582,33 @@ class TTSEngine(TTSBackend):
             except Exception as exc:
                 logger.debug("aplay terminate failed (ignored): %s", exc)
 
-    def _wait_for_aplay_drain(self, proc: subprocess.Popen) -> bool:  # type: ignore[type-arg]
+    def _wait_for_aplay_drain(
+        self,
+        proc: subprocess.Popen,  # type: ignore[type-arg]
+        *,
+        intentional_stop: bool = False,
+    ) -> bool:
         """Let aplay drain queued USB audio before resorting to a forced kill."""
         try:
-            proc.wait(timeout=self._aplay_drain_timeout_seconds)
-            return True
+            return_code = proc.wait(timeout=self._aplay_drain_timeout_seconds)
         except subprocess.TimeoutExpired:
             logger.error(
                 "aplay: drain timed out after %.1fs; forcing process stop",
                 self._aplay_drain_timeout_seconds,
             )
+            if not intentional_stop and not self._stop_requested.is_set():
+                self.report_render_transport_failure("aplay_drain_timeout")
         except Exception as exc:
             logger.error("aplay: drain wait failed; forcing process stop: %s", exc)
+            if not intentional_stop and not self._stop_requested.is_set():
+                self.report_render_transport_failure("aplay_drain_wait", exc)
+        else:
+            if return_code == 0:
+                return True
+            logger.error("aplay: exited with status %s while draining", return_code)
+            if not intentional_stop and not self._stop_requested.is_set():
+                self.report_render_transport_failure(f"aplay_exit_{return_code}")
+            return False
         try:
             proc.kill()
         except Exception as exc:
@@ -1810,23 +3895,68 @@ class TTSEngine(TTSBackend):
         try:
             view = memoryview(pcm_bytes)
             block = 48000 * 2 * 2 // 10  # 100 ms of 48 kHz stereo S16_LE.
-            for pos in range(0, len(view), block):
-                if self._stop_requested.is_set() or proc.poll() is not None:
+            if self._stop_requested.is_set():
+                return False
+            if proc.poll() is not None:
+                self.report_render_transport_failure("usb_stream_exited")
+                return False
+            first_end = min(block, len(view))
+            proc.stdin.write(view[:first_end])
+            proc.stdin.flush()
+            self._publish_render_reference(chunk, render_at=time.monotonic())
+            for pos in range(first_end, len(view), block):
+                if self._stop_requested.is_set():
+                    return False
+                if proc.poll() is not None:
+                    self.report_render_transport_failure("usb_stream_exited")
                     return False
                 proc.stdin.write(view[pos : pos + block])
                 proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             logger.error("MCP01 USB persistent stream write failed: %s", exc)
+            self.report_render_transport_failure("usb_stream_write", exc)
             return False
 
         deadline = started + duration + max(0.0, self._usb_direct_stream_drain_grace_seconds)
         while time.monotonic() < deadline:
-            if self._stop_requested.is_set() or proc.poll() is not None:
+            if self._stop_requested.is_set():
+                return False
+            if proc.poll() is not None:
+                self.report_render_transport_failure("usb_stream_drain")
                 return False
             time.sleep(min(0.05, deadline - time.monotonic()))
 
         self._last_aplay_close = time.monotonic()
         return True
+
+    def _write_aplay_with_render_clock(
+        self,
+        proc: subprocess.Popen,  # type: ignore[type-arg]
+        samples: np.ndarray,
+    ) -> float:
+        """Write one DAC frame before anchoring the paced render timeline."""
+
+        stdin = proc.stdin
+        if stdin is None:
+            raise BrokenPipeError("aplay stdin is unavailable")
+        mono = np.ascontiguousarray(samples, dtype=np.float32)
+        pcm = (mono * 32767).clip(-32768, 32767).astype(np.int16)
+        first_samples = min(len(pcm), max(1, round(self._sample_rate / 100.0)))
+        if first_samples:
+            stdin.write(pcm[:first_samples].tobytes())
+            stdin.flush()
+            written_at = time.monotonic()
+            render_at = self._reserve_streaming_pcm_render_window(
+                len(mono),
+                render_at=written_at,
+            )
+            self._publish_render_reference(mono, render_at=render_at)
+        else:
+            render_at = time.monotonic()
+        if first_samples < len(pcm):
+            stdin.write(pcm[first_samples:].tobytes())
+            stdin.flush()
+        return render_at
 
     def _play_chunk_usb_direct_one_shot_locked(self, chunk: np.ndarray) -> bool:
         """Play one chunk through the legacy one-shot MCP01 helper."""
@@ -1850,13 +3980,26 @@ class TTSEngine(TTSBackend):
             )
             with self._usb_audio_lock:
                 self._usb_audio_proc = proc
-            stdout, stderr = proc.communicate(pcm_bytes, timeout=timeout)
+            if proc.stdin is None:
+                raise BrokenPipeError("USB one-shot stdin is unavailable")
+            first_bytes = min(len(pcm_bytes), 48000 * 2 * 2 // 100)
+            proc.stdin.write(pcm_bytes[:first_bytes])
+            proc.stdin.flush()
+            self._publish_render_reference(chunk, render_at=time.monotonic())
+            stdout, stderr = proc.communicate(
+                pcm_bytes[first_bytes:],
+                timeout=timeout,
+            )
         except subprocess.TimeoutExpired:
             self._kill_usb_audio()
             logger.error("MCP01 USB audio playback timed out")
+            if not self._stop_requested.is_set():
+                self.report_render_transport_failure("usb_one_shot_timeout")
             return False
         except OSError as exc:
             logger.error("MCP01 USB audio playback failed to start: %s", exc)
+            if not self._stop_requested.is_set():
+                self.report_render_transport_failure("usb_one_shot_write", exc)
             return False
         finally:
             with self._usb_audio_lock:
@@ -1872,6 +4015,10 @@ class TTSEngine(TTSBackend):
                 stdout.decode(errors="replace").strip(),
                 stderr.decode(errors="replace").strip(),
             )
+            if not self._stop_requested.is_set():
+                self.report_render_transport_failure(
+                    f"usb_one_shot_exit_{proc.returncode}"
+                )
             return False
         logger.info("MCP01 USB audio playback ok: %s", stdout.decode(errors="replace").strip())
         self._last_aplay_close = time.monotonic()
@@ -2100,6 +4247,11 @@ class TTSEngine(TTSBackend):
             )
 
             _use_usb_direct = self._should_use_usb_direct()
+            if _use_usb_direct or (
+                self._aplay_bin
+                and self._output_transport in {"auto", "aplay"}
+            ):
+                self._set_playback_render_mode("unsupported")
             if _use_usb_direct and self._output_transport == "auto":
                 logger.info("TTS playback: ALSA plughw output unavailable; using MCP01 USB direct")
             if _use_usb_direct and self._usb_direct_persistent_stream:
@@ -2128,7 +4280,7 @@ class TTSEngine(TTSBackend):
 
             # --- aplay persistent-process setup (computed once) ---
             _aplay_cmd: list[str] | None = None
-            _preroll_bytes: bytes = b""
+            _preroll_reference: np.ndarray = np.empty(0, dtype=np.float32)
             if (
                 self._aplay_bin
                 and self._output_transport in {"auto", "aplay"}
@@ -2149,7 +4301,10 @@ class TTSEngine(TTSBackend):
                 # Verified on sunrise MCP01: without this, first 3 characters lost.
                 _preroll_n = int(self._sample_rate * 1.5)
                 _rng = np.random.RandomState(42)  # deterministic for consistency
-                _preroll_bytes = (_rng.randn(_preroll_n) * 200).astype(np.int16).tobytes()
+                _preroll_pcm = (_rng.randn(_preroll_n) * 200).astype(np.int16)
+                _preroll_reference = (
+                    _preroll_pcm.astype(np.float32) / 32768.0
+                )
 
             if _aplay_cmd is None and not _use_usb_direct:
                 self._play_sounddevice_stream_until_stopped()
@@ -2169,7 +4324,7 @@ class TTSEngine(TTSBackend):
             # channels and recording fails. aplay starts on first audio chunk
             # (see _proc is None branch below).
 
-            def _close_aplay() -> None:
+            def _close_aplay(*, intentional_stop: bool = False) -> None:
                 """Cleanly close the persistent aplay process."""
                 nonlocal _proc, _need_preroll, _empty_polls, _router_ctx
                 if _proc is None:
@@ -2178,7 +4333,10 @@ class TTSEngine(TTSBackend):
                     _proc.stdin.close()  # type: ignore[union-attr]
                 except Exception:
                     pass
-                self._wait_for_aplay_drain(_proc)
+                self._wait_for_aplay_drain(
+                    _proc,
+                    intentional_stop=intentional_stop,
+                )
                 with self._aplay_lock:
                     self._aplay_proc = None
                 _proc = None
@@ -2199,9 +4357,10 @@ class TTSEngine(TTSBackend):
             while self._is_playing:
                 # Check and clear stop request from barge-in
                 if self._stop_requested.is_set():
+                    self._invalidate_playback_hold("stop_requested")
                     self._stop_requested.clear()
                     self._clear_audio_buffer()
-                    _close_aplay()
+                    _close_aplay(intentional_stop=True)
                     logger.info("TTS playback: stop_requested, skipping queued audio")
                     continue
 
@@ -2250,9 +4409,25 @@ class TTSEngine(TTSBackend):
                         np.clip(chunk, -1.0, 1.0, out=chunk)
 
                     if _use_usb_direct:
-                        self._play_chunk_usb_direct_speech(chunk)
+                        usb_started_at = time.monotonic()
+                        if self._play_chunk_usb_direct_speech(chunk):
+                            usb_completed_at = time.monotonic()
+                            # The helper returns only after its physical drain.
+                            # Back-project at most the provider chunk duration;
+                            # any USB lead-in/preroll therefore stays outside
+                            # the generation-bound speech playhead.  During an
+                            # in-flight USB write progress remains zero, which
+                            # intentionally selects the safe delete fallback.
+                            render_at = max(
+                                usb_started_at,
+                                usb_completed_at
+                                - (len(chunk) / float(self._sample_rate)),
+                            )
+                            self._record_streaming_pcm_render(
+                                len(chunk),
+                                render_at=render_at,
+                            )
                     elif _aplay_cmd is not None:
-                        pcm = (chunk * 32767).clip(-32768, 32767).astype(np.int16)
                         dur = len(chunk) / self._sample_rate
                         logger.info(
                             "aplay: %d samples = %.3fs", len(chunk), dur
@@ -2286,14 +4461,33 @@ class TTSEngine(TTSBackend):
                                     and (time.monotonic() - self._last_aplay_close) < self._preroll_warm_window
                                 )
                                 if not _dac_warm:
-                                    _proc.stdin.write(_preroll_bytes)  # type: ignore[union-attr]
+                                    if _proc is None:
+                                        raise BrokenPipeError("aplay process is not available")
+                                    self._write_aplay_with_render_clock(
+                                        _proc,
+                                        _preroll_reference,
+                                    )
                                 else:
                                     logger.debug("aplay: skipping pre-roll (DAC warm)")
                                 _need_preroll = False
 
-                            _proc.stdin.write(pcm.tobytes())  # type: ignore[union-attr]
-                            _proc.stdin.flush()  # type: ignore[union-attr]
-                        except (BrokenPipeError, OSError):
+                            if _proc is None:
+                                raise BrokenPipeError("aplay process is not available")
+                            render_at = self._write_aplay_with_render_clock(
+                                _proc,
+                                chunk,
+                            )
+                            self._record_streaming_pcm_render(
+                                len(chunk),
+                                render_at=render_at,
+                                window_reserved=True,
+                            )
+                        except (BrokenPipeError, OSError) as exc:
+                            if not self._stop_requested.is_set():
+                                self.report_render_transport_failure(
+                                    "aplay_write",
+                                    exc,
+                                )
                             # aplay killed externally (barge-in)
                             with self._aplay_lock:
                                 self._aplay_proc = None
@@ -2311,11 +4505,51 @@ class TTSEngine(TTSBackend):
                     else:
                         if self._audio_router is not None:
                             with self._audio_router.output_session():
-                                sd.play(chunk, samplerate=self._sample_rate, device=self._output_device)
-                                sd.wait()
+                                try:
+                                    sd.play(
+                                        chunk,
+                                        samplerate=self._sample_rate,
+                                        device=self._output_device,
+                                    )
+                                    render_at = time.monotonic()
+                                    self._publish_render_reference(
+                                        chunk,
+                                        render_at=render_at,
+                                    )
+                                    self._record_streaming_pcm_render(
+                                        len(chunk),
+                                        render_at=render_at,
+                                    )
+                                    sd.wait()
+                                except Exception as exc:
+                                    self.report_render_transport_failure(
+                                        "sounddevice_playback",
+                                        exc,
+                                    )
+                                    raise
                         else:
-                            sd.play(chunk, samplerate=self._sample_rate, device=self._output_device)
-                            sd.wait()
+                            try:
+                                sd.play(
+                                    chunk,
+                                    samplerate=self._sample_rate,
+                                    device=self._output_device,
+                                )
+                                render_at = time.monotonic()
+                                self._publish_render_reference(
+                                    chunk,
+                                    render_at=render_at,
+                                )
+                                self._record_streaming_pcm_render(
+                                    len(chunk),
+                                    render_at=render_at,
+                                )
+                                sd.wait()
+                            except Exception as exc:
+                                self.report_render_transport_failure(
+                                    "sounddevice_playback",
+                                    exc,
+                                )
+                                raise
                     self._playback_busy.clear()
                 else:
                     if _proc is not None:
@@ -2325,10 +4559,12 @@ class TTSEngine(TTSBackend):
                     time.sleep(0.02)
         except Exception as e:
             logger.error("Playback error: %s", e)
+            self.report_render_transport_failure("playback_loop", e)
+            self._clear_audio_buffer()
         finally:
             # Clean up persistent aplay if still running
             if _aplay_cmd is not None:
-                _close_aplay()
+                _close_aplay(intentional_stop=not self._is_playing)
             self._kill_usb_audio()
             with self._aplay_lock:
                 self._aplay_proc = None
@@ -2338,6 +4574,7 @@ class TTSEngine(TTSBackend):
             # the audio device is unavailable or throws.
             with self._playback_lock:
                 self._is_playing = False
+            self._set_playback_render_mode("stopped")
 
     def _play_sounddevice_stream_until_stopped(self) -> None:
         """Play buffered audio through one continuous PortAudio stream."""
@@ -2350,19 +4587,32 @@ class TTSEngine(TTSBackend):
         }
 
         def _run() -> None:
-            with sd.OutputStream(**stream_kwargs):
-                while self._is_playing:
-                    if self._stop_requested.is_set():
-                        self._stop_requested.clear()
-                        self._clear_audio_buffer()
-                        self._playback_busy.clear()
-                        logger.info("TTS playback: stop_requested, skipping queued audio")
-                        continue
-                    if self._has_buffered_audio():
-                        self._playback_busy.set()
-                    else:
-                        self._playback_busy.clear()
-                    time.sleep(0.02)
+            self._set_playback_render_mode("sounddevice_callback")
+            try:
+                with sd.OutputStream(**stream_kwargs):
+                    while self._is_playing:
+                        if self._stop_requested.is_set():
+                            self._invalidate_playback_hold("stop_requested")
+                            self._stop_requested.clear()
+                            self._clear_audio_buffer()
+                            self._playback_busy.clear()
+                            logger.info(
+                                "TTS playback: stop_requested, skipping queued audio"
+                            )
+                            continue
+                        if self._has_buffered_audio():
+                            self._playback_busy.set()
+                        else:
+                            self._playback_busy.clear()
+                        time.sleep(0.02)
+            except Exception as exc:
+                self.report_render_transport_failure(
+                    "sounddevice_output_stream",
+                    exc,
+                )
+                raise
+            finally:
+                self._set_playback_render_mode("stopped")
 
         if self._audio_router is not None:
             with self._audio_router.output_session():
@@ -2377,6 +4627,15 @@ class TTSEngine(TTSBackend):
     def _advance_generation(self) -> int:
         with self._generation_lock:
             self._generation += 1
+            self._invalidate_playback_hold("generation_advanced")
+            self._streaming_pcm_final_generation = None
+            with self._streaming_pcm_playback_lock:
+                self._streaming_pcm_playback_generation = None
+                self._streaming_pcm_queued_samples = 0
+                self._streaming_pcm_claimed_samples = 0
+                self._streaming_pcm_leading_samples = 0
+                self._streaming_pcm_render_segments.clear()
+                self._streaming_pcm_render_next_at = 0.0
             return self._generation
 
     def _get_generation(self) -> int:
@@ -2385,6 +4644,112 @@ class TTSEngine(TTSBackend):
 
     def _is_generation_current(self, generation: int) -> bool:
         return generation == self._get_generation()
+
+    def _append_audio_for_generation(
+        self,
+        generation: int,
+        *chunks: np.ndarray,
+    ) -> bool:
+        """Atomically validate ownership and enqueue PCM for one generation."""
+
+        with self._generation_lock:
+            if generation != self._generation:
+                return False
+            with self._buffer_lock:
+                for chunk in chunks:
+                    if len(chunk) > 0:
+                        self.tts_buffer.append(chunk)
+        return True
+
+    def _append_streaming_audio_for_generation(
+        self,
+        generation: int,
+        chunks: list[np.ndarray],
+        *,
+        final: bool,
+        provider_samples: int,
+    ) -> bool:
+        """Atomically fence and enqueue one terminal-aware PCM stream update."""
+
+        with self._generation_lock:
+            if (
+                generation != self._generation
+                or self._streaming_pcm_final_generation == generation
+            ):
+                return False
+            with self._streaming_pcm_playback_lock:
+                if self._streaming_pcm_playback_generation == generation:
+                    self._streaming_pcm_queued_samples += max(
+                        0,
+                        int(provider_samples),
+                    )
+            with self._buffer_lock:
+                for chunk in chunks:
+                    if len(chunk) > 0:
+                        self.tts_buffer.append(chunk)
+            if final:
+                self._streaming_pcm_final_generation = generation
+        return True
+
+    def _record_streaming_pcm_render(
+        self,
+        rendered_samples: int,
+        *,
+        render_at: float,
+        window_reserved: bool = False,
+    ) -> None:
+        """Claim provider samples and place them on the physical DAC clock."""
+
+        if rendered_samples <= 0:
+            return
+        with self._streaming_pcm_playback_lock:
+            generation = self._streaming_pcm_playback_generation
+            if generation is None:
+                return
+            leading = min(
+                self._streaming_pcm_leading_samples,
+                int(rendered_samples),
+            )
+            self._streaming_pcm_leading_samples -= leading
+            available = max(
+                0,
+                self._streaming_pcm_queued_samples
+                - self._streaming_pcm_claimed_samples,
+            )
+            provider_samples = min(
+                available,
+                max(0, int(rendered_samples) - leading),
+            )
+            if provider_samples <= 0:
+                return
+            self._streaming_pcm_claimed_samples += provider_samples
+            start_at = float(render_at) + (leading / float(self._sample_rate))
+            if not window_reserved:
+                start_at = max(start_at, self._streaming_pcm_render_next_at)
+            end_at = start_at + (provider_samples / float(self._sample_rate))
+            self._streaming_pcm_render_segments.append((start_at, end_at))
+            if not window_reserved:
+                self._streaming_pcm_render_next_at = end_at
+
+    def _reserve_streaming_pcm_render_window(
+        self,
+        rendered_samples: int,
+        *,
+        render_at: float,
+    ) -> float:
+        """Reserve one sink window so cold preroll delays provider progress."""
+
+        start_at = float(render_at)
+        if rendered_samples <= 0:
+            return start_at
+        with self._streaming_pcm_playback_lock:
+            if self._streaming_pcm_playback_generation is None:
+                return start_at
+            start_at = max(start_at, self._streaming_pcm_render_next_at)
+            self._streaming_pcm_render_next_at = start_at + (
+                int(rendered_samples) / float(self._sample_rate)
+            )
+        return start_at
 
     def _has_buffered_audio(self) -> bool:
         with self._buffer_lock:

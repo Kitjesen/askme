@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import threading
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -27,8 +28,16 @@ from askme.runtime.core.module import In, Module, ModuleRegistry, Out
 from askme.runtime.modules.voice_stack import build_runtime_voice_stack
 from askme.runtime.voice_control import VoiceControlStateStore, deep_merge
 from askme.tools.core.tool_registry import ToolRegistry
+from askme.voice.output.phrase_prime import (
+    PhrasePrimeEntry,
+    configured_feedback_phrases,
+    prime_phrase_cache,
+    resolve_phrase_prime_entries,
+)
 
 logger = logging.getLogger(__name__)
+
+_BACKGROUND_TASK_STOP_TIMEOUT_SECONDS = 1.0
 
 
 class VoiceModule(Module):
@@ -46,7 +55,7 @@ class VoiceModule(Module):
     executor_in: In[AgentShell]
 
     # Out port
-    audio_out: Out[AudioFrontendPort]
+    audio_out: Out[AudioFrontendPort]  # type: ignore[no-redef]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         from askme.pipeline.channels.voice_loop import VoiceLoop
@@ -61,6 +70,7 @@ class VoiceModule(Module):
         self._base_cfg = deepcopy(cfg)
         self._state_store = VoiceControlStateStore(cfg)
         self._control_state = self._state_store.load()
+        self._component_switch_lock = asyncio.Lock()
         effective_cfg = self._effective_startup_config(cfg)
 
         llm_mod = self.llm_in
@@ -126,16 +136,15 @@ class VoiceModule(Module):
         self._voice_loop.set_address_detector(self._address_detector)
         self._interaction_gate = voice_stack.interaction_gate
         self._voice_loop.set_interaction_gate(self._interaction_gate)
-        self._interaction_perception_provider = _build_interaction_perception_provider(
-            registry
-        )
-        self._voice_loop.set_interaction_perception_provider(
-            self._interaction_perception_provider
-        )
+        self._interaction_perception_provider = _build_interaction_perception_provider(registry)
+        self._voice_loop.set_interaction_perception_provider(self._interaction_perception_provider)
         self._mission_context_provider = _build_mission_context_provider(effective_cfg, registry)
         self._voice_loop.set_mission_context_provider(self._mission_context_provider)
 
         self._task: asyncio.Task[None] | None = None
+        self._phrase_prime_task: asyncio.Task[None] | None = None
+        self._phrase_prime_stop = threading.Event()
+        self._tts_provider_prewarm_task: asyncio.Task[None] | None = None
         self._apply_persisted_llm_and_prompt()
         logger.info("VoiceModule: built")
 
@@ -171,6 +180,8 @@ class VoiceModule(Module):
         """Open mic persistently, then start the VoiceLoop."""
         self._audio.start_input()  # mic stays open across listen/speak cycles
         self._task = asyncio.create_task(self._voice_loop.run(), name="voice-loop")
+        self._start_phrase_prime_task()
+        self._start_tts_provider_prewarm_task()
         logger.info("VoiceModule: voice loop started (mic persistent)")
 
     async def stop(self) -> None:
@@ -181,12 +192,132 @@ class VoiceModule(Module):
                 await self._task
             except asyncio.CancelledError:
                 pass
+        phrase_prime_stop = getattr(self, "_phrase_prime_stop", None)
+        if phrase_prime_stop is not None:
+            phrase_prime_stop.set()
+        live_tts = self._resolve_live_tts_provider()
+        cancel_provider_prewarm = getattr(live_tts, "cancel_provider_prewarm", None)
+        if callable(cancel_provider_prewarm):
+            cancel_provider_prewarm()
+        phrase_prime_task = getattr(self, "_phrase_prime_task", None)
+        await self._harvest_background_task(phrase_prime_task, "phrase cache prime")
+        tts_provider_prewarm_task = getattr(self, "_tts_provider_prewarm_task", None)
+        await self._harvest_background_task(
+            tts_provider_prewarm_task,
+            "TTS provider prewarm",
+        )
         self._audio.stop_input()
         self._audio.shutdown()
         logger.info("VoiceModule: stopped")
 
+    async def _harvest_background_task(
+        self,
+        task: asyncio.Task[None] | None,
+        label: str,
+    ) -> None:
+        if task is None:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=_BACKGROUND_TASK_STOP_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "VoiceModule: %s did not stop within %.1fs; detaching",
+                label,
+                _BACKGROUND_TASK_STOP_TIMEOUT_SECONDS,
+            )
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        except asyncio.CancelledError:
+            pass
+
+    def _start_tts_provider_prewarm_task(self) -> None:
+        current_task = getattr(self, "_tts_provider_prewarm_task", None)
+        if current_task is not None and not current_task.done():
+            return
+        tts = self._resolve_live_tts_provider()
+        prewarm = getattr(tts, "prewarm_provider_session", None)
+        if not callable(prewarm):
+            return
+        self._tts_provider_prewarm_task = asyncio.create_task(
+            self._prewarm_tts_provider_background(prewarm),
+            name="voice-tts-provider-prewarm",
+        )
+
+    def _resolve_live_tts_provider(self) -> Any | None:
+        audio = getattr(self, "_audio", None)
+        tts = getattr(audio, "__dict__", {}).get("tts") if audio is not None else None
+        if tts is not None:
+            return tts
+        return getattr(self, "_tts_provider", None)
+
+    async def _prewarm_tts_provider_background(self, prewarm: Any) -> None:
+        try:
+            result = await asyncio.to_thread(prewarm)
+        except Exception as exc:
+            logger.warning("VoiceModule: TTS provider prewarm failed: %s", exc)
+            return
+        if isinstance(result, dict) and result.get("ok"):
+            logger.info("VoiceModule: TTS provider prewarm %s", result)
+        else:
+            logger.debug("VoiceModule: TTS provider prewarm skipped: %s", result)
+
+    def _start_phrase_prime_task(self) -> None:
+        current_task = getattr(self, "_phrase_prime_task", None)
+        if current_task is not None and not current_task.done():
+            return
+        voice_cfg = getattr(self, "_voice_cfg", {})
+        tts_cfg = dict(voice_cfg.get("tts", {}) or {})
+        if not bool(tts_cfg.get("phrase_cache_enabled", True)):
+            return
+        if not bool(tts_cfg.get("phrase_prime_enabled", True)):
+            return
+        configured = tts_cfg.get("phrase_prime_list", ())
+        policy = getattr(getattr(self, "_router", None), "_policy", None)
+        quick_replies = getattr(policy, "quick_replies", {})
+        entries = resolve_phrase_prime_entries(
+            configured,
+            quick_replies=quick_replies,
+            feedback_phrases=configured_feedback_phrases(voice_cfg),
+        )
+        if not entries:
+            return
+        self._phrase_prime_stop = threading.Event()
+        self._phrase_prime_task = asyncio.create_task(
+            self._prime_phrase_cache_background(tts_cfg, entries),
+            name="voice-phrase-cache-prime",
+        )
+
+    async def _prime_phrase_cache_background(
+        self,
+        tts_cfg: dict[str, Any],
+        entries: list[PhrasePrimeEntry],
+    ) -> None:
+        try:
+            results = await asyncio.to_thread(
+                prime_phrase_cache,
+                tts_cfg,
+                entries,
+                stop_event=self._phrase_prime_stop,
+            )
+        except Exception as exc:
+            logger.warning("VoiceModule: phrase cache prime failed: %s", exc)
+            return
+        created = sum(bool(result.get("created")) for result in results)
+        cached = sum(bool(result.get("cached")) for result in results)
+        logger.info(
+            "VoiceModule: phrase cache prime finished (%d cached, %d created)",
+            cached,
+            created,
+        )
+
     # -- typed accessors ------------------------------------------------
-    @property
+    @property  # type: ignore[no-redef]
     def audio_out(self) -> AudioFrontendPort:
         """The audio frontend instance (Out port)."""
         return self._audio
@@ -275,7 +406,8 @@ class VoiceModule(Module):
         gate_status = self._voice_loop.interaction_status_snapshot()
         interaction_policy = {
             "enabled": bool(getattr(self._interaction_gate, "enabled", False)),
-            "mode": "strict_public_site" if (
+            "mode": "strict_public_site"
+            if (
                 bool(getattr(self._interaction_gate, "silent_on_ambiguous", False))
                 and not bool(
                     getattr(
@@ -291,7 +423,8 @@ class VoiceModule(Module):
                         True,
                     )
                 )
-            ) else "permissive",
+            )
+            else "permissive",
             "silent_on_ambiguous": bool(
                 getattr(self._interaction_gate, "silent_on_ambiguous", False)
             ),
@@ -395,18 +528,24 @@ class VoiceModule(Module):
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        component = str(payload.get("component") or "").strip().lower()
-        if component == "llm":
-            result = await self._switch_llm(payload)
-        elif component == "asr":
-            result = await self._switch_asr(payload)
-        elif component == "tts":
-            result = await self._switch_tts(payload)
-        else:
-            raise ValueError("component must be one of: llm, asr, tts")
-        if result.get("updated"):
-            self._persist_control_state()
-        return result
+        switch_lock = getattr(self, "_component_switch_lock", None)
+        if switch_lock is None:
+            switch_lock = asyncio.Lock()
+            self._component_switch_lock = switch_lock
+
+        async with switch_lock:
+            component = str(payload.get("component") or "").strip().lower()
+            if component == "llm":
+                result = await self._switch_llm(payload)
+            elif component == "asr":
+                result = await self._switch_asr(payload)
+            elif component == "tts":
+                result = await self._switch_tts(payload)
+            else:
+                raise ValueError("component must be one of: llm, asr, tts")
+            if result.get("updated"):
+                self._persist_control_state()
+            return result
 
     def update_prompt_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         settings = self._apply_prompt_settings(payload)
@@ -432,14 +571,32 @@ class VoiceModule(Module):
         llm_mod = self._registry.get("llm")
         if llm_mod is None:
             raise RuntimeError("LLM module is not available")
+
+        previous_client = llm_mod.client
+        previous_payload = dict(self._control_state.get("llm", {}) or {})
+        previous_brain_cfg = self._resolve_llm_config(previous_payload)
         candidate = llm_mod.prepare_client(brain_cfg)
         if bool(payload.get("validate", True)):
             await llm_mod.validate_client(
                 candidate,
                 timeout_s=min(15.0, float(brain_cfg.get("timeout", 10.0))),
             )
+
         llm_mod.commit_client(candidate)
-        self._publish_llm(candidate, brain_cfg)
+        try:
+            self._publish_llm(candidate, brain_cfg)
+        except Exception:
+            logger.exception("LLM consumer publication failed; rolling back provider switch")
+            try:
+                llm_mod.commit_client(previous_client)
+            except Exception:
+                logger.exception("LLM module rollback failed")
+            try:
+                self._publish_llm(previous_client, previous_brain_cfg)
+            except Exception:
+                logger.exception("LLM consumer rollback failed")
+            raise
+
         self._control_state["llm"] = {
             "provider": candidate.provider_name,
             "model": candidate.model,
@@ -475,10 +632,23 @@ class VoiceModule(Module):
             raise RuntimeError("audio frontend does not support TTS hot switching")
         result = await asyncio.to_thread(reconfigure, tts_cfg)
         self._voice_cfg["tts"] = tts_cfg
+        backend = str(tts_cfg.get("backend") or "")
+        if backend == "volcengine":
+            model = str(tts_cfg.get("volcengine_tts_resource_id") or "")
+            voice_id = str(tts_cfg.get("volcengine_tts_speaker") or "")
+        elif backend == "edge":
+            model = str(tts_cfg.get("voice") or "")
+            voice_id = model
+        elif backend == "local":
+            model = Path(str(tts_cfg.get("model_dir") or "")).name
+            voice_id = str(tts_cfg.get("sid") or "")
+        else:
+            model = str(tts_cfg.get("minimax_tts_model") or "")
+            voice_id = str(tts_cfg.get("minimax_voice_id") or "")
         self._control_state["tts"] = {
-            "backend": str(tts_cfg.get("backend") or ""),
-            "model": str(tts_cfg.get("minimax_tts_model") or ""),
-            "voice_id": str(tts_cfg.get("minimax_voice_id") or ""),
+            "backend": backend,
+            "model": model,
+            "voice_id": voice_id,
         }
         return dict(result)
 
@@ -500,22 +670,26 @@ class VoiceModule(Module):
 
     def _resolve_llm_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         base = deepcopy(self._base_cfg.get("brain", {}))
-        provider = str(
-            payload.get("provider")
-            or self._control_state.get("llm", {}).get("provider")
-            or base.get("provider")
-            or ""
-        ).strip().lower()
+        provider = (
+            str(
+                payload.get("provider")
+                or self._control_state.get("llm", {}).get("provider")
+                or base.get("provider")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         presets = self._llm_presets()
         preset = presets.get(provider)
         if preset is None:
             raise ValueError(f"LLM provider is not configured: {provider}")
         resolved = deep_merge(base, preset)
         resolved["provider"] = provider
-        resolved["model"] = str(payload.get("model") or preset.get("model") or base.get("model") or "")
-        resolved["voice_model"] = str(
-            payload.get("voice_model") or resolved["model"]
+        resolved["model"] = str(
+            payload.get("model") or preset.get("model") or base.get("model") or ""
         )
+        resolved["voice_model"] = str(payload.get("voice_model") or resolved["model"])
         if isinstance(payload.get("fallback_models"), list):
             resolved["fallback_models"] = [
                 str(item).strip() for item in payload["fallback_models"] if str(item).strip()
@@ -536,8 +710,8 @@ class VoiceModule(Module):
         if brain.get("minimax_api_key"):
             presets["minimax"] = {
                 "api_key": brain.get("minimax_api_key", ""),
-                "base_url": brain.get("minimax_base_url", "https://api.minimax.chat/v1"),
-                "model": brain.get("minimax_model", "MiniMax-M2.5-highspeed"),
+                "base_url": brain.get("minimax_base_url", "https://api.minimaxi.com/v1"),
+                "model": brain.get("minimax_model", "MiniMax-M2.7-highspeed"),
                 "fallback_models": [],
             }
         configured = brain.get("provider_presets", {})
@@ -555,7 +729,13 @@ class VoiceModule(Module):
     ) -> dict[str, Any]:
         root = source or self._base_cfg
         voice_cfg = deepcopy(root.get("voice", {}))
-        provider = str(payload.get("provider") or voice_cfg.get("cloud_asr", {}).get("provider") or "local").strip().lower()
+        provider = (
+            str(
+                payload.get("provider") or voice_cfg.get("cloud_asr", {}).get("provider") or "local"
+            )
+            .strip()
+            .lower()
+        )
         cloud_cfg = deepcopy(voice_cfg.get("cloud_asr", {}))
         if provider == "local":
             cloud_cfg["enabled"] = False
@@ -586,13 +766,26 @@ class VoiceModule(Module):
         voice_cfg = root.get("voice", {})
         tts_cfg = deepcopy(voice_cfg.get("tts", {}))
         backend = str(payload.get("backend") or tts_cfg.get("backend") or "local").strip().lower()
-        if backend not in {"local", "edge", "minimax"}:
-            raise ValueError("TTS backend must be one of: local, edge, minimax")
+        if backend == "volc":
+            backend = "volcengine"
+        if backend not in {"local", "edge", "minimax", "volcengine"}:
+            raise ValueError("TTS backend must be one of: local, edge, minimax, volcengine")
         tts_cfg["backend"] = backend
         if payload.get("model"):
-            tts_cfg["minimax_tts_model"] = str(payload["model"])
+            model = str(payload["model"])
+            if backend == "volcengine":
+                # Volcengine's V3 route selects the TTS product/model through
+                # X-Api-Resource-Id, not an undocumented req_params.model.
+                tts_cfg["volcengine_tts_resource_id"] = model
+                tts_cfg["volcengine_tts_model"] = model
+            else:
+                tts_cfg["minimax_tts_model"] = model
         if payload.get("voice_id"):
-            tts_cfg["minimax_voice_id"] = str(payload["voice_id"])
+            voice_key = {
+                "edge": "voice",
+                "volcengine": "volcengine_tts_speaker",
+            }.get(backend, "minimax_voice_id")
+            tts_cfg[voice_key] = str(payload["voice_id"])
         return tts_cfg
 
     def _apply_prompt_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -620,9 +813,7 @@ class VoiceModule(Module):
             if regenerate
             else str(payload.get("user_prefix", current.get("user_prefix", "")))
         )
-        relay_mode = bool(
-            payload.get("relay_compat_mode", current.get("relay_compat_mode", False))
-        )
+        relay_mode = bool(payload.get("relay_compat_mode", current.get("relay_compat_mode", False)))
         return pipeline.update_prompt(
             base_prompt=base_prompt,
             prompt_seed=prompt_seed,
@@ -659,9 +850,36 @@ class VoiceModule(Module):
                 },
             ],
             "tts": [
-                {"backend": "minimax", "models": [str(base_tts.get("minimax_tts_model") or "")], "credential_ready": bool(base_tts.get("minimax_api_key"))},
-                {"backend": "edge", "models": [str(base_tts.get("voice") or "")], "credential_ready": importlib.util.find_spec("edge_tts") is not None},
-                {"backend": "local", "models": [local_model.name], "credential_ready": local_model.is_dir()},
+                {
+                    "backend": "minimax",
+                    "models": [str(base_tts.get("minimax_tts_model") or "")],
+                    "credential_ready": bool(base_tts.get("minimax_api_key")),
+                },
+                {
+                    "backend": "volcengine",
+                    "models": [str(base_tts.get("volcengine_tts_resource_id") or "")],
+                    "credential_ready": bool(
+                        (
+                            base_tts.get("volcengine_tts_api_key")
+                            or (
+                                base_tts.get("volcengine_tts_app_id")
+                                and base_tts.get("volcengine_tts_access_key")
+                            )
+                        )
+                        and base_tts.get("volcengine_tts_resource_id")
+                        and base_tts.get("volcengine_tts_speaker")
+                    ),
+                },
+                {
+                    "backend": "edge",
+                    "models": [str(base_tts.get("voice") or "")],
+                    "credential_ready": importlib.util.find_spec("edge_tts") is not None,
+                },
+                {
+                    "backend": "local",
+                    "models": [local_model.name],
+                    "credential_ready": local_model.is_dir(),
+                },
             ],
             "memory": memory.get("backend_dependencies", {}),
         }
@@ -675,28 +893,50 @@ class VoiceModule(Module):
     ) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
         if not audio.get("input_ready"):
-            issues.append({"id": "audio_input", "severity": "critical", "label": "麦克风输入未就绪"})
+            issues.append(
+                {"id": "audio_input", "severity": "critical", "label": "麦克风输入未就绪"}
+            )
         if not audio.get("output_ready"):
             issues.append({"id": "audio_output", "severity": "critical", "label": "语音输出未就绪"})
         if memory and not memory.get("ready"):
-            issues.append({"id": "memory_not_ready", "severity": "high", "label": "记忆检索尚未就绪"})
+            issues.append(
+                {"id": "memory_not_ready", "severity": "high", "label": "记忆检索尚未就绪"}
+            )
         elif memory.get("status") == "degraded":
-            issues.append({"id": "memory_degraded", "severity": "medium", "label": "记忆正在使用降级后端"})
+            issues.append(
+                {"id": "memory_degraded", "severity": "medium", "label": "记忆正在使用降级后端"}
+            )
         asr_error = str(audio.get("asr", {}).get("cloud", {}).get("last_error") or "")
         if asr_error and "45000081" not in asr_error:
-            issues.append({"id": "asr_provider_error", "severity": "medium", "label": asr_error[:120]})
+            issues.append(
+                {"id": "asr_provider_error", "severity": "medium", "label": asr_error[:120]}
+            )
         pending = audio.get("pending_runtime_updates", {})
         if any(bool(value) for value in pending.values()):
-            issues.append({"id": "runtime_switch_pending", "severity": "info", "label": "模型切换将在当前语音轮次结束后生效"})
+            issues.append(
+                {
+                    "id": "runtime_switch_pending",
+                    "severity": "info",
+                    "label": "模型切换将在当前语音轮次结束后生效",
+                }
+            )
         if prompt.get("relay_compat_mode"):
-            issues.append({"id": "relay_compat_prompt", "severity": "info", "label": "Prompt 正在使用旧中继兼容模式"})
+            issues.append(
+                {
+                    "id": "relay_compat_prompt",
+                    "severity": "info",
+                    "label": "Prompt 正在使用旧中继兼容模式",
+                }
+            )
         policy = (interaction or {}).get("policy", {})
         if policy and policy.get("mode") != "strict_public_site":
-            issues.append({
-                "id": "ambient_admission_permissive",
-                "severity": "medium",
-                "label": "对话准入仍允许未称呼小算的模糊现场语音",
-            })
+            issues.append(
+                {
+                    "id": "ambient_admission_permissive",
+                    "severity": "medium",
+                    "label": "对话准入仍允许未称呼小算的模糊现场语音",
+                }
+            )
         return issues
 
     def _persist_control_state(self) -> None:
@@ -771,7 +1011,7 @@ def _build_interaction_perception_provider(registry: ModuleRegistry) -> Any:
         world_state = getattr(cognition_mod, "world_state", None)
         scene_fact = (
             world_state.get_fact("scene.objects", include_stale=True)
-            if hasattr(world_state, "get_fact")
+            if world_state is not None and hasattr(world_state, "get_fact")
             else None
         )
         if scene_fact is not None:
@@ -885,14 +1125,18 @@ def _voice_product_readiness(
     if require_wake_word and audio_status.get("wake_word_enabled") is not True:
         blockers.append("wake_word_not_ready")
     if require_runtime_bridge and (
-        bridge_status.get("enabled") is not True
-        or bridge_status.get("circuit_open") is True
+        bridge_status.get("enabled") is not True or bridge_status.get("circuit_open") is True
     ):
         blockers.append("runtime_bridge_not_ready")
 
     return {
         "ready": not blockers,
         "blockers": blockers,
+        "degraded_mode": (
+            "kws_unavailable_safety_only"
+            if audio_status.get("kws_unavailable_safety_only") is True
+            else None
+        ),
         "requirements": {
             "wake_word": require_wake_word,
             "runtime_bridge": require_runtime_bridge,

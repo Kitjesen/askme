@@ -95,26 +95,35 @@ class MemPalaceBackend:
         items = await self.retrieve_items(text)
         return "\n".join(f"- {item['text']}" for item in items)
 
-    async def retrieve_items(self, text: str) -> list[dict[str, Any]]:
+    async def retrieve_items(
+        self,
+        text: str,
+        *,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         if not str(text or "").strip() or not self._ensure_mempalace():
             return []
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(self._retrieve_items_sync, text),
+                asyncio.to_thread(self._retrieve_items_sync, text, metadata_filter),
                 timeout=self._retrieve_timeout,
             )
-        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+        except TimeoutError:
             logger.warning("[Memory] MemPalace retrieval timed out (%.1fs).", self._retrieve_timeout)
             return []
         except Exception as exc:
             logger.debug("[Memory] MemPalace retrieve failed: %s", exc)
             return []
 
-    def _retrieve_items_sync(self, text: str) -> list[dict[str, Any]]:
+    def _retrieve_items_sync(
+        self,
+        text: str,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         collection = self._open_collection(create=False)
         if collection is None:
             return []
-        where = self._where_filter()
+        where = self._where_filter(metadata_filter)
         kwargs: dict[str, Any] = {
             "query_texts": [text],
             "n_results": max(self._n_results * 2, self._n_results),
@@ -139,6 +148,11 @@ class MemPalaceBackend:
             if similarity is not None and similarity < self._min_similarity:
                 continue
             meta = dict(metadata or {})
+            if metadata_filter and any(
+                str(meta.get(key) or "") != str(value)
+                for key, value in metadata_filter.items()
+            ):
+                continue
             source_file = str(meta.get("source_file") or "")
             items.append(
                 {
@@ -154,14 +168,25 @@ class MemPalaceBackend:
                 break
         return items
 
-    def _where_filter(self) -> dict[str, Any]:
-        if self._wing and self._room:
-            return {"$and": [{"wing": self._wing}, {"room": self._room}]}
+    def _where_filter(
+        self,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clauses: list[dict[str, Any]] = []
         if self._wing:
-            return {"wing": self._wing}
+            clauses.append({"wing": self._wing})
         if self._room:
-            return {"room": self._room}
-        return {}
+            clauses.append({"room": self._room})
+        for key, value in (metadata_filter or {}).items():
+            clean_key = str(key or "").strip()
+            if not clean_key or clean_key.startswith("$") or value is None:
+                continue
+            clauses.append({clean_key: value})
+        if not clauses:
+            return {}
+        if len(clauses) == 1:
+            return clauses[0]
+        return {"$and": clauses}
 
     async def save(self, user_text: str, assistant_text: str) -> None:
         user = str(user_text or "").strip()
@@ -178,19 +203,22 @@ class MemPalaceBackend:
             },
         )
 
-    async def save_fact(self, text: str, metadata: dict[str, Any] | None = None) -> None:
+    async def save_fact(self, text: str, metadata: dict[str, Any] | None = None) -> bool:
+        """Persist one fact and report only a confirmed collection upsert.
+
+        Initialization unavailability and empty input are explicit ``False``
+        results.  Collection write failures propagate so callers cannot report
+        durable progress for a failed write.
+        """
         clean = str(text or "").strip()
         if not clean or not self._ensure_mempalace():
-            return
-        try:
-            await asyncio.to_thread(self._save_fact_sync, clean, metadata or {})
-        except Exception as exc:
-            logger.debug("[Memory] MemPalace save_fact failed: %s", exc)
+            return False
+        return await asyncio.to_thread(self._save_fact_sync, clean, metadata or {})
 
-    def _save_fact_sync(self, text: str, metadata: dict[str, Any]) -> None:
+    def _save_fact_sync(self, text: str, metadata: dict[str, Any]) -> bool:
         collection = self._open_collection(create=True)
         if collection is None:
-            return
+            return False
         now = datetime.now(UTC).isoformat()
         source = str(metadata.get("source") or metadata.get("record_id") or "askme_memory")
         drawer_id = self._drawer_id(text, metadata)
@@ -211,6 +239,7 @@ class MemPalaceBackend:
             ids=[drawer_id],
             metadatas=[merged_metadata],
         )
+        return True
 
     def _drawer_id(self, text: str, metadata: dict[str, Any]) -> str:
         """Build an idempotent MemPalace drawer id.

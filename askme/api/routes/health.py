@@ -132,17 +132,19 @@ def register_health_routes(
         @app.get("/ready", tags=tags, include_in_schema=True)
         async def ready() -> JSONResponse:
             payload = await health_service.check_all()
+            is_ready = all(
+                comp.get("status") == "healthy"
+                for comp in payload.get("components", {}).values()
+            )
             ready_doc: dict[str, Any] = {
-                "ready": all(
-                    comp.get("status") == "healthy"
-                    for comp in payload.get("components", {}).values()
-                ),
+                "ready": is_ready,
                 "status": payload["status"],
                 "uptime_s": payload["uptime_s"],
                 "components": payload["components"],
             }
             return JSONResponse(
                 ready_doc,
+                status_code=200 if is_ready else 503,
                 headers={"Cache-Control": "no-store"},
             )
 

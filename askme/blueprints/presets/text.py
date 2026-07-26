@@ -6,38 +6,48 @@
     python -m askme.blueprints.presets.text
 """
 
-from askme.runtime.core.module import Runtime
-from askme.runtime.modules import (
-    CognitionModule,
-    ExecutorModule,
-    HealthModule,
-    LLMModule,
-    MemoryModule,
-    MissionModule,
-    PipelineModule,
-    RuntimeHandoffModule,
-    SkillModule,
-    TextModule,
-    ToolsModule,
-)
+from askme.blueprints.catalog.data import TEXT_MODULES
 
-text = (
-    Runtime.use(LLMModule)
-    + Runtime.use(ToolsModule)
-    + Runtime.use(MemoryModule)
-    + Runtime.use(MissionModule)
-    + Runtime.use(CognitionModule)
-    + Runtime.use(RuntimeHandoffModule)
-    + Runtime.use(PipelineModule)
-    + Runtime.use(SkillModule)
-    + Runtime.use(ExecutorModule)
-    + Runtime.use(TextModule)
-    + Runtime.use(HealthModule)
-)
+_LABEL = "文本运营控制台"
+
+
+def _build_text():
+    from askme.blueprints.runner.runner import compose_runtime
+    from askme.runtime.modules import (
+        CognitionModule,
+        ExecutorModule,
+        HealthModule,
+        LLMModule,
+        MemoryModule,
+        MissionModule,
+        PipelineModule,
+        RuntimeHandoffModule,
+        SkillModule,
+        TextModule,
+        ToolsModule,
+    )
+
+    return compose_runtime(
+        (
+            LLMModule,
+            ToolsModule,
+            MemoryModule,
+            MissionModule,
+            CognitionModule,
+            RuntimeHandoffModule,
+            PipelineModule,
+            SkillModule,
+            ExecutorModule,
+            TextModule,
+            HealthModule,
+        )
+    )
 
 __all__ = ["text"]
 
 if __name__ == "__main__":
     from askme.blueprints.runner.runner import run_blueprint
 
-    run_blueprint(text, "文本运营控制台")
+    run_blueprint(_build_text, _LABEL, module_names=TEXT_MODULES)
+else:
+    text = _build_text()

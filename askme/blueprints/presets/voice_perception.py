@@ -6,10 +6,16 @@
     python -m askme.blueprints.presets.voice_perception
 """
 
-from askme.runtime.core.module import Runtime
-from askme.runtime.modules import (
-    CognitionModule,
-    ExecutorModule,
+from askme.blueprints.catalog.data import VOICE_PERCEPTION_MODULES
+
+_LABEL = "语音感知运行时"
+
+
+def _build_voice_perception():
+    from askme.blueprints.runner.runner import compose_runtime
+    from askme.runtime.modules import (
+        CognitionModule,
+        ExecutorModule,
     HealthModule,
     LLMModule,
     MemoryModule,
@@ -23,31 +29,35 @@ from askme.runtime.modules import (
     SkillModule,
     TextModule,
     ToolsModule,
-    VoiceModule,
-)
+        VoiceModule,
+    )
 
-voice_perception = (
-    Runtime.use(LLMModule)
-    + Runtime.use(ToolsModule)
-    + Runtime.use(MemoryModule)
-    + Runtime.use(MissionModule)
-    + Runtime.use(CognitionModule)
-    + Runtime.use(RuntimeHandoffModule)
-    + Runtime.use(PipelineModule)
-    + Runtime.use(SkillModule)
-    + Runtime.use(ExecutorModule)
-    + Runtime.use(VoiceModule)
-    + Runtime.use(TextModule)
-    + Runtime.use(HealthModule)
-    + Runtime.use(PulseModule)
-    + Runtime.use(PerceptionModule)
-    + Runtime.use(SafetyModule)
-    + Runtime.use(ReactionModule)
-)
+    return compose_runtime(
+        (
+            LLMModule,
+            ToolsModule,
+            MemoryModule,
+            MissionModule,
+            CognitionModule,
+            RuntimeHandoffModule,
+            PipelineModule,
+            SkillModule,
+            ExecutorModule,
+            VoiceModule,
+            TextModule,
+            HealthModule,
+            PulseModule,
+            PerceptionModule,
+            SafetyModule,
+            ReactionModule,
+        )
+    )
 
 __all__ = ["voice_perception"]
 
 if __name__ == "__main__":
     from askme.blueprints.runner.runner import run_blueprint
 
-    run_blueprint(voice_perception, "语音感知运行时")
+    run_blueprint(_build_voice_perception, _LABEL, module_names=VOICE_PERCEPTION_MODULES)
+else:
+    voice_perception = _build_voice_perception()

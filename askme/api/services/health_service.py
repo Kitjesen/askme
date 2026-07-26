@@ -58,9 +58,18 @@ class HealthService:
                 status = await check_fn() if asyncio.iscoroutinefunction(check_fn) else check_fn()
                 latency = (time.perf_counter() - t0) * 1000
                 results[name] = {"status": "healthy", "latency_ms": latency, **(status or {})}
+                component_status = str(results[name].get("status") or "healthy")
+                if component_status != "healthy":
+                    overall = (
+                        "unhealthy"
+                        if component_status in {"unhealthy", "error"}
+                        else "degraded"
+                        if overall == "healthy"
+                        else overall
+                    )
             except Exception as e:
                 results[name] = {"status": "unhealthy", "error": str(e)}
-                overall = "degraded"
+                overall = "unhealthy"
         return {
             "status": overall,
             "uptime_s": self.uptime_seconds(),

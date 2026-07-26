@@ -20,7 +20,7 @@ services:
       - MINIMAX_API_KEY=${MINIMAX_API_KEY}
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
       - LLM_API_KEY=${LLM_API_KEY:-${MINIMAX_API_KEY}}
-      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.minimax.chat/v1}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.minimaxi.com/v1}
     volumes:
       - ../models:/app/models:ro
       - askme_data:/app/data

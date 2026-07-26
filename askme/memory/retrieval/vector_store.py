@@ -158,31 +158,86 @@ class VectorStore:
 
     # -- Public API -----------------------------------------------------------
 
-    def add(self, text: str, metadata: dict[str, Any] | None = None) -> None:
-        """Add a text entry with optional metadata.
+    def add(self, text: str, metadata: dict[str, Any] | None = None) -> bool:
+        """Add or replace a text entry with optional metadata.
 
-        No-ops when the embedding backend is unavailable.
+        A catalog record_id is a stable identity. Re-indexing that identity
+        replaces its text, metadata and embedding and collapses historical
+        duplicates. An older numeric evidence_version cannot overwrite a
+        newer indexed version. Entries without record_id remain append-only.
         """
         if not _check_st_available():
-            return
+            return False
         if not text.strip():
-            return
+            return False
 
+        clean_metadata = dict(metadata or {})
         try:
             vec = self._encode([text])[0]  # shape (dim,)
         except Exception as exc:
             logger.warning("[VectorStore] Encoding failed: %s", exc)
-            return
+            return False
 
         with self._lock:
+            record_id = str(clean_metadata.get("record_id") or "").strip()
+            matching_indices = [
+                index
+                for index, current in enumerate(self._metadata)
+                if record_id
+                and str((current or {}).get("record_id") or "").strip() == record_id
+            ]
+            if matching_indices:
+                incoming_version = self._evidence_version(clean_metadata)
+                existing_versions = [
+                    version
+                    for version in (
+                        self._evidence_version(self._metadata[index])
+                        for index in matching_indices
+                    )
+                    if version is not None
+                ]
+                if (
+                    incoming_version is not None
+                    and existing_versions
+                    and incoming_version < max(existing_versions)
+                ):
+                    logger.warning(
+                        "[VectorStore] Ignoring stale evidence_version %s for %s (current=%s)",
+                        incoming_version,
+                        record_id,
+                        max(existing_versions),
+                    )
+                    return False
+
+                primary = matching_indices[0]
+                self._texts[primary] = text
+                self._metadata[primary] = clean_metadata
+                if self._embeddings is None:
+                    self._embeddings = self._encode(self._texts)
+                else:
+                    self._embeddings[primary] = vec
+                for duplicate in reversed(matching_indices[1:]):
+                    self._texts.pop(duplicate)
+                    self._metadata.pop(duplicate)
+                    if self._embeddings is not None:
+                        self._embeddings = np.delete(self._embeddings, duplicate, axis=0)
+                return True
+
             self._texts.append(text)
-            self._metadata.append(metadata or {})
+            self._metadata.append(clean_metadata)
             if self._embeddings is None:
                 self._embeddings = vec.reshape(1, -1)
             else:
                 self._embeddings = np.vstack([self._embeddings, vec.reshape(1, -1)])
+        return True
 
-    def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        *,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """Search for the most similar entries to *query*.
 
         Returns a list of dicts: ``{"text": ..., "score": ..., "metadata": ...}``.
@@ -200,16 +255,30 @@ class VectorStore:
         with self._lock:
             if self._embeddings is None or len(self._texts) == 0:
                 return []
-            # Cosine similarity (embeddings are already L2-normalized)
-            scores = self._embeddings @ q_vec
-            top_indices = _top_score_indices(scores, top_k)
+            eligible_indices = np.array(
+                [
+                    idx
+                    for idx, metadata in enumerate(self._metadata)
+                    if all(
+                        metadata.get(key) == value
+                        for key, value in (metadata_filter or {}).items()
+                    )
+                ],
+                dtype=np.int64,
+            )
+            if eligible_indices.size == 0:
+                return []
+            # Cosine similarity (embeddings are already L2-normalized).
+            scores = self._embeddings[eligible_indices] @ q_vec
+            top_local_indices = _top_score_indices(scores, top_k)
 
             results = []
-            for idx in top_indices:
-                idx_int = int(idx)
+            for local_idx in top_local_indices:
+                local_idx_int = int(local_idx)
+                idx_int = int(eligible_indices[local_idx_int])
                 results.append({
                     "text": self._texts[idx_int],
-                    "score": float(scores[idx_int]),
+                    "score": float(scores[local_idx_int]),
                     "metadata": self._metadata[idx_int],
                 })
             return results
@@ -238,15 +307,34 @@ class VectorStore:
         target = str(record_id or "").strip()
         if not target:
             return False
+        updated = False
         with self._lock:
             for idx, metadata in enumerate(self._metadata):
-                current = metadata if isinstance(metadata, dict) else {}
+                current = dict(metadata) if isinstance(metadata, dict) else {}
                 if str(current.get("record_id") or "") != target:
+                    continue
+                incoming_version = self._evidence_version(patch)
+                current_version = self._evidence_version(current)
+                if (
+                    incoming_version is not None
+                    and current_version is not None
+                    and incoming_version < current_version
+                ):
                     continue
                 current.update(patch)
                 self._metadata[idx] = current
-                return True
-        return False
+                updated = True
+        return updated
+
+    @staticmethod
+    def _evidence_version(metadata: dict[str, Any] | None) -> int | None:
+        value = (metadata or {}).get("evidence_version")
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     # -- Persistence ----------------------------------------------------------
 
