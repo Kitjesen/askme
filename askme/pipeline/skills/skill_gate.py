@@ -8,9 +8,11 @@ import json
 import logging
 import re
 import time as _time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from askme.llm.core.contracts import LLMCallContext
 from askme.pipeline.core.hooks import PipelineHooks, ToolCallRecord
+from askme.pipeline.core.protocols import SkillExecutionDisposition
 from askme.pipeline.core.trace import get_tracer
 from askme.pipeline.core.utils import classify_skill_error, strip_think_blocks
 from askme.pipeline.skills.outcome import (
@@ -82,6 +84,85 @@ class SkillGate:
         elif self._episodic:
             self._episodic.log(kind, text)
 
+    def classify_execution_result(
+        self,
+        result: str,
+        *,
+        skill_name: str = "",
+    ) -> SkillExecutionDisposition:
+        """Map the implementation outcome onto the core settlement contract."""
+
+        if str(result or "").lstrip().startswith("[安全锁定]"):
+            return SkillExecutionDisposition(
+                status="failed",
+                code="estop_active",
+            )
+        outcome = SkillOutcome.from_legacy_result(result, skill_name=skill_name)
+        if outcome.status is SkillOutcomeStatus.SUCCEEDED:
+            return SkillExecutionDisposition(
+                status="succeeded",
+                code=outcome.code,
+            )
+        if outcome.status is SkillOutcomeStatus.CANCELLED:
+            return SkillExecutionDisposition(
+                status="cancelled",
+                code=outcome.code,
+            )
+        return SkillExecutionDisposition(
+            status="failed",
+            code=outcome.code,
+        )
+
+    def _record_conversation(
+        self,
+        user_text: str,
+        assistant_text: str,
+        *,
+        conversation_session_id: str | None,
+    ) -> None:
+        """Project one skill exchange once, preserving the legacy call shape."""
+
+        if conversation_session_id is None:
+            self._conversation.add_user_message(user_text)
+            self._conversation.add_assistant_message(assistant_text)
+            return
+        self._conversation.add_user_message(
+            user_text,
+            conversation_session_id=conversation_session_id,
+        )
+        self._conversation.add_assistant_message(
+            assistant_text,
+            conversation_session_id=conversation_session_id,
+        )
+
+    @staticmethod
+    def _should_project_conversation(skill_name: str) -> bool:
+        """Whether this skill should write the legacy prompt-history projection."""
+
+        return skill_name != "agent_task"
+
+    @staticmethod
+    def _llm_call_context(
+        *,
+        conversation_session_id: str | None,
+        voice_turn_id: str | None,
+        source: str,
+        turn_cancel_token: Any | None,
+    ) -> LLMCallContext:
+        channel = source if source in {"voice", "text"} else "text"
+        context = LLMCallContext(
+            session_id=conversation_session_id,
+            turn_id=voice_turn_id,
+            purpose="tool_followup",
+            channel=channel,
+            request_class="robot_action",
+            privacy_class="conversation",
+            allow_cache=False,
+        )
+        if turn_cancel_token is not None:
+            object.__setattr__(context, "cancel_token", turn_cancel_token)
+        return context
+
     def _prepare_agent_result(self, result: str) -> tuple[str, str]:
         """Prepare agent result for TTS + conversation storage."""
         _AGENT_TTS_LIMIT = self._max_response_chars or 200
@@ -125,7 +206,7 @@ class SkillGate:
         for prefix in prefixes:
             if not text.startswith(prefix):
                 continue
-            target = text[len(prefix):].strip()
+            target = text[len(prefix) :].strip()
             target = re.split(r"[。！？?!，,；;]", target, maxsplit=1)[0].strip()
             changed = True
             while changed:
@@ -147,6 +228,7 @@ class SkillGate:
         async def _thinking_indicator() -> None:
             await asyncio.sleep(1.2)
             self._audio.play_thinking()
+
         return asyncio.create_task(_thinking_indicator()), None
 
     async def can_execute(
@@ -245,8 +327,14 @@ class SkillGate:
     # Core
 
     async def execute_skill(
-        self, skill_name: str, user_text: str, extra_context: str = "",
+        self,
+        skill_name: str,
+        user_text: str,
+        extra_context: str = "",
         source: str = "voice",
+        conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: Any | None = None,
     ) -> str:
         """Execute a named skill and speak the result."""
         audit_start = _time.perf_counter()
@@ -282,15 +370,14 @@ class SkillGate:
                 if dep_skill is None:
                     logger.warning(
                         "Skill '%s' depends on '%s' which is not available",
-                        skill_name, dep,
+                        skill_name,
+                        dep,
                     )
 
         logger.info("Executing skill: %s", skill_name)
 
         _skill_def = self._skill_manager.get(skill_name)
-        _is_agent_shell = (
-            _skill_def is not None and _skill_def.execution == "agent_shell"
-        )
+        _is_agent_shell = _skill_def is not None and _skill_def.execution == "agent_shell"
         if _is_agent_shell and self._agent_shell is not None:
             logger.info("[AgentShell] Routing agent_task to deprecated AgentShell compat stub")
             self._audio.drain_buffers()
@@ -308,8 +395,12 @@ class SkillGate:
                 result = strip_think_blocks(result)
                 spoken, stored = self._prepare_agent_result(result)
                 self._last_spoken_text = spoken
-                self._conversation.add_user_message(user_text)
-                self._conversation.add_assistant_message(stored)
+                if self._should_project_conversation(skill_name):
+                    self._record_conversation(
+                        user_text,
+                        stored,
+                        conversation_session_id=conversation_session_id,
+                    )
                 self._log_episode("outcome", f"{skill_name}完成: {result[:100]}")
                 if source == "voice":
                     await asyncio.to_thread(self._audio.wait_speaking_done)
@@ -370,7 +461,8 @@ class SkillGate:
                 if phrase in user_text:
                     logger.info(
                         "[DogControl] Dispatching capability '%s' for phrase '%s'",
-                        capability, phrase,
+                        capability,
+                        phrase,
                     )
                     dispatch_result = await asyncio.to_thread(
                         self._dog_control.dispatch_capability, capability, {}
@@ -382,7 +474,7 @@ class SkillGate:
                         )
                     break
 
-        _ep = (self._mem.episodic if self._mem is not None else self._episodic)
+        _ep = self._mem.episodic if self._mem is not None else self._episodic
         if skill_name == "patrol_report" and _ep:
             parts = [
                 _ep.get_recent_digest(),
@@ -405,8 +497,10 @@ class SkillGate:
                     # Fire pre_tool hooks as a fire-and-forget task so the
                     # synchronous callback doesn't block the skill executor.
                     probe = ToolCallRecord(
-                        call_id="", tool_name=tool_name,
-                        arguments="", result="",
+                        call_id="",
+                        tool_name=tool_name,
+                        arguments="",
+                        result="",
                         elapsed_ms=0.0,
                     )
                     try:
@@ -418,8 +512,16 @@ class SkillGate:
             t0 = _time.perf_counter()
             with get_tracer().span(f"skill.{skill_name}", skill=skill_name):
                 raw_result = await self._skill_executor.execute(
-                    skill, context, prompt_seed=self._prompt_seed or None,
+                    skill,
+                    context,
+                    prompt_seed=self._prompt_seed or None,
                     on_tool_call=_on_tool_call,
+                    llm_call_context=self._llm_call_context(
+                        conversation_session_id=conversation_session_id,
+                        voice_turn_id=voice_turn_id,
+                        source=source,
+                        turn_cancel_token=turn_cancel_token,
+                    ),
                 )
             elapsed_ms = (_time.perf_counter() - t0) * 1000
 
@@ -432,8 +534,10 @@ class SkillGate:
             # post_tool hook may transform the skill result.
             if self._hooks and self._hooks.post_tool:
                 record = ToolCallRecord(
-                    call_id="", tool_name=skill_name,
-                    arguments=user_text, result=result,
+                    call_id="",
+                    tool_name=skill_name,
+                    arguments=user_text,
+                    result=result,
                     elapsed_ms=elapsed_ms,
                 )
                 result = await self._hooks.fire_post_tool(record)
@@ -447,8 +551,12 @@ class SkillGate:
                 SkillOutcomeStatus.TIMED_OUT,
             }:
                 await self._speak_outcome(execution_outcome, source=source)
-                self._conversation.add_user_message(user_text)
-                self._conversation.add_assistant_message(execution_outcome.user_message)
+                if self._should_project_conversation(skill_name):
+                    self._record_conversation(
+                        user_text,
+                        execution_outcome.user_message,
+                        conversation_session_id=conversation_session_id,
+                    )
                 self._log_episode(
                     "error",
                     f"技能返回内部错误 {skill_name}: {result[:100]}",
@@ -468,8 +576,12 @@ class SkillGate:
 
             self._audio.speak(result)
             self._last_spoken_text = result
-            self._conversation.add_user_message(user_text)
-            self._conversation.add_assistant_message(result)
+            if self._should_project_conversation(skill_name):
+                self._record_conversation(
+                    user_text,
+                    result,
+                    conversation_session_id=conversation_session_id,
+                )
             self._log_episode("outcome", f"直接回复: {result[:100]}")
             if source == "voice":
                 await asyncio.to_thread(self._audio.wait_speaking_done)

@@ -16,7 +16,7 @@ from askme.llm.providers.domestic import (
 from askme.llm.providers.fake import FakeLLMProvider
 from askme.llm.providers.litellm import LiteLLMProxyProvider
 from askme.llm.providers.openai_compatible import OpenAICompatibleProvider
-from askme.llm.providers.profiles import infer_provider_name, normalize_provider_name
+from askme.llm.providers.profiles import normalize_provider_name
 from askme.llm.streaming.retry import default_backoff
 
 _PROVIDER_CLASSES = {
@@ -52,9 +52,9 @@ def create_llm_provider(
 
 def resolve_provider_name(config: LLMConfig) -> str:
     explicit = normalize_provider_name(config.provider)
-    if explicit:
-        return explicit
-    return infer_provider_name(model=config.model, base_url=config.base_url)
+    if not explicit:
+        raise ValueError("LLMConfig.provider is required; implicit provider inference is disabled")
+    return explicit
 
 
 def available_llm_providers() -> list[str]:

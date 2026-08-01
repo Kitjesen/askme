@@ -34,6 +34,7 @@ def _build_edge_robot():
         TextModule,
         ToolsModule,
         VoiceModule,
+        WarmSessionModule,
     )
 
     return compose_runtime(
@@ -49,6 +50,7 @@ def _build_edge_robot():
             ExecutorModule,
             VoiceModule,
             TextModule,
+            WarmSessionModule,
             HealthModule,
             PulseModule,
             PerceptionModule,
@@ -59,6 +61,7 @@ def _build_edge_robot():
             ProactiveModule,
         )
     )
+
 
 __all__ = ["edge_robot"]
 

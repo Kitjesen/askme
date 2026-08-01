@@ -16,20 +16,21 @@ def _build_voice_perception():
     from askme.runtime.modules import (
         CognitionModule,
         ExecutorModule,
-    HealthModule,
-    LLMModule,
-    MemoryModule,
-    MissionModule,
-    PerceptionModule,
-    PipelineModule,
-    PulseModule,
-    ReactionModule,
-    RuntimeHandoffModule,
-    SafetyModule,
-    SkillModule,
-    TextModule,
-    ToolsModule,
+        HealthModule,
+        LLMModule,
+        MemoryModule,
+        MissionModule,
+        PerceptionModule,
+        PipelineModule,
+        PulseModule,
+        ReactionModule,
+        RuntimeHandoffModule,
+        SafetyModule,
+        SkillModule,
+        TextModule,
+        ToolsModule,
         VoiceModule,
+        WarmSessionModule,
     )
 
     return compose_runtime(
@@ -45,6 +46,7 @@ def _build_voice_perception():
             ExecutorModule,
             VoiceModule,
             TextModule,
+            WarmSessionModule,
             HealthModule,
             PulseModule,
             PerceptionModule,
@@ -52,6 +54,7 @@ def _build_voice_perception():
             ReactionModule,
         )
     )
+
 
 __all__ = ["voice_perception"]
 

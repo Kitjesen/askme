@@ -286,18 +286,10 @@ def test_immediate_stop_is_joined_before_successor_can_start() -> None:
     )
     events: list[str] = []
     try:
-        agent.tts.start_playback = MagicMock(
-            side_effect=lambda: events.append("start")
-        )
-        agent.tts.stop_immediately = MagicMock(
-            side_effect=lambda: events.append("signal_stop")
-        )
-        agent.tts.drain_buffers = MagicMock(
-            side_effect=lambda: events.append("drain_generation")
-        )
-        agent.tts.stop_playback = MagicMock(
-            side_effect=lambda: events.append("join_playback")
-        )
+        agent.tts.start_playback = MagicMock(side_effect=lambda: events.append("start"))
+        agent.tts.stop_immediately = MagicMock(side_effect=lambda: events.append("signal_stop"))
+        agent.tts.drain_buffers = MagicMock(side_effect=lambda: events.append("drain_generation"))
+        agent.tts.stop_playback = MagicMock(side_effect=lambda: events.append("join_playback"))
         first = agent.start_playback(voice_turn_id="turn-a")
         assert first is not None
         events.clear()
@@ -585,6 +577,23 @@ def test_wake_word_wait_records_microphone_frames() -> None:
     )
 
 
+def test_wake_word_wait_fails_closed_when_spotter_is_unavailable() -> None:
+    agent = object.__new__(AudioAgent)
+    agent.stop_event = threading.Event()
+    agent._record_input_observation = MagicMock()
+    agent._refresh_voice_metrics = MagicMock()
+    stream = MagicMock()
+    agent.kws_stream = stream
+    agent.kws = MagicMock()
+    agent.kws.spotter = None
+    mic = MagicMock()
+    mic.sample_rate = 16_000
+    mic.read_chunk.return_value = np.zeros(160, dtype=np.float32)
+
+    assert agent._wait_for_wake_word_mic(mic) is False
+    stream.accept_waveform.assert_not_called()
+
+
 def test_kws_runtime_error_marks_stream_unavailable_for_fail_closed_mode() -> None:
     agent = object.__new__(AudioAgent)
     agent.voice_mode = True
@@ -622,6 +631,28 @@ def test_asr_result_does_not_renew_followup_window_before_admission() -> None:
 
     agent.mark_interaction_turn()
     assert agent._last_interaction_time > 123.0
+
+
+def test_accepted_asr_result_exposes_confidence_to_voice_loop() -> None:
+    agent = object.__new__(AudioAgent)
+    agent._turn_traces = MagicMock()
+    agent.audio_queue = MagicMock()
+    agent._metrics = MagicMock()
+    agent._clear_input_failure = MagicMock()
+    agent._refresh_voice_metrics = MagicMock()
+    agent._asr_mgr = MagicMock()
+    agent._last_interaction_time = 0.0
+    agent._agent_state = AgentState.LISTENING
+
+    assert (
+        agent._accept_result(
+            "\u5bfc\u822a\u5230\u4ed3\u5e93",
+            asr_source="cloud",
+            asr_confidence=0.62,
+        )
+        == "\u5bfc\u822a\u5230\u4ed3\u5e93"
+    )
+    assert agent.last_turn_asr_confidence == 0.62
 
 
 def test_accepted_asr_result_logs_only_non_content_metadata(caplog) -> None:
@@ -849,17 +880,12 @@ class TestNoiseFilterLogic:
 
     def _is_noise(self, text: str, awaiting_confirmation: bool = False) -> bool:
         """Replicate the noise filter logic from listen_loop."""
-        is_confirmation_word = (
-            awaiting_confirmation and text in _CONFIRMATION_WORDS
-        )
-        return (
-            not is_confirmation_word
-            and (
-                text in _NOISE_UTTERANCES
-                or text in _CONFIRMATION_WORDS
-                or (len(text) == 1 and text not in _SINGLE_CHAR_COMMANDS)
-                or (len(text) < _MIN_VALID_TEXT_LEN and text not in _SINGLE_CHAR_COMMANDS)
-            )
+        is_confirmation_word = awaiting_confirmation and text in _CONFIRMATION_WORDS
+        return not is_confirmation_word and (
+            text in _NOISE_UTTERANCES
+            or text in _CONFIRMATION_WORDS
+            or (len(text) == 1 and text not in _SINGLE_CHAR_COMMANDS)
+            or (len(text) < _MIN_VALID_TEXT_LEN and text not in _SINGLE_CHAR_COMMANDS)
         )
 
     def test_noise_utterances_filtered(self):
@@ -1318,9 +1344,7 @@ class TestChimeSynthesis:
         finally:
             agent.shutdown()
 
-    def test_acknowledge_does_not_disable_the_slow_turn_thinking_chime(
-        self, monkeypatch
-    ):
+    def test_acknowledge_does_not_disable_the_slow_turn_thinking_chime(self, monkeypatch):
         """ACK and long-tail feedback have independent rate-limit clocks."""
         import threading
 
@@ -1439,6 +1463,7 @@ def test_sounddevice_chime_publishes_reference_after_stream_start(monkeypatch):
         "publish_feedback_render_reference",
         lambda *_args, **_kwargs: (order.append("reference"), delivered.set()),
     )
+
     class _OutputStream:
         def __init__(self, *, callback, finished_callback, **_kwargs):
             self.callback = callback

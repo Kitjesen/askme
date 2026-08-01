@@ -17,9 +17,18 @@ Status BEFORE: all code paths untested. Status AFTER: fully covered.
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from askme.pipeline.skill_dispatcher import SkillDispatcher
+
+from askme.conversation import (
+    InteractionInput,
+    InteractionTurnManager,
+    TurnStatus,
+    VoiceTurnLedger,
+)
+from askme.pipeline.core.protocols import SkillExecutionDisposition
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -55,6 +64,50 @@ def _make_dispatcher(
         audio=mock_audio,
     )
     return dispatcher, mock_pipeline, mock_skill_manager, mock_audio
+
+
+class CanonicalAgentTaskPipeline:
+    """Pipeline stub with the canonical interaction contract required by agent_task."""
+
+    def __init__(self, *, execute_delay: float = 0.0, execute_result: str = "完成"):
+        self.process = AsyncMock(return_value="LLM回复")
+        self.execute_skill = AsyncMock(side_effect=self._execute_skill)
+        self.execute_delay = execute_delay
+        self.execute_result = execute_result
+        self.settle_calls = []
+        self._ledger_dir = tempfile.TemporaryDirectory()
+        self._turn_ledger = VoiceTurnLedger(f"{self._ledger_dir.name}/agent-task-turns.jsonl")
+        self._interaction_turns = InteractionTurnManager(self._turn_ledger)
+
+    def _open_direct_interaction(self, **kwargs):
+        return self._interaction_turns.open(
+            InteractionInput(
+                user_text=kwargs["user_text"],
+                source=kwargs["source"],
+                thread_id=kwargs.get("conversation_session_id"),
+                turn_id=kwargs.get("voice_turn_id"),
+                channel=kwargs["source"],
+                metadata=kwargs.get("metadata") or {},
+                cancel_token=kwargs.get("turn_cancel_token"),
+            )
+        )
+
+    def _settle_direct_interaction(self, interaction, outcome):
+        self.settle_calls.append((interaction, outcome))
+        return self._interaction_turns.settle(interaction, outcome)
+
+    def _classify_skill_execution_result(self, result, skill_name):
+        assert skill_name == "agent_task"
+        if str(result).startswith("cancel:"):
+            return SkillExecutionDisposition(status="cancelled", code="operator_cancelled")
+        if str(result).startswith("fail:"):
+            return SkillExecutionDisposition(status="failed", code="agent_failed")
+        return SkillExecutionDisposition(status="succeeded", code="succeeded")
+
+    async def _execute_skill(self, name, text, ctx="", **_kwargs):
+        if self.execute_delay:
+            await asyncio.sleep(self.execute_delay)
+        return self.execute_result
 
 
 # ── Group 1: execute_skill_sync() ─────────────────────────────────────────────
@@ -93,9 +146,7 @@ class TestExecuteSkillSync:
         await dispatcher.dispatch("navigate", "去仓库A")
         assert dispatcher._loop is not None
 
-        result = await asyncio.to_thread(
-            dispatcher.execute_skill_sync, "navigate", "再去仓库B"
-        )
+        result = await asyncio.to_thread(dispatcher.execute_skill_sync, "navigate", "再去仓库B")
         assert result == "技能执行完成"
 
     def test_sync_unknown_skill_returns_error(self):
@@ -164,7 +215,6 @@ class TestExecuteSkillSync:
 
 
 class TestDispatchAudioFeedback:
-
     async def test_first_dispatch_no_audio(self):
         """First skill in a mission must NOT speak."""
         skill = _make_skill()
@@ -217,7 +267,6 @@ class TestDispatchAudioFeedback:
 
 
 class TestCompleteMissionAudio:
-
     async def test_complete_multistep_mission_returns_mission_for_caller_to_announce(self):
         """≥2 steps → complete_mission() is audio-silent but returns the mission.
 
@@ -265,7 +314,6 @@ class TestCompleteMissionAudio:
 
 
 class TestDispatchTimeoutActual:
-
     async def test_dispatch_timeout_returns_timeout_message(self):
         """TimeoutError from wait_for → '[超时]' in result (not re-raised).
 
@@ -306,16 +354,13 @@ class TestDispatchTimeoutActual:
         assert dispatcher.last_mission is not None
         assert dispatcher.last_mission.step_count == 1
         step_result = dispatcher.last_mission.steps[0].result
-        assert "[超时]" in step_result, (
-            f"Step result must contain '[超时]', got: {step_result!r}"
-        )
+        assert "[超时]" in step_result, f"Step result must contain '[超时]', got: {step_result!r}"
 
 
 # ── Group 5: Edge cases and P2 coverage ───────────────────────────────────────
 
 
 class TestDispatchEdgeCases:
-
     async def test_dispatch_non_timeout_exception_propagates(self):
         """Non-TimeoutError is caught, mission marked FAILED, error string returned.
 
@@ -356,9 +401,7 @@ class TestDispatchEdgeCases:
 
         assert len(captured_contexts) == 1
         x_count = captured_contexts[0].count("X")
-        assert x_count == 200, (
-            f"history_for_context must truncate to 200 chars; found {x_count}"
-        )
+        assert x_count == 200, f"history_for_context must truncate to 200 chars; found {x_count}"
 
     async def test_source_locked_to_first_dispatch(self):
         """Mission source is set by first dispatch and never overridden."""
@@ -366,7 +409,7 @@ class TestDispatchEdgeCases:
         dispatcher, _, _, _ = _make_dispatcher(skill=skill)
 
         await dispatcher.dispatch("navigate", "去仓库", source="voice")
-        await dispatcher.dispatch("navigate", "再去",   source="text")
+        await dispatcher.dispatch("navigate", "再去", source="text")
 
         assert dispatcher.current_mission.source == "voice", (
             f"Source must stay 'voice', got {dispatcher.current_mission.source!r}"
@@ -385,9 +428,12 @@ class TestDispatchEdgeCases:
         skill = _make_skill()
         dispatcher, _, mock_sm, _ = _make_dispatcher(skill=skill)
 
-        s1 = _make_skill("navigate"); s1.description = "导航"
-        s2 = _make_skill("search");   s2.description = "搜索"
-        s3 = _make_skill("get_time"); s3.description = "获取时间"
+        s1 = _make_skill("navigate")
+        s1.description = "导航"
+        s2 = _make_skill("search")
+        s2.description = "搜索"
+        s3 = _make_skill("get_time")
+        s3.description = "获取时间"
         mock_sm.get_enabled.return_value = [s1, s2, s3]
 
         result = dispatcher.get_skill_catalog_for_prompt()
@@ -482,6 +528,7 @@ class TestCompleteMissionFailedState:
     async def test_failed_mission_no_success_audio(self):
         """complete_mission() must NOT speak 多步任务完成 when state is FAILED."""
         from askme.pipeline.skill_dispatcher import MissionState
+
         skill = _make_skill()
         dispatcher, _, _, mock_audio = _make_dispatcher(skill=skill)
 
@@ -496,7 +543,9 @@ class TestCompleteMissionFailedState:
         # Must not say "多步任务完成"
         for call in mock_audio.speak.call_args_list:
             text = call[0][0]
-            assert "多步任务完成" not in text, f"Should not announce success for failed mission: {text!r}"
+            assert "多步任务完成" not in text, (
+                f"Should not announce success for failed mission: {text!r}"
+            )
 
 
 class TestHandleGeneralPlanOriginalContext:
@@ -511,10 +560,12 @@ class TestHandleGeneralPlanOriginalContext:
         dispatcher, mock_pipeline, _, _ = _make_dispatcher(skill=skill)
 
         planner = _MagicMock()
-        planner.plan = _AsyncMock(return_value=[
-            PlanStep(skill_name="navigate", intent="前往仓库"),
-            PlanStep(skill_name="navigate", intent="前往B点"),
-        ])
+        planner.plan = _AsyncMock(
+            return_value=[
+                PlanStep(skill_name="navigate", intent="前往仓库"),
+                PlanStep(skill_name="navigate", intent="前往B点"),
+            ]
+        )
         dispatcher._planner = planner
 
         original_text = "去东区仓库取货然后送到B点"
@@ -569,9 +620,7 @@ class TestHandleGeneralPlanOriginalContext:
         skill = _make_skill()
         dispatcher, mock_pipeline, _, _ = _make_dispatcher(skill=skill)
         planner = MagicMock()
-        planner.plan = AsyncMock(
-            return_value=[PlanStep(skill_name="navigate", intent="first")]
-        )
+        planner.plan = AsyncMock(return_value=[PlanStep(skill_name="navigate", intent="first")])
         dispatcher._planner = planner
         token = AtomicCancellationToken()
         atomic_try_run = token.try_run
@@ -598,18 +647,16 @@ class TestAgentTaskBackground:
     """agent_task is fired as a background asyncio.Task — VoiceLoop stays responsive."""
 
     def _make_dispatcher_with_agent_task(
-        self, *, execute_delay: float = 0.0, execute_result: str = "完成",
-    ) -> tuple[SkillDispatcher, MagicMock]:
+        self,
+        *,
+        execute_delay: float = 0.0,
+        execute_result: str = "完成",
+    ) -> tuple[SkillDispatcher, CanonicalAgentTaskPipeline]:
         skill = _make_skill(name="agent_task", timeout=120)
-        mock_pipeline = MagicMock()
-        mock_pipeline.process = AsyncMock(return_value="LLM回复")
-
-        async def _slow_execute(name, text, ctx=""):
-            if execute_delay:
-                await asyncio.sleep(execute_delay)
-            return execute_result
-
-        mock_pipeline.execute_skill = AsyncMock(side_effect=_slow_execute)
+        mock_pipeline = CanonicalAgentTaskPipeline(
+            execute_delay=execute_delay,
+            execute_result=execute_result,
+        )
 
         mock_skill_manager = MagicMock()
         mock_skill_manager.get.return_value = skill
@@ -635,9 +682,16 @@ class TestAgentTaskBackground:
         result = await dispatcher.dispatch("agent_task", "帮我研究一下")
 
         assert "处理" in result or "进度" in result
+        assert mock_pipeline.execute_skill.await_count == 0
+        [turn] = mock_pipeline._turn_ledger.list_turns()
+        assert turn.status is TurnStatus.SPEAKING
         # The background task may not be done yet
         if dispatcher._active_agent_task:
             dispatcher._active_agent_task.cancel()
+            try:
+                await dispatcher._active_agent_task
+            except asyncio.CancelledError:
+                pass
 
     async def test_has_active_agent_task_true_while_running(self):
         """has_active_agent_task is True while the background task is running."""
@@ -648,6 +702,10 @@ class TestAgentTaskBackground:
 
         if dispatcher._active_agent_task:
             dispatcher._active_agent_task.cancel()
+            try:
+                await dispatcher._active_agent_task
+            except asyncio.CancelledError:
+                pass
 
     async def test_has_active_agent_task_false_initially(self):
         """has_active_agent_task is False before any agent_task dispatch."""
@@ -660,10 +718,23 @@ class TestAgentTaskBackground:
 
         await dispatcher.dispatch("agent_task", "长任务")
         assert dispatcher.has_active_agent_task is True
+        for _ in range(10):
+            if dispatcher._pipeline.execute_skill.await_count:
+                break
+            await asyncio.sleep(0)
+        assert dispatcher._pipeline.execute_skill.await_count == 1
 
+        task = dispatcher._active_agent_task
         cancelled = dispatcher.cancel_active_agent_task()
         assert cancelled is True
         assert dispatcher.has_active_agent_task is False
+        if task:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        [turn] = dispatcher._pipeline._turn_ledger.list_turns()
+        assert turn.status is TurnStatus.CANCELLED
 
     async def test_cancel_active_agent_task_when_none_returns_false(self):
         """cancel_active_agent_task() returns False when no task is running."""
@@ -682,6 +753,8 @@ class TestAgentTaskBackground:
         await asyncio.wait_for(task, timeout=1.0)
 
         assert dispatcher.has_active_agent_task is False
+        [turn] = dispatcher._pipeline._turn_ledger.list_turns()
+        assert turn.status is TurnStatus.COMMITTED
         # Mission should have been completed
         assert dispatcher._current_mission is None
 

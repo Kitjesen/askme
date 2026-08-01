@@ -39,14 +39,18 @@ def _server_event(
 
 
 def _audio_only(payload: bytes) -> bytes:
-    return bytes(
-        [
-            0x11,
-            int(MessageType.AUDIO_ONLY_SERVER) << 4,
-            int(Serialization.RAW) << 4,
-            0,
-        ]
-    ) + len(payload).to_bytes(4, "big") + payload
+    return (
+        bytes(
+            [
+                0x11,
+                int(MessageType.AUDIO_ONLY_SERVER) << 4,
+                int(Serialization.RAW) << 4,
+                0,
+            ]
+        )
+        + len(payload).to_bytes(4, "big")
+        + payload
+    )
 
 
 def _session_audio(payload: bytes, *, session_id: str) -> bytes:
@@ -382,9 +386,7 @@ def test_interrupt_unblocks_blocking_prewarm_handshake() -> None:
     client.interrupt()
     thread.join(timeout=1.0)
 
-    assert result == [
-        {"ok": False, "status": "cancelled", "reason": "interrupted"}
-    ]
+    assert result == [{"ok": False, "status": "cancelled", "reason": "interrupted"}]
     assert ws.aborted is True
 
 
@@ -479,6 +481,24 @@ def test_interrupt_after_socket_open_cancels_before_provider_handshake() -> None
     assert ws.sent == []
 
 
+def test_close_after_socket_open_does_not_finish_before_provider_handshake() -> None:
+    ws = FakeWebSocket([_server_event(EventType.CONNECTION_STARTED)])
+    client, _ = _client(ws)
+    socket_opened, release_tracking = _pause_after_socket_open(client)
+    result: list[dict[str, Any]] = []
+    thread = threading.Thread(target=lambda: result.append(client.prewarm()))
+    thread.start()
+    assert socket_opened.wait(timeout=1.0)
+
+    client.close()
+    release_tracking.set()
+    thread.join(timeout=1.0)
+
+    assert result == [{"ok": False, "status": "cancelled", "reason": "interrupted"}]
+    assert ws.closed is True
+    assert ws.sent == []
+
+
 def test_close_closes_synthesis_socket_before_active_publish() -> None:
     ws = FakeWebSocket(
         [
@@ -520,9 +540,7 @@ def test_interrupt_closes_prewarm_socket_before_active_publish() -> None:
     release_publish.set()
     thread.join(timeout=1.0)
 
-    assert result == [
-        {"ok": False, "status": "cancelled", "reason": "interrupted"}
-    ]
+    assert result == [{"ok": False, "status": "cancelled", "reason": "interrupted"}]
     assert ws.closed is True
     assert [_client_event(frame) for frame in ws.sent] == [EventType.START_CONNECTION]
 
@@ -540,9 +558,7 @@ def test_close_closes_prewarm_socket_before_active_publish() -> None:
     release_publish.set()
     thread.join(timeout=1.0)
 
-    assert result == [
-        {"ok": False, "status": "cancelled", "reason": "interrupted"}
-    ]
+    assert result == [{"ok": False, "status": "cancelled", "reason": "interrupted"}]
     assert ws.closed is True
     assert [_client_event(frame) for frame in ws.sent] == [
         EventType.START_CONNECTION,
@@ -826,9 +842,7 @@ def test_prewarm_does_not_clear_active_synthesis_interrupt() -> None:
 
 
 def test_blocking_candidate_close_does_not_delay_active_interrupt() -> None:
-    prewarm_ws = BlockingCloseWebSocket(
-        [_server_event(EventType.CONNECTION_STARTED)]
-    )
+    prewarm_ws = BlockingCloseWebSocket([_server_event(EventType.CONNECTION_STARTED)])
     synth_ws = BlockingWebSocket(
         [
             _server_event(EventType.CONNECTION_STARTED),

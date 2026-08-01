@@ -24,6 +24,7 @@ def _make_client(monkeypatch, **overrides):
         "askme.llm.core.client.get_config",
         lambda: {
             "brain": {
+                "provider": "openai_compatible",
                 "api_key": "test-key",
                 "base_url": "https://test.example.com/v1",
                 "model": "primary-model",
@@ -37,6 +38,59 @@ def _make_client(monkeypatch, **overrides):
     from askme.llm.client import LLMClient
 
     return LLMClient()
+
+
+def test_legacy_litellm_constructor_fails_closed_before_transport(monkeypatch):
+    monkeypatch.setattr(
+        "askme.llm.core.client.get_config",
+        lambda: {
+            "brain": {
+                "provider": "litellm",
+                "api_key": "",
+                "model": "voice-fast",
+                "health_model": "health-probe",
+                "max_retries": 0,
+                "fallback_models": [],
+                "minimax_api_key": "",
+            }
+        },
+    )
+    create_provider = MagicMock()
+    monkeypatch.setattr("askme.llm.core.client.create_llm_provider", create_provider)
+
+    from askme.llm.client import LLMClient
+
+    with pytest.raises(ValueError, match="Invalid LLM configuration.*api_key.*base_url"):
+        LLMClient()
+
+    create_provider.assert_not_called()
+
+
+def test_legacy_constructor_preserves_litellm_routing_ownership(monkeypatch):
+    monkeypatch.setattr(
+        "askme.llm.core.client.get_config",
+        lambda: {
+            "brain": {
+                "provider": "litellm",
+                "api_key": "sk-scoped",
+                "base_url": "http://127.0.0.1:4000/v1",
+                "model": "voice-fast",
+                "health_model": "health-probe",
+                "max_retries": 0,
+                "fallback_models": [],
+                "minimax_api_key": "",
+            }
+        },
+    )
+
+    from askme.llm.client import LLMClient
+
+    client = LLMClient()
+
+    assert client.provider_name == "litellm"
+    assert client.config.base_url == "http://127.0.0.1:4000/v1"
+    assert client.provider_status()["routing_owner"] == "litellm"
+    assert client.provider_status()["fallback_models"] == []
 
 
 # ---------------------------------------------------------------------------

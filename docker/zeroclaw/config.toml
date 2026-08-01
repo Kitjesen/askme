@@ -1,0 +1,19 @@
+# ZeroClaw model-control policy for the product Compose stack.
+# ZEROCLAW_API_KEY is injected from a dedicated LiteLLM virtual key.
+api_key = ""
+default_provider = "custom:http://litellm:4000/v1"
+default_model = "robot-action"
+default_temperature = 0.2
+model_routes = []
+embedding_routes = []
+
+[reliability]
+provider_retries = 0
+provider_backoff_ms = 500
+fallback_providers = []
+api_keys = []
+model_fallbacks = {}
+channel_initial_backoff_secs = 2
+channel_max_backoff_secs = 60
+scheduler_poll_secs = 15
+scheduler_retries = 2

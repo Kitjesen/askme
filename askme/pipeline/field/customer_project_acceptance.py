@@ -180,6 +180,7 @@ def list_customer_project_onsite_evidence(
     payload = _customer_project_onsite_evidence_payload(
         profile,
         field_readiness=field_readiness if include_readiness_auto else None,
+        evidence_roots=_onsite_evidence_allowed_roots(profile_root),
     )
     return {
         "found": True,
@@ -231,7 +232,11 @@ def register_customer_project_onsite_evidence(
         }
     evidence_path = str(evidence.get("path") or evidence.get("evidence_path") or "").strip()
     inventory = (
-        _evidence_file_inventory(evidence_path, evidence_url=_evidence_url(evidence_path))
+        _evidence_file_inventory(
+            evidence_path,
+            evidence_url=_evidence_url(evidence_path),
+            allowed_roots=_onsite_evidence_allowed_roots(profile_root),
+        )
         if evidence_path
         else {}
     )
@@ -294,7 +299,10 @@ def register_customer_project_onsite_evidence(
     receipts.append(receipt)
     profile["onsite_acceptance_evidence"] = receipts
     _write_yaml(path, profile)
-    payload = _customer_project_onsite_evidence_payload(profile)
+    payload = _customer_project_onsite_evidence_payload(
+        profile,
+        evidence_roots=_onsite_evidence_allowed_roots(profile_root),
+    )
     return {
         "accepted": True,
         "profile_path": str(path),
@@ -715,6 +723,7 @@ def customer_project_acceptance_report(
     onsite_evidence = _customer_project_onsite_evidence_payload(
         profile,
         field_readiness=field_readiness,
+        evidence_roots=_onsite_evidence_allowed_roots(profile_root),
     )["onsite_acceptance_evidence"]
     onsite_summary = _mapping(onsite_evidence.get("summary"))
     env_refs = site_profile_env_references(profile)
@@ -1404,8 +1413,9 @@ def _customer_project_onsite_evidence_payload(
     profile: dict[str, Any],
     *,
     field_readiness: dict[str, Any] | None = None,
+    evidence_roots: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
-    receipts = _customer_project_onsite_evidence_receipts(profile)
+    receipts = _customer_project_onsite_evidence_receipts(profile, evidence_roots=evidence_roots)
     if isinstance(field_readiness, dict):
         receipts = [
             *receipts,
@@ -1586,7 +1596,11 @@ def _customer_project_auto_onsite_evidence_receipt(
     }
 
 
-def _customer_project_onsite_evidence_receipts(profile: dict[str, Any]) -> list[dict[str, Any]]:
+def _customer_project_onsite_evidence_receipts(
+    profile: dict[str, Any],
+    *,
+    evidence_roots: tuple[Path, ...] = (),
+) -> list[dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
     for item in _customer_project_raw_onsite_evidence(profile):
         evidence_type = _normalize_onsite_evidence_type(
@@ -1594,7 +1608,15 @@ def _customer_project_onsite_evidence_receipts(profile: dict[str, Any]) -> list[
         )
         status = _normalize_onsite_evidence_status(item.get("status"))
         path = str(item.get("path") or item.get("evidence_path") or "").strip()
-        inventory = _evidence_file_inventory(path, evidence_url=_evidence_url(path)) if path else {}
+        inventory = (
+            _evidence_file_inventory(
+                path,
+                evidence_url=_evidence_url(path),
+                allowed_roots=evidence_roots,
+            )
+            if path
+            else {}
+        )
         receipt = {
             "receipt_type": str(
                 item.get("receipt_type") or "askme.customer_project_onsite_evidence"
@@ -1651,6 +1673,17 @@ def _manual_onsite_evidence_tier(value: Any) -> str:
     if text in {"", "acceptance_candidate"}:
         return "acceptance_candidate"
     return ""
+
+
+def _onsite_evidence_allowed_roots(profile_root: Path) -> tuple[Path, ...]:
+    try:
+        root = Path(profile_root).resolve()
+    except OSError:
+        return ()
+    parent = root.parent
+    if parent == root or parent == Path(root.anchor):
+        return (root,)
+    return (root, parent)
 
 
 def _stored_onsite_evidence_tier(item: dict[str, Any]) -> str:

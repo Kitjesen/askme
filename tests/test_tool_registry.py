@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
+from dataclasses import replace
 from typing import Any
 
 from askme.tools.tool_registry import BaseTool, ToolRegistry
+
+from askme.conversation import InteractionTurnContext
 
 
 class _SafeTool(BaseTool):
@@ -156,6 +161,24 @@ def _make_registry(**overrides: Any) -> ToolRegistry:
     return ToolRegistry(config=config)
 
 
+def _interaction_context(
+    thread_id: str,
+    turn_id: str,
+    *,
+    person_id: str = "person-1",
+    operator_id: str = "operator-1",
+) -> InteractionTurnContext:
+    return InteractionTurnContext(
+        thread_id=thread_id,
+        turn_id=turn_id,
+        channel="voice",
+        source="voice",
+        user_text="run tool",
+        person_id=person_id,
+        operator_id=operator_id,
+    )
+
+
 def _wait_job(
     registry: ToolRegistry,
     job_id: str,
@@ -227,6 +250,268 @@ def test_dangerous_tool_requires_operator_approval() -> None:
     assert result.startswith("[Approval Required]")
     assert registry.has_pending_approval() is True
     assert tool.calls == 0
+
+
+def test_scoped_approvals_can_be_pending_for_multiple_threads() -> None:
+    registry = _make_registry()
+    first = _DangerousTool()
+    second = _SecondDangerousTool()
+    registry.register(first)
+    registry.register(second)
+    thread_a = _interaction_context("thread-a", "turn-a")
+    thread_b = _interaction_context("thread-b", "turn-b")
+
+    first_result = registry.execute(
+        "dangerous_tool",
+        '{"z": 1, "target": "bin-a", "a": 2}',
+        max_safety_level="dangerous",
+        interaction_context=thread_a,
+    )
+    second_result = registry.execute(
+        "second_dangerous_tool",
+        '{"target": "bin-b"}',
+        max_safety_level="dangerous",
+        interaction_context=thread_b,
+    )
+
+    scope_a = registry.pending_approval_scope(thread_a)
+    scope_b = registry.pending_approval_scope(thread_b)
+    assert first_result.startswith("[Approval Required]")
+    assert second_result.startswith("[Approval Required]")
+    assert scope_a is not None
+    assert scope_b is not None
+    assert scope_a.approval_id != scope_b.approval_id
+    assert scope_a.subject == "dangerous_tool"
+    assert scope_b.subject == "second_dangerous_tool"
+    expected_payload = json.dumps(
+        {"a": 2, "target": "bin-a", "z": 1},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert scope_a.payload_digest == hashlib.sha256(expected_payload.encode()).hexdigest()
+    assert first.calls == 0
+    assert second.calls == 0
+
+    approved = registry.approve_pending(
+        replace(thread_a, turn_id="turn-a-confirm"),
+        approval_id=scope_a.approval_id,
+    )
+    assert approved == "dangerous"
+    assert first.calls == 1
+    assert second.calls == 0
+    assert registry.pending_approval_scope(thread_b) == scope_b
+
+
+def test_scoped_approval_accepts_exact_id_from_later_turn() -> None:
+    registry = _make_registry()
+    tool = _DangerousTool()
+    registry.register(tool)
+    prompt = _interaction_context("thread-a", "turn-prompt")
+    registry.execute(
+        "dangerous_tool",
+        '{"target": "bin-a"}',
+        max_safety_level="dangerous",
+        interaction_context=prompt,
+    )
+    scope = registry.pending_approval_scope(prompt)
+    assert scope is not None
+    same_turn = registry.approve_pending(
+        prompt,
+        approval_id=scope.approval_id,
+    )
+    assert same_turn.startswith("[Approval]")
+    assert tool.calls == 0
+
+    response = replace(prompt, turn_id="turn-response", user_text="approve")
+
+    assert registry.matches_confirmation(
+        "approve",
+        interaction_context=response,
+        approval_id=scope.approval_id,
+    )
+    result = registry.handle_pending_input(
+        "approve",
+        interaction_context=response,
+        approval_id=scope.approval_id,
+    )
+
+    assert result == "dangerous"
+    assert tool.calls == 1
+    assert registry.pending_approval_scope(response) is None
+
+
+def test_scoped_approval_rejects_wrong_challenge_or_identity() -> None:
+    registry = _make_registry()
+    tool = _DangerousTool()
+    registry.register(tool)
+    prompt = _interaction_context("thread-a", "turn-prompt")
+    registry.execute(
+        "dangerous_tool",
+        "{}",
+        max_safety_level="dangerous",
+        interaction_context=prompt,
+    )
+    scope = registry.pending_approval_scope(prompt)
+    assert scope is not None
+    later_turn = replace(prompt, turn_id="turn-response")
+
+    assert registry.pending_approval_scope(replace(later_turn, thread_id="thread-b")) is None
+    assert registry.pending_approval_scope(replace(later_turn, person_id="person-2")) is None
+    assert registry.pending_approval_scope(replace(later_turn, operator_id="operator-2")) is None
+    assert registry.approve_pending(
+        interaction_context=replace(later_turn, thread_id="thread-b"),
+        approval_id=scope.approval_id,
+    ).startswith("[Approval]")
+    assert registry.approve_pending(
+        interaction_context=replace(later_turn, person_id="person-2"),
+        approval_id=scope.approval_id,
+    ).startswith("[Approval]")
+    assert registry.reject_pending(
+        interaction_context=replace(later_turn, operator_id="operator-2"),
+        approval_id=scope.approval_id,
+    ).startswith("[Approval]")
+    assert registry.reject_pending(
+        interaction_context=later_turn,
+        approval_id="wrong-id",
+    ).startswith("[Approval]")
+    assert tool.calls == 0
+    assert registry.pending_approval_scope(later_turn) == scope
+
+    cancelled = registry.reject_pending(
+        interaction_context=later_turn,
+        approval_id=scope.approval_id,
+    )
+    assert cancelled.startswith("[Approval Cancelled]")
+    assert registry.pending_approval_scope(later_turn) is None
+
+
+def test_legacy_no_context_cannot_resolve_scoped_approval() -> None:
+    registry = _make_registry()
+    tool = _DangerousTool()
+    registry.register(tool)
+    context = _interaction_context("thread-a", "turn-prompt")
+    registry.execute(
+        "dangerous_tool",
+        "{}",
+        max_safety_level="dangerous",
+        interaction_context=context,
+    )
+    scope = registry.pending_approval_scope(context)
+    assert scope is not None
+
+    assert registry.has_pending_approval() is False
+    assert registry.matches_confirmation("approve") is False
+    assert registry.matches_rejection("cancel") is False
+    assert registry.handle_pending_input("approve") is None
+    assert registry.approve_pending().startswith("[Approval]")
+    assert registry.reject_pending().startswith("[Approval]")
+    assert registry.pending_approval_scope(context) == scope
+    assert tool.calls == 0
+
+
+def test_anonymous_voice_cannot_queue_scoped_approval() -> None:
+    registry = _make_registry()
+    tool = _DangerousTool()
+    registry.register(tool)
+    prompt = replace(
+        _interaction_context("public-voice", "turn-prompt"),
+        person_id=None,
+        operator_id=None,
+    )
+
+    result = registry.execute(
+        "dangerous_tool",
+        "{}",
+        max_safety_level="dangerous",
+        interaction_context=prompt,
+    )
+
+    assert "已认证操作员" in result
+
+
+def test_scoped_approval_expires_before_exact_response() -> None:
+    registry = _make_registry(approval_timeout_seconds=0.01)
+    tool = _DangerousTool()
+    registry.register(tool)
+    prompt = _interaction_context("thread-a", "turn-prompt")
+    registry.execute(
+        "dangerous_tool",
+        "{}",
+        max_safety_level="dangerous",
+        interaction_context=prompt,
+    )
+    scope = registry.pending_approval_scope(prompt)
+    assert scope is not None
+    response = replace(prompt, turn_id="turn-response")
+
+    time.sleep(0.02)
+    result = registry.approve_pending(
+        interaction_context=response,
+        approval_id=scope.approval_id,
+    )
+
+    assert result.startswith("[Approval Expired]")
+    assert registry.pending_approval_scope(response) is None
+    assert tool.calls == 0
+
+
+def test_submit_background_propagates_scoped_approval_context() -> None:
+    registry = _make_registry()
+    tool = _DangerousTool()
+    tool.backgroundable = True
+    registry.register(tool)
+    prompt = _interaction_context("thread-a", "turn-prompt")
+
+    job = registry.submit_background(
+        "dangerous_tool",
+        '{"target": "bin-a"}',
+        max_safety_level="dangerous",
+        interaction_context=prompt,
+    )
+    scope = registry.pending_approval_scope(prompt)
+
+    assert job["status"] == "pending_approval"
+    assert scope is not None
+    assert scope.subject == "dangerous_tool"
+    assert scope.approval_id in job["result"]
+
+
+def test_scoped_approval_executes_at_most_once_under_race() -> None:
+    registry = _make_registry()
+    tool = _DangerousTool()
+    registry.register(tool)
+    prompt = _interaction_context("thread-a", "turn-prompt")
+    registry.execute(
+        "dangerous_tool",
+        "{}",
+        max_safety_level="dangerous",
+        interaction_context=prompt,
+    )
+    scope = registry.pending_approval_scope(prompt)
+    assert scope is not None
+    response = replace(prompt, turn_id="turn-response")
+    barrier = threading.Barrier(3)
+    results: list[str] = []
+
+    def approve() -> None:
+        barrier.wait()
+        results.append(
+            registry.approve_pending(
+                interaction_context=response,
+                approval_id=scope.approval_id,
+            )
+        )
+
+    workers = [threading.Thread(target=approve) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join(timeout=1.0)
+
+    assert tool.calls == 1
+    assert sorted(result == "dangerous" for result in results) == [False, True]
 
 
 def test_approve_pending_executes_dangerous_tool() -> None:

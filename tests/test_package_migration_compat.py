@@ -223,6 +223,7 @@ LEGACY_LLM_FACADE_MODULES = {
     "askme.llm.factory",
     "askme.llm.gateway",
     "askme.llm.intent_router",
+    "askme.llm.key_policy",
     "askme.llm.model_policy",
 }
 
@@ -233,6 +234,7 @@ LEGACY_LLM_FACADE_FILES = {
     Path("askme/llm/factory.py"),
     Path("askme/llm/gateway.py"),
     Path("askme/llm/intent_router.py"),
+    Path("askme/llm/key_policy.py"),
     Path("askme/llm/model_policy.py"),
 }
 
@@ -683,9 +685,7 @@ def test_product_package_roots_do_not_regrow_script_piles() -> None:
         if not package_path.is_dir() or package_path.name in ignored_roots:
             continue
         implementation_files = sorted(
-            path.name
-            for path in package_path.glob("*.py")
-            if path.name != "__init__.py"
+            path.name for path in package_path.glob("*.py") if path.name != "__init__.py"
         )
         if len(implementation_files) > 8:
             violations.append(
@@ -1139,9 +1139,7 @@ def test_tool_type_checking_imports_use_canonical_owner_paths() -> None:
             if isinstance(node, ast.ImportFrom) and node.module is not None
         }
         relative_imports = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.level > 0
+            node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.level > 0
         ]
         assert modules <= imported
         assert relative_imports == []
@@ -1321,9 +1319,7 @@ def test_pipeline_owner_subpackage_facades_export_expected_entrypoints() -> None
 
 
 def test_brain_pipeline_core_does_not_import_skill_implementation() -> None:
-    tree = ast.parse(
-        Path("askme/pipeline/core/brain_pipeline.py").read_text(encoding="utf-8-sig")
-    )
+    tree = ast.parse(Path("askme/pipeline/core/brain_pipeline.py").read_text(encoding="utf-8-sig"))
     imports: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module is not None:
@@ -1331,15 +1327,13 @@ def test_brain_pipeline_core_does_not_import_skill_implementation() -> None:
         if isinstance(node, ast.Import):
             imports.update(alias.name for alias in node.names)
 
-    assert not any(
-        module.startswith("askme.pipeline.skills") for module in imports
-    ), "pipeline.core must receive skill gates by protocol injection"
+    assert not any(module.startswith("askme.pipeline.skills") for module in imports), (
+        "pipeline.core must receive skill gates by protocol injection"
+    )
 
 
 def test_default_interface_registration_delegates_provider_backends() -> None:
-    tree = ast.parse(
-        Path("askme/interfaces/register_defaults.py").read_text(encoding="utf-8")
-    )
+    tree = ast.parse(Path("askme/interfaces/register_defaults.py").read_text(encoding="utf-8"))
     imports: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module is not None:
@@ -1352,9 +1346,7 @@ def test_default_interface_registration_delegates_provider_backends() -> None:
     assert "askme.voice.output.tts" not in imports
     assert "askme.providers.register_defaults" in imports
 
-    provider_source = Path("askme/providers/register_defaults.py").read_text(
-        encoding="utf-8"
-    )
+    provider_source = Path("askme/providers/register_defaults.py").read_text(encoding="utf-8")
     assert "askme.voice.asr" not in provider_source
     assert "askme.voice.input.asr" in provider_source
     assert "askme.voice.output.tts" in provider_source
@@ -1376,7 +1368,10 @@ def test_api_mission_routes_live_outside_health_server() -> None:
     product_surface_source = Path("askme/api/product/routes.py").read_text(encoding="utf-8")
     route_source = Path("askme/api/routes/mission.py").read_text(encoding="utf-8")
 
-    assert "from askme.api.composition import ApiRouteDependencies, register_api_routes" in health_source
+    assert (
+        "from askme.api.composition import ApiRouteDependencies, register_api_routes"
+        in health_source
+    )
     assert "register_api_routes(" in health_source
     assert "register_mission_routes(" not in health_source
     assert 'registrar="register_product_routes"' in composition_source
@@ -1534,9 +1529,7 @@ def test_every_route_module_with_fastapi_decorators_is_surface_classified() -> N
 
 def test_agent_profile_route_uses_tool_catalog_boundary() -> None:
     route_source = Path("askme/api/routes/agent_profiles.py").read_text(encoding="utf-8")
-    service_source = Path("askme/api/services/agent_profile_tools.py").read_text(
-        encoding="utf-8"
-    )
+    service_source = Path("askme/api/services/agent_profile_tools.py").read_text(encoding="utf-8")
 
     forbidden_route_imports = (
         "askme.tools.core.builtin_tools",
@@ -1595,7 +1588,9 @@ def test_api_route_composition_invokes_every_route_registrar_once(
         identity_readiness_payload=lambda: {},
         current_operator_payload=lambda _request: {},
         authorization_payload=lambda _request, _body: {},
-        mission_json=lambda payload, status_code=200: JSONResponse(payload, status_code=status_code),
+        mission_json=lambda payload, status_code=200: JSONResponse(
+            payload, status_code=status_code
+        ),
         cors_options_response=lambda methods: Response(
             headers={"Access-Control-Allow-Methods": methods}
         ),
@@ -1697,7 +1692,9 @@ def test_field_route_registration_delegates_to_split_route_modules(
     field_routes.register_field_routes(
         app,
         dispatch_field_operations=dispatch_field_operations,
-        mission_json=lambda payload, status_code=200: JSONResponse(payload, status_code=status_code),
+        mission_json=lambda payload, status_code=200: JSONResponse(
+            payload, status_code=status_code
+        ),
         optional_json_body=optional_json_body,
         cors_options_response=lambda methods: Response(
             headers={"Access-Control-Allow-Methods": methods}
@@ -1794,14 +1791,8 @@ def test_internal_code_uses_canonical_llm_modules() -> None:
             if (
                 isinstance(node, ast.Call)
                 and (
-                    (
-                        isinstance(node.func, ast.Attribute)
-                        and node.func.attr == "import_module"
-                    )
-                    or (
-                        isinstance(node.func, ast.Name)
-                        and node.func.id == "import_module"
-                    )
+                    (isinstance(node.func, ast.Attribute) and node.func.attr == "import_module")
+                    or (isinstance(node.func, ast.Name) and node.func.id == "import_module")
                 )
                 and node.args
                 and isinstance(node.args[0], ast.Constant)
@@ -1909,12 +1900,8 @@ def test_customer_project_public_facades_export_expected_contracts() -> None:
     field_site_runtime_config = importlib.import_module(
         "askme.pipeline.field.field_site_runtime_config"
     )
-    field_site_validation = importlib.import_module(
-        "askme.pipeline.field.field_site_validation"
-    )
-    field_site_catalog = importlib.import_module(
-        "askme.pipeline.field.field_site_catalog"
-    )
+    field_site_validation = importlib.import_module("askme.pipeline.field.field_site_validation")
+    field_site_catalog = importlib.import_module("askme.pipeline.field.field_site_catalog")
 
     assert set(customer_projects.__all__) == CUSTOMER_PROJECT_PUBLIC_NAMES
     assert set(customer_project_acceptance.__all__) == CUSTOMER_PROJECT_ACCEPTANCE_HELPERS
@@ -1922,10 +1909,22 @@ def test_customer_project_public_facades_export_expected_contracts() -> None:
         CUSTOMER_PROJECT_ACCEPTANCE_REGISTRY_HELPERS
     )
     assert set(customer_project_artifacts.__all__) == CUSTOMER_PROJECT_ARTIFACT_PUBLIC_NAMES
-    assert set(customer_project_evidence_inventory.__all__) == CUSTOMER_PROJECT_EVIDENCE_INVENTORY_HELPERS
-    assert set(customer_project_execution_bindings.__all__) == CUSTOMER_PROJECT_EXECUTION_BINDING_HELPERS
-    assert set(customer_project_profile_operations.__all__) == CUSTOMER_PROJECT_PROFILE_OPERATION_HELPERS
-    assert set(customer_project_package_assessment.__all__) == CUSTOMER_PROJECT_PACKAGE_ASSESSMENT_HELPERS
+    assert (
+        set(customer_project_evidence_inventory.__all__)
+        == CUSTOMER_PROJECT_EVIDENCE_INVENTORY_HELPERS
+    )
+    assert (
+        set(customer_project_execution_bindings.__all__)
+        == CUSTOMER_PROJECT_EXECUTION_BINDING_HELPERS
+    )
+    assert (
+        set(customer_project_profile_operations.__all__)
+        == CUSTOMER_PROJECT_PROFILE_OPERATION_HELPERS
+    )
+    assert (
+        set(customer_project_package_assessment.__all__)
+        == CUSTOMER_PROJECT_PACKAGE_ASSESSMENT_HELPERS
+    )
     assert set(customer_project_package_html.__all__) == CUSTOMER_PROJECT_PACKAGE_HTML_HELPERS
     assert set(customer_project_package_rules.__all__) == CUSTOMER_PROJECT_PACKAGE_RULE_HELPERS
     assert set(customer_project_managed_objects.__all__) == CUSTOMER_PROJECT_MANAGED_OBJECT_HELPERS
@@ -2015,17 +2014,20 @@ def test_delivery_resource_registry_kernel_is_physically_split() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
-    assert not {
-        "load_delivery_resource_registry",
-        "list_delivery_resource_registry",
-        "upsert_delivery_resource",
-        "list_delivery_resource_revisions",
-        "disable_delivery_resource",
-        "rollback_delivery_resource_registry",
-        "_delivery_resource_catalog",
-        "_delivery_resource_rows",
-        "_delivery_resource_registry_path",
-    } & function_names
+    assert (
+        not {
+            "load_delivery_resource_registry",
+            "list_delivery_resource_registry",
+            "upsert_delivery_resource",
+            "list_delivery_resource_revisions",
+            "disable_delivery_resource",
+            "rollback_delivery_resource_registry",
+            "_delivery_resource_catalog",
+            "_delivery_resource_rows",
+            "_delivery_resource_registry_path",
+        }
+        & function_names
+    )
 
 
 def test_delivery_resource_governance_kernel_is_physically_split() -> None:
@@ -2037,16 +2039,19 @@ def test_delivery_resource_governance_kernel_is_physically_split() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
-    assert not {
-        "create_delivery_resource_governance_request",
-        "list_delivery_resource_governance_requests",
-        "review_delivery_resource_governance_request",
-        "escalate_overdue_delivery_resource_governance_requests",
-        "_delivery_resource_governance_operation_payload",
-        "_preview_delivery_resource_governance_operation",
-        "_delivery_resource_governance_impact",
-        "_delivery_resource_governance_request_public_payload",
-    } & function_names
+    assert (
+        not {
+            "create_delivery_resource_governance_request",
+            "list_delivery_resource_governance_requests",
+            "review_delivery_resource_governance_request",
+            "escalate_overdue_delivery_resource_governance_requests",
+            "_delivery_resource_governance_operation_payload",
+            "_preview_delivery_resource_governance_operation",
+            "_delivery_resource_governance_impact",
+            "_delivery_resource_governance_request_public_payload",
+        }
+        & function_names
+    )
 
 
 def test_customer_project_resource_catalog_kernel_is_physically_split() -> None:
@@ -2058,10 +2063,13 @@ def test_customer_project_resource_catalog_kernel_is_physically_split() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
-    assert not {
-        "build_customer_project_resource_catalog",
-        "_delivery_resource_consumers_from_profile",
-    } & function_names
+    assert (
+        not {
+            "build_customer_project_resource_catalog",
+            "_delivery_resource_consumers_from_profile",
+        }
+        & function_names
+    )
 
 
 def test_customer_project_template_catalog_kernel_is_physically_split() -> None:
@@ -2073,12 +2081,15 @@ def test_customer_project_template_catalog_kernel_is_physically_split() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
-    assert not {
-        "list_customer_project_templates",
-        "customer_project_template_summary_from_items",
-        "_customer_project_template_filters",
-        "_customer_project_template_matches_filters",
-    } & function_names
+    assert (
+        not {
+            "list_customer_project_templates",
+            "customer_project_template_summary_from_items",
+            "_customer_project_template_filters",
+            "_customer_project_template_matches_filters",
+        }
+        & function_names
+    )
 
 
 def test_customer_project_template_catalog_stays_read_only() -> None:
@@ -2100,23 +2111,29 @@ def test_customer_project_template_catalog_stays_read_only() -> None:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
 
-    assert not {
-        "create_customer_project_from_template",
-        "create_customer_project_template_release_request",
-        "customer_project_template_release_notes",
-        "export_customer_project_template_release_notes_bundle",
-        "review_customer_project_template_release_request",
-        "update_customer_project_template_release",
-    } & function_names
-    assert not {
-        "mkdir",
-        "rename",
-        "replace",
-        "rmdir",
-        "unlink",
-        "write_bytes",
-        "write_text",
-    } & called_attributes
+    assert (
+        not {
+            "create_customer_project_from_template",
+            "create_customer_project_template_release_request",
+            "customer_project_template_release_notes",
+            "export_customer_project_template_release_notes_bundle",
+            "review_customer_project_template_release_request",
+            "update_customer_project_template_release",
+        }
+        & function_names
+    )
+    assert (
+        not {
+            "mkdir",
+            "rename",
+            "replace",
+            "rmdir",
+            "unlink",
+            "write_bytes",
+            "write_text",
+        }
+        & called_attributes
+    )
     assert not {"open", "shutil"} & called_names
 
 
@@ -2165,11 +2182,14 @@ def test_customer_project_template_support_kernel_is_leaf_and_physically_split()
 
     assert not TEMPLATE_SUPPORT_HELPERS & monolith_functions
     assert TEMPLATE_SUPPORT_HELPERS <= support_functions
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_project_template_release",
-        "askme.pipeline.field.customer_project_templates",
-    } & support_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_project_template_release",
+            "askme.pipeline.field.customer_project_templates",
+        }
+        & support_imports
+    )
 
 
 def test_customer_project_template_delivery_kernel_is_leaf_and_physically_split() -> None:
@@ -2200,13 +2220,16 @@ def test_customer_project_template_delivery_kernel_is_leaf_and_physically_split(
 
     assert not TEMPLATE_DELIVERY_HELPERS & monolith_functions
     assert TEMPLATE_DELIVERY_HELPERS <= delivery_functions
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_project_template_release",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_artifacts",
-    } & delivery_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_project_template_release",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_artifacts",
+        }
+        & delivery_imports
+    )
 
 
 def test_solution_delivery_readiness_kernel_is_leaf_and_physically_split() -> None:
@@ -2240,13 +2263,16 @@ def test_solution_delivery_readiness_kernel_is_leaf_and_physically_split() -> No
     }
     assert not migrated_names & monolith_functions
     assert migrated_names <= readiness_functions
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_template_catalog",
-        "askme.pipeline.field.customer_project_resource_catalog",
-        "askme.pipeline.field.delivery_resource_governance",
-    } & readiness_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_template_catalog",
+            "askme.pipeline.field.customer_project_resource_catalog",
+            "askme.pipeline.field.delivery_resource_governance",
+        }
+        & readiness_imports
+    )
 
 
 def test_customer_project_implementation_handoff_kernel_is_leaf_and_physically_split() -> None:
@@ -2277,12 +2303,15 @@ def test_customer_project_implementation_handoff_kernel_is_leaf_and_physically_s
 
     assert not CUSTOMER_PROJECT_IMPLEMENTATION_HANDOFF_HELPERS & monolith_functions
     assert CUSTOMER_PROJECT_IMPLEMENTATION_HANDOFF_HELPERS <= handoff_functions
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-    } & handoff_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+        }
+        & handoff_imports
+    )
 
 
 def test_customer_project_artifact_manifest_kernel_is_leaf_and_physically_split() -> None:
@@ -2313,13 +2342,16 @@ def test_customer_project_artifact_manifest_kernel_is_leaf_and_physically_split(
 
     assert not CUSTOMER_PROJECT_ARTIFACT_MANIFEST_HELPERS & monolith_functions
     assert CUSTOMER_PROJECT_ARTIFACT_MANIFEST_HELPERS <= manifest_functions
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & manifest_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & manifest_imports
+    )
 
 
 def test_customer_project_artifact_kernel_is_leaf_and_physically_split() -> None:
@@ -2350,15 +2382,18 @@ def test_customer_project_artifact_kernel_is_leaf_and_physically_split() -> None
 
     assert not CUSTOMER_PROJECT_ARTIFACT_KERNEL_HELPERS & monolith_functions
     assert CUSTOMER_PROJECT_ARTIFACT_KERNEL_HELPERS <= artifact_functions
-    assert set(importlib.import_module("askme.pipeline.field.customer_project_artifacts").__all__) == (
-        CUSTOMER_PROJECT_ARTIFACT_PUBLIC_NAMES
+    assert set(
+        importlib.import_module("askme.pipeline.field.customer_project_artifacts").__all__
+    ) == (CUSTOMER_PROJECT_ARTIFACT_PUBLIC_NAMES)
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+        }
+        & artifact_imports
     )
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-    } & artifact_imports
 
 
 def test_customer_project_evidence_inventory_kernel_is_leaf_and_physically_split() -> None:
@@ -2389,13 +2424,16 @@ def test_customer_project_evidence_inventory_kernel_is_leaf_and_physically_split
 
     assert not CUSTOMER_PROJECT_EVIDENCE_INVENTORY_HELPERS & monolith_functions
     assert CUSTOMER_PROJECT_EVIDENCE_INVENTORY_HELPERS <= inventory_functions
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & inventory_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & inventory_imports
+    )
 
 
 def test_customer_project_package_assessment_kernel_is_leaf_and_physically_split() -> None:
@@ -2430,13 +2468,16 @@ def test_customer_project_package_assessment_kernel_is_leaf_and_physically_split
     }
     assert not CUSTOMER_PROJECT_PACKAGE_ASSESSMENT_HELPERS & monolith_functions
     assert assessment_function_helpers <= assessment_functions
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & assessment_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & assessment_imports
+    )
 
 
 def test_customer_project_package_html_kernel_is_leaf_and_physically_split() -> None:
@@ -2467,13 +2508,16 @@ def test_customer_project_package_html_kernel_is_leaf_and_physically_split() -> 
 
     assert not CUSTOMER_PROJECT_PACKAGE_HTML_HELPERS & monolith_functions
     assert CUSTOMER_PROJECT_PACKAGE_HTML_HELPERS <= html_functions
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & html_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & html_imports
+    )
 
 
 def test_customer_project_package_rules_kernel_is_leaf_and_physically_split() -> None:
@@ -2504,13 +2548,16 @@ def test_customer_project_package_rules_kernel_is_leaf_and_physically_split() ->
 
     assert not CUSTOMER_PROJECT_PACKAGE_RULE_HELPERS & monolith_functions
     assert CUSTOMER_PROJECT_PACKAGE_RULE_HELPERS <= rules_functions
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & rules_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & rules_imports
+    )
 
 
 def test_customer_project_scope_kernel_is_leaf_and_physically_split() -> None:
@@ -2541,13 +2588,16 @@ def test_customer_project_scope_kernel_is_leaf_and_physically_split() -> None:
 
     assert not CUSTOMER_PROJECT_SCOPE_HELPERS & monolith_functions
     assert CUSTOMER_PROJECT_SCOPE_HELPERS <= scope_functions
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & scope_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & scope_imports
+    )
 
 
 def test_customer_project_profile_store_kernel_is_leaf_and_physically_split() -> None:
@@ -2578,13 +2628,16 @@ def test_customer_project_profile_store_kernel_is_leaf_and_physically_split() ->
 
     assert not CUSTOMER_PROJECT_PROFILE_STORE_HELPERS & monolith_functions
     assert CUSTOMER_PROJECT_PROFILE_STORE_HELPERS <= profiles_functions
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & profiles_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & profiles_imports
+    )
 
 
 def test_customer_project_managed_objects_kernel_is_leaf_and_physically_split() -> None:
@@ -2613,21 +2666,24 @@ def test_customer_project_managed_objects_kernel_is_leaf_and_physically_split() 
         for alias in node.names
     }
 
-    managed_object_function_helpers = (
-        CUSTOMER_PROJECT_MANAGED_OBJECT_HELPERS - {"_ACCEPTANCE_TEST_ALIASES"}
-    )
+    managed_object_function_helpers = CUSTOMER_PROJECT_MANAGED_OBJECT_HELPERS - {
+        "_ACCEPTANCE_TEST_ALIASES"
+    }
     assert not managed_object_function_helpers & monolith_functions
     assert managed_object_function_helpers <= managed_object_functions
-    assert set(importlib.import_module("askme.pipeline.field.customer_project_managed_objects").__all__) == (
-        CUSTOMER_PROJECT_MANAGED_OBJECT_HELPERS
+    assert set(
+        importlib.import_module("askme.pipeline.field.customer_project_managed_objects").__all__
+    ) == (CUSTOMER_PROJECT_MANAGED_OBJECT_HELPERS)
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & managed_object_imports
     )
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & managed_object_imports
 
 
 def test_customer_project_execution_bindings_kernel_is_leaf_and_physically_split() -> None:
@@ -2663,21 +2719,24 @@ def test_customer_project_execution_bindings_kernel_is_leaf_and_physically_split
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
 
-    execution_function_helpers = (
-        CUSTOMER_PROJECT_EXECUTION_BINDING_HELPERS - {"_SCENARIO_REQUIRED_INPUTS"}
-    )
+    execution_function_helpers = CUSTOMER_PROJECT_EXECUTION_BINDING_HELPERS - {
+        "_SCENARIO_REQUIRED_INPUTS"
+    }
     assert not execution_function_helpers & monolith_functions
     assert execution_function_helpers <= execution_functions
-    assert set(importlib.import_module("askme.pipeline.field.customer_project_execution_bindings").__all__) == (
-        CUSTOMER_PROJECT_EXECUTION_BINDING_HELPERS
+    assert set(
+        importlib.import_module("askme.pipeline.field.customer_project_execution_bindings").__all__
+    ) == (CUSTOMER_PROJECT_EXECUTION_BINDING_HELPERS)
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & execution_imports
     )
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & execution_imports
     assert (
         "askme.pipeline.field.customer_project_execution_bindings",
         ("build_customer_project_execution_bindings",),
@@ -2719,16 +2778,19 @@ def test_customer_project_acceptance_registry_kernel_is_leaf_and_physically_spli
 
     assert not CUSTOMER_PROJECT_ACCEPTANCE_REGISTRY_HELPERS & monolith_functions
     assert CUSTOMER_PROJECT_ACCEPTANCE_REGISTRY_HELPERS <= registry_functions
-    assert set(importlib.import_module("askme.pipeline.field.customer_project_acceptance_registry").__all__) == (
-        CUSTOMER_PROJECT_ACCEPTANCE_REGISTRY_HELPERS
+    assert set(
+        importlib.import_module("askme.pipeline.field.customer_project_acceptance_registry").__all__
+    ) == (CUSTOMER_PROJECT_ACCEPTANCE_REGISTRY_HELPERS)
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & registry_imports
     )
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & registry_imports
     assert (
         "askme.pipeline.field.customer_project_acceptance_registry",
         ("build_customer_project_acceptance_registry",),
@@ -2763,16 +2825,19 @@ def test_field_site_runtime_config_kernel_is_leaf_and_physically_split() -> None
 
     assert not FIELD_SITE_RUNTIME_CONFIG_HELPERS & monolith_functions
     assert FIELD_SITE_RUNTIME_CONFIG_HELPERS <= runtime_config_functions
-    assert set(importlib.import_module("askme.pipeline.field.field_site_runtime_config").__all__) == (
-        FIELD_SITE_RUNTIME_CONFIG_HELPERS
+    assert set(
+        importlib.import_module("askme.pipeline.field.field_site_runtime_config").__all__
+    ) == (FIELD_SITE_RUNTIME_CONFIG_HELPERS)
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & runtime_config_imports
     )
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & runtime_config_imports
 
 
 def test_field_site_validation_kernel_is_leaf_and_physically_split() -> None:
@@ -2828,13 +2893,16 @@ def test_field_site_validation_kernel_is_leaf_and_physically_split() -> None:
     assert "askme.pipeline.field.field_site_validation" in release_imports
     assert "askme.pipeline.field.field_site_profile" not in catalog_imports
     assert "askme.pipeline.field.field_site_profile" not in release_imports
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & validation_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & validation_imports
+    )
 
 
 def test_field_site_catalog_kernel_is_leaf_and_physically_split() -> None:
@@ -2883,13 +2951,16 @@ def test_field_site_catalog_kernel_is_leaf_and_physically_split() -> None:
             "build_site_profile_report",
         ),
     ) in customer_project_imports
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & catalog_imports
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & catalog_imports
+    )
 
 
 def test_customer_project_acceptance_kernel_is_leaf_and_physically_split() -> None:
@@ -2943,16 +3014,19 @@ def test_customer_project_acceptance_kernel_is_leaf_and_physically_split() -> No
     acceptance_function_helpers = CUSTOMER_PROJECT_ACCEPTANCE_HELPERS - acceptance_constant_names
     assert not acceptance_function_helpers & monolith_functions
     assert acceptance_function_helpers <= acceptance_functions
-    assert set(importlib.import_module("askme.pipeline.field.customer_project_acceptance").__all__) == (
-        CUSTOMER_PROJECT_ACCEPTANCE_HELPERS
+    assert set(
+        importlib.import_module("askme.pipeline.field.customer_project_acceptance").__all__
+    ) == (CUSTOMER_PROJECT_ACCEPTANCE_HELPERS)
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+            "askme.pipeline.field.customer_project_template_release",
+        }
+        & acceptance_imports
     )
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-        "askme.pipeline.field.customer_project_template_release",
-    } & acceptance_imports
     assert (
         "askme.pipeline.field.customer_project_acceptance",
         (
@@ -3018,16 +3092,19 @@ def test_customer_project_profile_operations_kernel_is_leaf_and_physically_split
 
     assert not CUSTOMER_PROJECT_PROFILE_OPERATION_HELPERS & monolith_functions
     assert CUSTOMER_PROJECT_PROFILE_OPERATION_HELPERS <= operation_functions
-    assert set(importlib.import_module("askme.pipeline.field.customer_project_profile_operations").__all__) == (
-        CUSTOMER_PROJECT_PROFILE_OPERATION_HELPERS
+    assert set(
+        importlib.import_module("askme.pipeline.field.customer_project_profile_operations").__all__
+    ) == (CUSTOMER_PROJECT_PROFILE_OPERATION_HELPERS)
+    assert (
+        not {
+            "askme.pipeline.field.field_site_profile",
+            "askme.pipeline.field_site_profile",
+            "askme.pipeline.field.customer_projects",
+            "askme.pipeline.field.customer_project_templates",
+            "askme.pipeline.field.customer_project_artifacts",
+        }
+        & operation_imports
     )
-    assert not {
-        "askme.pipeline.field.field_site_profile",
-        "askme.pipeline.field_site_profile",
-        "askme.pipeline.field.customer_projects",
-        "askme.pipeline.field.customer_project_templates",
-        "askme.pipeline.field.customer_project_artifacts",
-    } & operation_imports
     assert (
         "askme.pipeline.field.customer_project_profile_operations",
         (
@@ -3232,7 +3309,9 @@ def test_moved_packages_resolve_repo_root_paths() -> None:
     for name in TEMPLATE_SUPPORT_HELPERS:
         assert getattr(field_site_profile, name) is getattr(customer_project_template_support, name)
     for name in TEMPLATE_DELIVERY_HELPERS:
-        assert getattr(field_site_profile, name) is getattr(customer_project_template_delivery, name)
+        assert getattr(field_site_profile, name) is getattr(
+            customer_project_template_delivery, name
+        )
     for name in SOLUTION_DELIVERY_READINESS_HELPERS:
         assert getattr(field_site_profile, name) is getattr(solution_delivery_readiness, name)
     for name in CUSTOMER_PROJECT_IMPLEMENTATION_HANDOFF_HELPERS:
@@ -3270,13 +3349,19 @@ def test_moved_packages_resolve_repo_root_paths() -> None:
     for name in CUSTOMER_PROJECT_MANAGED_OBJECT_HELPERS:
         assert getattr(field_site_profile, name) is getattr(customer_project_managed_objects, name)
     for name in CUSTOMER_PROJECT_ACCEPTANCE_REGISTRY_HELPERS:
-        assert getattr(field_site_profile, name) is getattr(customer_project_acceptance_registry, name)
+        assert getattr(field_site_profile, name) is getattr(
+            customer_project_acceptance_registry, name
+        )
     for name in CUSTOMER_PROJECT_ACCEPTANCE_HELPERS:
         assert getattr(field_site_profile, name) is getattr(customer_project_acceptance, name)
     for name in CUSTOMER_PROJECT_EXECUTION_BINDING_HELPERS:
-        assert getattr(field_site_profile, name) is getattr(customer_project_execution_bindings, name)
+        assert getattr(field_site_profile, name) is getattr(
+            customer_project_execution_bindings, name
+        )
     for name in CUSTOMER_PROJECT_PROFILE_OPERATION_HELPERS:
-        assert getattr(field_site_profile, name) is getattr(customer_project_profile_operations, name)
+        assert getattr(field_site_profile, name) is getattr(
+            customer_project_profile_operations, name
+        )
     for name in FIELD_SITE_RUNTIME_CONFIG_HELPERS:
         assert getattr(field_site_profile, name) is getattr(field_site_runtime_config, name)
     for name in FIELD_SITE_VALIDATION_HELPERS:
@@ -3298,7 +3383,9 @@ def test_moved_packages_resolve_repo_root_paths() -> None:
         "verify_customer_project_acceptance_dossier",
         "verify_customer_project_proposal_bundle",
     ):
-        assert getattr(customer_project_artifacts, name) is getattr(customer_project_acceptance, name)
+        assert getattr(customer_project_artifacts, name) is getattr(
+            customer_project_acceptance, name
+        )
     for name in CUSTOMER_PROJECT_ARTIFACT_KERNEL_HELPERS:
         assert getattr(field_site_profile, name) is getattr(customer_project_artifacts, name)
     assert customer_projects.build_customer_project_execution_bindings is (
@@ -3318,7 +3405,9 @@ def test_moved_packages_resolve_repo_root_paths() -> None:
         "delete_managed_object",
         "rollback_customer_project_profile",
     ):
-        assert getattr(customer_projects, name) is getattr(customer_project_profile_operations, name)
+        assert getattr(customer_projects, name) is getattr(
+            customer_project_profile_operations, name
+        )
     assert customer_project_templates.create_customer_project_from_template is (
         customer_project_profile_operations.create_customer_project_from_template
     )

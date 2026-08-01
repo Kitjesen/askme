@@ -26,6 +26,7 @@ def _build_voice():
         TextModule,
         ToolsModule,
         VoiceModule,
+        WarmSessionModule,
     )
 
     return compose_runtime(
@@ -41,9 +42,11 @@ def _build_voice():
             ExecutorModule,
             VoiceModule,
             TextModule,
+            WarmSessionModule,
             HealthModule,
         )
     )
+
 
 __all__ = ["voice"]
 

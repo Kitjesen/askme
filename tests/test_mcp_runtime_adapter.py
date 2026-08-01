@@ -23,7 +23,7 @@ def test_app_context_adapter_maps_runtime_app_stable_fields() -> None:
     from askme.mcp.runtime_adapter import app_context_from_runtime_app
 
     runtime = _runtime_app(
-        llm=SimpleNamespace(client="llm-client"),
+        llm=SimpleNamespace(client="raw-client", llm_client="llm-client"),
         memory=SimpleNamespace(
             conversation="conversation",
             session_memory="session-memory",
@@ -64,6 +64,16 @@ def test_app_context_adapter_maps_runtime_app_stable_fields() -> None:
     assert ctx.scene_intelligence == "scene-intelligence"
 
 
+def test_app_context_adapter_ignores_raw_llm_client() -> None:
+    from askme.mcp.runtime_adapter import app_context_from_runtime_app
+
+    runtime = _runtime_app(llm=SimpleNamespace(client="raw-client"))
+
+    ctx = app_context_from_runtime_app(runtime)
+
+    assert ctx.llm_client is None
+
+
 def test_mcp_runtime_tool_surface_registers_skill_execution_tools() -> None:
     from askme.mcp.context import register_runtime_tool_surface
     from askme.tools.core.tool_registry import ToolRegistry
@@ -100,7 +110,14 @@ def test_mcp_runtime_tool_surface_registers_skill_execution_tools() -> None:
         vision_bridge=vision_bridge,
     )
 
-    for tool_name in ("nav_dispatch", "nav_status", "robot_api", "move_robot", "scan_around", "temporal_query"):
+    for tool_name in (
+        "nav_dispatch",
+        "nav_status",
+        "robot_api",
+        "move_robot",
+        "scan_around",
+        "temporal_query",
+    ):
         assert registry.get(tool_name) is not None
     assert registry.get("move_robot")._navigation_client is navigation
     assert registry.get("scan_around")._robot_control_client is robot_control

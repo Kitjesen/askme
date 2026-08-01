@@ -41,7 +41,7 @@ class VoiceGatewayService:
 
     @property
     def session_manager(self) -> ConversationSessionManager:
-        """Conversation session lifecycle owner for voice/text turns."""
+        """Process-local context projection/cache, not a turn lifecycle owner."""
         return self._session_manager
 
     def status_snapshot(self) -> dict[str, Any]:
@@ -64,6 +64,9 @@ class VoiceGatewayService:
         conversation_id: str | None = None,
         chat_session_id: str | None = None,
         session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: Any | None = None,
+        person_id: str | None = None,
         operator_id: str | None = None,
         robot_id: str | None = None,
         site_id: str | None = None,
@@ -83,6 +86,9 @@ class VoiceGatewayService:
                 chat_session_id=chat_session_id,
                 session_id=session_id,
             ),
+            voice_turn_id=voice_turn_id,
+            turn_cancel_token=turn_cancel_token,
+            person_id=person_id,
             operator_id=operator_id,
             robot_id=robot_id,
             site_id=site_id,
@@ -101,6 +107,9 @@ class VoiceGatewayService:
         conversation_id: str | None = None,
         chat_session_id: str | None = None,
         session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: Any | None = None,
+        person_id: str | None = None,
         operator_id: str | None = None,
         robot_id: str | None = None,
         site_id: str | None = None,
@@ -120,6 +129,9 @@ class VoiceGatewayService:
                 chat_session_id=chat_session_id,
                 session_id=session_id,
             ),
+            voice_turn_id=voice_turn_id,
+            turn_cancel_token=turn_cancel_token,
+            person_id=person_id,
             operator_id=operator_id,
             robot_id=robot_id,
             site_id=site_id,
@@ -138,7 +150,7 @@ class VoiceGatewayService:
         recent_turn_limit: int = 6,
         max_chars: int | None = None,
     ) -> dict[str, Any]:
-        """Return a compact conversation context for prompt/runtime assembly."""
+        """Return compact projected context for prompt/runtime assembly."""
 
         payload = self._session_manager.context_payload(
             session_id,
@@ -164,7 +176,7 @@ class VoiceGatewayService:
         tool_calls: list[dict[str, Any]] | None = None,
         handoff_id: str | None = None,
     ) -> bool:
-        """Record a local fallback turn into the gateway conversation session."""
+        """Project an explicitly settled local turn into the gateway context cache."""
 
         clean_session_id = _clean_optional(session_id)
         if clean_session_id is None:
@@ -187,11 +199,7 @@ class VoiceGatewayService:
                 intent=_clean_optional(intent),
                 gate_decision=_clean_optional(gate_decision),
                 skill_name=_clean_optional(skill_name),
-                tool_calls=[
-                    dict(item)
-                    for item in (tool_calls or [])
-                    if isinstance(item, dict)
-                ],
+                tool_calls=[dict(item) for item in (tool_calls or []) if isinstance(item, dict)],
                 handoff_id=_clean_optional(handoff_id),
                 metadata=turn_metadata,
             )
@@ -206,6 +214,9 @@ class VoiceGatewayService:
         text: str,
         *,
         conversation_session_id: str | None,
+        voice_turn_id: str | None,
+        turn_cancel_token: Any | None,
+        person_id: str | None,
         operator_id: str | None,
         robot_id: str | None,
         site_id: str | None,
@@ -234,6 +245,9 @@ class VoiceGatewayService:
                 max_chars=3000,
             ),
             "channel": channel,
+            "voice_turn_id": _clean_optional(voice_turn_id),
+            "turn_cancel_token": turn_cancel_token,
+            "person_id": _clean_optional(person_id),
             "operator_id": operator_id,
             "robot_id": robot_id,
             "site_id": site_id,
@@ -244,19 +258,8 @@ class VoiceGatewayService:
             text,
             bridge_context,
         )
-        recording_deferred = False
+        recording_deferred = bool(defer_recording)
         if isinstance(result, dict) and result.get("handled"):
-            turn = result.get("turn")
-            spoken_reply = (
-                turn.get("spoken_reply")
-                if isinstance(turn, dict)
-                else result.get("reply")
-            )
-            recording_deferred = bool(
-                defer_recording
-                and isinstance(spoken_reply, str)
-                and spoken_reply.strip()
-            )
             if not recording_deferred:
                 self._record_handled_turn(
                     session.session_id,
@@ -288,12 +291,15 @@ class VoiceGatewayService:
         turn = result.get("turn")
         if not isinstance(turn, dict):
             turn = {}
-        assistant_text = _clean_optional(
-            turn.get("spoken_reply")
-            or turn.get("assistant_text")
-            or result.get("assistant_text")
-            or result.get("reply")
-        ) or ""
+        assistant_text = (
+            _clean_optional(
+                turn.get("spoken_reply")
+                or turn.get("assistant_text")
+                or result.get("assistant_text")
+                or result.get("reply")
+            )
+            or ""
+        )
         active_planning_session_id = _clean_optional(
             turn.get("planning_session_id") or result.get("planning_session_id")
         )
@@ -316,13 +322,9 @@ class VoiceGatewayService:
         intent = _clean_optional(
             turn.get("intent") or turn.get("action_type") or result.get("intent")
         )
-        gate_decision = _clean_optional(
-            turn.get("gate_decision") or result.get("gate_decision")
-        )
+        gate_decision = _clean_optional(turn.get("gate_decision") or result.get("gate_decision"))
         skill_name = _clean_optional(turn.get("skill_name") or result.get("skill_name"))
-        handoff_id = _clean_optional(
-            turn.get("handoff_id") or result.get("handoff_id")
-        )
+        handoff_id = _clean_optional(turn.get("handoff_id") or result.get("handoff_id"))
         self._session_manager.append_turn(
             session_id,
             user_text=user_text,
@@ -349,9 +351,7 @@ def _call_with_supported_kwargs(
             return method(text, **cleaned)
         except TypeError:
             return method(text)
-    accepts_kwargs = any(
-        param.kind == Parameter.VAR_KEYWORD for param in params.values()
-    )
+    accepts_kwargs = any(param.kind == Parameter.VAR_KEYWORD for param in params.values())
     accepted = (
         cleaned
         if accepts_kwargs

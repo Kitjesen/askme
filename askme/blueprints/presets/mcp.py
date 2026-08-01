@@ -16,18 +16,19 @@ def _build_mcp():
     from askme.runtime.modules import (
         CognitionModule,
         ControlModule,
-    ExecutorModule,
-    HealthModule,
-    LLMModule,
-    MemoryModule,
-    MissionModule,
-    PipelineModule,
-    PulseModule,
-    RuntimeHandoffModule,
-    SafetyModule,
-    SkillModule,
-    ToolsModule,
+        ExecutorModule,
+        HealthModule,
+        LLMModule,
+        MemoryModule,
+        MissionModule,
+        PipelineModule,
+        PulseModule,
+        RuntimeHandoffModule,
+        SafetyModule,
+        SkillModule,
+        ToolsModule,
         VoiceModule,
+        WarmSessionModule,
     )
 
     return compose_runtime(
@@ -45,9 +46,11 @@ def _build_mcp():
             ExecutorModule,
             VoiceModule,
             ControlModule,
+            WarmSessionModule,
             HealthModule,
         )
     )
+
 
 __all__ = ["mcp"]
 

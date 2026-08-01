@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from askme.llm.core.contracts import LLMCallContext
 
@@ -85,6 +85,34 @@ class StreamProcessorProtocol(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class SkillExecutionDisposition:
+    """Canonical Turn settlement decision returned by an injected skill gate."""
+
+    status: Literal["succeeded", "failed", "cancelled"]
+    code: str
+
+    def __post_init__(self) -> None:
+        if self.status not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError(f"invalid skill execution disposition status: {self.status}")
+        if not str(self.code or "").strip():
+            raise ValueError("skill execution disposition code must not be empty")
+
+
+@runtime_checkable
+class SkillResultClassifierProtocol(Protocol):
+    """Optional extension for gates that classify their legacy string result."""
+
+    def classify_execution_result(
+        self,
+        result: str,
+        *,
+        skill_name: str = "",
+    ) -> SkillExecutionDisposition:
+        """Classify the legacy result for canonical Turn settlement."""
+        ...
+
+
 @runtime_checkable
 class SkillGateProtocol(Protocol):
     """Contract for the skill execution + safety gate component."""
@@ -100,6 +128,9 @@ class SkillGateProtocol(Protocol):
         user_text: str,
         extra_context: str = "",
         source: str = "voice",
+        conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
     ) -> str:
         """Execute a named skill and speak the result."""
         ...

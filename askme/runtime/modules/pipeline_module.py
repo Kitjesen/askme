@@ -18,6 +18,7 @@ from typing import Any
 
 # LLMClient imported lazily to avoid circular imports at module scan time
 from askme.conversation import VoiceTurnLedger
+from askme.conversation.paths import resolve_turn_ledger_path
 from askme.llm.core.client import LLMClient
 from askme.memory.core.conversation_consumer import ConversationMemoryConsumer
 from askme.pipeline.core.brain_pipeline import BrainPipeline
@@ -36,16 +37,9 @@ def _project_root() -> Path:
 
 
 def _turn_ledger_path(cfg: dict[str, Any]) -> Path:
-    """Resolve the durable Conversation Core event log outside the package."""
+    """Resolve the centralized Conversation Core event-log path."""
 
-    conversation_cfg = cfg.get("conversation", {})
-    configured = (
-        os.getenv("ASKME_TURN_LEDGER_PATH")
-        or conversation_cfg.get("turn_ledger_path")
-        or "data/conversation/turn_ledger.jsonl"
-    )
-    path = Path(str(configured)).expanduser()
-    return path if path.is_absolute() else _project_root() / path
+    return resolve_turn_ledger_path(cfg, project_root=_project_root())
 
 
 def _legacy_conversation_history_path(cfg: dict[str, Any]) -> Path:
@@ -112,7 +106,7 @@ class PipelineModule(Module):
         control_mod: Any = self.control_in
 
         # Unpack wired module attributes into typed locals.
-        llm = _from(llm_mod, "client")
+        llm = _from(llm_mod, "llm_client")
         conversation = _from(mem_mod, "conversation")
         memory_bridge = _from(mem_mod, "memory_bridge")
         session_memory = _from(mem_mod, "session_memory")

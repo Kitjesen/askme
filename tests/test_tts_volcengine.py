@@ -68,7 +68,9 @@ class FakeVolcClient:
         audio_bytes = 0
         for item in self.script:
             if not should_continue():
-                return VolcengineTTSSynthesisResult("session", audio_chunks, audio_bytes, "cancelled")
+                return VolcengineTTSSynthesisResult(
+                    "session", audio_chunks, audio_bytes, "cancelled"
+                )
             if isinstance(item, BaseException):
                 raise item
             on_audio(item)
@@ -96,7 +98,9 @@ class FakeVolcFactory:
         return client
 
 
-def _install_factory(monkeypatch: pytest.MonkeyPatch, engine: TTSEngine, factory: FakeVolcFactory) -> None:
+def _install_factory(
+    monkeypatch: pytest.MonkeyPatch, engine: TTSEngine, factory: FakeVolcFactory
+) -> None:
     monkeypatch.setattr(engine, "_new_volcengine_client", factory.new)
 
 
@@ -108,7 +112,9 @@ def _buffered_samples(engine: TTSEngine) -> np.ndarray:
     return np.concatenate(chunks)
 
 
-def test_backend_alias_dispatches_to_volcengine_and_queues_pcm(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backend_alias_dispatches_to_volcengine_and_queues_pcm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     engine = TTSEngine(_base_config())
     client = FakeVolcClient(script=[_pcm(120)])
     _install_factory(monkeypatch, engine, FakeVolcFactory(client))
@@ -127,9 +133,7 @@ def test_backend_alias_dispatches_to_volcengine_and_queues_pcm(monkeypatch: pyte
 
 
 def test_volcengine_resamples_provider_pcm(monkeypatch: pytest.MonkeyPatch) -> None:
-    engine = TTSEngine(
-        _base_config(sample_rate=16000, volcengine_tts_sample_rate=32000)
-    )
+    engine = TTSEngine(_base_config(sample_rate=16000, volcengine_tts_sample_rate=32000))
     client = FakeVolcClient(script=[_pcm(3200)])
     _install_factory(monkeypatch, engine, FakeVolcFactory(client))
     try:
@@ -141,7 +145,9 @@ def test_volcengine_resamples_provider_pcm(monkeypatch: pytest.MonkeyPatch) -> N
         engine.shutdown()
 
 
-def test_missing_volcengine_config_falls_back_without_client(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_volcengine_config_falls_back_without_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     engine = TTSEngine(_base_config(volcengine_tts_api_key="", volcengine_tts_app_id=""))
     fallback_calls: list[str] = []
     monkeypatch.setattr(
@@ -195,7 +201,9 @@ def test_volcengine_failure_before_audio_uses_fallback(monkeypatch: pytest.Monke
         engine.shutdown()
 
 
-def test_volcengine_failure_after_partial_audio_never_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_volcengine_failure_after_partial_audio_never_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     engine = TTSEngine(_base_config())
     client = FakeVolcClient(
         script=[_pcm(80), VolcengineTTSClientError("provider failed after audio")]
@@ -217,7 +225,9 @@ def test_volcengine_failure_after_partial_audio_never_fallbacks(monkeypatch: pyt
         engine.shutdown()
 
 
-def test_volcengine_drain_interrupts_and_closes_live_client(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_volcengine_drain_interrupts_and_closes_live_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     engine = TTSEngine(_base_config())
     client = FakeVolcClient(script=[_pcm(64)])
     _install_factory(monkeypatch, engine, FakeVolcFactory(client))
@@ -310,11 +320,7 @@ def test_voice_profile_switch_uses_explicit_volcengine_speaker_mapping(
 ) -> None:
     monkeypatch.setattr(TTSEngine, "start_playback", lambda self: None)
     engine = TTSEngine(
-        _base_config(
-            voice_profiles={
-                "visitor_friendly": {"volcengine_voice_id": "speaker-b"}
-            }
-        )
+        _base_config(voice_profiles={"visitor_friendly": {"volcengine_voice_id": "speaker-b"}})
     )
     try:
         result = engine.set_voice_profile_payload({"profile_id": "visitor_friendly"})
@@ -337,9 +343,7 @@ def test_persisted_voice_profile_restores_explicit_volcengine_speaker(tmp_path) 
         _base_config(
             voice_profile="patrol_default",
             voice_profile_state_path=str(state_path),
-            voice_profiles={
-                "visitor_friendly": {"volcengine_voice_id": "speaker-persisted"}
-            },
+            voice_profiles={"visitor_friendly": {"volcengine_voice_id": "speaker-persisted"}},
         )
     )
     try:
@@ -347,9 +351,7 @@ def test_persisted_voice_profile_restores_explicit_volcengine_speaker(tmp_path) 
 
         assert snapshot["minimax"]["active_profile"] == "visitor_friendly"
         assert snapshot["volcengine"]["speaker"] == "speaker-persisted"
-        assert snapshot["minimax"]["active_profile_settings"]["voice_id"] == (
-            "speaker-persisted"
-        )
+        assert snapshot["minimax"]["active_profile_settings"]["voice_id"] == ("speaker-persisted")
     finally:
         engine.shutdown()
 
@@ -372,22 +374,31 @@ def test_volcengine_prewarm_disabled_skips_without_client(monkeypatch: pytest.Mo
 def test_volcengine_prewarm_opens_and_reuses_client(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = TTSEngine(_base_config(volcengine_tts_live_session_prewarm_enabled=True))
     client = FakeVolcClient()
-    _install_factory(monkeypatch, engine, FakeVolcFactory(client))
+    replacement = FakeVolcClient(name="replacement")
+    _install_factory(monkeypatch, engine, FakeVolcFactory(client, replacement))
     try:
         opened = engine.prewarm_provider_session()
         reused = engine.prewarm_provider_session()
+        refreshed = engine.prewarm_provider_session(force_refresh=True)
 
         assert opened["ok"] is True
         assert opened["status"] == "opened"
         assert reused["ok"] is True
         assert reused["status"] == "reused"
+        assert refreshed["ok"] is True
+        assert refreshed["status"] == "refreshed"
         assert client.prewarm_calls == 1
+        assert replacement.prewarm_calls == 1
+        assert client.closed is True
+        assert replacement.closed is False
         assert not engine._has_buffered_audio()
     finally:
         engine.shutdown()
 
 
-def test_slow_volcengine_prewarm_never_blocks_real_synthesis(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_slow_volcengine_prewarm_never_blocks_real_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     started = threading.Event()
     release = threading.Event()
     candidate = FakeVolcClient(
@@ -443,3 +454,45 @@ def test_shutdown_interrupts_volcengine_prewarm_candidate(monkeypatch: pytest.Mo
         assert candidate.closed is True
     finally:
         release.set()
+
+
+def test_force_refresh_keeps_live_volcengine_client_when_real_use_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+    live = FakeVolcClient(script=[_pcm(64)], name="live")
+    candidate = FakeVolcClient(
+        prewarm_started=refresh_started,
+        release_prewarm=release_refresh,
+        name="candidate",
+    )
+    engine = TTSEngine(_base_config(volcengine_tts_live_session_prewarm_enabled=True))
+    _install_factory(monkeypatch, engine, FakeVolcFactory(live, candidate))
+    refresh_result: dict[str, Any] = {}
+    try:
+        assert engine.prewarm_provider_session()["status"] == "opened"
+
+        thread = threading.Thread(
+            target=lambda: refresh_result.update(
+                engine.prewarm_provider_session(force_refresh=True)
+            )
+        )
+        thread.start()
+        assert refresh_started.wait(timeout=1.0)
+
+        generated = engine._generate_audio("real speech", engine._get_generation())
+        assert generated == "volcengine"
+        assert live.synthesize_calls == ["real speech"]
+
+        release_refresh.set()
+        thread.join(timeout=2.0)
+
+        assert not thread.is_alive()
+        assert refresh_result["status"] == "superseded_by_live_session"
+        assert engine._volcengine_client is live
+        assert live.closed is False
+        assert candidate.closed is True
+    finally:
+        release_refresh.set()
+        engine.shutdown()

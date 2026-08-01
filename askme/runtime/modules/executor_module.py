@@ -38,7 +38,7 @@ class ExecutorModule(Module):
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         llm_mod = self.llm_in
-        llm = getattr(llm_mod, "client", None) if llm_mod else None
+        llm = getattr(llm_mod, "llm_client", None) if llm_mod else None
 
         tools_mod = self.tool_registry_in
         tools = getattr(tools_mod, "registry", None) if tools_mod else None

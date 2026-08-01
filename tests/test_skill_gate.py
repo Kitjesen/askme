@@ -9,6 +9,7 @@ from askme.pipeline.skill_gate import SkillGate
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def _make_skill_def(
     name: str = "patrol",
     execution: str = "skill_executor",
@@ -65,6 +66,7 @@ def _make_gate(
 
 # ── TestCancelToken ───────────────────────────────────────────────────────────
 
+
 class TestCancelToken:
     async def test_cancel_token_set_returns_empty(self):
         token = asyncio.Event()
@@ -89,6 +91,7 @@ class TestCancelToken:
 
 # ── TestSkillNotFound ─────────────────────────────────────────────────────────
 
+
 class TestSkillNotFound:
     async def test_returns_error_message_for_missing_skill(self):
         gate = _make_gate(skill=None)
@@ -103,6 +106,7 @@ class TestSkillNotFound:
 
 # ── TestEstop ─────────────────────────────────────────────────────────────────
 
+
 class TestEstop:
     async def test_estop_active_blocks_skill(self):
         skill = _make_skill_def("navigate")
@@ -112,6 +116,16 @@ class TestEstop:
         gate = _make_gate(skill=skill, dog_safety=dog_safety)
         result = await gate.execute_skill("navigate", "go")
         assert "急停" in result or "安全锁定" in result
+
+    def test_estop_result_classifies_as_failed_settlement(self):
+        gate = _make_gate()
+
+        disposition = gate.classify_execution_result(
+            "[安全锁定] 急停已激活",
+            skill_name="navigate",
+        )
+
+        assert (disposition.status, disposition.code) == ("failed", "estop_active")
 
     async def test_estop_inactive_allows_skill(self):
         skill = _make_skill_def("navigate")
@@ -142,6 +156,7 @@ class TestEstop:
 
 
 # ── TestSkillExecution ────────────────────────────────────────────────────────
+
 
 class TestSkillExecution:
     async def test_disabled_skill_is_blocked_before_executor(self):
@@ -180,10 +195,7 @@ class TestSkillExecution:
 
     async def test_think_blocks_stripped_from_result(self):
         skill = _make_skill_def("patrol")
-        gate = _make_gate(
-            skill=skill,
-            executor_result="<think>reasoning</think>Final answer."
-        )
+        gate = _make_gate(skill=skill, executor_result="<think>reasoning</think>Final answer.")
         result = await gate.execute_skill("patrol", "go", source="text")
         assert "<think>" not in result
         assert "Final answer." in result
@@ -215,6 +227,7 @@ class TestSkillExecution:
 
 # ── TestAgentShellRouting ─────────────────────────────────────────────────────
 
+
 class TestAgentShellRouting:
     async def test_agent_shell_skill_routed_to_shell(self):
         skill = _make_skill_def("agent_task", execution="agent_shell")
@@ -225,13 +238,14 @@ class TestAgentShellRouting:
         assert result == "Agent done."
         agent_shell.run_task.assert_called_once()
 
-    async def test_agent_shell_result_in_conversation(self):
+    async def test_agent_shell_result_not_projected_to_legacy_conversation(self):
         skill = _make_skill_def("agent_task", execution="agent_shell")
         agent_shell = MagicMock()
         agent_shell.run_task = AsyncMock(return_value="Agent result.")
         gate = _make_gate(skill=skill, agent_shell=agent_shell)
         await gate.execute_skill("agent_task", "do task", source="text")
-        gate._conversation.add_user_message.assert_called_once_with("do task")
+        gate._conversation.add_user_message.assert_not_called()
+        gate._conversation.add_assistant_message.assert_not_called()
 
     async def test_agent_shell_exception_returns_error(self):
         skill = _make_skill_def("agent_task", execution="agent_shell")
@@ -240,6 +254,16 @@ class TestAgentShellRouting:
         gate = _make_gate(skill=skill, agent_shell=agent_shell)
         result = await gate.execute_skill("agent_task", "do task", source="text")
         assert "[AgentShell Error]" in result
+
+    async def test_agent_task_executor_result_not_projected_to_legacy_conversation(self):
+        skill = _make_skill_def("agent_task", execution="skill_executor")
+        gate = _make_gate(skill=skill, executor_result="Fallback result.")
+
+        result = await gate.execute_skill("agent_task", "do task", source="text")
+
+        assert result == "Fallback result."
+        gate._conversation.add_user_message.assert_not_called()
+        gate._conversation.add_assistant_message.assert_not_called()
 
     async def test_agent_shell_none_falls_through_to_executor(self):
         skill = _make_skill_def("agent_task", execution="agent_shell")
@@ -250,6 +274,7 @@ class TestAgentShellRouting:
 
 
 # ── TestPrepareAgentResult ────────────────────────────────────────────────────
+
 
 class TestPrepareAgentResult:
     def test_short_result_returned_unchanged(self):
@@ -288,6 +313,7 @@ class TestPrepareAgentResult:
 
 # ── TestExtractSemanticTarget ─────────────────────────────────────────────────
 
+
 class TestExtractSemanticTarget:
     def setup_method(self):
         self.gate = _make_gate()
@@ -324,9 +350,11 @@ class TestExtractSemanticTarget:
 
 # ── TestPostToolHook ──────────────────────────────────────────────────────────
 
+
 class TestPostToolHook:
     async def test_post_tool_hook_can_transform_result(self):
         from askme.pipeline.hooks import PipelineHooks
+
         hooks = PipelineHooks()
 
         async def transform(record):
@@ -346,6 +374,7 @@ class TestPostToolHook:
 
 
 # ── TestLateBindingSetters ────────────────────────────────────────────────────
+
 
 class TestLateBindingSetters:
     def test_set_audio(self):
@@ -374,6 +403,7 @@ class TestLateBindingSetters:
 
 
 # ── TestEpisodicLogging ───────────────────────────────────────────────────────
+
 
 class TestEpisodicLogging:
     async def test_episodic_logs_action_and_outcome(self):

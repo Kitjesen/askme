@@ -1,0 +1,8 @@
+# Linux edge hardware contract.
+# Apply after docker-compose.yml on product hosts that expose ALSA devices.
+services:
+  askme:
+    devices:
+      - "${ASKME_AUDIO_DEVICE:-/dev/snd}:/dev/snd"
+    group_add:
+      - "${ASKME_AUDIO_GID:?set ASKME_AUDIO_GID to the host audio group GID}"

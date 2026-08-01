@@ -7,6 +7,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from askme.pipeline.field_operations import FieldOperationsService, sign_field_device_payload
@@ -65,12 +66,12 @@ class _FakeDispatcher:
 
 
 class _FakeLLM:
-    async def chat(self, messages):
+    async def chat(self, messages, **kwargs):
         return "你好，我可以带你去北门停车场，请跟在我侧后方。"
 
 
 class _UnsafeLLM:
-    async def chat(self, messages):
+    async def chat(self, messages, **kwargs):
         return "危险！请立即撤离并报警处理。"
 
 
@@ -81,9 +82,7 @@ class _FakeIncidentMemory:
         self.saved = False
 
     def record_anomaly(self, location, description, coords=None):
-        self.anomalies.append(
-            {"location": location, "description": description, "coords": coords}
-        )
+        self.anomalies.append({"location": location, "description": description, "coords": coords})
 
     def record_observation(self, location, description, coords=None):
         self.observations.append(
@@ -120,6 +119,20 @@ def _service(tmp_path: Path, **config) -> FieldOperationsService:
         alert_dispatcher_factory=_FakeDispatcher,
         llm_client=config.get("llm_client"),
     )
+
+
+def test_from_env_does_not_construct_llm_client(monkeypatch):
+    from askme.llm.core import client as llm_client_module
+
+    constructor = MagicMock(side_effect=AssertionError("field operations must not own LLM"))
+    monkeypatch.setenv("ASKME_FIELD_LLM_NARRATIVE", "1")
+    monkeypatch.setattr(llm_client_module, "LLMClient", constructor)
+
+    service = FieldOperationsService.from_env()
+
+    constructor.assert_not_called()
+    assert service._llm is None
+    assert service._llm_narrative_enabled is True
 
 
 def _runtime_world() -> WorldStateService:
@@ -689,9 +702,9 @@ async def test_field_event_action_audit_integrity_failure_cannot_be_config_bypas
         {"operator_id": "security-1", "note": "seen"},
     )
     assert acknowledged["acknowledged"] is True
-    assert [item["action"] for item in service.detail_payload(event_id)["event"]["action_audit"]] == [
-        "acknowledge"
-    ]
+    assert [
+        item["action"] for item in service.detail_payload(event_id)["event"]["action_audit"]
+    ] == ["acknowledge"]
 
     original_lines = audit_path.read_text(encoding="utf-8").splitlines()
     dispatcher_call_count = len(_FakeDispatcher.calls)
@@ -1019,7 +1032,9 @@ async def test_notification_smoke_test_rejects_unknown_group(tmp_path: Path):
     assert _FakeDispatcher.calls == []
 
 
-def test_notification_preflight_blocks_placeholder_config_without_env(tmp_path: Path, monkeypatch) -> None:
+def test_notification_preflight_blocks_placeholder_config_without_env(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.delenv("ASKME_DINGTALK_SECURITY_WEBHOOK", raising=False)
     monkeypatch.delenv("ASKME_DINGTALK_SECURITY_SECRET", raising=False)
     service = FieldOperationsService(
@@ -1040,7 +1055,9 @@ def test_notification_preflight_blocks_placeholder_config_without_env(tmp_path: 
 
 
 def test_notification_preflight_resolves_env_placeholders(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("ASKME_DINGTALK_SECURITY_WEBHOOK", "https://oapi.dingtalk.com/robot/send?access_token=x")
+    monkeypatch.setenv(
+        "ASKME_DINGTALK_SECURITY_WEBHOOK", "https://oapi.dingtalk.com/robot/send?access_token=x"
+    )
     monkeypatch.setenv("ASKME_DINGTALK_SECURITY_SECRET", "SEC-test")
     service = FieldOperationsService(
         config={
@@ -1090,7 +1107,9 @@ async def test_camera_vehicle_ingest_uses_map_zone_for_illegal_parking(tmp_path:
     assert result["event"]["location"] == "B区主通道"
 
 
-def _vehicle_object(*, project_ids: list[str] | None = None, site_ids: list[str] | None = None) -> dict:
+def _vehicle_object(
+    *, project_ids: list[str] | None = None, site_ids: list[str] | None = None
+) -> dict:
     return {
         "display_name": "Vehicle parking objects",
         "category": "traffic",
@@ -1104,7 +1123,9 @@ def _vehicle_object(*, project_ids: list[str] | None = None, site_ids: list[str]
             "vision_models": ["vehicle-detection"],
             "sensor_protocols": ["camera-detection-json"],
             "skill_packages": ["capability.detect_illegal_parking"],
-            "acceptance_tests": ["tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking"],
+            "acceptance_tests": [
+                "tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking"
+            ],
         },
     }
 
@@ -1214,7 +1235,11 @@ async def test_ingest_does_not_bind_managed_object_when_project_scope_mismatches
     )
     decision = event_view["admission_decision"]
     assert "unbound_managed_object" in decision["technical_reasons"]
-    assert {"label": "resource_binding", "value": "no_managed_object_matched", "status": "manual_check"} in decision["evidence_facts"]
+    assert {
+        "label": "resource_binding",
+        "value": "no_managed_object_matched",
+        "status": "manual_check",
+    } in decision["evidence_facts"]
     assert decision["next_step"] == (
         "当前事件可继续处置；交付验收前需要将设备、视觉模型、传感器协议和验收用例绑定到客户现场对象。"
     )
@@ -1458,7 +1483,9 @@ async def test_device_onboarding_payload_reports_object_binding_and_next_actions
                     "vision_models": ["smoke-camera-review"],
                     "sensor_protocols": ["mqtt-smoke-temperature"],
                     "skill_packages": ["capability.fire_or_smoke"],
-                    "acceptance_tests": ["tests/scenario_tests/test_field_operations_evaluation.py::fire_or_smoke"],
+                    "acceptance_tests": [
+                        "tests/scenario_tests/test_field_operations_evaluation.py::fire_or_smoke"
+                    ],
                 },
             }
         },
@@ -1510,7 +1537,9 @@ async def test_readiness_payload_includes_device_onboarding_gates(tmp_path: Path
                     "vision_models": ["smoke-camera-review"],
                     "sensor_protocols": ["mqtt-smoke-temperature"],
                     "skill_packages": ["capability.fire_or_smoke"],
-                    "acceptance_tests": ["tests/scenario_tests/test_field_operations_evaluation.py::fire_or_smoke"],
+                    "acceptance_tests": [
+                        "tests/scenario_tests/test_field_operations_evaluation.py::fire_or_smoke"
+                    ],
                 },
             }
         },
@@ -1568,7 +1597,10 @@ async def test_trusted_device_ingest_rejects_missing_signature(tmp_path: Path):
     assert result["reason"] == "device_not_trusted"
     assert result["normalized"]["device_trust"]["reason"] == "missing_device_signature"
     assert result["ingest_scope_contract"]["device"]["trusted"] is False
-    assert result["ingest_scope_contract"]["managed_object"]["binding_status"] == "blocked_device_trust"
+    assert (
+        result["ingest_scope_contract"]["managed_object"]["binding_status"]
+        == "blocked_device_trust"
+    )
     assert result["ingest_scope_contract"]["production_gate"]["status"] == "blocked"
 
 
@@ -1925,7 +1957,9 @@ def test_field_events_route_applies_tenant_namespace_scope(tmp_path: Path, monke
                 }
             )
         )
-    client = TestClient(create_health_app(lambda: _health_snapshot(), field_operations_handler=service))
+    client = TestClient(
+        create_health_app(lambda: _health_snapshot(), field_operations_handler=service)
+    )
 
     response = client.get("/api/field/events", headers={"X-Askme-Operator-Id": "tenant-reader"})
 
@@ -2055,22 +2089,22 @@ def test_field_operations_http_endpoints(tmp_path: Path):
     assert acceptance_payload["summary"]["scenario_count"] >= 9
     assert acceptance_payload["summary"]["production_ready"] is False
     assert acceptance_payload["policy"]["does_not_dispatch_hardware"] is True
-    acceptance_by_id = {
-        item["scenario_id"]: item for item in acceptance_payload["rows"]
-    }
+    acceptance_by_id = {item["scenario_id"]: item for item in acceptance_payload["rows"]}
     assert acceptance_by_id["wayfinding_help_point"]["natural_language_routes"]
     assert acceptance_by_id["wayfinding_help_point"]["notification_group"] == "none"
     assert acceptance_by_id["wayfinding_help_point"]["archive_required"] is False
     assert acceptance_by_id["visitor_escort"]["requires_operator_approval"] is False
     assert acceptance_by_id["urgent_patrol_dispatch"]["requires_operator_approval"] is True
-    assert acceptance_by_id["urgent_patrol_dispatch"]["natural_language_routes"][0][
-        "skill_name"
-    ] == "patrol_scan"
+    assert (
+        acceptance_by_id["urgent_patrol_dispatch"]["natural_language_routes"][0]["skill_name"]
+        == "patrol_scan"
+    )
     assert acceptance_by_id["fire_or_smoke"]["device_entrypoints"]
     assert "smoke/temperature sensor" in acceptance_by_id["fire_or_smoke"]["onsite_dependencies"]
-    assert "scripts/eval/check_dashboard_visual.py::field_scenario_matrix" in acceptance_by_id[
-        "illegal_parking"
-    ]["verification_artifacts"]
+    assert (
+        "scripts/eval/check_dashboard_visual.py::field_scenario_matrix"
+        in acceptance_by_id["illegal_parking"]["verification_artifacts"]
+    )
     help_payload = client.get("/api/field/ingest")
     assert help_payload.status_code == 200
     assert "field-ingest-bridge" in help_payload.json()["bridge_contract"]["dry_run"]
@@ -2153,7 +2187,9 @@ def test_field_operations_http_endpoints(tmp_path: Path):
     assert events.status_code == 200
     assert events.json()["total"] == 2
     assert events.json()["summary"]["needs_attention"] >= 1
-    security_events = client.get("/api/field/events?notification_group=security", headers=read_headers)
+    security_events = client.get(
+        "/api/field/events?notification_group=security", headers=read_headers
+    )
     assert security_events.status_code == 200
     assert security_events.json()["filter"]["notification_group"] == "security"
     assert security_events.json()["filtered_total"] >= 1
@@ -2307,9 +2343,7 @@ def test_field_operation_routes_expose_and_validate_product_response_schemas(tmp
         ("/api/field/audit/integrity", "get"): "FieldActionAuditIntegrityResponse",
     }
     for (path, method), schema_name in expected_refs.items():
-        schema = paths[path][method]["responses"]["200"]["content"]["application/json"][
-            "schema"
-        ]
+        schema = paths[path][method]["responses"]["200"]["content"]["application/json"]["schema"]
         assert schema["$ref"].endswith(f"/{schema_name}")
 
     FieldScenarioCatalogResponse.model_validate(client.get("/api/field/scenarios").json())
@@ -2322,9 +2356,7 @@ def test_field_operation_routes_expose_and_validate_product_response_schemas(tmp
         client.get("/api/field/notification-preflight?status_as_200=true").json()
     )
     FieldDeviceStatusResponse.model_validate(client.get("/api/field/devices").json())
-    FieldDeviceOnboardingResponse.model_validate(
-        client.get("/api/field/device-onboarding").json()
-    )
+    FieldDeviceOnboardingResponse.model_validate(client.get("/api/field/device-onboarding").json())
 
     trigger = client.post(
         "/api/field/events",
@@ -2449,7 +2481,9 @@ def test_field_evidence_endpoint_respects_event_project_scope(tmp_path: Path, mo
                 }
             )
         )
-    client = TestClient(create_health_app(lambda: _health_snapshot(), field_operations_handler=service))
+    client = TestClient(
+        create_health_app(lambda: _health_snapshot(), field_operations_handler=service)
+    )
 
     try:
         allowed = client.get(

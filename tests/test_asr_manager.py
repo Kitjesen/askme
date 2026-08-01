@@ -10,6 +10,7 @@ from askme.voice.asr_manager import (
     _SINGLE_CHAR_COMMANDS,
     ASRManager,
     ASRPartial,
+    ASRResult,
 )
 
 # ---------------------------------------------------------------------------
@@ -161,6 +162,20 @@ class TestCloudLocalFallback:
         assert result is not None
         assert result.source == "cloud"
         assert "\u4e91\u7aef\u7ed3\u679c" in result.text
+
+    def test_cloud_confidence_is_preserved_in_result(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+        mocks["cloud"].finish_session.return_value = "\u4e91\u7aef\u7ed3\u679c"
+        mocks["cloud"].status_snapshot.return_value = {
+            "confidence": 0.73,
+        }
+
+        mgr.start_session()
+        result = mgr.finish_and_get_result()
+
+        assert isinstance(result, ASRResult)
+        assert result.confidence == 0.73
 
     def test_local_fallback_when_cloud_empty(self):
         mgr = _make_manager(cloud_available=True)

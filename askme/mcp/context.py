@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 class AppContext:
     """Shared application state accessible by all MCP tools and resources."""
 
+    process_session_id: str = field(default_factory=lambda: f"mcp-{uuid.uuid4().hex}")
     config: dict[str, Any] = field(default_factory=dict)
     runtime_app: Any = None
     arm_controller: ArmControlPort | None = None
@@ -51,7 +53,10 @@ class AppContext:
     skill_executor: Any = None
     tool_registry: Any = None
     llm_client: Any = None
+    llm_module: Any = None
     conversation: Any = None
+    turn_ledger: Any = None
+    interaction_turn_manager: Any = None
     memory_bridge: Any = None
     session_memory: Any = None
     episodic_memory: Any = None
@@ -112,7 +117,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     for warning in validate_config(ctx.config):
         logger.warning("Config: %s", warning)
 
-    from askme.llm.core.client import LLMClient
+    from askme.conversation import InteractionTurnManager, VoiceTurnLedger
+    from askme.conversation.paths import resolve_turn_ledger_path
     from askme.memory.core.conversation import ConversationManager
     from askme.memory.core.episodic_memory import EpisodicMemory
     from askme.memory.core.session import SessionMemory
@@ -124,13 +130,21 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         build_scene_intelligence,
         build_temporal_memory,
     )
+    from askme.runtime.core.module import ModuleRegistry
+    from askme.runtime.modules.llm_module import LLMModule
     from askme.skills.core.skill_executor import SkillExecutor
     from askme.skills.core.skill_manager import SkillManager
     from askme.tools.core.tool_registry import ToolRegistry
 
-    ctx.llm_client = LLMClient()
+    ctx.llm_module = LLMModule()
+    llm_registry = ModuleRegistry()
+    llm_registry.register(ctx.llm_module)
+    ctx.llm_module.build(ctx.config, llm_registry)
+    ctx.llm_client = ctx.llm_module.llm_client
     ctx.session_memory = SessionMemory(llm=ctx.llm_client)
     ctx.conversation = ConversationManager(session_memory=ctx.session_memory)
+    ctx.turn_ledger = VoiceTurnLedger(resolve_turn_ledger_path(ctx.config))
+    ctx.interaction_turn_manager = InteractionTurnManager(ctx.turn_ledger)
     ctx.memory_bridge = MemoryBridge()
     ctx.episodic_memory = EpisodicMemory(llm=ctx.llm_client)
     perception_stack = build_perception(ctx.config)
@@ -213,4 +227,6 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             ctx.arm_controller.close()
         if ctx.tts_engine:
             ctx.tts_engine.shutdown()
+        if ctx.llm_module:
+            await ctx.llm_module.stop()
         logger.info("Shutdown complete.")

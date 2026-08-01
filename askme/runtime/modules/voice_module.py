@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import logging
 import threading
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from askme.agent_shell import AgentShell
 from askme.llm.core.client import LLMClient
@@ -38,6 +39,33 @@ from askme.voice.output.phrase_prime import (
 logger = logging.getLogger(__name__)
 
 _BACKGROUND_TASK_STOP_TIMEOUT_SECONDS = 1.0
+
+
+class _LLMControlModule(Protocol):
+    """Control-plane contract required for runtime LLM switching."""
+
+    client: LLMClient
+    llm_client: Any
+
+    def replace_config(self, brain_cfg: dict[str, Any]) -> LLMClient: ...
+
+    def prepare_client(self, brain_cfg: dict[str, Any]) -> LLMClient: ...
+
+    async def validate_client(
+        self,
+        client: LLMClient,
+        *,
+        timeout_s: float = 10.0,
+        model: str | None = None,
+        purpose: str = "assistant_response",
+    ) -> None: ...
+
+    def commit_client(
+        self,
+        next_client: LLMClient,
+        *,
+        warmup_model: str | None = None,
+    ) -> None: ...
 
 
 class VoiceModule(Module):
@@ -71,10 +99,12 @@ class VoiceModule(Module):
         self._state_store = VoiceControlStateStore(cfg)
         self._control_state = self._state_store.load()
         self._component_switch_lock = asyncio.Lock()
+        self._runtime_switch_state_lock = threading.RLock()
         effective_cfg = self._effective_startup_config(cfg)
 
         llm_mod = self.llm_in
         self._voice_cfg = dict(effective_cfg.get("voice", {}) or {})
+        self._ensure_runtime_switch_state()
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else OTABridgeMetrics()
 
         tools_mod = self.tool_registry_in
@@ -85,7 +115,10 @@ class VoiceModule(Module):
         dispatcher = getattr(skill_mod, "skill_dispatcher", None) if skill_mod else None
 
         pipeline_mod = self.pipeline_in
-        pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
+        pipeline_candidate = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
+        if pipeline_candidate is None:
+            raise RuntimeError("VoiceModule requires an available brain pipeline")
+        pipeline = cast(BrainPipeline, pipeline_candidate)
 
         executor_mod = self.executor_in
         agent_shell = getattr(executor_mod, "shell", None) if executor_mod else None
@@ -103,6 +136,9 @@ class VoiceModule(Module):
         self._voice_runtime_bridge = voice_stack.voice_runtime_bridge
         self._voice_gateway = voice_stack.voice_gateway
         self._router = voice_stack.router
+        runtime_switch_setter = getattr(self._audio, "set_runtime_switch_callback", None)
+        if callable(runtime_switch_setter):
+            runtime_switch_setter(self._handle_runtime_switch_outcome)
 
         # Register voice tools
         if tools is not None:
@@ -119,6 +155,12 @@ class VoiceModule(Module):
         if dispatcher is not None:
             dispatcher.set_audio(self._audio)
 
+        interaction_gate_cfg = self._voice_cfg.get("interaction_gate", {})
+        if not isinstance(interaction_gate_cfg, dict):
+            raise ValueError("voice.interaction_gate must be a mapping")
+        anonymous_encounter_idle_seconds = interaction_gate_cfg.get(
+            "anonymous_encounter_idle_seconds", 25.0
+        )
         self._interaction_service = RobotInteractionService(self._router)
 
         # VoiceLoop
@@ -129,6 +171,7 @@ class VoiceModule(Module):
             voice_runtime_bridge=self._voice_gateway,
             dispatcher=dispatcher,
             audio_router=self._audio_router,
+            anonymous_encounter_idle_seconds=anonymous_encounter_idle_seconds,
         )
 
         # Runtime voice stack owns gate construction; VoiceModule injects into VoiceLoop.
@@ -144,7 +187,6 @@ class VoiceModule(Module):
         self._task: asyncio.Task[None] | None = None
         self._phrase_prime_task: asyncio.Task[None] | None = None
         self._phrase_prime_stop = threading.Event()
-        self._tts_provider_prewarm_task: asyncio.Task[None] | None = None
         self._apply_persisted_llm_and_prompt()
         logger.info("VoiceModule: built")
 
@@ -164,9 +206,12 @@ class VoiceModule(Module):
         if isinstance(llm_state, dict) and llm_state:
             try:
                 brain_cfg = self._resolve_llm_config(llm_state)
-                llm_mod = self._registry.get("llm")
-                client = llm_mod.replace_config(brain_cfg)
-                self._publish_llm(client, brain_cfg)
+                llm_mod = self._require_llm_control_module(
+                    required_methods=("replace_config",),
+                    required_attributes=("llm_client",),
+                )
+                llm_mod.replace_config(brain_cfg)
+                self._publish_llm(llm_mod.llm_client, brain_cfg)
             except Exception as exc:
                 logger.warning("VoiceModule: persisted LLM selection ignored: %s", exc)
         prompt_state = self._control_state.get("prompt", {})
@@ -181,7 +226,6 @@ class VoiceModule(Module):
         self._audio.start_input()  # mic stays open across listen/speak cycles
         self._task = asyncio.create_task(self._voice_loop.run(), name="voice-loop")
         self._start_phrase_prime_task()
-        self._start_tts_provider_prewarm_task()
         logger.info("VoiceModule: voice loop started (mic persistent)")
 
     async def stop(self) -> None:
@@ -195,17 +239,8 @@ class VoiceModule(Module):
         phrase_prime_stop = getattr(self, "_phrase_prime_stop", None)
         if phrase_prime_stop is not None:
             phrase_prime_stop.set()
-        live_tts = self._resolve_live_tts_provider()
-        cancel_provider_prewarm = getattr(live_tts, "cancel_provider_prewarm", None)
-        if callable(cancel_provider_prewarm):
-            cancel_provider_prewarm()
         phrase_prime_task = getattr(self, "_phrase_prime_task", None)
         await self._harvest_background_task(phrase_prime_task, "phrase cache prime")
-        tts_provider_prewarm_task = getattr(self, "_tts_provider_prewarm_task", None)
-        await self._harvest_background_task(
-            tts_provider_prewarm_task,
-            "TTS provider prewarm",
-        )
         self._audio.stop_input()
         self._audio.shutdown()
         logger.info("VoiceModule: stopped")
@@ -235,37 +270,6 @@ class VoiceModule(Module):
                 pass
         except asyncio.CancelledError:
             pass
-
-    def _start_tts_provider_prewarm_task(self) -> None:
-        current_task = getattr(self, "_tts_provider_prewarm_task", None)
-        if current_task is not None and not current_task.done():
-            return
-        tts = self._resolve_live_tts_provider()
-        prewarm = getattr(tts, "prewarm_provider_session", None)
-        if not callable(prewarm):
-            return
-        self._tts_provider_prewarm_task = asyncio.create_task(
-            self._prewarm_tts_provider_background(prewarm),
-            name="voice-tts-provider-prewarm",
-        )
-
-    def _resolve_live_tts_provider(self) -> Any | None:
-        audio = getattr(self, "_audio", None)
-        tts = getattr(audio, "__dict__", {}).get("tts") if audio is not None else None
-        if tts is not None:
-            return tts
-        return getattr(self, "_tts_provider", None)
-
-    async def _prewarm_tts_provider_background(self, prewarm: Any) -> None:
-        try:
-            result = await asyncio.to_thread(prewarm)
-        except Exception as exc:
-            logger.warning("VoiceModule: TTS provider prewarm failed: %s", exc)
-            return
-        if isinstance(result, dict) and result.get("ok"):
-            logger.info("VoiceModule: TTS provider prewarm %s", result)
-        else:
-            logger.debug("VoiceModule: TTS provider prewarm skipped: %s", result)
 
     def _start_phrase_prime_task(self) -> None:
         current_task = getattr(self, "_phrase_prime_task", None)
@@ -365,6 +369,9 @@ class VoiceModule(Module):
     @property
     def audio_router(self) -> AudioRouterPort:
         """The audio router instance."""
+
+        if self._audio_router is None:
+            raise RuntimeError("VoiceModule audio router is not available")
         return self._audio_router
 
     @property
@@ -376,6 +383,13 @@ class VoiceModule(Module):
     def tts_provider(self) -> Any:
         """The TTS provider behind the audio frontend."""
         return getattr(self._audio, "tts", self._tts_provider)
+
+    def set_tts_activation_callback(self, callback: Any | None) -> None:
+        """Connect the runtime warm-session owner to TTS activation events."""
+
+        setter = getattr(self._audio, "set_tts_activation_callback", None)
+        if callable(setter):
+            setter(callback)
 
     def voice_profiles_payload(self) -> dict[str, Any]:
         return self.tts_provider.voice_profiles_payload()
@@ -466,6 +480,7 @@ class VoiceModule(Module):
                 "llm": llm_status,
                 "asr": audio_status.get("asr", {}),
                 "tts": audio_status.get("tts", {}),
+                "switches": self._runtime_switches_snapshot(),
                 "kws": {
                     "enabled": audio_status.get("wake_word_enabled", False),
                     "keyword": "小算",
@@ -543,7 +558,9 @@ class VoiceModule(Module):
                 result = await self._switch_tts(payload)
             else:
                 raise ValueError("component must be one of: llm, asr, tts")
-            if result.get("updated"):
+            if result.get("updated") and (
+                component not in {"asr", "tts"} or result.get("state") == "active"
+            ):
                 self._persist_control_state()
             return result
 
@@ -568,39 +585,74 @@ class VoiceModule(Module):
 
     async def _switch_llm(self, payload: dict[str, Any]) -> dict[str, Any]:
         brain_cfg = self._resolve_llm_config(payload)
-        llm_mod = self._registry.get("llm")
-        if llm_mod is None:
-            raise RuntimeError("LLM module is not available")
+        required_methods = ["prepare_client", "commit_client"]
+        if bool(payload.get("validate", True)):
+            required_methods.append("validate_client")
+        llm_mod = self._require_llm_control_module(
+            required_methods=tuple(required_methods),
+            required_attributes=("client", "llm_client"),
+        )
 
         previous_client = llm_mod.client
         previous_payload = dict(self._control_state.get("llm", {}) or {})
         previous_brain_cfg = self._resolve_llm_config(previous_payload)
+        previous_warmup_model = str(
+            previous_brain_cfg.get("health_model")
+            or previous_brain_cfg.get("voice_model")
+            or previous_client.model
+        ).strip()
         candidate = llm_mod.prepare_client(brain_cfg)
-        if bool(payload.get("validate", True)):
-            await llm_mod.validate_client(
-                candidate,
-                timeout_s=min(15.0, float(brain_cfg.get("timeout", 10.0))),
-            )
-
-        llm_mod.commit_client(candidate)
+        candidate_warmup_model = str(
+            brain_cfg.get("health_model") or brain_cfg.get("voice_model") or candidate.model
+        ).strip()
         try:
-            self._publish_llm(candidate, brain_cfg)
+            if candidate.provider_name == "litellm" and candidate_warmup_model != "health-probe":
+                raise ValueError("LiteLLM switch requires health_model='health-probe'")
+            if bool(payload.get("validate", True)):
+                validation_timeout = min(15.0, float(brain_cfg.get("timeout", 10.0)))
+                await llm_mod.validate_client(
+                    candidate,
+                    timeout_s=validation_timeout,
+                )
+                if candidate.provider_name == "litellm":
+                    await llm_mod.validate_client(
+                        candidate,
+                        timeout_s=validation_timeout,
+                        model=candidate_warmup_model,
+                        purpose="health_probe",
+                    )
+        except Exception:
+            await self._retire_llm_client(candidate, label="failed validation")
+            raise
+
+        llm_mod.commit_client(
+            candidate,
+            warmup_model=candidate_warmup_model,
+        )
+        try:
+            self._publish_llm(llm_mod.llm_client, brain_cfg)
         except Exception:
             logger.exception("LLM consumer publication failed; rolling back provider switch")
             try:
-                llm_mod.commit_client(previous_client)
+                llm_mod.commit_client(
+                    previous_client,
+                    warmup_model=previous_warmup_model,
+                )
             except Exception:
                 logger.exception("LLM module rollback failed")
             try:
-                self._publish_llm(previous_client, previous_brain_cfg)
+                self._publish_llm(llm_mod.llm_client, previous_brain_cfg)
             except Exception:
                 logger.exception("LLM consumer rollback failed")
+            await self._defer_llm_client_retirement(llm_mod, candidate, label="failed candidate")
             raise
 
+        await self._defer_llm_client_retirement(llm_mod, previous_client, label="previous provider")
         self._control_state["llm"] = {
             "provider": candidate.provider_name,
             "model": candidate.model,
             "voice_model": str(brain_cfg.get("voice_model") or candidate.model),
+            "health_model": candidate_warmup_model,
             "fallback_models": list(brain_cfg.get("fallback_models", [])),
         }
         return {
@@ -610,28 +662,131 @@ class VoiceModule(Module):
             "runtime": candidate.provider_status(),
         }
 
+    def _require_llm_control_module(
+        self,
+        *,
+        required_methods: tuple[str, ...],
+        required_attributes: tuple[str, ...] = (),
+    ) -> _LLMControlModule:
+        module = self._registry.get("llm")
+        if module is None:
+            raise RuntimeError("LLM module is not available")
+
+        missing_methods: list[str] = []
+        for name in required_methods:
+            try:
+                method = getattr(module, name)
+            except Exception:
+                method = None
+            if not callable(method):
+                missing_methods.append(name)
+
+        missing_attributes: list[str] = []
+        for name in required_attributes:
+            try:
+                value = getattr(module, name)
+            except Exception:
+                value = None
+            if value is None:
+                missing_attributes.append(name)
+
+        if missing_methods or missing_attributes:
+            missing = ", ".join((*missing_methods, *missing_attributes))
+            raise RuntimeError(f"LLM module control contract is unavailable: {missing}")
+        return cast(_LLMControlModule, module)
+
     async def _switch_asr(self, payload: dict[str, Any]) -> dict[str, Any]:
         voice_cfg = self._resolve_asr_voice_config(payload)
+        desired = self._asr_selection(voice_cfg)
+        effective = self._current_asr_selection()
         reconfigure = getattr(self._audio, "reconfigure_asr", None)
         if not callable(reconfigure):
             raise RuntimeError("audio frontend does not support ASR hot switching")
-        result = await asyncio.to_thread(reconfigure, voice_cfg)
-        cloud_cfg = voice_cfg.get("cloud_asr", {})
-        provider = "local" if not cloud_cfg.get("enabled") else str(cloud_cfg.get("provider") or "")
+        try:
+            result = await asyncio.to_thread(reconfigure, voice_cfg)
+        except Exception as exc:
+            self._record_runtime_switch_failure("asr", desired, str(exc))
+            raise
+        if str(result.get("state") or "active") == "pending":
+            self._record_runtime_switch_pending("asr", desired)
+            return self._runtime_switch_result(
+                result,
+                desired=desired,
+                effective=effective,
+                pending=desired,
+            )
+
         self._voice_cfg = voice_cfg
-        self._control_state["asr"] = {
-            "provider": provider,
-            "model": str(cloud_cfg.get("model") or "local"),
-        }
-        return dict(result)
+        self._control_state["asr"] = desired
+        self._record_runtime_switch_active("asr", desired)
+        return self._runtime_switch_result(
+            result,
+            desired=desired,
+            effective=desired,
+        )
 
     async def _switch_tts(self, payload: dict[str, Any]) -> dict[str, Any]:
         tts_cfg = self._resolve_tts_config(payload)
+        desired = self._tts_selection(tts_cfg)
+        effective = self._current_tts_selection()
         reconfigure = getattr(self._audio, "reconfigure_tts", None)
         if not callable(reconfigure):
             raise RuntimeError("audio frontend does not support TTS hot switching")
-        result = await asyncio.to_thread(reconfigure, tts_cfg)
+        try:
+            result = await asyncio.to_thread(reconfigure, tts_cfg)
+        except Exception as exc:
+            self._record_runtime_switch_failure("tts", desired, str(exc))
+            raise
+        if str(result.get("state") or "active") == "pending":
+            self._record_runtime_switch_pending("tts", desired)
+            return self._runtime_switch_result(
+                result,
+                desired=desired,
+                effective=effective,
+                pending=desired,
+            )
+
         self._voice_cfg["tts"] = tts_cfg
+        self._control_state["tts"] = desired
+        self._record_runtime_switch_active("tts", desired)
+        return self._runtime_switch_result(
+            result,
+            desired=desired,
+            effective=desired,
+        )
+
+    def _current_asr_selection(self) -> dict[str, str]:
+        persisted = self._control_state.get("asr", {})
+        if isinstance(persisted, dict) and persisted.get("provider"):
+            provider = str(persisted.get("provider") or "local")
+            return {
+                "provider": provider,
+                "model": str(persisted.get("model") or ("local" if provider == "local" else "")),
+            }
+        return self._asr_selection(self._voice_cfg)
+
+    @staticmethod
+    def _asr_selection(voice_cfg: dict[str, Any]) -> dict[str, str]:
+        cloud_cfg = voice_cfg.get("cloud_asr", {})
+        if not isinstance(cloud_cfg, dict) or not cloud_cfg.get("enabled"):
+            return {"provider": "local", "model": "local"}
+        return {
+            "provider": str(cloud_cfg.get("provider") or ""),
+            "model": str(cloud_cfg.get("model") or ""),
+        }
+
+    def _current_tts_selection(self) -> dict[str, str]:
+        persisted = self._control_state.get("tts", {})
+        if isinstance(persisted, dict) and persisted.get("backend"):
+            return {
+                "backend": str(persisted.get("backend") or ""),
+                "model": str(persisted.get("model") or ""),
+                "voice_id": str(persisted.get("voice_id") or ""),
+            }
+        return self._tts_selection(self._voice_cfg.get("tts", {}))
+
+    @staticmethod
+    def _tts_selection(tts_cfg: dict[str, Any]) -> dict[str, str]:
         backend = str(tts_cfg.get("backend") or "")
         if backend == "volcengine":
             model = str(tts_cfg.get("volcengine_tts_resource_id") or "")
@@ -645,19 +800,211 @@ class VoiceModule(Module):
         else:
             model = str(tts_cfg.get("minimax_tts_model") or "")
             voice_id = str(tts_cfg.get("minimax_voice_id") or "")
-        self._control_state["tts"] = {
+        return {
             "backend": backend,
             "model": model,
             "voice_id": voice_id,
         }
-        return dict(result)
+
+    def _runtime_switch_lock(self) -> Any:
+        lock = getattr(self, "_runtime_switch_state_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._runtime_switch_state_lock = lock
+        return lock
+
+    def _ensure_runtime_switch_state(self) -> dict[str, dict[str, Any]]:
+        lock = self._runtime_switch_lock()
+        with lock:
+            current = getattr(self, "_runtime_switch_state", None)
+            if isinstance(current, dict) and {"asr", "tts"} <= current.keys():
+                return current
+            asr = self._current_asr_selection()
+            tts = self._current_tts_selection()
+            current = {
+                "asr": {
+                    "state": "active",
+                    "desired": dict(asr),
+                    "effective": dict(asr),
+                    "pending": None,
+                    "failed": None,
+                },
+                "tts": {
+                    "state": "active",
+                    "desired": dict(tts),
+                    "effective": dict(tts),
+                    "pending": None,
+                    "failed": None,
+                },
+            }
+            self._runtime_switch_state = current
+            return current
+
+    def _record_runtime_switch_pending(
+        self,
+        component: str,
+        desired: dict[str, str],
+    ) -> None:
+        with self._runtime_switch_lock():
+            state = self._ensure_runtime_switch_state()[component]
+            state.update(
+                {
+                    "state": "pending",
+                    "desired": dict(desired),
+                    "pending": dict(desired),
+                    "failed": None,
+                }
+            )
+
+    def _record_runtime_switch_active(
+        self,
+        component: str,
+        effective: dict[str, str],
+    ) -> None:
+        with self._runtime_switch_lock():
+            state = self._ensure_runtime_switch_state()[component]
+            state.update(
+                {
+                    "state": "active",
+                    "desired": dict(effective),
+                    "effective": dict(effective),
+                    "pending": None,
+                    "failed": None,
+                }
+            )
+
+    def _record_runtime_switch_failure(
+        self,
+        component: str,
+        desired: dict[str, str],
+        reason: str,
+    ) -> None:
+        failure = {"reason": str(reason or "runtime activation failed")}
+        with self._runtime_switch_lock():
+            state = self._ensure_runtime_switch_state()[component]
+            state.update(
+                {
+                    "state": "failed",
+                    "desired": dict(desired),
+                    "pending": None,
+                    "failed": failure,
+                }
+            )
+
+    def _runtime_switches_snapshot(self) -> dict[str, dict[str, Any]]:
+        with self._runtime_switch_lock():
+            return deepcopy(self._ensure_runtime_switch_state())
+
+    def _handle_runtime_switch_outcome(self, outcome: dict[str, Any]) -> None:
+        component = str(outcome.get("component") or "").strip().lower()
+        if component not in {"asr", "tts"}:
+            logger.warning("Ignoring runtime switch outcome for unknown component: %s", component)
+            return
+        config = outcome.get("config")
+        if not isinstance(config, dict):
+            logger.warning("Ignoring %s runtime switch outcome without config", component)
+            return
+        desired = self._asr_selection(config) if component == "asr" else self._tts_selection(config)
+        outcome_state = str(outcome.get("state") or "").strip().lower()
+
+        if outcome_state == "failed":
+            with self._runtime_switch_lock():
+                pending = self._ensure_runtime_switch_state()[component].get("pending")
+                if pending is not None and pending != desired:
+                    logger.info("Ignoring stale %s runtime switch failure", component)
+                    return
+                self._record_runtime_switch_failure(
+                    component,
+                    desired,
+                    str(outcome.get("reason") or "runtime activation failed"),
+                )
+            return
+        if outcome_state != "active":
+            logger.warning(
+                "Ignoring %s runtime switch outcome with state %r",
+                component,
+                outcome_state,
+            )
+            return
+
+        with self._runtime_switch_lock():
+            current = self._ensure_runtime_switch_state()[component]
+            pending = current.get("pending")
+            if component == "asr":
+                self._voice_cfg = dict(config)
+            else:
+                self._voice_cfg["tts"] = dict(config)
+            self._control_state[component] = dict(desired)
+            if pending is not None and pending != desired:
+                current["effective"] = dict(desired)
+                current["failed"] = None
+            else:
+                self._record_runtime_switch_active(component, desired)
+            self._persist_control_state()
+
+    @staticmethod
+    def _runtime_switch_result(
+        result: dict[str, Any],
+        *,
+        desired: dict[str, str],
+        effective: dict[str, str],
+        pending: dict[str, str] | None = None,
+        failed: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(result)
+        activation = payload.get("effective")
+        if activation is not None and not isinstance(activation, dict):
+            payload["activation"] = activation
+        payload.update(
+            {
+                "desired": dict(desired),
+                "effective": dict(effective),
+                "pending": dict(pending) if pending is not None else None,
+                "failed": dict(failed) if failed is not None else None,
+            }
+        )
+        return payload
+
+    async def _defer_llm_client_retirement(
+        self,
+        llm_module: Any,
+        client: Any,
+        *,
+        label: str,
+    ) -> None:
+        retire = getattr(llm_module, "retire_client", None)
+        if callable(retire):
+            try:
+                result = retire(client)
+                if inspect.isawaitable(result):
+                    await result
+                return
+            except Exception:
+                logger.warning(
+                    "VoiceModule: failed to defer %s LLM retirement",
+                    label,
+                    exc_info=True,
+                )
+                return
+        await self._retire_llm_client(client, label=label)
+
+    async def _retire_llm_client(self, client: Any, *, label: str) -> None:
+        close = getattr(client, "aclose", None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=2.0)
+        except Exception:
+            logger.warning("VoiceModule: failed to retire %s LLM client", label, exc_info=True)
 
     def _publish_llm(self, client: Any, brain_cfg: dict[str, Any]) -> None:
         pipeline = self._pipeline()
         if pipeline is not None:
             pipeline.replace_llm(
                 client,
-                voice_model=str(brain_cfg.get("voice_model") or client.model),
+                voice_model=str(brain_cfg.get("voice_model") or getattr(client, "model", "")),
             )
         memory_mod = self._registry.get("memory")
         replace_llm = getattr(memory_mod, "replace_llm", None)
@@ -707,13 +1054,6 @@ class VoiceModule(Module):
                 "fallback_models": brain.get("fallback_models", []),
             }
         }
-        if brain.get("minimax_api_key"):
-            presets["minimax"] = {
-                "api_key": brain.get("minimax_api_key", ""),
-                "base_url": brain.get("minimax_base_url", "https://api.minimaxi.com/v1"),
-                "model": brain.get("minimax_model", "MiniMax-M2.7-highspeed"),
-                "fallback_models": [],
-            }
         configured = brain.get("provider_presets", {})
         if isinstance(configured, dict):
             for name, preset in configured.items():

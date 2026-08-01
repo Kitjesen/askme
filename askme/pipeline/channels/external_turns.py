@@ -29,6 +29,7 @@ def begin_external_turn(
     user_text: str,
     *,
     source: str,
+    channel: str = "voice",
     conversation_thread_id: str | None = None,
     conversation_session_id: str | None = None,
     turn_id: str | None = None,
@@ -48,9 +49,9 @@ def begin_external_turn(
         thread = ledger.resolve_thread(
             conversation_thread_id=conversation_thread_id,
             conversation_session_id=conversation_session_id,
-            # Provider/runtime path changes are Turn sources, not new
-            # product-level conversation channels.
-            channel="voice",
+            # Provider/runtime path changes normally share the voice
+            # Thread channel; text adapters can opt into their own channel.
+            channel=channel,
             metadata=metadata,
         )
         turn = ledger.start_turn(
@@ -284,6 +285,7 @@ def record_external_turn(
     assistant_text: str,
     *,
     source: str = "external",
+    channel: str = "voice",
     conversation_thread_id: str | None = None,
     conversation_session_id: str | None = None,
     turn_id: str | None = None,
@@ -306,6 +308,7 @@ def record_external_turn(
         pipeline,
         user_text,
         source=source,
+        channel=channel,
         conversation_thread_id=conversation_thread_id,
         conversation_session_id=conversation_session_id,
         turn_id=turn_id,
@@ -367,8 +370,11 @@ def _record_legacy_projection(
             try:
                 task = asyncio.create_task(reflect())
                 task.add_done_callback(
-                    lambda t: logger.error("[Episodic] Reflection failed: %s", t.exception())
-                    if not t.cancelled() and t.exception() else None
+                    lambda t: (
+                        logger.error("[Episodic] Reflection failed: %s", t.exception())
+                        if not t.cancelled() and t.exception()
+                        else None
+                    )
                 )
             except RuntimeError:
                 logger.debug("No running loop for external-turn reflection")
@@ -390,8 +396,7 @@ def _call_with_thread_scope(
         method(content)
         return
     supports_keyword = any(
-        parameter.kind is Parameter.VAR_KEYWORD
-        or parameter.name == "conversation_session_id"
+        parameter.kind is Parameter.VAR_KEYWORD or parameter.name == "conversation_session_id"
         for parameter in parameters
     )
     if supports_keyword:
@@ -419,15 +424,12 @@ def _legacy_fallback_enabled(pipeline: Any) -> bool:
 
     namespace = getattr(pipeline, "__dict__", None)
     return bool(
-        isinstance(namespace, dict)
-        and namespace.get("_conversation_core_legacy_fallback", False)
+        isinstance(namespace, dict) and namespace.get("_conversation_core_legacy_fallback", False)
     )
 
 
 def _ledger_write_error(operation: str, exc: BaseException) -> ConversationLedgerError:
-    return ConversationLedgerError(
-        f"Conversation Core could not {operation}: {type(exc).__name__}"
-    )
+    return ConversationLedgerError(f"Conversation Core could not {operation}: {type(exc).__name__}")
 
 
 def _report_ledger_failure(

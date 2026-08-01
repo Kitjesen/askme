@@ -2,9 +2,9 @@
 
 import os
 import shutil
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 
@@ -66,8 +66,7 @@ def _pytest_marker_names_for_path(path: Path) -> set[str]:
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     for item in items:
         if (
-            Path(str(item.fspath)).name
-            in {"test_agent_task_e2e.py", "test_thunder_agent_shell.py"}
+            Path(str(item.fspath)).name in {"test_agent_task_e2e.py", "test_thunder_agent_shell.py"}
             and item.name in _THUNDER_AGENT_SHELL_REACT_LOOP_TESTS
         ):
             item.add_marker(
@@ -82,6 +81,10 @@ def _set_test_env(monkeypatch):
     """Set minimal environment variables so config.py doesn't fail."""
     monkeypatch.setenv("LLM_API_KEY", "sk-test-key")
     monkeypatch.setenv("LLM_BASE_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("LITELLM_VIRTUAL_KEY", "sk-test-litellm-key")
+    monkeypatch.setenv("ZEROCLAW_LITELLM_VIRTUAL_KEY", "sk-test-zeroclaw-key")
+    monkeypatch.setenv("VISION_LITELLM_VIRTUAL_KEY", "sk-test-vision-key")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-key")
     monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.deepseek.example/v1")
     monkeypatch.setenv("MINIMAX_API_KEY", "sk-test-key")
@@ -108,7 +111,17 @@ def tmp_path(project_root: Path) -> Path:
         else project_root / "data" / "pytest-tmp"
     )
     base_dir.mkdir(parents=True, exist_ok=True)
-    path = Path(tempfile.mkdtemp(prefix="case-", dir=base_dir))
+    # tempfile.mkdtemp() can create a non-inheritable ACL under the Windows
+    # restricted-token sandbox. mkdir() inherits the writable-root ACL.
+    for _ in range(100):
+        path = base_dir / f"case-{uuid4().hex[:12]}"
+        try:
+            path.mkdir()
+        except FileExistsError:
+            continue
+        break
+    else:  # pragma: no cover - UUID collisions are practically unreachable.
+        raise RuntimeError(f"Could not allocate a unique test directory in {base_dir}")
     try:
         yield path
     finally:
@@ -127,19 +140,23 @@ def make_proactive_orch():
     from askme.pipeline.proactive.orchestrator import ProactiveOrchestrator
 
     sk_search = SkillDefinition(
-        name="web_search", voice_trigger="搜索",
+        name="web_search",
+        voice_trigger="搜索",
         required_slots=[SlotSpec(name="query", type="text", prompt="搜什么？")],
     )
     sk_nav = SkillDefinition(
-        name="navigate", voice_trigger="去",
+        name="navigate",
+        voice_trigger="去",
         required_slots=[SlotSpec(name="destination", type="location", prompt="去哪里？")],
     )
     dispatcher = MagicMock()
     dispatcher.current_mission = None
 
     def _get(name):
-        if name == "web_search": return sk_search
-        if name == "navigate": return sk_nav
+        if name == "web_search":
+            return sk_search
+        if name == "navigate":
+            return sk_nav
         return None
 
     dispatcher.get_skill.side_effect = _get

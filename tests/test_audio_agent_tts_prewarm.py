@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -85,199 +84,63 @@ def agent(monkeypatch: pytest.MonkeyPatch) -> AudioAgent:
     instance.shutdown()
 
 
-def test_immediate_tts_switch_prewarm_does_not_block_reconfigure_or_readiness(
+def test_immediate_tts_switch_notifies_runtime_owner_without_local_prewarm(
     agent: AudioAgent,
 ) -> None:
-    prewarm_started = threading.Event()
-    prewarm_release = threading.Event()
-    reconfigure_done = threading.Event()
-    result: dict[str, object] = {}
+    activated: list[_FakeTTSEngine] = []
+    agent.set_tts_activation_callback(activated.append)
 
-    def reconfigure() -> None:
-        result.update(
-            agent.reconfigure_tts(
-                {
-                    "backend": "next",
-                    "prewarm_started": prewarm_started,
-                    "prewarm_release": prewarm_release,
-                }
-            )
-        )
-        reconfigure_done.set()
+    result = agent.reconfigure_tts({"backend": "next"})
+    next_tts = agent.tts
 
-    caller = threading.Thread(target=reconfigure, daemon=True)
-    caller.start()
-    try:
-        assert prewarm_started.wait(timeout=1.0)
-        assert reconfigure_done.wait(timeout=0.2)
-        assert prewarm_release.is_set() is False
-        assert result["state"] == "active"
-        assert agent.status_snapshot()["output_ready"] is True
-    finally:
-        prewarm_release.set()
-        caller.join(timeout=1.0)
+    assert result["state"] == "active"
+    assert next_tts.backend == "next"
+    assert next_tts.prewarm_calls == 0
+    assert activated == [next_tts]
+    assert not hasattr(agent, "_tts_provider_prewarm_threads")
+    assert agent.status_snapshot()["output_ready"] is True
 
 
-def test_pending_tts_switch_starts_prewarm_only_after_it_becomes_active(
+def test_pending_tts_switch_notifies_only_after_new_engine_becomes_active(
     agent: AudioAgent,
 ) -> None:
     current = _FakeTTSEngine.created[0]
     current._is_playing = True
-    prewarm_started = threading.Event()
-    prewarm_release = threading.Event()
-    apply_done = threading.Event()
+    activated: list[_FakeTTSEngine] = []
+    agent.set_tts_activation_callback(activated.append)
 
-    pending = agent.reconfigure_tts(
-        {
-            "backend": "pending",
-            "prewarm_started": prewarm_started,
-            "prewarm_release": prewarm_release,
-        }
-    )
+    pending = agent.reconfigure_tts({"backend": "pending"})
 
     assert pending["state"] == "pending"
+    assert activated == []
     assert len(_FakeTTSEngine.created) == 1
-    assert prewarm_started.is_set() is False
 
     current._is_playing = False
-    caller = threading.Thread(
-        target=lambda: (agent._apply_pending_runtime_updates(), apply_done.set()),
-        daemon=True,
-    )
-    caller.start()
-    try:
-        assert prewarm_started.wait(timeout=1.0)
-        assert apply_done.wait(timeout=0.2)
-        assert prewarm_release.is_set() is False
-        assert agent.tts.backend == "pending"
-        assert current.shutdown_calls == 1
-    finally:
-        prewarm_release.set()
-        caller.join(timeout=1.0)
+    agent._apply_pending_runtime_updates()
+    next_tts = agent.tts
+
+    assert next_tts.backend == "pending"
+    assert next_tts.prewarm_calls == 0
+    assert activated == [next_tts]
+    assert current.shutdown_calls == 1
 
 
-def test_shutdown_cancels_and_harvests_active_tts_prewarm(agent: AudioAgent) -> None:
-    prewarm_started = threading.Event()
-    prewarm_release = threading.Event()
-    prewarm_stopping = threading.Event()
-    prewarm_finish_release = threading.Event()
-    prewarm_finished = threading.Event()
-    shutdown_done = threading.Event()
-
-    agent.reconfigure_tts(
-        {
-            "backend": "next",
-            "prewarm_started": prewarm_started,
-            "prewarm_release": prewarm_release,
-            "prewarm_stopping": prewarm_stopping,
-            "prewarm_finish_release": prewarm_finish_release,
-            "prewarm_finished": prewarm_finished,
-        }
-    )
-    assert prewarm_started.wait(timeout=1.0)
-    tracked_threads = tuple(agent._tts_provider_prewarm_threads)
-    assert tracked_threads
-    assert all(thread.daemon for thread in tracked_threads)
-
-    caller = threading.Thread(
-        target=lambda: (agent.shutdown(), shutdown_done.set()),
-        daemon=True,
-    )
-    caller.start()
-    try:
-        assert prewarm_stopping.wait(timeout=1.0)
-        assert shutdown_done.wait(timeout=0.1) is False
-        prewarm_finish_release.set()
-        assert shutdown_done.wait(timeout=1.0)
-        assert prewarm_finished.is_set()
-        assert all(not thread.is_alive() for thread in tracked_threads)
-    finally:
-        prewarm_finish_release.set()
-        caller.join(timeout=1.0)
-
-
-def test_rapid_tts_switch_skips_prewarm_for_engine_replaced_before_worker_runs(
-    agent: AudioAgent,
-) -> None:
-    final_started = threading.Event()
-    final_release = threading.Event()
-
-    with agent._runtime_switch_lock:
-        agent.reconfigure_tts({"backend": "superseded"})
-        superseded = _FakeTTSEngine.created[-1]
-        agent.reconfigure_tts(
-            {
-                "backend": "final",
-                "prewarm_started": final_started,
-                "prewarm_release": final_release,
-            }
-        )
-
-    try:
-        assert final_started.wait(timeout=1.0)
-        assert superseded.prewarm_calls == 0
-        assert superseded.cancel_calls >= 1
-        assert superseded.shutdown_calls == 1
-        assert agent.tts.backend == "final"
-    finally:
-        final_release.set()
-
-
-def test_tts_switch_cancels_inflight_prewarm_on_replaced_engine(agent: AudioAgent) -> None:
-    replaced_started = threading.Event()
-    replaced_finished = threading.Event()
-    final_started = threading.Event()
-    final_release = threading.Event()
-
-    agent.reconfigure_tts(
-        {
-            "backend": "inflight",
-            "prewarm_started": replaced_started,
-            "prewarm_finished": replaced_finished,
-        }
-    )
-    replaced = agent.tts
-    assert replaced_started.wait(timeout=1.0)
-
-    agent.reconfigure_tts(
-        {
-            "backend": "final",
-            "prewarm_started": final_started,
-            "prewarm_release": final_release,
-        }
-    )
-    try:
-        assert replaced_finished.wait(timeout=1.0)
-        assert final_started.wait(timeout=1.0)
-        assert replaced.cancel_calls >= 1
-        assert replaced.shutdown_calls == 1
-        assert agent.tts.backend == "final"
-    finally:
-        final_release.set()
-
-
-def test_tts_prewarm_exception_is_logged_without_affecting_active_engine(
+def test_tts_activation_callback_failure_does_not_rollback_switch(
     agent: AudioAgent,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level("WARNING", logger=audio_agent_module.__name__)
 
-    result = agent.reconfigure_tts(
-        {
-            "backend": "failing-prewarm",
-            "prewarm_error": RuntimeError("prewarm boom"),
-        }
-    )
+    def fail_callback(_tts: _FakeTTSEngine) -> None:
+        raise RuntimeError("refresh callback failed")
 
-    deadline = time.monotonic() + 1.0
-    while agent._tts_provider_prewarm_threads and time.monotonic() < deadline:
-        time.sleep(0.01)
+    agent.set_tts_activation_callback(fail_callback)
+    result = agent.reconfigure_tts({"backend": "next"})
 
     assert result["state"] == "active"
-    assert agent.tts.backend == "failing-prewarm"
-    assert agent.status_snapshot()["output_ready"] is True
-    assert not agent._tts_provider_prewarm_threads
-    assert "TTS provider prewarm failed: prewarm boom" in caplog.text
+    assert agent.tts.backend == "next"
+    assert agent.tts.prewarm_calls == 0
+    assert "TTS activation callback failed: refresh callback failed" in caplog.text
 
 
 def test_shutdown_racing_tts_construction_closes_and_rejects_new_engine(
@@ -319,43 +182,6 @@ def test_shutdown_racing_tts_construction_closes_and_rejects_new_engine(
     finally:
         construct_release.set()
         caller.join(timeout=1.0)
-
-
-def test_shutdown_timeout_detaches_uncooperative_prewarm_as_daemon(
-    agent: AudioAgent,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level("WARNING", logger=audio_agent_module.__name__)
-    prewarm_started = threading.Event()
-    prewarm_release = threading.Event()
-    prewarm_finished = threading.Event()
-
-    agent.reconfigure_tts(
-        {
-            "backend": "uncooperative",
-            "prewarm_started": prewarm_started,
-            "prewarm_release": prewarm_release,
-            "prewarm_finished": prewarm_finished,
-            "cancel_releases_prewarm": False,
-        }
-    )
-    assert prewarm_started.wait(timeout=1.0)
-    tracked_threads = tuple(agent._tts_provider_prewarm_threads)
-
-    started_at = time.monotonic()
-    agent.shutdown()
-    elapsed = time.monotonic() - started_at
-    try:
-        assert elapsed < 1.25
-        assert tracked_threads
-        assert all(thread.daemon for thread in tracked_threads)
-        assert any(thread.is_alive() for thread in tracked_threads)
-        assert "daemon TTS provider prewarm thread(s) did not stop" in caplog.text
-    finally:
-        prewarm_release.set()
-        assert prewarm_finished.wait(timeout=1.0)
-        for thread in tracked_threads:
-            thread.join(timeout=1.0)
 
 
 def test_tts_reconfigure_after_shutdown_is_rejected_without_pending_state(

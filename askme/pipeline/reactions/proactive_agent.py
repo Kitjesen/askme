@@ -7,10 +7,14 @@ import json
 import logging
 import os
 import time
+import uuid
 from collections import deque
+from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any
 from urllib import error, parse, request
 
+from askme.llm.core.contracts import LLMCallContext
+from askme.llm.providers.profiles import normalize_provider_name
 from askme.pipeline.field.alert_dispatcher import AlertDispatcher
 from askme.pipeline.field.incident_alerts import INCIDENT_ALERTS, format_incident_alert
 
@@ -105,9 +109,15 @@ class ProactiveAgent:
         self._last_anomaly_time: float = 0.0
         self._consecutive_normal: int = 0
         self._alert_cooldown: float = float(pro_cfg.get("alert_cooldown", 30))
-        self._judge_model: str = pro_cfg.get(
-            "judge_model",
-            config.get("brain", {}).get("voice_model", "MiniMax-M2.7-highspeed"),
+        configured_judge_model = str(
+            pro_cfg.get("judge_model")
+            or config.get("brain", {}).get("voice_model")
+            or "robot-action"
+        )
+        self._judge_model = (
+            "robot-action"
+            if normalize_provider_name(config.get("brain", {}).get("provider")) == "litellm"
+            else configured_judge_model
         )
         sensitivity_key = pro_cfg.get("sensitivity", "medium")
         self._sensitivity_text: str = _SENSITIVITY.get(sensitivity_key, _SENSITIVITY["medium"])
@@ -130,6 +140,8 @@ class ProactiveAgent:
         self._episodic = episodic
         self._llm = llm
         self._robot_id: str | None = config.get("robot", {}).get("robot_id")
+        self._interaction_session_id = uuid.uuid4().hex
+        self._interaction_cancel_token: Any | None = None
 
         # Multi-channel alert dispatcher
         self._alert_dispatcher = AlertDispatcher(
@@ -155,16 +167,115 @@ class ProactiveAgent:
         # Auto-tasks
         self._auto_tasks: list[dict[str, Any]] = []
         for task_def in pro_cfg.get("auto_tasks", []):
-            self._auto_tasks.append({
-                "name": task_def.get("name", "unnamed"),
-                "interval": float(task_def.get("interval", 300)),
-                "prompt": task_def.get("prompt", ""),
-                "last_run": 0.0,
-            })
+            self._auto_tasks.append(
+                {
+                    "name": task_def.get("name", "unnamed"),
+                    "interval": float(task_def.get("interval", 300)),
+                    "prompt": task_def.get("prompt", ""),
+                    "last_run": 0.0,
+                }
+            )
 
     def set_solve_callback(self, callback: Any) -> None:
         """Wire the autonomous solve callback (called with anomaly description)."""
         self._solve_callback = callback
+
+    def set_interaction_context(
+        self,
+        *,
+        session_id: str,
+        cancel_token: Any | None,
+    ) -> None:
+        """Bind process-lifetime Thread identity and lifecycle cancellation."""
+
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            raise ValueError("proactive interaction session_id must not be empty")
+        self._interaction_session_id = normalized_session_id
+        self._interaction_cancel_token = cancel_token
+
+    def _new_llm_call_context(
+        self,
+        *,
+        purpose: str,
+        request_class: str,
+    ) -> LLMCallContext:
+        values: dict[str, Any] = {
+            "session_id": self._interaction_session_id,
+            "turn_id": uuid.uuid4().hex,
+            "call_id": uuid.uuid4().hex,
+            "purpose": purpose,
+            "channel": "proactive",
+            "request_class": request_class,
+            "privacy_class": "restricted",
+            "allow_cache": False,
+        }
+        try:
+            context_parameters = signature(LLMCallContext).parameters
+        except (TypeError, ValueError):
+            context_parameters = {}
+        if self._interaction_cancel_token is not None and "cancel_token" in context_parameters:
+            values["cancel_token"] = self._interaction_cancel_token
+        return LLMCallContext(**values)
+
+    @staticmethod
+    def _supported_call_kwargs(
+        callback: Any,
+        values: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Filter optional context for strict legacy LLM call signatures."""
+
+        signature_target = getattr(callback, "side_effect", None)
+        if not callable(signature_target):
+            signature_target = callback
+        try:
+            parameters = signature(signature_target).parameters
+        except (TypeError, ValueError):
+            return {
+                key: value
+                for key, value in values.items()
+                if key in {"model", "temperature"} and value is not None
+            }
+        if any(parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values()):
+            return {key: value for key, value in values.items() if value is not None}
+        keyword_kinds = {
+            Parameter.POSITIONAL_OR_KEYWORD,
+            Parameter.KEYWORD_ONLY,
+        }
+        return {
+            key: value
+            for key, value in values.items()
+            if value is not None and key in parameters and parameters[key].kind in keyword_kinds
+        }
+
+    async def _chat_with_interaction_context(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        temperature: float | None = None,
+        purpose: str,
+        request_class: str,
+    ) -> str:
+        token = self._interaction_cancel_token
+        if token is not None and token.is_set():
+            raise asyncio.CancelledError
+        callback = self._llm.chat
+        return await callback(
+            messages,
+            **self._supported_call_kwargs(
+                callback,
+                {
+                    "model": model,
+                    "temperature": temperature,
+                    "context": self._new_llm_call_context(
+                        purpose=purpose,
+                        request_class=request_class,
+                    ),
+                    "cancel_token": token,
+                },
+            ),
+        )
 
     def _adaptive_interval(self) -> float:
         """Calculate patrol interval based on time-of-day and anomaly history.
@@ -176,6 +287,7 @@ class ProactiveAgent:
         - 10+ consecutive normal scans: 1.5x base (relax)
         """
         import datetime
+
         hour = datetime.datetime.now().hour
         base = self._base_interval
 
@@ -218,7 +330,9 @@ class ProactiveAgent:
 
         logger.info(
             "[Proactive] Started — interval=%ds, judge=%s, sensitivity=%s, telemetry=%s",
-            self._patrol_interval, self._judge_model, self._sensitivity_text[:10],
+            self._patrol_interval,
+            self._judge_model,
+            self._sensitivity_text[:10],
             "on" if self._telemetry_hub_url else "off",
         )
 
@@ -288,7 +402,9 @@ class ProactiveAgent:
         if anomaly:
             self._last_anomaly_time = time.monotonic()
             self._consecutive_normal = 0
-            logger.warning("[Proactive] ANOMALY: %s (next scan in %.0fs)", anomaly, self._adaptive_interval())
+            logger.warning(
+                "[Proactive] ANOMALY: %s (next scan in %.0fs)", anomaly, self._adaptive_interval()
+            )
 
             # Capture snapshot of the anomaly scene
             image_path: str | None = None
@@ -319,7 +435,9 @@ class ProactiveAgent:
             if self._tick_count % 5 == 0:
                 if self._vision:
                     await self._vision.save_snapshot(label=f"patrol_{self._tick_count}")
-                await self._speak_alert(f"巡检正常，第{self._tick_count}次扫描完成。", topic="patrol.normal")
+                await self._speak_alert(
+                    f"巡检正常，第{self._tick_count}次扫描完成。", topic="patrol.normal"
+                )
 
         self._scene_history.append(current_scene)
 
@@ -332,9 +450,7 @@ class ProactiveAgent:
         if not self._scene_history:
             return None  # First scan, no baseline
 
-        history_text = "\n".join(
-            f"[{i + 1}] {s}" for i, s in enumerate(self._scene_history)
-        )
+        history_text = "\n".join(f"[{i + 1}] {s}" for i, s in enumerate(self._scene_history))
 
         prompt = _ANOMALY_PROMPT.format(
             history=history_text,
@@ -344,10 +460,12 @@ class ProactiveAgent:
 
         try:
             response = await asyncio.wait_for(
-                self._llm.chat(
+                self._chat_with_interaction_context(
                     [{"role": "user", "content": prompt}],
                     model=self._judge_model,
                     temperature=0.1,
+                    purpose="vision_grounding",
+                    request_class="vision",
                 ),
                 timeout=10.0,
             )
@@ -365,7 +483,14 @@ class ProactiveAgent:
     # TTS alert (conflict-safe)
     # ------------------------------------------------------------------
 
-    async def _speak_alert(self, message: str, *, severity: str = "info", topic: str = "", payload: dict[str, Any] | None = None) -> None:
+    async def _speak_alert(
+        self,
+        message: str,
+        *,
+        severity: str = "info",
+        topic: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         """Dispatch an alert via multi-channel dispatcher (voice + webhook + IM)."""
         now = time.monotonic()
         if now - self._last_alert_time < self._alert_cooldown:
@@ -397,7 +522,6 @@ class ProactiveAgent:
             logger.info("[Proactive] Change event consumer disabled.")
             return
 
-
         logger.info("[Proactive] Change event consumer started: %s", self._change_event_file)
 
         # Seek to end — skip historical events from previous runs
@@ -410,7 +534,8 @@ class ProactiveAgent:
         while not stop_event.is_set():
             try:
                 events = await asyncio.to_thread(
-                    self._read_change_events, file_pos,
+                    self._read_change_events,
+                    file_pos,
                 )
                 if events:
                     new_pos, parsed = events
@@ -477,14 +602,12 @@ class ProactiveAgent:
             )
 
         # High importance + auto_solve → trigger problem solving
-        if (
-            self._auto_solve
-            and self._solve_callback is not None
-            and event.importance >= 0.7
-        ):
+        if self._auto_solve and self._solve_callback is not None and event.importance >= 0.7:
             logger.info("[Proactive] Auto-solving change event: %s", description)
             try:
-                await self._solve_callback(f"感知系统检测到变化：{description}。请判断是否需要处理。")
+                await self._solve_callback(
+                    f"感知系统检测到变化：{description}。请判断是否需要处理。"
+                )
             except Exception as exc:
                 logger.warning("[Proactive] Auto-solve from change event failed: %s", exc)
 
@@ -498,7 +621,9 @@ class ProactiveAgent:
             logger.info("[Proactive] Event monitor disabled — no telemetry_hub_url")
             return
 
-        logger.info("[Proactive] Event monitor started — polling every %ds", self._event_poll_interval)
+        logger.info(
+            "[Proactive] Event monitor started — polling every %ds", self._event_poll_interval
+        )
 
         while not stop_event.is_set():
             try:
@@ -556,7 +681,9 @@ class ProactiveAgent:
                             "event_id": event_id,
                         }
                     )
-                logger.info("[Proactive] Alert event: %s [%s] → %s", topic, event_severity, message[:40])
+                logger.info(
+                    "[Proactive] Alert event: %s [%s] → %s", topic, event_severity, message[:40]
+                )
                 await self._speak_alert(
                     message,
                     severity=event_severity,
@@ -640,9 +767,11 @@ class ProactiveAgent:
 
             try:
                 response = await asyncio.wait_for(
-                    self._llm.chat(
+                    self._chat_with_interaction_context(
                         [{"role": "user", "content": content}],
                         model=self._judge_model,
+                        purpose="general",
+                        request_class="robot_action",
                     ),
                     timeout=10.0,
                 )

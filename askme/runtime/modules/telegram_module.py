@@ -23,6 +23,8 @@ Configuration (config.yaml):
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
 import logging
 import os
 import tempfile
@@ -33,6 +35,38 @@ from askme.pipeline.core.brain_pipeline import BrainPipeline
 from askme.runtime.core.module import In, Module, ModuleRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_telegram_identifier(kind: str, value: Any) -> str:
+    namespace = f"telegram:{kind}"
+    digest = hashlib.sha256(f"{namespace}:{value}".encode()).hexdigest()[:24]
+    return f"{namespace}:{digest}"
+
+
+def _supported_telegram_identity_context(process: Any, user_id: Any) -> dict[str, Any]:
+    if user_id is None:
+        return {}
+
+    identity = _stable_telegram_identifier("user", user_id)
+    candidates: dict[str, Any] = {
+        "person_id": identity,
+        "operator_id": identity,
+        "metadata": {"channel": "telegram"},
+    }
+    try:
+        parameters = tuple(inspect.signature(process).parameters.values())
+    except (TypeError, ValueError):
+        return {}
+
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+        return candidates
+    supported_names = {
+        parameter.name
+        for parameter in parameters
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    return {name: value for name, value in candidates.items() if name in supported_names}
 
 
 class TelegramModule(Module):
@@ -53,9 +87,7 @@ class TelegramModule(Module):
         token_env = tg_cfg.get("token_env", "TELEGRAM_BOT_TOKEN")
         self._token = os.environ.get(token_env, "")
 
-        self._allowed_users: list[int] = [
-            int(u) for u in tg_cfg.get("allowed_users", [])
-        ]
+        self._allowed_users: list[int] = [int(u) for u in tg_cfg.get("allowed_users", [])]
         self._voice_transcribe: bool = tg_cfg.get("voice_transcribe", True)
         self._lingtu_url: str = tg_cfg.get("lingtu_url", "") or os.environ.get(
             "NAV_GATEWAY_URL", ""
@@ -103,13 +135,9 @@ class TelegramModule(Module):
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("list", self._cmd_list))
         self._app.add_handler(CommandHandler("cancel", self._cmd_cancel))
-        self._app.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text)
-        )
+        self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
         if self._voice_transcribe:
-            self._app.add_handler(
-                MessageHandler(filters.VOICE, self._handle_voice)
-            )
+            self._app.add_handler(MessageHandler(filters.VOICE, self._handle_voice))
 
         # Initialize and start polling in background
         await self._app.initialize()
@@ -208,7 +236,16 @@ class TelegramModule(Module):
             await update.message.reply_text("[错误] 大脑管线未就绪")
             return
         try:
-            response = await self._pipeline.process(text, source="telegram")
+            conversation_session_id = _stable_telegram_identifier("chat", update.effective_chat.id)
+            identity_context = _supported_telegram_identity_context(
+                self._pipeline.process, update.effective_user.id
+            )
+            response = await self._pipeline.process(
+                text,
+                source="telegram",
+                conversation_session_id=conversation_session_id,
+                **identity_context,
+            )
             reply = response if isinstance(response, str) else str(response)
         except Exception as exc:
             logger.exception("TelegramModule: pipeline error")
@@ -230,8 +267,17 @@ class TelegramModule(Module):
 
                 # Convert OGG → 16kHz mono WAV via ffmpeg
                 proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y", "-i", str(ogg_path),
-                    "-ar", "16000", "-ac", "1", "-f", "wav", str(wav_path),
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(ogg_path),
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    "-f",
+                    "wav",
+                    str(wav_path),
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
@@ -332,7 +378,9 @@ class TelegramModule(Module):
         url = f"{self._lingtu_url.rstrip('/')}{path}"
         data = json.dumps(body).encode()
         req = urllib.request.Request(
-            url, data=data, method="POST",
+            url,
+            data=data,
+            method="POST",
             headers={"Content-Type": "application/json"},
         )
         try:

@@ -8,6 +8,7 @@ import math
 import time as _time
 from contextvars import ContextVar
 from dataclasses import replace
+from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -95,7 +96,7 @@ class StreamProcessor:
         tools: ToolRegistry,
         tool_executor: ToolExecutor,
         splitter: StreamSplitter,
-        general_tool_max_safety_level: int,
+        general_tool_max_safety_level: str,
         max_response_chars: int,
         voice_tts_coalesce: bool = False,
         voice_model: str | None = None,
@@ -356,6 +357,31 @@ class StreamProcessor:
 
         return full_response, tool_calls_acc
 
+    @staticmethod
+    def _supported_tool_context_kwargs(
+        callback: Any,
+        *,
+        turn_cancel_token: CancellationToken | None,
+        llm_call_context: LLMCallContext | None,
+    ) -> dict[str, Any]:
+        """Pass turn policy context without breaking legacy test/runtime adapters."""
+
+        try:
+            parameters = signature(callback).parameters
+            accepts_kwargs = any(
+                parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values()
+            )
+        except (TypeError, ValueError):
+            return {}
+
+        context = {
+            "turn_cancel_token": turn_cancel_token,
+            "llm_call_context": llm_call_context,
+        }
+        if accepts_kwargs:
+            return context
+        return {name: value for name, value in context.items() if name in parameters}
+
     async def stream_with_tools(
         self,
         messages: list[dict[str, Any]],
@@ -464,12 +490,18 @@ class StreamProcessor:
             context_token = self._tool_turn_cancel_token.set(active_cancel_token)
             llm_context_token = self._tool_llm_call_context.set(llm_call_context)
             try:
+                tool_context_kwargs = self._supported_tool_context_kwargs(
+                    self._tool_executor.execute_tools,
+                    turn_cancel_token=active_cancel_token,
+                    llm_call_context=llm_call_context,
+                )
                 full_response = await self._tool_executor.execute_tools(
                     tool_calls_acc,
                     system_prompt,
                     model=model,
                     source=source,
                     conversation_session_id=conversation_session_id,
+                    **tool_context_kwargs,
                 )
             finally:
                 self._tool_llm_call_context.reset(llm_context_token)

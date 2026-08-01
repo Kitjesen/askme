@@ -90,11 +90,16 @@ class TestRobotName:
         # Check window is actually set
         assert det._name_activated_until > time.monotonic()
 
-    def test_name_window_expires(self):
+    def test_name_window_expires(self, monkeypatch):
+        clock = [100.0]
+        monkeypatch.setattr(
+            "askme.robot_interaction.address_detector.time.monotonic",
+            lambda: clock[0],
+        )
         det = _make_detector(name_window=0.001)
         det.is_addressed("雷霆你好")
-        time.sleep(0.01)  # let the tiny window expire
-        # After expiry, casual chat should return False
+        clock[0] += 0.01
+        # After expiry, casual chat should return False.
         assert det.is_addressed("哈哈好吃") is False
 
 

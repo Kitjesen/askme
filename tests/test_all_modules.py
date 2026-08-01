@@ -18,21 +18,26 @@ from askme.runtime.module import Module, ModuleRegistry, Runtime, RuntimeApp
 
 class _MockLLMModule(Module):
     """Mock LLM module that creates a fake client."""
+
     name = "llm"
     provides = ("llm",)
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         self.client = MagicMock()
         self.client.model = "test-model"
-        self.client.chat = AsyncMock(return_value=MagicMock(
-            choices=[MagicMock(message=MagicMock(content="hi", tool_calls=None))]
-        ))
+        self.client.chat = AsyncMock(
+            return_value=MagicMock(
+                choices=[MagicMock(message=MagicMock(content="hi", tool_calls=None))]
+            )
+        )
+        self.llm_client = self.client
         self.ota_metrics = MagicMock()
         self.ota_metrics.snapshot.return_value = {}
 
 
 class _MockToolsModule(Module):
     """Mock Tools module that creates a fake registry."""
+
     name = "tools"
     provides = ("tools",)
 
@@ -45,6 +50,7 @@ class _MockToolsModule(Module):
 
 class _MockPulseModule(Module):
     """Mock Pulse module."""
+
     name = "pulse"
     provides = ("telemetry", "dds")
 
@@ -56,6 +62,7 @@ class _MockPulseModule(Module):
 
 class _MockMemoryModule(Module):
     """Mock Memory module."""
+
     name = "memory"
     provides = ("conversation", "episodic", "vector_memory", "session_memory")
 
@@ -123,11 +130,13 @@ class TestPerceptionModule:
 
     def test_name_and_provides(self):
         from askme.runtime.modules.perception_module import PerceptionModule
+
         assert PerceptionModule.name == "perception"
         assert "vision" in PerceptionModule.provides
 
     def test_depends_on_pulse(self):
         from askme.runtime.modules.perception_module import PerceptionModule
+
         assert "pulse" in PerceptionModule.depends_on
 
 
@@ -157,11 +166,13 @@ class TestSafetyModule:
 
     def test_name_and_provides(self):
         from askme.runtime.modules.safety_module import SafetyModule
+
         assert SafetyModule.name == "safety"
         assert "dog_safety" in SafetyModule.provides
 
     def test_depends_on_pulse(self):
         from askme.runtime.modules.safety_module import SafetyModule
+
         assert "pulse" in SafetyModule.depends_on
 
 
@@ -177,6 +188,7 @@ class TestPipelineModule:
         registry = _base_registry()
         # Add safety module
         from askme.runtime.modules.safety_module import SafetyModule
+
         safety = SafetyModule()
         registry.register(safety)
         safety.build(_cfg(), registry)
@@ -196,6 +208,7 @@ class TestPipelineModule:
 
     def test_name_and_depends(self):
         from askme.runtime.modules.pipeline_module import PipelineModule
+
         assert PipelineModule.name == "pipeline"
         assert "llm" in PipelineModule.depends_on
         assert "memory" in PipelineModule.depends_on
@@ -238,6 +251,7 @@ class TestSkillModule:
 
     def test_name_and_depends(self):
         from askme.runtime.modules.skill_module import SkillModule
+
         assert SkillModule.name == "skill"
         assert "pipeline" in SkillModule.depends_on
 
@@ -281,6 +295,7 @@ class TestExecutorModule:
 
     def test_name_and_depends(self):
         from askme.runtime.modules.executor_module import ExecutorModule
+
         assert ExecutorModule.name == "executor"
         assert "llm" in ExecutorModule.depends_on
 
@@ -292,8 +307,9 @@ class TestExecutorModule:
 
 class TestVoiceModule:
     @patch("askme.voice.audio_agent.AudioAgent.__init__", return_value=None)
+    @patch("askme.voice.audio_agent.AudioAgent.set_runtime_switch_callback")
     @patch("askme.voice.audio_agent.AudioAgent.speak", return_value=None)
-    def test_build_minimal(self, mock_speak, mock_init):
+    def test_build_minimal(self, mock_speak, mock_set_runtime_switch_callback, mock_init):
         from askme.runtime.modules.executor_module import ExecutorModule
         from askme.runtime.modules.pipeline_module import PipelineModule
         from askme.runtime.modules.skill_module import SkillModule
@@ -313,12 +329,15 @@ class TestVoiceModule:
         executor.build(_cfg(), registry)
 
         mod = VoiceModule()
+        mod.pipeline_in = pipeline  # simulate Runtime auto-wiring for the required port
         mod.build(_cfg(), registry)
         assert mod.voice_loop is not None
         assert mod.router is not None
+        mock_set_runtime_switch_callback.assert_called_once()
 
     def test_name_and_depends(self):
         from askme.runtime.modules.voice_module import VoiceModule
+
         assert VoiceModule.name == "voice"
         assert "pipeline" in VoiceModule.depends_on
         assert "skill" in VoiceModule.depends_on
@@ -352,6 +371,7 @@ class TestTextModule:
 
     def test_health(self):
         from askme.runtime.modules.text_module import TextModule
+
         # health() should work even before build
         mod = TextModule()
         h = mod.health()
@@ -359,6 +379,7 @@ class TestTextModule:
 
     def test_name_and_depends(self):
         from askme.runtime.modules.text_module import TextModule
+
         assert TextModule.name == "text"
         assert "pipeline" in TextModule.depends_on
 
@@ -389,6 +410,7 @@ class TestControlModule:
 
     def test_name_and_depends(self):
         from askme.runtime.modules.control_module import ControlModule
+
         assert ControlModule.name == "control"
         assert "pulse" in ControlModule.depends_on
 
@@ -406,6 +428,7 @@ class TestLEDModule:
 
         # Add safety module dependency
         from askme.runtime.modules.safety_module import SafetyModule
+
         safety = SafetyModule()
         registry.register(safety)
         safety.build(_cfg(), registry)
@@ -420,6 +443,7 @@ class TestLEDModule:
 
         registry = _base_registry()
         from askme.runtime.modules.safety_module import SafetyModule
+
         safety = SafetyModule()
         registry.register(safety)
         safety.build(_cfg(), registry)
@@ -431,6 +455,7 @@ class TestLEDModule:
 
     def test_name_and_depends(self):
         from askme.runtime.modules.led_module import LEDModule
+
         assert LEDModule.name == "led"
         assert "safety" in LEDModule.depends_on
         assert "skill" in LEDModule.depends_on
@@ -472,6 +497,7 @@ class TestProactiveModule:
 
     def test_name_and_depends(self):
         from askme.runtime.modules.proactive_module import ProactiveModule
+
         assert ProactiveModule.name == "proactive"
         assert "pipeline" in ProactiveModule.depends_on
         assert "memory" in ProactiveModule.depends_on
@@ -504,6 +530,7 @@ class TestHealthModule:
 
     def test_name_and_provides(self):
         from askme.runtime.modules.health_module import HealthModule
+
         assert HealthModule.name == "health"
         assert "health_http" in HealthModule.provides
 
@@ -517,46 +544,66 @@ class TestCompositions:
     def test_voice_runtime_builds(self):
         """voice blueprint includes cognition and fake runtime handoff."""
         from askme.blueprints.voice import voice
+
+        from askme.runtime.modules.warm_session_module import WarmSessionModule
+
         names = [mc.name for mc in voice._module_classes]
         assert "cognition" in names
         assert "runtime_handoff" in names
         assert "executor" in names
+        assert "warm_sessions" in names
+        assert WarmSessionModule in voice._module_classes
         assert names.index("executor") < names.index("voice")
-        assert len(voice._module_classes) == 12
+        assert len(voice._module_classes) == 13
 
     def test_voice_perception_runtime_builds(self):
         """voice_perception declares its own complete module list."""
         from askme.blueprints.voice_perception import voice_perception
+
+        from askme.runtime.modules.warm_session_module import WarmSessionModule
+
         names = [mc.name for mc in voice_perception._module_classes]
         assert "cognition" in names
         assert "runtime_handoff" in names
         assert "executor" in names
-        assert len(voice_perception._module_classes) == 16
+        assert "warm_sessions" in names
+        assert WarmSessionModule in voice_perception._module_classes
+        assert len(voice_perception._module_classes) == 17
 
     def test_text_runtime_has_no_voice(self):
         """text blueprint has no VoiceModule."""
         from askme.blueprints.text import text
+
+        from askme.runtime.modules.warm_session_module import WarmSessionModule
+
         names = [mc.name for mc in text._module_classes]
         assert "voice" not in names
         assert "text" in names
         assert "mission" in names
         assert "cognition" in names
         assert "runtime_handoff" in names
+        assert "warm_sessions" in names
         assert "health" in names
         assert "executor" in names
+        assert WarmSessionModule in text._module_classes
         assert names.index("executor") < names.index("text")
-        assert len(text._module_classes) == 11
+        assert len(text._module_classes) == 12
 
     def test_edge_robot_runtime_builds(self):
         """edge_robot declares its own complete module list."""
         from askme.blueprints.edge_robot import edge_robot
+
+        from askme.runtime.modules.warm_session_module import WarmSessionModule
+
         names = [mc.name for mc in edge_robot._module_classes]
         assert "control" in names
         assert "led" in names
         assert "mission" in names
         assert "cognition" in names
         assert "runtime_handoff" in names
-        assert len(edge_robot._module_classes) == 19
+        assert "warm_sessions" in names
+        assert WarmSessionModule in edge_robot._module_classes
+        assert len(edge_robot._module_classes) == 20
 
     def test_replace_on_composition(self):
         """Replacing a module in a blueprint should work."""
@@ -565,7 +612,9 @@ class TestCompositions:
         class MockLLM(Module):
             name = "llm"
             provides = ("llm",)
-            def build(self, cfg, registry): pass
+
+            def build(self, cfg, registry):
+                pass
 
         replaced = voice.replace(
             type("LLMModule", (), {"name": "llm"}),
@@ -580,12 +629,15 @@ class TestCompositions:
         from askme.blueprints.voice import voice
 
         from askme.runtime.modules.text_module import TextModule
+        from askme.runtime.modules.warm_session_module import WarmSessionModule
 
         smaller = voice.without(TextModule)
         names = [mc.name for mc in smaller._module_classes]
         assert "text" not in names
         assert "cognition" in names
-        assert len(smaller._module_classes) == 11
+        assert "warm_sessions" in names
+        assert WarmSessionModule in smaller._module_classes
+        assert len(smaller._module_classes) == 12
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -617,16 +669,33 @@ class TestModuleExports:
             TextModule,
             ToolsModule,
             VoiceModule,
+            WarmSessionModule,
         )
+
         modules = [
             CognitionModule,
-            LLMModule, ToolsModule, PulseModule, MemoryModule,
-            MissionModule, PerceptionModule, SafetyModule, PipelineModule,
-            SkillModule, ExecutorModule, VoiceModule, TextModule,
-            ControlModule, LEDModule, ProactiveModule, ReactionModule,
-            RuntimeHandoffModule, HealthModule, TelegramModule,
+            LLMModule,
+            ToolsModule,
+            PulseModule,
+            MemoryModule,
+            MissionModule,
+            PerceptionModule,
+            SafetyModule,
+            PipelineModule,
+            SkillModule,
+            ExecutorModule,
+            VoiceModule,
+            TextModule,
+            ControlModule,
+            LEDModule,
+            ProactiveModule,
+            ReactionModule,
+            RuntimeHandoffModule,
+            HealthModule,
+            TelegramModule,
+            WarmSessionModule,
         ]
-        assert len(modules) == 20
+        assert len(modules) == 21
         for mod_cls in modules:
             assert hasattr(mod_cls, "name")
             assert hasattr(mod_cls, "build")
@@ -634,7 +703,9 @@ class TestModuleExports:
     def test_all_in_dunder_all(self):
         """__all__ should list all module classes."""
         import askme.runtime.modules as pkg
-        assert len(pkg.__all__) == 20
+
+        assert "WarmSessionModule" in pkg.__all__
+        assert len(pkg.__all__) == 21
 
 
 class TestToolsModule:

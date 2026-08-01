@@ -11,8 +11,13 @@ import asyncio
 import json
 import logging
 import os
+import uuid
+from dataclasses import replace
+from inspect import Parameter, signature
 from typing import Any
 
+from askme.conversation import InteractionTurnContext
+from askme.llm.core.contracts import LLMCallContext
 from askme.telemetry.ota_bridge import OTABridgeMetrics
 from askme.tools.core.tool_registry import ToolRegistry
 
@@ -43,6 +48,62 @@ class SkillExecutor:
         self._tools = tool_registry
         self._default_model = default_model
         self._metrics = metrics
+
+    @staticmethod
+    def _accepts_keyword(callback: Any, name: str) -> bool:
+        """Return whether a callable accepts one optional compatibility keyword."""
+
+        signature_target = callback
+        side_effect = getattr(callback, "side_effect", None)
+        if callable(side_effect):
+            signature_target = side_effect
+        try:
+            parameters = signature(signature_target).parameters
+        except (TypeError, ValueError):
+            return False
+        parameter = parameters.get(name)
+        return bool(
+            (parameter is not None and parameter.kind is not Parameter.POSITIONAL_ONLY)
+            or any(candidate.kind is Parameter.VAR_KEYWORD for candidate in parameters.values())
+        )
+
+    @staticmethod
+    def _interaction_context(
+        llm_call_context: LLMCallContext,
+    ) -> InteractionTurnContext | None:
+        """Project complete LLM turn identity into canonical tool policy context."""
+
+        thread_id = str(llm_call_context.session_id or "").strip()
+        turn_id = str(llm_call_context.turn_id or "").strip()
+        if not thread_id or not turn_id:
+            return None
+        channel = str(llm_call_context.channel or "").strip()
+        operator_id = str(llm_call_context.operator_id or "").strip()
+        context_kwargs: dict[str, Any] = {}
+        cancel_token = getattr(llm_call_context, "cancel_token", None)
+        if cancel_token is not None:
+            context_kwargs["cancel_token"] = cancel_token
+        return InteractionTurnContext(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            channel=channel,
+            source=channel,
+            user_text="",
+            operator_id=operator_id or None,
+            **context_kwargs,
+        )
+
+    def _has_pending_approval(
+        self,
+        interaction_context: InteractionTurnContext | None,
+    ) -> bool:
+        callback = self._tools.has_pending_approval
+        if interaction_context is not None and self._accepts_keyword(
+            callback,
+            "interaction_context",
+        ):
+            return bool(callback(interaction_context=interaction_context))
+        return bool(callback())
 
     async def preflight_skill(self, skill: SkillDefinition) -> tuple[bool, str]:
         """Check deterministic runtime prerequisites before an audible preface.
@@ -106,6 +167,7 @@ class SkillExecutor:
         *,
         prompt_seed: list[dict[str, Any]] | None = None,
         on_tool_call: Any | None = None,
+        llm_call_context: LLMCallContext | None = None,
     ) -> str:
         """Execute a skill end-to-end.
 
@@ -134,20 +196,21 @@ class SkillExecutor:
         # Exclude dispatch_skill from skill tool sets — prevents recursive dispatch
         # which would saturate the thread pool via asyncio.run_coroutine_threadsafe.
         tool_definitions = [
-            td for td in tool_definitions
-            if td.get("function", {}).get("name") != "dispatch_skill"
+            td for td in tool_definitions if td.get("function", {}).get("name") != "dispatch_skill"
         ]
 
         # If the skill specifies a tools section, filter to only those tools
         allowed_tools: list[str] | None = None
         if skill.tools_section:
             allowed_tools = [
-                t.strip() for t in skill.tools_section.split("\n")
+                t.strip()
+                for t in skill.tools_section.split("\n")
                 if t.strip() and not t.strip().startswith("#")
             ]
             if allowed_tools:
                 tool_definitions = [
-                    td for td in tool_definitions
+                    td
+                    for td in tool_definitions
                     if td.get("function", {}).get("name") in allowed_tools
                 ]
         allowed_tool_names = {
@@ -170,7 +233,16 @@ class SkillExecutor:
         if context and "user_input" in context:
             messages.append({"role": "user", "content": context["user_input"]})
 
+        base_llm_context = llm_call_context or LLMCallContext(
+            purpose="tool_followup",
+            channel="text",
+            request_class="robot_action",
+            privacy_class="conversation",
+            allow_cache=False,
+        )
+
         import time as _time
+
         t_start = _time.perf_counter()
         try:
             result = await asyncio.wait_for(
@@ -181,6 +253,7 @@ class SkillExecutor:
                     allowed_tool_names=allowed_tool_names,
                     max_safety_level=max_safety_level,
                     on_tool_call=on_tool_call,
+                    llm_call_context=base_llm_context,
                 ),
                 timeout=timeout,
             )
@@ -198,7 +271,9 @@ class SkillExecutor:
             logger.warning("Skill '%s' timed out after %ds", skill.name, timeout)
             if self._metrics is not None:
                 self._metrics.record_skill_execution(
-                    success=False, skill_name=skill.name, duration_s=duration_s,
+                    success=False,
+                    skill_name=skill.name,
+                    duration_s=duration_s,
                 )
             return f"[Timeout] Skill '{skill.name}' execution timed out after {timeout}s."
         except Exception as exc:
@@ -206,7 +281,9 @@ class SkillExecutor:
             logger.warning("Skill '%s' failed: %s", skill.name, exc)
             if self._metrics is not None:
                 self._metrics.record_skill_execution(
-                    success=False, skill_name=skill.name, duration_s=duration_s,
+                    success=False,
+                    skill_name=skill.name,
+                    duration_s=duration_s,
                 )
             return f"[Error] Skill '{skill.name}' execution failed: {exc}"
 
@@ -220,13 +297,16 @@ class SkillExecutor:
         max_safety_level: str = "critical",
         max_iterations: int = 5,
         on_tool_call: Any | None = None,
+        llm_call_context: LLMCallContext,
     ) -> str:
         """Run the LLM -> tool-call -> LLM loop until a text response is produced."""
+        interaction_context = self._interaction_context(llm_call_context)
         for iteration in range(max_iterations):
             response = await self._create_completion(
                 messages,
                 model=model,
                 tool_definitions=tool_definitions,
+                llm_call_context=llm_call_context,
             )
             choice = response.choices[0]
             message = choice.message
@@ -234,21 +314,23 @@ class SkillExecutor:
             # If the model returned tool calls, execute them
             if message.tool_calls:
                 # Append the assistant message (with tool_calls) to conversation
-                messages.append({
-                    "role": "assistant",
-                    "content": message.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in message.tool_calls
-                    ],
-                })
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": message.content,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                            for tc in message.tool_calls
+                        ],
+                    }
+                )
 
                 # Execute each tool call and append results
                 for tc in message.tool_calls:
@@ -256,23 +338,36 @@ class SkillExecutor:
                     tool_args = tc.function.arguments
                     logger.info(
                         "Skill tool call [%d/%d]: %s(%s)",
-                        iteration + 1, max_iterations, tool_name, tool_args,
+                        iteration + 1,
+                        max_iterations,
+                        tool_name,
+                        tool_args,
                     )
                     if on_tool_call:
                         on_tool_call(tool_name)
+                    execute_kwargs: dict[str, Any] = {
+                        "allowed_names": allowed_tool_names,
+                        "max_safety_level": max_safety_level,
+                    }
+                    if interaction_context is not None and self._accepts_keyword(
+                        self._tools.execute,
+                        "interaction_context",
+                    ):
+                        execute_kwargs["interaction_context"] = interaction_context
                     result = await asyncio.to_thread(
                         self._tools.execute,
                         tool_name,
                         tool_args,
-                        allowed_names=allowed_tool_names,
-                        max_safety_level=max_safety_level,
+                        **execute_kwargs,
                     )
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": str(result),
-                    })
-                    if self._tools.has_pending_approval():
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": str(result),
+                        }
+                    )
+                    if self._has_pending_approval(interaction_context):
                         return str(result)
                 continue
 
@@ -289,13 +384,20 @@ class SkillExecutor:
         *,
         model: str,
         tool_definitions: list[dict[str, Any]],
+        llm_call_context: LLMCallContext,
     ) -> Any:
         if hasattr(self._llm, "chat_completion"):
+            call_context = replace(
+                llm_call_context,
+                call_id=uuid.uuid4().hex,
+                purpose="tool_followup",
+            )
             return await self._llm.chat_completion(
                 messages,
                 tools=tool_definitions or None,
                 tool_choice="auto" if tool_definitions else None,
                 model=model,
+                context=call_context,
             )
 
         kwargs: dict[str, Any] = {
@@ -343,7 +445,12 @@ def _navigation_status_readiness(payload: Any) -> tuple[bool, str]:
             lowered = str(value or "").lower()
             if any(
                 token in lowered
-                for token in ("stale", "odometry_missing", "pose_not_ready", "localization_not_ready")
+                for token in (
+                    "stale",
+                    "odometry_missing",
+                    "pose_not_ready",
+                    "localization_not_ready",
+                )
             ):
                 return False, "nav_pose_stale"
         if normalized_key in {"status", "state", "readiness"}:

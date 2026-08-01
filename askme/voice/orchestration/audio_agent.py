@@ -14,7 +14,7 @@ from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import numpy as np
@@ -34,6 +34,7 @@ except ModuleNotFoundError:
         OutputStream = None
         CallbackAbort = _CallbackAbort
         CallbackStop = _CallbackStop
+
         @staticmethod
         def play(*args: object, **kwargs: object) -> None: ...
         @staticmethod
@@ -43,6 +44,7 @@ except ModuleNotFoundError:
         @staticmethod
         def query_devices(device: object = None, kind: object = None) -> object:
             return {}
+
     sd = _SoundDeviceStub()  # type: ignore[assignment]
 
 from askme.robot_interaction.routing_policy import (
@@ -51,6 +53,7 @@ from askme.robot_interaction.routing_policy import (
 )
 from askme.telemetry.ota_bridge import OTABridgeMetrics, get_ota_runtime_metrics
 from askme.voice.core.media_contracts import VoiceMediaFrame
+from askme.voice.core.punctuation import PunctuationRestorer
 from askme.voice.core.turn_trace import VoiceTurnTraceRecorder
 from askme.voice.input.asr_manager import (
     _CONFIRMATION_WORDS,  # noqa: F401 — re-exported for tests
@@ -72,6 +75,7 @@ from askme.voice.input.vad_controller import (
 from askme.voice.orchestration.interrupt_recovery import (
     InterruptionRecoveryCoordinator,
     InterruptionRecoveryState,
+    PlaybackHoldPort,
 )
 from askme.voice.output.audio_router import AudioRouter
 from askme.voice.output.phrase_prime import WAITING_FEEDBACK_CACHE_KEY
@@ -81,7 +85,6 @@ logger = logging.getLogger(__name__)
 
 # Default ASR timeout (overridden by config voice.asr.asr_timeout)
 _DEFAULT_ASR_TIMEOUT = 10.0
-_TTS_PREWARM_HARVEST_TIMEOUT_S = 0.5
 
 
 class AgentState(Enum):
@@ -95,11 +98,12 @@ class AgentState(Enum):
         Any → MUTED (mute() called)
         MUTED → IDLE (unmute() called)
     """
-    IDLE = "idle"              # Waiting for wake word / user input
-    LISTENING = "listening"    # VAD active, collecting speech (speech_active=True)
+
+    IDLE = "idle"  # Waiting for wake word / user input
+    LISTENING = "listening"  # VAD active, collecting speech (speech_active=True)
     PROCESSING = "processing"  # ASR done, text returned, LLM/skill running
-    SPEAKING = "speaking"      # TTS is playing back audio
-    MUTED = "muted"            # Microphone muted by user
+    SPEAKING = "speaking"  # TTS is playing back audio
+    MUTED = "muted"  # Microphone muted by user
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,9 +151,7 @@ class AudioAgent:
         if not isinstance(readiness_cfg, dict):
             readiness_cfg = {}
         self.voice_mode = voice_mode
-        self._require_wake_word = bool(
-            readiness_cfg.get("require_wake_word", True)
-        )
+        self._require_wake_word = bool(readiness_cfg.get("require_wake_word", True))
         self._metrics = metrics or get_ota_runtime_metrics()
         self._audio_router = audio_router
 
@@ -158,6 +160,7 @@ class AudioAgent:
         self.stop_event = threading.Event()
         self.woken_up: bool = False
         self.last_turn_wake_authorized: bool = False
+        self.last_turn_asr_confidence: float | None = None
         self.last_turn_wake_source: str = "none"
         self.last_accepted_voice_turn_id: str | None = None
         self._active_capture_voice_turn_id: str | None = None
@@ -179,9 +182,7 @@ class AudioAgent:
         self._spoken_wait_prompt_enabled: bool = bool(
             feedback_cfg.get("spoken_wait_prompt_enabled", False)
         )
-        self._spoken_wait_prompt_text: str = str(
-            feedback_cfg.get("text", "") or ""
-        ).strip()
+        self._spoken_wait_prompt_text: str = str(feedback_cfg.get("text", "") or "").strip()
         self._spoken_wait_prompt_cache_key: str = str(
             feedback_cfg.get("cache_key", "") or ""
         ).strip()
@@ -196,11 +197,9 @@ class AudioAgent:
             feedback_cfg.get("delay_s", 1.5),
             default=1.5,
         )
-        self._spoken_wait_prompt_min_interval_s = (
-            self._finite_nonnegative_feedback_seconds(
-                feedback_cfg.get("min_interval_s", 8.0),
-                default=8.0,
-            )
+        self._spoken_wait_prompt_min_interval_s = self._finite_nonnegative_feedback_seconds(
+            feedback_cfg.get("min_interval_s", 8.0),
+            default=8.0,
         )
         self._last_spoken_wait_prompt_at: float = 0.0
         self._processing_feedback_generation: int = 0
@@ -214,7 +213,8 @@ class AudioAgent:
         self._processing_feedback_overlap_prevented_total: int = 0
         self._processing_feedback_last_transition: str = "idle"
         self._runtime_switch_lock = threading.RLock()
-        self._tts_provider_prewarm_threads: set[threading.Thread] = set()
+        self._tts_activation_callback: Callable[[TTSEngine], None] | None = None
+        self._runtime_switch_callback: Callable[[dict[str, Any]], None] | None = None
         self._listen_loop_active = False
         self._listen_cancel_event: threading.Event | None = None
         self._listen_loop_stopped = threading.Event()
@@ -225,12 +225,8 @@ class AudioAgent:
         self._pending_asr_config: dict[str, Any] | None = None
         self._pending_tts_config: dict[str, Any] | None = None
         self._barge_in_callback: Callable[[], None] | None = None
-        self._capture_processor: (
-            Callable[[np.ndarray, int, bool], np.ndarray] | None
-        ) = None
-        self._capture_processor_failure_callback: (
-            Callable[[BaseException], None] | None
-        ) = None
+        self._capture_processor: Callable[[np.ndarray, int, bool], np.ndarray] | None = None
+        self._capture_processor_failure_callback: Callable[[BaseException], None] | None = None
         self._capture_processor_error_logged = False
         self._capture_processor_failed_current_frame = False
         # Optional cloud speech-to-speech stays behind the local microphone,
@@ -290,9 +286,7 @@ class AudioAgent:
         self._fast_endpoint = FastEndpointController(
             quick_replies=DEFAULT_QUICK_REPLIES,
             enabled=bool(fast_path_cfg.get("enabled", False)),
-            candidate_silence_ms=float(
-                fast_path_cfg.get("candidate_silence_ms", 300.0)
-            ),
+            candidate_silence_ms=float(fast_path_cfg.get("candidate_silence_ms", 300.0)),
             estop_candidate_silence_ms=float(
                 fast_path_cfg.get("estop_candidate_silence_ms", 150.0)
             ),
@@ -300,9 +294,7 @@ class AudioAgent:
         )
 
         # -- Input engines (only in voice mode) --
-        self._asr_timeout: float = voice_cfg.get("asr", {}).get(
-            "asr_timeout", _DEFAULT_ASR_TIMEOUT
-        )
+        self._asr_timeout: float = voice_cfg.get("asr", {}).get("asr_timeout", _DEFAULT_ASR_TIMEOUT)
 
         # Backward-compat attributes (tested by test_audio_agent.py)
         self._echo_gate_peak: int = int(voice_cfg.get("echo_gate_peak", 800))
@@ -317,9 +309,7 @@ class AudioAgent:
             except (ValueError, TypeError):
                 self._input_device = str(_raw_input)
         _raw_gate = voice_cfg.get("noise_gate_peak", 0)
-        self._noise_gate_peak: int = (
-            0 if str(_raw_gate).lower() == "auto" else int(_raw_gate)
-        )
+        self._noise_gate_peak: int = 0 if str(_raw_gate).lower() == "auto" else int(_raw_gate)
         # Fast endpointing needs its own low-energy threshold.  The main noise
         # gate may deliberately be disabled when software AEC is active, but a
         # disabled gate must not prevent safe fixed phrases from closing early.
@@ -353,6 +343,7 @@ class AudioAgent:
         # needs a live VAD controller.
         self._vad_ctrl = VADController(voice_cfg) if voice_mode else None
         self._asr_mgr = ASRManager(voice_cfg) if voice_mode else None
+        self.punct: PunctuationRestorer | None
 
         if voice_mode:
             assert self._vad_ctrl is not None
@@ -384,16 +375,27 @@ class AudioAgent:
             self.woken_up = True
 
         # -- Output engine --
-        self.tts = TTSEngine(voice_cfg.get("tts", {}), audio_router=audio_router)
+        initial_tts_config = voice_cfg.get("tts", {})
+        self.tts = TTSEngine(initial_tts_config, audio_router=audio_router)
+        initial_asr = self._asr_config_selection(voice_cfg)
+        initial_tts = self._tts_config_selection(initial_tts_config)
+        self._runtime_switch_desired = {
+            "asr": dict(initial_asr),
+            "tts": dict(initial_tts),
+        }
+        self._runtime_switch_effective = {
+            "asr": dict(initial_asr),
+            "tts": dict(initial_tts),
+        }
+        self._runtime_switch_failed: dict[str, dict[str, str] | None] = {
+            "asr": None,
+            "tts": None,
+        }
         interruption_cfg = voice_cfg.get("interruption_recovery", {}) or {}
         if not isinstance(interruption_cfg, dict):
             raise ValueError("voice.interruption_recovery must be a mapping")
-        self._interruption_pause_timeout_s = float(
-            interruption_cfg.get("pause_timeout_s", 0.05)
-        )
-        self._interruption_hold_timeout_s = float(
-            interruption_cfg.get("hold_timeout_s", 2.0)
-        )
+        self._interruption_pause_timeout_s = float(interruption_cfg.get("pause_timeout_s", 0.05))
+        self._interruption_hold_timeout_s = float(interruption_cfg.get("hold_timeout_s", 2.0))
         self._interruption_recovery = self._new_interruption_recovery(self.tts)
         logger.info("AudioAgent run_id=%s mode=%s", self._run_id, "voice" if voice_mode else "text")
         self._refresh_voice_metrics()
@@ -406,9 +408,7 @@ class AudioAgent:
         self._output_trace_lock = threading.RLock()
         self._output_trace_epoch = 0
         self._active_output_trace_token: OutputPlaybackTraceToken | None = None
-        self._output_trace_context: ContextVar[
-            OutputPlaybackTraceToken | None
-        ] = ContextVar(
+        self._output_trace_context: ContextVar[OutputPlaybackTraceToken | None] = ContextVar(
             f"askme_output_playback_{id(self)}",
             default=None,
         )
@@ -471,10 +471,7 @@ class AudioAgent:
         # stale wait cue cannot slip between them and stop the answer audio.
         with self._output_trace_lock:
             active = self._active_output_trace_token
-            if (
-                active is not None
-                and self._output_trace_context.get() != active
-            ):
+            if active is not None and self._output_trace_context.get() != active:
                 self._playback_owner_conflict_count += 1
                 raise RuntimeError("playback owner conflict")
             with self._realtime_output_lock:
@@ -500,9 +497,7 @@ class AudioAgent:
         or acquiring authority over a newer turn.
         """
 
-        normalized_voice_turn_id = self._normalize_playback_voice_turn_id(
-            voice_turn_id
-        )
+        normalized_voice_turn_id = self._normalize_playback_voice_turn_id(voice_turn_id)
         with self._output_trace_lock:
             token = self._start_playback_locked(
                 normalized_voice_turn_id,
@@ -598,17 +593,13 @@ class AudioAgent:
                 self._close_interruption_recovery()
                 if self._interruption_output_trace_token == active:
                     self._interruption_output_trace_token = None
-            frozen_played_ms = self._streaming_played_ms(
-                active.transport_generation
-            )
+            frozen_played_ms = self._streaming_played_ms(active.transport_generation)
             self.tts.stop_playback()
             if active.provider_generation is not None:
                 with self._realtime_output_lock:
                     if (
-                        self._realtime_output_provider_generation
-                        == active.provider_generation
-                        and self._realtime_output_tts_generation
-                        == active.transport_generation
+                        self._realtime_output_provider_generation == active.provider_generation
+                        and self._realtime_output_tts_generation == active.transport_generation
                     ):
                         self._realtime_last_physical_played_ms = max(
                             int(
@@ -638,10 +629,7 @@ class AudioAgent:
 
         with self._output_trace_lock:
             token = self._realtime_output_trace_token
-            if (
-                token is None
-                or token.provider_generation != int(expected_generation)
-            ):
+            if token is None or token.provider_generation != int(expected_generation):
                 self._stale_playback_stop_count += 1
                 return False
             self.stop_playback(token)
@@ -662,6 +650,7 @@ class AudioAgent:
             self._audio.stop_playback()
         """
         import asyncio
+
         token = self.start_playback()
         if token is None:
             raise RuntimeError("playback owner conflict")
@@ -701,9 +690,7 @@ class AudioAgent:
         if coordinator is not None:
             try:
                 if not coordinator.start():
-                    logger.warning(
-                        "Realtime dialogue unavailable; using cascade voice fallback"
-                    )
+                    logger.warning("Realtime dialogue unavailable; using cascade voice fallback")
             except Exception as exc:
                 # Realtime is an optional latency path.  Mic + ASR + LLM + TTS
                 # must remain usable if its preconnect fails.
@@ -799,19 +786,12 @@ class AudioAgent:
             session_id=self._run_id,
             bot_name=str(getattr(realtime_config, "bot_name", "小算") or "小算"),
             system_role=str(getattr(realtime_config, "system_role", "") or ""),
-            speaking_style=str(
-                getattr(realtime_config, "speaking_style", "") or ""
-            ),
+            speaking_style=str(getattr(realtime_config, "speaking_style", "") or ""),
             input_mode=str(getattr(realtime_config, "input_mode", "audio") or "audio"),
-            input_sample_rate=int(
-                getattr(realtime_config, "input_sample_rate", 16_000)
-            ),
-            output_sample_rate=int(
-                getattr(realtime_config, "output_sample_rate", 24_000)
-            ),
+            input_sample_rate=int(getattr(realtime_config, "input_sample_rate", 16_000)),
+            output_sample_rate=int(getattr(realtime_config, "output_sample_rate", 24_000)),
             output_format=str(
-                getattr(realtime_config, "output_format", "pcm_s16le")
-                or "pcm_s16le"
+                getattr(realtime_config, "output_format", "pcm_s16le") or "pcm_s16le"
             ),
             allow_tool_calls=False,
             allow_hardware_dispatch=False,
@@ -822,13 +802,9 @@ class AudioAgent:
             context,
             mode=self._realtime_mode,
             audio_sink=(
-                self._queue_realtime_audio
-                if self._realtime_mode == "general_chat"
-                else None
+                self._queue_realtime_audio if self._realtime_mode == "general_chat" else None
             ),
-            pending_output_ms=int(
-                getattr(realtime_config, "pending_output_ms", 2_000)
-            ),
+            pending_output_ms=int(getattr(realtime_config, "pending_output_ms", 2_000)),
         )
 
     def _prepare_realtime_turn_boundary(self) -> bool:
@@ -872,10 +848,7 @@ class AudioAgent:
             current = self._realtime_recovery_thread
             if current is not None and current.is_alive():
                 return False
-            if (
-                self._realtime_coordinator is not coordinator
-                or self.stop_event.is_set()
-            ):
+            if self._realtime_coordinator is not coordinator or self.stop_event.is_set():
                 return False
             cancel_event = threading.Event()
             self._realtime_recovery_stop = cancel_event
@@ -907,9 +880,7 @@ class AudioAgent:
             obsolete = self._realtime_coordinator is not coordinator
         if success and (cancelled or obsolete):
             try:
-                coordinator.close(
-                    "recovery_cancelled" if cancelled else "recovery_obsolete"
-                )
+                coordinator.close("recovery_cancelled" if cancelled else "recovery_obsolete")
             except Exception as exc:
                 error = error or type(exc).__name__
             success = False
@@ -995,10 +966,7 @@ class AudioAgent:
             status = coordinator.status_snapshot()
         except Exception:
             return False
-        return bool(
-            status.get("active", False)
-            and not status.get("quarantined", False)
-        )
+        return bool(status.get("active", False) and not status.get("quarantined", False))
 
     def realtime_capture_active(self) -> bool:
         coordinator = self._realtime_coordinator
@@ -1008,10 +976,7 @@ class AudioAgent:
             status = coordinator.status_snapshot()
         except Exception:
             return False
-        return bool(
-            status.get("active", False)
-            and not status.get("quarantined", False)
-        )
+        return bool(status.get("active", False) and not status.get("quarantined", False))
 
     def try_realtime_general_chat(
         self,
@@ -1048,11 +1013,7 @@ class AudioAgent:
 
         coordinator = self._realtime_coordinator
         prepare = getattr(coordinator, "prepare_general_chat", None)
-        if (
-            coordinator is None
-            or not self.realtime_general_chat_ready()
-            or not callable(prepare)
-        ):
+        if coordinator is None or not self.realtime_general_chat_ready() or not callable(prepare):
             return None
         try:
             return prepare(
@@ -1074,18 +1035,12 @@ class AudioAgent:
 
         coordinator = self._realtime_coordinator
         release = getattr(coordinator, "release_general_chat", None)
-        if (
-            coordinator is None
-            or not self.realtime_general_chat_ready()
-            or not callable(release)
-        ):
+        if coordinator is None or not self.realtime_general_chat_ready() or not callable(release):
             return False
         approval_generation = int(getattr(approval, "generation", 0) or 0)
         if expected_generation > 0 and approval_generation != int(expected_generation):
             return False
-        normalized_voice_turn_id = (
-            voice_turn_id.strip() if isinstance(voice_turn_id, str) else None
-        )
+        normalized_voice_turn_id = voice_turn_id.strip() if isinstance(voice_turn_id, str) else None
         if voice_turn_id is not None and (
             not normalized_voice_turn_id or len(normalized_voice_turn_id) > 128
         ):
@@ -1134,9 +1089,7 @@ class AudioAgent:
                 if realtime_token is not None and active == realtime_token:
                     self.tts.stop_playback()
                     self._agent_state = AgentState.IDLE
-                    self._close_active_output_trace_locked(
-                        "realtime_release_rejected"
-                    )
+                    self._close_active_output_trace_locked("realtime_release_rejected")
             except Exception as exc:
                 logger.debug("Realtime PCM release cleanup failed: %s", exc)
             with self._realtime_output_lock:
@@ -1161,13 +1114,10 @@ class AudioAgent:
                 expected_generation = self._realtime_output_provider_generation
             generation_matches = bool(
                 expected_generation > 0
-                and expected_generation
-                == self._realtime_output_provider_generation
+                and expected_generation == self._realtime_output_provider_generation
             )
             if generation_matches:
-                self._realtime_output_terminated_provider_generation = int(
-                    expected_generation
-                )
+                self._realtime_output_terminated_provider_generation = int(expected_generation)
                 self._realtime_output_tts_generation = None
                 self._realtime_output_provider_generation = 0
                 self._realtime_output_started = False
@@ -1210,17 +1160,12 @@ class AudioAgent:
                 )
                 or 0
             )
-            if (
-                expected_generation > 0
-                and provider_generation != int(expected_generation)
-            ):
+            if expected_generation > 0 and provider_generation != int(expected_generation):
                 stale_expected_generation = int(expected_generation)
             else:
                 stale_expected_generation = 0
             if stale_expected_generation == 0 and provider_generation > 0:
-                self._realtime_output_terminated_provider_generation = int(
-                    provider_generation
-                )
+                self._realtime_output_terminated_provider_generation = int(provider_generation)
             if stale_expected_generation == 0:
                 self._realtime_output_tts_generation = None
                 self._realtime_output_provider_generation = 0
@@ -1310,10 +1255,7 @@ class AudioAgent:
             target_generation = int(expected_generation or provider_generation)
             realtime_token = self._realtime_output_trace_token
             active = self._active_output_trace_token
-            if (
-                target_generation > 0
-                and provider_generation != target_generation
-            ):
+            if target_generation > 0 and provider_generation != target_generation:
                 self.discard_realtime_turn(
                     reason,
                     expected_generation=target_generation,
@@ -1356,9 +1298,7 @@ class AudioAgent:
         ):
             return False
         samples = np.asarray(samples_i16)
-        if samples.ndim != 1 or samples.size == 0 or not np.issubdtype(
-            samples.dtype, np.integer
-        ):
+        if samples.ndim != 1 or samples.size == 0 or not np.issubdtype(samples.dtype, np.integer):
             return False
         pcm = np.ascontiguousarray(samples, dtype="<i2").tobytes()
         try:
@@ -1410,12 +1350,8 @@ class AudioAgent:
             if generation is None:
                 return
             active = self._active_output_trace_token
-            if (
-                active is not None
-                and (
-                    not already_started
-                    or active != self._realtime_output_trace_token
-                )
+            if active is not None and (
+                not already_started or active != self._realtime_output_trace_token
             ):
                 self._playback_owner_conflict_count += 1
                 self.discard_realtime_turn(
@@ -1585,10 +1521,9 @@ class AudioAgent:
         if not self.voice_mode:
             raise RuntimeError("ASR reconfiguration requires voice mode")
         clean = dict(voice_config or {})
+        self._record_runtime_switch_attempt("asr", clean)
         with self._runtime_switch_lock:
-            if self._asr_phase_active or bool(
-                getattr(self._asr_mgr, "_recognition_active", False)
-            ):
+            if self._asr_phase_active or bool(getattr(self._asr_mgr, "_recognition_active", False)):
                 self._pending_asr_config = clean
                 return {
                     "updated": True,
@@ -1596,12 +1531,35 @@ class AudioAgent:
                     "state": "pending",
                     "effective": "next_listen_cycle",
                 }
-        return self._apply_asr_config(clean)
+        try:
+            return self._apply_asr_config(clean)
+        except Exception as exc:
+            self._record_runtime_switch_failure("asr", clean, exc)
+            raise
+
+    def set_tts_activation_callback(
+        self,
+        callback: Callable[[TTSEngine], None] | None,
+    ) -> None:
+        """Register the runtime owner notified when a new TTS engine is active."""
+
+        with self._runtime_switch_lock:
+            self._tts_activation_callback = callback
+
+    def set_runtime_switch_callback(
+        self,
+        callback: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        """Register the owner notified when a deferred ASR/TTS switch resolves."""
+
+        with self._runtime_switch_lock:
+            self._runtime_switch_callback = callback
 
     def reconfigure_tts(self, tts_config: dict[str, Any]) -> dict[str, Any]:
         """Replace TTS immediately when idle, or queue it after playback."""
 
         clean = dict(tts_config or {})
+        self._record_runtime_switch_attempt("tts", clean)
         with self._runtime_switch_lock:
             if self.stop_event.is_set():
                 raise RuntimeError("TTS reconfiguration rejected after AudioAgent shutdown")
@@ -1613,7 +1571,11 @@ class AudioAgent:
                     "state": "pending",
                     "effective": "after_playback",
                 }
-        return self._apply_tts_config(clean)
+        try:
+            return self._apply_tts_config(clean)
+        except Exception as exc:
+            self._record_runtime_switch_failure("tts", clean, exc)
+            raise
 
     def _apply_asr_config(self, voice_config: dict[str, Any]) -> dict[str, Any]:
         next_manager = ASRManager(voice_config)
@@ -1627,6 +1589,7 @@ class AudioAgent:
         if previous is not None:
             previous.reset()
         self._refresh_voice_metrics()
+        self._record_runtime_switch_active("asr", voice_config)
         return {
             "updated": True,
             "component": "asr",
@@ -1658,11 +1621,11 @@ class AudioAgent:
             raise RuntimeError("TTS reconfiguration rejected after AudioAgent shutdown")
         if previous is not None and previous_interruption_recovery is not None:
             previous_interruption_recovery.close()
-            self._cancel_tts_provider_prewarm(previous)
             previous.shutdown()
         self._refresh_voice_metrics()
+        self._record_runtime_switch_active("tts", tts_config)
         runtime = next_tts.status_snapshot()
-        self._start_tts_provider_prewarm(next_tts)
+        self._notify_tts_activated(next_tts)
         return {
             "updated": True,
             "component": "tts",
@@ -1675,95 +1638,235 @@ class AudioAgent:
         tts: TTSEngine,
     ) -> InterruptionRecoveryCoordinator:
         return InterruptionRecoveryCoordinator(
-            tts,
+            cast(PlaybackHoldPort, tts),
             pause_timeout_s=self._interruption_pause_timeout_s,
             hold_timeout_s=self._interruption_hold_timeout_s,
         )
 
-    def _start_tts_provider_prewarm(self, tts: TTSEngine) -> None:
-        prewarm = getattr(tts, "prewarm_provider_session", None)
-        if not callable(prewarm):
-            return
-
-        thread = threading.Thread(
-            target=self._prewarm_tts_provider,
-            args=(tts, prewarm),
-            name="audio-agent-tts-provider-prewarm",
-            daemon=True,
-        )
+    def _notify_tts_activated(self, tts: TTSEngine) -> None:
         with self._runtime_switch_lock:
-            if self.stop_event.is_set() or self.tts is not tts:
-                return
-            self._tts_provider_prewarm_threads.add(thread)
-            try:
-                thread.start()
-            except Exception as exc:
-                self._tts_provider_prewarm_threads.discard(thread)
-                logger.warning("TTS provider prewarm could not start: %s", exc)
-
-    def _prewarm_tts_provider(self, tts: TTSEngine, prewarm: Callable[[], Any]) -> None:
-        current = threading.current_thread()
+            callback = self._tts_activation_callback
+        if callback is None:
+            return
         try:
-            with self._runtime_switch_lock:
-                if self.stop_event.is_set() or self.tts is not tts:
-                    return
-            try:
-                result = prewarm()
-            except Exception as exc:
-                logger.warning("TTS provider prewarm failed: %s", exc)
-                return
-            if isinstance(result, dict) and result.get("ok"):
-                logger.info("TTS provider prewarm %s", result)
+            callback(tts)
+        except Exception as exc:
+            # Warming is a latency optimization. A notification consumer must
+            # never roll back an already committed, otherwise healthy engine.
+            logger.warning("TTS activation callback failed: %s", exc)
+
+    def _ensure_runtime_switch_tracking(self) -> None:
+        lock = getattr(self, "_runtime_switch_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._runtime_switch_lock = lock
+        with lock:
+            pending_asr = getattr(self, "_pending_asr_config", None)
+            pending_tts = getattr(self, "_pending_tts_config", None)
+            default_asr = (
+                self._asr_config_selection(pending_asr)
+                if isinstance(pending_asr, dict)
+                else {"provider": "local", "model": "local"}
+            )
+            if isinstance(pending_tts, dict):
+                default_tts = self._tts_config_selection(pending_tts)
             else:
-                logger.debug("TTS provider prewarm skipped: %s", result)
-        finally:
-            with self._runtime_switch_lock:
-                self._tts_provider_prewarm_threads.discard(current)
+                default_tts = {
+                    "backend": str(getattr(getattr(self, "tts", None), "backend", "")),
+                    "model": "",
+                    "voice_id": "",
+                }
+            desired = getattr(self, "_runtime_switch_desired", None)
+            if not isinstance(desired, dict):
+                desired = {}
+                self._runtime_switch_desired = desired
+            effective = getattr(self, "_runtime_switch_effective", None)
+            if not isinstance(effective, dict):
+                effective = {}
+                self._runtime_switch_effective = effective
+            failed = getattr(self, "_runtime_switch_failed", None)
+            if not isinstance(failed, dict):
+                failed = {}
+                self._runtime_switch_failed = failed
+            desired.setdefault("asr", dict(default_asr))
+            desired.setdefault("tts", dict(default_tts))
+            effective.setdefault("asr", dict(default_asr))
+            effective.setdefault("tts", dict(default_tts))
+            failed.setdefault("asr", None)
+            failed.setdefault("tts", None)
+            if not hasattr(self, "_runtime_switch_callback"):
+                self._runtime_switch_callback = None
 
     @staticmethod
-    def _cancel_tts_provider_prewarm(tts: TTSEngine) -> None:
-        cancel = getattr(tts, "cancel_provider_prewarm", None)
-        if not callable(cancel):
-            return
-        try:
-            cancel()
-        except Exception as exc:
-            logger.warning("TTS provider prewarm cancellation failed: %s", exc)
+    def _asr_config_selection(voice_config: dict[str, Any]) -> dict[str, str]:
+        cloud_cfg = voice_config.get("cloud_asr", {})
+        if not isinstance(cloud_cfg, dict) or not cloud_cfg.get("enabled"):
+            return {"provider": "local", "model": "local"}
+        return {
+            "provider": str(cloud_cfg.get("provider") or ""),
+            "model": str(cloud_cfg.get("model") or ""),
+        }
 
-    def _harvest_tts_provider_prewarm_threads(self) -> None:
-        deadline = time.monotonic() + _TTS_PREWARM_HARVEST_TIMEOUT_S
+    @staticmethod
+    def _tts_config_selection(tts_config: dict[str, Any]) -> dict[str, str]:
+        backend = str(tts_config.get("backend") or "")
+        if backend == "volcengine":
+            model = str(tts_config.get("volcengine_tts_resource_id") or "")
+            voice_id = str(tts_config.get("volcengine_tts_speaker") or "")
+        elif backend == "edge":
+            model = str(tts_config.get("voice") or "")
+            voice_id = model
+        elif backend == "local":
+            raw_model = str(tts_config.get("model_dir") or "").replace("\\", "/").rstrip("/")
+            model = raw_model.rsplit("/", 1)[-1] if raw_model else ""
+            voice_id = str(tts_config.get("sid") or "")
+        else:
+            model = str(tts_config.get("minimax_tts_model") or "")
+            voice_id = str(tts_config.get("minimax_voice_id") or "")
+        return {
+            "backend": backend,
+            "model": model,
+            "voice_id": voice_id,
+        }
+
+    def _runtime_switch_selection(
+        self,
+        component: str,
+        config: dict[str, Any],
+    ) -> dict[str, str]:
+        if component == "asr":
+            return self._asr_config_selection(config)
+        return self._tts_config_selection(config)
+
+    def _record_runtime_switch_attempt(
+        self,
+        component: str,
+        config: dict[str, Any],
+    ) -> None:
+        selection = self._runtime_switch_selection(component, config)
         with self._runtime_switch_lock:
-            threads = tuple(self._tts_provider_prewarm_threads)
-        current = threading.current_thread()
-        for thread in threads:
-            if thread is current:
-                continue
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            thread.join(timeout=remaining)
-        alive = [thread for thread in threads if thread is not current and thread.is_alive()]
-        if alive:
-            logger.warning(
-                "%d daemon TTS provider prewarm thread(s) did not stop within %.1fs",
-                len(alive),
-                _TTS_PREWARM_HARVEST_TIMEOUT_S,
-            )
+            self._runtime_switch_desired[component] = selection
+            self._runtime_switch_failed[component] = None
+
+    def _record_runtime_switch_active(
+        self,
+        component: str,
+        config: dict[str, Any],
+    ) -> None:
+        selection = self._runtime_switch_selection(component, config)
+        with self._runtime_switch_lock:
+            self._runtime_switch_desired[component] = dict(selection)
+            self._runtime_switch_effective[component] = dict(selection)
+            self._runtime_switch_failed[component] = None
+
+    def _record_runtime_switch_failure(
+        self,
+        component: str,
+        config: dict[str, Any],
+        error: BaseException,
+    ) -> None:
+        selection = self._runtime_switch_selection(component, config)
+        with self._runtime_switch_lock:
+            self._runtime_switch_desired[component] = selection
+            self._runtime_switch_failed[component] = {
+                "reason": str(error) or type(error).__name__,
+                "type": type(error).__name__,
+            }
+
+    def _runtime_switch_status_snapshot(self) -> dict[str, dict[str, Any]]:
+        self._ensure_runtime_switch_tracking()
+        with self._runtime_switch_lock:
+            pending_configs = {
+                "asr": self._pending_asr_config,
+                "tts": self._pending_tts_config,
+            }
+            snapshot: dict[str, dict[str, Any]] = {}
+            for component, pending_config in pending_configs.items():
+                failed = self._runtime_switch_failed.get(component)
+                pending = (
+                    self._runtime_switch_selection(component, pending_config)
+                    if pending_config is not None
+                    else None
+                )
+                snapshot[component] = {
+                    "state": "pending"
+                    if pending is not None
+                    else ("failed" if failed else "active"),
+                    "desired": dict(self._runtime_switch_desired[component]),
+                    "effective": dict(self._runtime_switch_effective[component]),
+                    "pending": dict(pending) if pending is not None else None,
+                    "failed": dict(failed) if failed is not None else None,
+                }
+            return snapshot
+
+    def _notify_runtime_switch_outcome(
+        self,
+        *,
+        component: str,
+        state: str,
+        config: dict[str, Any],
+        runtime: dict[str, Any] | None = None,
+        reason: str = "",
+    ) -> None:
+        with self._runtime_switch_lock:
+            callback = self._runtime_switch_callback
+        if callback is None:
+            return
+        event: dict[str, Any] = {
+            "component": component,
+            "state": state,
+            "config": config,
+        }
+        if runtime is not None:
+            event["runtime"] = runtime
+        if reason:
+            event["reason"] = reason
+        try:
+            callback(event)
+        except Exception as exc:
+            logger.warning("Runtime switch callback failed: %s", exc)
+
+    def _clear_pending_runtime_switch(
+        self,
+        component: str,
+        config: dict[str, Any],
+    ) -> bool:
+        attribute = f"_pending_{component}_config"
+        with self._runtime_switch_lock:
+            if getattr(self, attribute, None) is not config:
+                return False
+            setattr(self, attribute, None)
+            return True
 
     def _apply_pending_runtime_updates(self) -> None:
         with self._runtime_switch_lock:
             asr_config = self._pending_asr_config
             tts_config = self._pending_tts_config if not self.is_busy else None
-        if asr_config is not None:
+        for component, config, apply in (
+            ("asr", asr_config, self._apply_asr_config),
+            ("tts", tts_config, self._apply_tts_config),
+        ):
+            if config is None:
+                continue
             try:
-                self._apply_asr_config(asr_config)
+                result = apply(config)
             except Exception as exc:
-                logger.warning("Pending ASR switch failed: %s", exc)
-        if tts_config is not None:
-            try:
-                self._apply_tts_config(tts_config)
-            except Exception as exc:
-                logger.warning("Pending TTS switch failed: %s", exc)
+                if self._clear_pending_runtime_switch(component, config):
+                    self._record_runtime_switch_failure(component, config, exc)
+                    self._notify_runtime_switch_outcome(
+                        component=component,
+                        state="failed",
+                        config=config,
+                        reason=str(exc) or type(exc).__name__,
+                    )
+                logger.warning("Pending %s switch failed: %s", component.upper(), exc)
+            else:
+                self._notify_runtime_switch_outcome(
+                    component=component,
+                    state="active",
+                    config=config,
+                    runtime=result.get("runtime"),
+                )
 
     # ------------------------------------------------------------------
     # Microphone mute control
@@ -1846,19 +1949,14 @@ class AudioAgent:
         def _snapshot() -> dict[str, Any]:
             event = str(getattr(self, "_feedback_event", "") or "")
             processing_active = bool(
-                getattr(self, "_feedback_active", False)
-                and event in {"thinking", "waiting_prompt"}
+                getattr(self, "_feedback_active", False) and event in {"thinking", "waiting_prompt"}
             )
             return {
-                "armed": bool(
-                    getattr(self, "_processing_feedback_armed", False)
-                ),
+                "armed": bool(getattr(self, "_processing_feedback_armed", False)),
                 "active": processing_active,
                 "active_event": event if processing_active else "",
                 "delay_ms": int(round(self.processing_feedback_delay_s * 1000.0)),
-                "generation": int(
-                    getattr(self, "_processing_feedback_generation", 0)
-                ),
+                "generation": int(getattr(self, "_processing_feedback_generation", 0)),
                 "last_transition": str(
                     getattr(
                         self,
@@ -1866,21 +1964,11 @@ class AudioAgent:
                         "idle",
                     )
                 ),
-                "armed_total": int(
-                    getattr(self, "_processing_feedback_armed_total", 0)
-                ),
-                "triggered_total": int(
-                    getattr(self, "_processing_feedback_triggered_total", 0)
-                ),
-                "started_total": int(
-                    getattr(self, "_processing_feedback_started_total", 0)
-                ),
-                "cancelled_total": int(
-                    getattr(self, "_processing_feedback_cancelled_total", 0)
-                ),
-                "suppressed_total": int(
-                    getattr(self, "_processing_feedback_suppressed_total", 0)
-                ),
+                "armed_total": int(getattr(self, "_processing_feedback_armed_total", 0)),
+                "triggered_total": int(getattr(self, "_processing_feedback_triggered_total", 0)),
+                "started_total": int(getattr(self, "_processing_feedback_started_total", 0)),
+                "cancelled_total": int(getattr(self, "_processing_feedback_cancelled_total", 0)),
+                "suppressed_total": int(getattr(self, "_processing_feedback_suppressed_total", 0)),
                 "overlap_prevented_total": int(
                     getattr(
                         self,
@@ -1904,9 +1992,9 @@ class AudioAgent:
         delay = max(0.0, self.processing_feedback_delay_s)
         with lock:
             previous = getattr(self, "_processing_feedback_timer", None)
-            self._processing_feedback_generation = int(
-                getattr(self, "_processing_feedback_generation", 0)
-            ) + 1
+            self._processing_feedback_generation = (
+                int(getattr(self, "_processing_feedback_generation", 0)) + 1
+            )
             generation = self._processing_feedback_generation
             self._processing_feedback_armed = True
             self._processing_feedback_timer = None
@@ -1939,16 +2027,17 @@ class AudioAgent:
                         if self._processing_feedback_generation == generation:
                             self._processing_feedback_armed = False
                             self._processing_feedback_timer = None
-                            self._processing_feedback_cancelled_total = int(
-                                getattr(
-                                    self,
-                                    "_processing_feedback_cancelled_total",
-                                    0,
+                            self._processing_feedback_cancelled_total = (
+                                int(
+                                    getattr(
+                                        self,
+                                        "_processing_feedback_cancelled_total",
+                                        0,
+                                    )
                                 )
-                            ) + 1
-                            self._processing_feedback_last_transition = (
-                                "turn_cancelled"
+                                + 1
                             )
+                            self._processing_feedback_last_transition = "turn_cancelled"
                 return
 
             cancelled = bool(
@@ -1961,13 +2050,16 @@ class AudioAgent:
                     if self._processing_feedback_generation == generation:
                         self._processing_feedback_armed = False
                         self._processing_feedback_timer = None
-                        self._processing_feedback_cancelled_total = int(
-                            getattr(
-                                self,
-                                "_processing_feedback_cancelled_total",
-                                0,
+                        self._processing_feedback_cancelled_total = (
+                            int(
+                                getattr(
+                                    self,
+                                    "_processing_feedback_cancelled_total",
+                                    0,
+                                )
                             )
-                        ) + 1
+                            + 1
+                        )
                         self._processing_feedback_last_transition = "turn_cancelled"
                 return
             _play_if_current()
@@ -1981,9 +2073,9 @@ class AudioAgent:
             ):
                 return False
             self._processing_feedback_timer = timer
-            self._processing_feedback_armed_total = int(
-                getattr(self, "_processing_feedback_armed_total", 0)
-            ) + 1
+            self._processing_feedback_armed_total = (
+                int(getattr(self, "_processing_feedback_armed_total", 0)) + 1
+            )
             self._processing_feedback_last_transition = "armed"
         try:
             timer.start()
@@ -2025,15 +2117,15 @@ class AudioAgent:
                     and event in {"thinking", "waiting_prompt"}
                 )
             )
-            self._processing_feedback_generation = int(
-                getattr(self, "_processing_feedback_generation", 0)
-            ) + 1
+            self._processing_feedback_generation = (
+                int(getattr(self, "_processing_feedback_generation", 0)) + 1
+            )
             self._processing_feedback_armed = False
             self._processing_feedback_timer = None
             if was_processing:
-                self._processing_feedback_cancelled_total = int(
-                    getattr(self, "_processing_feedback_cancelled_total", 0)
-                ) + 1
+                self._processing_feedback_cancelled_total = (
+                    int(getattr(self, "_processing_feedback_cancelled_total", 0)) + 1
+                )
                 self._processing_feedback_last_transition = "cancelled"
         if timer is not None:
             timer.cancel()
@@ -2068,9 +2160,9 @@ class AudioAgent:
 
     def _play_processing_feedback(self, generation: int | None = None) -> None:
         with self._chime_lock:
-            self._processing_feedback_triggered_total = int(
-                getattr(self, "_processing_feedback_triggered_total", 0)
-            ) + 1
+            self._processing_feedback_triggered_total = (
+                int(getattr(self, "_processing_feedback_triggered_total", 0)) + 1
+            )
             self._processing_feedback_last_transition = "triggered"
         cached = self._waiting_prompt_pcm_if_available()
         if cached is not None:
@@ -2088,9 +2180,7 @@ class AudioAgent:
         if not bool(getattr(self, "_spoken_wait_prompt_enabled", False)):
             return None
         text = str(getattr(self, "_spoken_wait_prompt_text", "") or "").strip()
-        cache_key = str(
-            getattr(self, "_spoken_wait_prompt_cache_key", "") or ""
-        ).strip()
+        cache_key = str(getattr(self, "_spoken_wait_prompt_cache_key", "") or "").strip()
         if not text or cache_key != WAITING_FEEDBACK_CACHE_KEY:
             return None
         now = time.monotonic()
@@ -2123,13 +2213,9 @@ class AudioAgent:
             return
         with lock:
             was_active = bool(getattr(self, "_feedback_active", False))
-            self._feedback_generation = int(
-                getattr(self, "_feedback_generation", 0)
-            ) + 1
+            self._feedback_generation = int(getattr(self, "_feedback_generation", 0)) + 1
             process = getattr(self, "_feedback_process", None)
-            sounddevice_active = bool(
-                getattr(self, "_feedback_sounddevice_active", False)
-            )
+            sounddevice_active = bool(getattr(self, "_feedback_sounddevice_active", False))
             sounddevice_cancel_event = getattr(
                 self,
                 "_feedback_sounddevice_cancel_event",
@@ -2170,12 +2256,8 @@ class AudioAgent:
         self._refresh_voice_metrics()
 
     def _start_voice_turn_trace(self) -> str:
-        self._realtime_generation_at_listen_start = (
-            self._current_realtime_generation()
-        )
-        self.last_turn_realtime_baseline_generation = (
-            self._realtime_generation_at_listen_start
-        )
+        self._realtime_generation_at_listen_start = self._current_realtime_generation()
+        self.last_turn_realtime_baseline_generation = self._realtime_generation_at_listen_start
         self.last_turn_realtime_generation = 0
         trace = self._turn_traces.start(
             source="microphone",
@@ -2362,9 +2444,7 @@ class AudioAgent:
                 dtype=np.float32,
             )
             if processed.shape != samples.shape:
-                raise ValueError(
-                    "capture processor must preserve the input sample shape"
-                )
+                raise ValueError("capture processor must preserve the input sample shape")
             if not np.all(np.isfinite(processed)):
                 raise ValueError("capture processor returned non-finite samples")
             return np.ascontiguousarray(processed, dtype=np.float32)
@@ -2396,10 +2476,7 @@ class AudioAgent:
         """Commit a validated interruption, then stop its fenced output."""
 
         recovery = getattr(self, "_interruption_recovery", None)
-        if (
-            recovery is None
-            or recovery.state is InterruptionRecoveryState.IDLE
-        ):
+        if recovery is None or recovery.state is InterruptionRecoveryState.IDLE:
             return False
         with self._output_trace_lock:
             token = self._interruption_output_trace_token
@@ -2453,9 +2530,8 @@ class AudioAgent:
             if token is None:
                 return False
             if (
-                (expected_token is not None and token != expected_token)
-                or self._active_output_trace_token != token
-            ):
+                expected_token is not None and token != expected_token
+            ) or self._active_output_trace_token != token:
                 self._stale_playback_stop_count += 1
                 return False
             if not recovery.recover(reason):
@@ -2527,9 +2603,7 @@ class AudioAgent:
         # Provider implementations have bounded connect/final-result waits.
         # If socket cancellation could not release one immediately, wait once
         # through that configured bound before allowing a caller to restart.
-        provider_timeout = float(
-            getattr(asr_manager, "_cloud_finish_timeout", 5.0) or 5.0
-        )
+        provider_timeout = float(getattr(asr_manager, "_cloud_finish_timeout", 5.0) or 5.0)
         provider_grace = min(10.0, max(0.5, provider_timeout + 0.5))
         return listen_stopped.wait(timeout=provider_grace)
 
@@ -2563,12 +2637,7 @@ class AudioAgent:
         """
         vad_controller = self._vad_ctrl
         asr_manager = self._asr_mgr
-        if (
-            self.asr is None
-            or self.vad is None
-            or vad_controller is None
-            or asr_manager is None
-        ):
+        if self.asr is None or self.vad is None or vad_controller is None or asr_manager is None:
             raise RuntimeError("listen_loop requires voice_mode=True")
 
         mic = self._mic
@@ -2610,6 +2679,7 @@ class AudioAgent:
             self._prepare_realtime_turn_boundary()
             self._start_voice_turn_trace()
             self.last_turn_wake_authorized = False
+            self.last_turn_asr_confidence = None
             self.last_turn_wake_source = "none"
             self._metrics.mark_voice_listen_started()
             self._refresh_voice_metrics()
@@ -2686,7 +2756,9 @@ class AudioAgent:
                     self._expire_output_interruption_hold()
 
                     if time.monotonic() > deadline:
-                        logger.info("ASR timeout: no speech detected within %.0fs.", self._asr_timeout)
+                        logger.info(
+                            "ASR timeout: no speech detected within %.0fs.", self._asr_timeout
+                        )
                         asr.reset()
                         self._mark_input_failure("asr_timeout")
                         recover_frozen_interruption("asr_timeout")
@@ -2724,7 +2796,9 @@ class AudioAgent:
                         continue
 
                     tts_active = self.tts.is_active()
-                    result = proc.process(raw, tts_active=tts_active, speech_active=vad.speech_active)
+                    result = proc.process(
+                        raw, tts_active=tts_active, speech_active=vad.speech_active
+                    )
                     samples_f32, samples_i16, peak, echo_gated = result
                     processed_capture = self._process_capture_frame(
                         samples_f32,
@@ -2733,9 +2807,7 @@ class AudioAgent:
                     )
                     if processed_capture is not None:
                         samples_f32 = processed_capture
-                        samples_i16 = (
-                            samples_f32 * 32767.0
-                        ).clip(-32768, 32767).astype(np.int16)
+                        samples_i16 = (samples_f32 * 32767.0).clip(-32768, 32767).astype(np.int16)
                         peak = (
                             int(np.max(np.abs(samples_i16.astype(np.int32))))
                             if samples_i16.size
@@ -2880,6 +2952,7 @@ class AudioAgent:
                                 cloud_result.text,
                                 asr_source=cloud_result.source,
                                 asr_latency_ms=cloud_result.latency_ms,
+                                asr_confidence=getattr(cloud_result, "confidence", None),
                                 interruption_token=interruption_token,
                             )
                         if cloud_result and cloud_result.is_noise:
@@ -2907,6 +2980,7 @@ class AudioAgent:
                                 forced.text,
                                 asr_source=forced.source,
                                 asr_latency_ms=forced.latency_ms,
+                                asr_confidence=getattr(forced, "confidence", None),
                                 forced_endpoint=True,
                                 interruption_token=interruption_token,
                             )
@@ -2921,10 +2995,7 @@ class AudioAgent:
                     # transcript during low-energy trailing audio.  This avoids
                     # waiting for the full VAD tail and cloud finalization, but
                     # never admits physical actions.
-                    if (
-                        event == VADEvent.SPEECH_CONTINUE
-                        and self._fast_endpoint.enabled
-                    ):
+                    if event == VADEvent.SPEECH_CONTINUE and self._fast_endpoint.enabled:
                         partial = asr.partial_result()
                         decision = self._fast_endpoint.observe(
                             partial_text=partial.text if partial is not None else "",
@@ -2934,10 +3005,7 @@ class AudioAgent:
                             ),
                             now=now,
                         )
-                        if (
-                            decision.action is FastEndpointAction.COMMIT
-                            and partial is not None
-                        ):
+                        if decision.action is FastEndpointAction.COMMIT and partial is not None:
                             fast_result = asr.commit_partial(
                                 partial,
                                 self.awaiting_confirmation,
@@ -2957,6 +3025,7 @@ class AudioAgent:
                                     fast_result.text,
                                     asr_source=fast_result.source,
                                     asr_latency_ms=fast_result.latency_ms,
+                                    asr_confidence=getattr(fast_result, "confidence", None),
                                     interruption_token=interruption_token,
                                 )
 
@@ -2970,17 +3039,17 @@ class AudioAgent:
                                 cloud_result.text,
                                 asr_source=cloud_result.source,
                                 asr_latency_ms=cloud_result.latency_ms,
+                                asr_confidence=getattr(cloud_result, "confidence", None),
                                 interruption_token=interruption_token,
                             )
                         # Fall back to local ASR result
-                        is_noise = asr.is_noise(
-                            ep_result.text, self.awaiting_confirmation
-                        )
+                        is_noise = asr.is_noise(ep_result.text, self.awaiting_confirmation)
                         if not is_noise:
                             return self._accept_result(
                                 ep_result.text,
                                 asr_source=ep_result.source,
                                 asr_latency_ms=ep_result.latency_ms,
+                                asr_confidence=getattr(ep_result, "confidence", None),
                                 interruption_token=interruption_token,
                             )
                         else:
@@ -3012,11 +3081,9 @@ class AudioAgent:
             raise
         finally:
             recover_frozen_interruption("listen_loop_exit")
-            if (
-                (listen_cancel.is_set() or self.stop_event.is_set())
-                and int(getattr(self, "last_turn_realtime_generation", 0) or 0)
-                <= 0
-            ):
+            if (listen_cancel.is_set() or self.stop_event.is_set()) and int(
+                getattr(self, "last_turn_realtime_generation", 0) or 0
+            ) <= 0:
                 self._discard_realtime_capture_if_started("listen_cancelled")
             with self._runtime_switch_lock:
                 self._listen_loop_active = False
@@ -3037,15 +3104,26 @@ class AudioAgent:
         *,
         asr_source: str = "",
         asr_latency_ms: float | None = None,
+        asr_confidence: float | None = None,
         forced_endpoint: bool = False,
         interruption_token: OutputPlaybackTraceToken | None = None,
     ) -> str | None:
         """Accept a recognized text result: log, queue, update state."""
+        if asr_confidence is not None:
+            try:
+                asr_confidence = float(asr_confidence)
+            except (TypeError, ValueError):
+                asr_confidence = None
+        if asr_confidence is not None and (
+            not math.isfinite(asr_confidence) or not 0.0 <= asr_confidence <= 1.0
+        ):
+            asr_confidence = None
         capture_voice_turn_id = getattr(self, "_active_capture_voice_turn_id", None)
         asr_metadata = {
             "asr_source": asr_source,
             "asr_latency_ms": asr_latency_ms,
             "forced_endpoint": forced_endpoint,
+            "asr_confidence": asr_confidence,
             "text_chars": len(text),
         }
         if capture_voice_turn_id:
@@ -3056,10 +3134,7 @@ class AudioAgent:
             )
         else:
             self._turn_traces.mark("asr_final", **asr_metadata)
-        if (
-            self.kws_unavailable_safety_only
-            and not is_local_safety_utterance(text)
-        ):
+        if self.kws_unavailable_safety_only and not is_local_safety_utterance(text):
             reason = "kws_unavailable_safety_only_filtered"
             if capture_voice_turn_id:
                 self._turn_traces.finish_for(
@@ -3077,8 +3152,7 @@ class AudioAgent:
             self._active_capture_voice_turn_id = None
             self.last_accepted_voice_turn_id = None
             logger.warning(
-                "Discarded non-safety ASR result because required KWS is "
-                "unavailable (chars=%d)",
+                "Discarded non-safety ASR result because required KWS is unavailable (chars=%d)",
                 len(text),
             )
             self._recover_interrupted_playback(
@@ -3088,9 +3162,7 @@ class AudioAgent:
             self._discard_realtime_capture_if_started(reason)
             self.last_turn_realtime_generation = 0
             self._agent_state = (
-                AgentState.MUTED
-                if getattr(self, "_muted", False)
-                else AgentState.IDLE
+                AgentState.MUTED if getattr(self, "_muted", False) else AgentState.IDLE
             )
             asr_manager = getattr(self, "_asr_mgr", None)
             if asr_manager is not None:
@@ -3115,6 +3187,7 @@ class AudioAgent:
         self._active_capture_voice_turn_id = None
         self.last_accepted_voice_turn_id = capture_voice_turn_id
         logger.info("ASR result accepted (chars=%d)", len(text))
+        self.last_turn_asr_confidence = asr_confidence
         coordinator = getattr(self, "_realtime_coordinator", None)
         finish_input = getattr(coordinator, "finish_input", None)
         realtime_capture_armed = bool(
@@ -3175,9 +3248,7 @@ class AudioAgent:
 
         if not self._realtime_turn_capture_is_armed():
             return
-        baseline = int(
-            getattr(self, "_realtime_generation_at_listen_start", 0) or 0
-        )
+        baseline = int(getattr(self, "_realtime_generation_at_listen_start", 0) or 0)
         generation = self._current_realtime_generation()
         try:
             if generation > baseline:
@@ -3225,9 +3296,7 @@ class AudioAgent:
             self._input_last_observed_at = now
             self._input_vad_state = vad_state
             self._input_gate_state = gate_state
-            self._input_level_window.append(
-                (now, self._input_last_peak, self._input_last_rms)
-            )
+            self._input_level_window.append((now, self._input_last_peak, self._input_last_rms))
 
     def _mark_input_failure(self, reason: str) -> None:
         with self._input_state_lock:
@@ -3279,9 +3348,7 @@ class AudioAgent:
                 "microphone_captured_silence:check_input_device_permission_or_physical_mute"
             )
         elif noise_gate_peak > 0 and peak_max_10s < noise_gate_peak:
-            gate_recommendation = (
-                f"observed_peak_below_noise_gate:{peak_max_10s}<{noise_gate_peak}"
-            )
+            gate_recommendation = f"observed_peak_below_noise_gate:{peak_max_10s}<{noise_gate_peak}"
 
         tts_is_active = getattr(self.tts, "is_active", None)
         if callable(tts_is_active):
@@ -3371,13 +3438,16 @@ class AudioAgent:
             kws = self.kws
             if stream is None or kws is None:
                 return False
+            spotter = kws.spotter
+            if spotter is None:
+                return False
             try:
                 stream.accept_waveform(sample_rate, samples)
 
-                while kws.spotter.is_ready(stream):
-                    kws.spotter.decode_stream(stream)
+                while spotter.is_ready(stream):
+                    spotter.decode_stream(stream)
 
-                result = kws.spotter.get_result(stream)
+                result = spotter.get_result(stream)
             except Exception as e:
                 logger.error("KWS error: %s", e)
                 self.kws_stream = None
@@ -3441,27 +3511,25 @@ class AudioAgent:
                     event in {"thinking", "waiting_prompt"}
                     and self._semantic_tts_busy_for_feedback()
                 ):
-                    self._processing_feedback_suppressed_total = int(
-                        getattr(self, "_processing_feedback_suppressed_total", 0)
-                    ) + 1
-                    self._processing_feedback_overlap_prevented_total = int(
-                        getattr(
-                            self,
-                            "_processing_feedback_overlap_prevented_total",
-                            0,
-                        )
-                    ) + 1
-                    self._processing_feedback_last_transition = (
-                        "semantic_overlap_prevented"
+                    self._processing_feedback_suppressed_total = (
+                        int(getattr(self, "_processing_feedback_suppressed_total", 0)) + 1
                     )
+                    self._processing_feedback_overlap_prevented_total = (
+                        int(
+                            getattr(
+                                self,
+                                "_processing_feedback_overlap_prevented_total",
+                                0,
+                            )
+                        )
+                        + 1
+                    )
+                    self._processing_feedback_last_transition = "semantic_overlap_prevented"
                     return
-                if (
-                    event == "thinking"
-                    and now - self._last_thinking_chime_at < 2.0
-                ):
-                    self._processing_feedback_suppressed_total = int(
-                        getattr(self, "_processing_feedback_suppressed_total", 0)
-                    ) + 1
+                if event == "thinking" and now - self._last_thinking_chime_at < 2.0:
+                    self._processing_feedback_suppressed_total = (
+                        int(getattr(self, "_processing_feedback_suppressed_total", 0)) + 1
+                    )
                     self._processing_feedback_last_transition = "rate_limited"
                     logger.debug("chime '%s' skipped due to recent feedback", event)
                     return
@@ -3476,19 +3544,20 @@ class AudioAgent:
                     event in {"thinking", "waiting_prompt"}
                     and self._semantic_tts_busy_for_feedback()
                 ):
-                    self._processing_feedback_suppressed_total = int(
-                        getattr(self, "_processing_feedback_suppressed_total", 0)
-                    ) + 1
-                    self._processing_feedback_overlap_prevented_total = int(
-                        getattr(
-                            self,
-                            "_processing_feedback_overlap_prevented_total",
-                            0,
-                        )
-                    ) + 1
-                    self._processing_feedback_last_transition = (
-                        "semantic_overlap_prevented"
+                    self._processing_feedback_suppressed_total = (
+                        int(getattr(self, "_processing_feedback_suppressed_total", 0)) + 1
                     )
+                    self._processing_feedback_overlap_prevented_total = (
+                        int(
+                            getattr(
+                                self,
+                                "_processing_feedback_overlap_prevented_total",
+                                0,
+                            )
+                        )
+                        + 1
+                    )
+                    self._processing_feedback_last_transition = "semantic_overlap_prevented"
                     return
                 self._last_chime_at = now
                 if event == "thinking":
@@ -3501,9 +3570,9 @@ class AudioAgent:
                 self._feedback_sounddevice_active = False
                 self._feedback_sounddevice_cancel_event = None
                 if event in {"thinking", "waiting_prompt"}:
-                    self._processing_feedback_started_total = int(
-                        getattr(self, "_processing_feedback_started_total", 0)
-                    ) + 1
+                    self._processing_feedback_started_total = (
+                        int(getattr(self, "_processing_feedback_started_total", 0)) + 1
+                    )
                     self._processing_feedback_last_transition = "started"
 
             feedback_sample_rate = int(sample_rate or self._SR)
@@ -3529,8 +3598,7 @@ class AudioAgent:
             def _feedback_is_current() -> bool:
                 with self._chime_lock:
                     return bool(
-                        self._feedback_active
-                        and self._feedback_generation == feedback_generation
+                        self._feedback_active and self._feedback_generation == feedback_generation
                     )
 
             def _run() -> None:
@@ -3557,10 +3625,7 @@ class AudioAgent:
 
                 try:
                     with self._chime_lock:
-                        if (
-                            not _feedback_is_current()
-                            or self._semantic_tts_busy_for_feedback()
-                        ):
+                        if not _feedback_is_current() or self._semantic_tts_busy_for_feedback():
                             return
                         if self.tts.play_feedback_audio(audio, feedback_sample_rate):
                             logger.debug("chime '%s' played via TTS feedback path", event)
@@ -3591,12 +3656,14 @@ class AudioAgent:
                             chime_cmd += ["-D", str(output_device)]
 
                         import subprocess
+
                         for attempt in range(2):
                             if not _feedback_is_current():
                                 return
                             try:
                                 proc = subprocess.Popen(
-                                    chime_cmd, stdin=subprocess.PIPE,
+                                    chime_cmd,
+                                    stdin=subprocess.PIPE,
                                     stderr=subprocess.PIPE,
                                 )
                                 if proc.stdin is None:
@@ -3607,8 +3674,7 @@ class AudioAgent:
                                 )
                                 with self._chime_lock:
                                     if (
-                                        self._feedback_generation
-                                        != feedback_generation
+                                        self._feedback_generation != feedback_generation
                                         or not self._feedback_active
                                         or self._semantic_tts_busy_for_feedback()
                                     ):
@@ -3627,12 +3693,12 @@ class AudioAgent:
                                     return
                                 logger.warning(
                                     "chime '%s' aplay exit %d (attempt %d): %s",
-                                    event, proc.returncode, attempt + 1,
+                                    event,
+                                    proc.returncode,
+                                    attempt + 1,
                                     stderr.decode(errors="replace").strip()[:100],
                                 )
-                                _report_transport_failure(
-                                    f"feedback_aplay_exit_{proc.returncode}"
-                                )
+                                _report_transport_failure(f"feedback_aplay_exit_{proc.returncode}")
                             except subprocess.TimeoutExpired:
                                 logger.warning(
                                     "chime '%s' timed out (attempt %d)",
@@ -3699,9 +3765,7 @@ class AudioAgent:
                                 sounddevice_cancel_event.set()
                                 return
                             self._feedback_sounddevice_active = True
-                            self._feedback_sounddevice_cancel_event = (
-                                sounddevice_cancel_event
-                            )
+                            self._feedback_sounddevice_cancel_event = sounddevice_cancel_event
                             stream.start()
                         _publish_render_reference()
                         max_playback_s = max(
@@ -3778,7 +3842,7 @@ class AudioAgent:
                 + 0.05 * np.sin(2 * np.pi * freq * 5.40 * t)
             )
             tone *= np.exp(-t * 25)  # fast decay
-            audio[offset:offset + n] += tone
+            audio[offset : offset + n] += tone
             offset += n + int(sr * gap)
 
         return audio
@@ -3815,7 +3879,7 @@ class AudioAgent:
             )
             # Each note slightly louder for rising energy
             tone *= (0.7 + 0.15 * i) * np.exp(-t * 20)
-            audio[offset:offset + n] += tone
+            audio[offset : offset + n] += tone
             offset += n + int(sr * gap)
 
         return audio
@@ -3837,8 +3901,8 @@ class AudioAgent:
         phase = np.cumsum(2 * np.pi * freq / sr).astype(np.float32)
         # Fundamental + harmonics for better noise penetration
         tone = 0.30 * np.sin(phase)
-        tone += 0.12 * np.sin(phase * 2.0)   # 1800Hz harmonic
-        tone += 0.05 * np.sin(phase * 3.0)   # 2700Hz harmonic
+        tone += 0.12 * np.sin(phase * 2.0)  # 1800Hz harmonic
+        tone += 0.05 * np.sin(phase * 3.0)  # 2700Hz harmonic
         # Smooth fade-in (30ms) / fade-out (80ms)
         fade_in = int(sr * 0.03)
         fade_out = int(sr * 0.08)
@@ -3861,7 +3925,7 @@ class AudioAgent:
             t = np.linspace(0, note_dur, n, endpoint=False, dtype=np.float32)
             tone = 0.25 * np.sin(2 * np.pi * freq * t)
             tone *= np.exp(-t * 12)
-            audio[offset:offset + n] += tone
+            audio[offset : offset + n] += tone
             offset += n + int(sr * gap)
 
         return audio
@@ -3899,10 +3963,11 @@ class AudioAgent:
                 logger.debug("Realtime dialogue shutdown failed: %s", exc)
         with self._runtime_switch_lock:
             tts = self.tts
+            self._pending_asr_config = None
             self._pending_tts_config = None
-        self._cancel_tts_provider_prewarm(tts)
+            self._tts_activation_callback = None
+            self._runtime_switch_callback = None
         tts.shutdown()
-        self._harvest_tts_provider_prewarm_threads()
         self._refresh_voice_metrics(
             input_ready=False,
             output_ready=False,
@@ -3915,9 +3980,7 @@ class AudioAgent:
         return self._refresh_voice_metrics()
 
     def _refresh_voice_metrics(self, **overrides: Any) -> dict[str, Any]:
-        kws_available = bool(
-            self.kws and getattr(self.kws, "available", False)
-        )
+        kws_available = bool(self.kws and getattr(self.kws, "available", False))
         wake_word_ready = self.wake_word_ready
         safety_only = self.kws_unavailable_safety_only
         if not self.voice_mode:
@@ -3934,31 +3997,20 @@ class AudioAgent:
             with self._output_trace_lock:
                 voice_turn_counters.update(
                     {
-                        "orphan_output_event_count": (
-                            self._orphan_output_trace_event_count
-                        ),
-                        "playback_owner_conflict_count": (
-                            self._playback_owner_conflict_count
-                        ),
-                        "stale_playback_stop_count": (
-                            self._stale_playback_stop_count
-                        ),
-                        "playback_owner_active": (
-                            self._active_output_trace_token is not None
-                        ),
+                        "orphan_output_event_count": (self._orphan_output_trace_event_count),
+                        "playback_owner_conflict_count": (self._playback_owner_conflict_count),
+                        "stale_playback_stop_count": (self._stale_playback_stop_count),
+                        "playback_owner_active": (self._active_output_trace_token is not None),
                     }
                 )
         snapshot = {
             "run_id": self._run_id,
             "mode": "voice" if self.voice_mode else "text",
             "enabled": self.voice_mode,
-            "input_ready": bool(
-                self.voice_mode and self.asr is not None and self.vad is not None
-            ),
+            "input_ready": bool(self.voice_mode and self.asr is not None and self.vad is not None),
             "output_ready": self.tts is not None,
-            "pipeline_ok": bool(self.tts) and (
-                not self.voice_mode or (self.asr is not None and self.vad is not None)
-            ),
+            "pipeline_ok": bool(self.tts)
+            and (not self.voice_mode or (self.asr is not None and self.vad is not None)),
             "asr_available": self.asr is not None,
             "vad_available": self.vad is not None,
             "kws_available": kws_available,
@@ -3966,9 +4018,7 @@ class AudioAgent:
             "kws_required": self._require_wake_word,
             "kws_unavailable_safety_only": safety_only,
             "input_policy": input_policy,
-            "wake_word_enabled": bool(
-                self.voice_mode and wake_word_ready
-            ),
+            "wake_word_enabled": bool(self.voice_mode and wake_word_ready),
             "woken_up": self.woken_up,
             "last_turn_wake_authorized": self.last_turn_wake_authorized,
             "last_turn_wake_source": self.last_turn_wake_source,
@@ -3998,6 +4048,7 @@ class AudioAgent:
                 "asr": self._pending_asr_config is not None,
                 "tts": self._pending_tts_config is not None,
             },
+            "runtime_switches": self._runtime_switch_status_snapshot(),
             "input": self._input_status_snapshot(),
         }
         snapshot.update(overrides)
@@ -4024,11 +4075,15 @@ class AudioAgent:
                 "last_error": type(exc).__name__,
                 "turn_boundary_recovery": recovery,
             }
-        snapshot = dict(status) if isinstance(status, dict) else {
-            "mode": self._realtime_mode,
-            "active": False,
-            "fallback": "cascade",
-        }
+        snapshot = (
+            dict(status)
+            if isinstance(status, dict)
+            else {
+                "mode": self._realtime_mode,
+                "active": False,
+                "fallback": "cascade",
+            }
+        )
         snapshot["turn_boundary_recovery"] = recovery
         return snapshot
 
@@ -4044,9 +4099,7 @@ class AudioAgent:
         snapshot = self._realtime_status_snapshot()
         with self._realtime_output_lock:
             tts_generation = self._realtime_output_tts_generation
-            frozen_played_ms = int(
-                getattr(self, "_realtime_last_physical_played_ms", 0) or 0
-            )
+            frozen_played_ms = int(getattr(self, "_realtime_last_physical_played_ms", 0) or 0)
         played_ms = max(
             frozen_played_ms,
             self._streaming_played_ms(tts_generation),
@@ -4089,9 +4142,7 @@ class AudioAgent:
 
     def _interaction_status_snapshot(self) -> dict[str, Any]:
         cooldown_remaining = round(self._in_post_tts_input_cooldown(), 2)
-        input_ready = bool(
-            self.voice_mode and self.asr is not None and self.vad is not None
-        )
+        input_ready = bool(self.voice_mode and self.asr is not None and self.vad is not None)
         output_ready = self.tts is not None
         if self._muted:
             state = "muted"

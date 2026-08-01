@@ -16,27 +16,42 @@ Askme 是面向机器人方案商/集成商的现场运营交付中台。它把�
 - 高级软件架构蓝图：`docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md`
 - R1-R7 需求到架构追踪：`docs/PRODUCT_ARCHITECTURE_TRACE.md`
 - 需求证据台账：`docs/DEMAND_EVIDENCE_LEDGER.md`
+- Warm Session 运维：`docs/WARM_SESSIONS.md`
 
 当前 P0 是机器人方案商/集成商交付中台，不是通用聊天机器人，也不替代底盘控制。Field Delivery Domain 是客户项目、现场事件、证据、客户签收和 readiness gaps 的产品事实源；Runtime / Safety / Hardware 仍拥有真实执行。customer signoff != production readiness，不承诺无人值守生产上线。
 
 ## 快速开始
 
-### Docker 一键启动
+### Docker 两阶段启动
 
-```powershell
-# 纯 Askme MCP 服务（无语音硬件）
-docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
-```
+首次部署必须先启动 LiteLLM 并生成 AskMe scoped virtual key，再启动默认产品栈：
 
-```powershell
-# 完整栈：Askme + ZeroClaw（Agent 大脑）
-docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
-```
+~~~powershell
+Copy-Item docker/.env.example docker/.env
+Copy-Item docker/litellm.env.example docker/.env.litellm
+# 填写 docker/.env.litellm 后先启动控制面
+docker compose --env-file docker/.env.litellm -f docker/docker-compose.litellm.yml up -d --wait litellm
+# 按 docs/LITELLM_GATEWAY.md 生成 AskMe virtual key，
+# 将 LITELLM_VIRTUAL_KEY 与 ASKME_CONTROL_API_KEY 写入 docker/.env。
+# Linux edge 主机还必须把 audio 组 GID 写入 ASKME_AUDIO_GID。
+# 第一阶段先校验 master/salt/DB；默认栈再校验 AskMe virtual key 与全部角色隔离。
+docker compose --env-file docker/.env --env-file docker/.env.litellm -f docker/docker-compose.yml -f docker/docker-compose.edge-linux.yml up -d
+
+# 仅调试 ZeroClaw 模型路由时，另签发 robot-action key 后显式启用实验 profile：
+docker compose --env-file docker/.env --env-file docker/.env.litellm -f docker/docker-compose.yml -f docker/docker-compose.edge-linux.yml --profile experimental-zeroclaw up -d
+~~~
+
+默认镜像仍运行 `edge_robot`，不是 headless 演示服务。入口会在启动前校验
+配置所需模型和真实输入/输出声卡；缺少 `models/`、`/dev/snd` 或正确
+`ASKME_AUDIO_GID` 时以 78 退出且不会伪报 ready。Docker Desktop/Windows
+不属于这条 Linux edge 硬件部署路径；Windows 开发请使用下方本地蓝图。
 
 启动后访问：
 - Dashboard: `http://localhost:8765/dashboard`
-- MCP SSE: `http://localhost:8765/mcp`
-- 健康检查: `http://localhost:8765/healthz`
+- Readiness: `http://localhost:8765/ready`
+- Liveness: `http://localhost:8765/healthz`
+
+runtime 容器当前未挂载 FastMCP，因此不对外发布 `/mcp` 路由；ZeroClaw/MCP 链路必须按实验 profile 单独验收，不能把容器进程存活当作 MCP ready。
 
 ### 本地开发
 
@@ -62,9 +77,9 @@ python -m askme.blueprints.presets.edge_robot  # 园区巡检机器人
 | MCP 工具服务 | 已有入口 | 受控工具和资源暴露给 MCP 客户端 |
 | Agent Profile | 已有管理 | 可审计的角色配置、工具白名单、MCP 连接 |
 | 企业审计 | 已有 | SkillAuditLog + 统一审计时间线 + 导出证据包 |
-| ZeroClaw 集成 | v0.1.7 基线 | MCP 协议对接，支持 zeroclaw onboard；NanoClaw 作为后续边缘 profile，不另起一套 Agent 大脑 |
+| ZeroClaw 集成 | 阻断：v0.1.7 容器未接通 MCP | 默认产品栈不启动；仅显式实验 profile 可启动受 LiteLLM 约束的 gateway，且不能作为 AskMe MCP 集成验收证据 |
 | Conversation Core | Phase 1 已接入（迁移期） | 统一 Thread / Turn / Generation、持久化轮次账本和旧会话 ID 兼容，逐步收敛多套历史写入 |
-| LiteLLM 模型控制面 | 代码就绪、默认未启用 | 固定版本的本地 Proxy；已贯通安全 `LLMCallContext`、W3C trace、独立 call ID、逐请求时限、能力别名和隐私默认值。Askme 继续独占会话、轮次、记忆、工具、安全和打断；真实 A/B 与故障演练完成前不宣称提速 |
+| LiteLLM 模型控制面 | 默认启用（需部署凭据） | 固定版本的本地 Proxy；已贯通安全 `LLMCallContext`、W3C trace、独立 call ID、逐请求时限、能力别名和隐私默认值。Askme 继续独占会话、轮次、记忆、工具、安全和打断；真实 A/B 与故障演练完成前不宣称提速 |
 
 ## 对话与语音实时架构（Conversation Core Phase 1）
 
@@ -91,7 +106,7 @@ Phase 1 已把确认后的用户文本、成功交付的回答、取消/失败�
 | 迁移中 | `ConversationManager` 与 Voice Gateway 仍保留 prompt-context/summary 兼容投影；Conversation Core 是新 Thread/Turn/Generation 的规范事实源，但还不是所有历史读写的唯一物理存储 |
 | 尚未实现 | Conversation Summary 投影、Memory/Vision/Task 的 committed-event consumer 和证据 ID 回链、所有 skill/tool 执行回合的统一结算、Person 聚合/说话人识别、跨日期 Session Window、跨入口冲突 Turn 的自动排队/共享 lease、音频到文字的精确截断对齐、多进程/分布式 writer、协调停止所有在途 worker/播放、原始 JSONL 与旧历史的物理擦除/加密销钥 |
 
-视觉能力目前是“按需相机/VLM 支路”，不是始终开启的统一多模态大模型：视觉问句可触发当前帧采集并直接生成短回答，普通轮也可在显式 `auto_capture` 时把场景描述加入 prompt。主配置 `config.yaml` 默认关闭 `vision.enabled` 和 `vision.vlm_enabled`，而板卡 profile `config.board.yaml` 会显式开启两者，实际状态取决于部署选择的配置 profile。现有视觉回复可以结算到 Turn，原始图片/快照 ID、采集时间与该 Turn/Generation 的证据回链尚未闭合，因此不能宣称连续视觉记忆或产品级可审计多模态已经完成。
+视觉能力目前是“按需相机/VLM 支路”，不是始终开启的统一多模态大模型：视觉问句可触发当前帧采集，普通轮也可在显式 `auto_capture` 时把场景描述加入 prompt。主配置 `config.yaml` 默认关闭本地视觉和云 VLM；板卡 profile 只启用本地摄像头/YOLO 感知，云端 `vlm_enabled` 在 `vision-scene` 别名和独立 scoped key 验收前继续保持关闭。原始图片/快照 ID、采集时间与 Turn/Generation 的证据回链尚未闭合，因此不能宣称连续视觉记忆或产品级可审计多模态已经完成。
 
 迁移期接受 `thread_id`、`conversation_thread_id`、`conversation_session_id`、`conversation_id`、`chat_session_id` 和 `session_id`；多个非空值必须一致，否则请求被拒绝。Thread 的 `channel` 在 Phase 1 固定为稳定的 `voice` 业务通道，实际入口记录在 `Turn.source`。没有显式 ID 时，VoiceLoop/TextLoop 会在自身生命周期内生成稳定本地 ID；`/api/chat` 与 Voice Gateway 会为匿名请求 fail-new，并把新 ID 返回给客户端，后续轮次必须回传；裸 ledger 调用同样 fail-new，避免不同匿名用户串线。
 
@@ -101,9 +116,9 @@ CLOSED、EXPIRED、ERASED Thread、冲突 alias 和冲突 Turn payload 都属于
 
 默认语音仍是本地门控的 ASR→LLM→TTS 级联。可选火山豆包端到端语音位于 `voice.realtime`，默认 `enabled: false`。中央策略与 `prepare → durable Turn/Generation → release PCM` 两阶段安全补丁已完成离线回归，旧的一步放音入口也已 fail-closed；机器人动作、急停、工具/审批和视觉查询始终走本地级联。当前环境仍缺少线上凭据、shadow 隐私/稳定性证据和真机声学证据，因此不能直接启用 `general_chat`，发布仍必须按 `split → shadow → general_chat 小流量`。无音频、断线或审批失败会回退 cascade。普通麦克风/音箱一体设备只有通过硬件/AEC 门禁才开启全双工，否则自动退回半双工，且不需要 ROS2。详见 [火山实时语音](docs/VOLCENGINE_REALTIME_VOICE.md) 和 [全双工验收](docs/FULL_DUPLEX_VOICE.md)。
 
-本阶段解决的是会话正确性与可审计性，不代表已经达到延迟目标。2026-07-19 用完整 runtime persona 做 20 样本校正后，DeepSeek V4 Flash 首个非空文本为 P50 961.8ms / P95 1140.7ms，首个有效语义子句为 P50 1168.4ms / P95 1378.8ms；短首句合规率 95%，直接问题错误 `[SILENT]` 为 0/20。旧的约 110ms 只是首个任意 stream chunk，可能为空，不能再当作 TTFT 证据。这仍不含 ASR 和 TTS，因此产品级 P95 ≤1.2s 尚未达成。上线前仍需测量 ASR-final→physical-first-semantic-audio、barge-in→physical-stop、Turn commit 的 P50/P95。详见[语音延迟执行计划](docs/VOICE_LATENCY_EXECUTION_PLAN_2026-07-19.md)。领域词汇见 [CONTEXT.md](CONTEXT.md)，目标架构决策见 [ADR-0001](docs/adr/0001-conversation-core-single-write-owner.md)。
+本阶段解决的是会话正确性与可审计性，不代表已经达到延迟目标。2026-07-19 在切换前的 DeepSeek 直连路径上，用完整 runtime persona 做 20 样本校正后，DeepSeek V4 Flash 首个非空文本为 P50 961.8ms / P95 1140.7ms，首个有效语义子句为 P50 1168.4ms / P95 1378.8ms；短首句合规率 95%，直接问题错误 `[SILENT]` 为 0/20。旧的约 110ms 只是首个任意 stream chunk，可能为空，不能再当作 TTFT 证据。这仍不含 ASR 和 TTS，因此产品级 P95 ≤1.2s 尚未达成。上线前仍需测量 ASR-final→physical-first-semantic-audio、barge-in→physical-stop、Turn commit 的 P50/P95。详见[语音延迟执行计划](docs/VOICE_LATENCY_EXECUTION_PLAN_2026-07-19.md)。领域词汇见 [CONTEXT.md](CONTEXT.md)，目标架构决策见 [ADR-0001](docs/adr/0001-conversation-core-single-write-owner.md)。
 
-Gate A 代码优化现已落地：真实 voice model 的非阻塞 LLM 预热、只接受稳定运行时缓存键的隔离短语 prime、包含声学参数的 v2 缓存签名、MiniMax SSE/WS 共用的首续片状态机，以及优先于静音/审批/对话门控的精确急停端点。长尾轮在 1.5 秒可播放独立 thinking feedback；空 delta 不会提前熄灭保险丝，取消/首个真实 payload 会原子阻止或停止反馈，ACK 也不会误触发 thinking 限频。该反馈只改善等待感，绝不计作首个语义音频。配置中的 36/54ms TTS 首续片阈值仍是实验值；普通意图继续使用 300ms，精确急停实际最早约 160ms。统一报告脚本会在样本少于 20、证据损坏或缺少目标硬件字段时拒绝给出“通过”。这些都是代码就绪结论，不是物理提速结论。
+Gate A 代码优化现已落地：独立 health-probe 能力别名的非阻塞 LLM 保温、只接受稳定运行时缓存键的隔离短语 prime、包含声学参数的 v2 缓存签名、MiniMax SSE/WS 共用的首续片状态机，以及优先于静音/审批/对话门控的精确急停端点。长尾轮在 1.5 秒可播放独立 thinking feedback；空 delta 不会提前熄灭保险丝，取消/首个真实 payload 会原子阻止或停止反馈，ACK 也不会误触发 thinking 限频。该反馈只改善等待感，绝不计作首个语义音频。配置中的 36/54ms TTS 首续片阈值仍是实验值；普通意图继续使用 300ms，精确急停实际最早约 160ms。统一报告脚本会在样本少于 20、证据损坏或缺少目标硬件字段时拒绝给出“通过”。这些都是代码就绪结论，不是物理提速结论。
 
 MiniMax 在线 TTS 采集器已经补齐，固定 20 句语料、禁用短语缓存、只合成不播放。2026-07-19 当前最新可审计 MiniMax speech-2.8-turbo WebSocket 实测：warm 复用 provider 首 PCM P50 270.71ms / P95 376.08ms、buffer commit P50 277.01ms / P95 379.32ms；cold 每条新连接且带 4.5s case 间隔 provider 首 PCM P50 631.75ms / P95 2294.78ms、buffer commit P50 652.09ms / P95 2314.36ms。Cold 的长尾明显，且一次无间隔 cold 重测出现 13/20 passed、7/20 provider failure，因此产品主路径必须保持 warm WebSocket 复用与后台预热，而不是每轮新建连接。启动和运行时 immediate/pending provider 切换现在都会非阻塞预热；替换/shutdown 会取消旧预热，并以 0.5 秒总预算收割不合作的 daemon worker。这仍不是物理首音：统一报告仍因缺少 `physical_first_nonzero_ms` 与 `barge_in_to_speaker_stop_ms` 保持 `insufficient_evidence`。采集器现在默认生成唯一文件名并拒绝覆盖既有证据，也支持 `--case-delay-ms` 避免 cold/new-connection 重测撞上供应商 RPM 限流。
 
@@ -113,29 +128,11 @@ MiniMax 在线 TTS 采集器已经补齐，固定 20 句语料、禁用短语缓
 
 ## ZeroClaw 集成状态
 
-Askme 可作为 ZeroClaw（Agent 大脑）的 MCP 服务端，为 ZeroClaw 提供受控现场交付工具、客户项目上下文、证据和运行交接能力。
+AskMe 已提供独立 MCP 服务端能力，但 **ZeroClaw v0.1.7 容器尚未接通 AskMe MCP**。该版本已核对的配置 schema 没有 MCP connector 字段。默认 Compose 与 quickstart 不启动 ZeroClaw；只有显式 `experimental-zeroclaw` profile 或 `docker-zeroclaw` / `local-zeroclaw` 命令可启动 gateway，并把它的模型请求限制到 LiteLLM `robot-action` 别名。
 
-当前版本基线：`zeroclaw 0.1.7`。Docker/部署脚本默认固定到 `ZEROCLAW_VERSION=0.1.7`，避免继续使用漂移的 `latest`。ZeroClaw 和 NanoClaw 归为同一运行时家族：ZeroClaw 是标准 Agent/Gateway 形态，NanoClaw 是未来真机边缘化时的轻量 profile，不作为第二个并列大脑。
+因此，启动 ZeroClaw 进程不等于 MCP 集成可用，也不能据此宣称知识检索、现场工具或 runtime handoff 已贯通。生产验收必须保持阻断，直到选定支持的 ZeroClaw 版本或实现明确的 HTTP/MCP adapter，并补齐端到端工具调用、认证、取消和审计测试。
 
-```text
-ZeroClaw (Rust Agent 大脑) → MCP → Askme (现场运营交付中台) → Runtime / Safety / Hardware
-```
-
-集成方式：
-
-```powershell
-# 方式 1：Docker 完整栈
-docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
-
-# 方式 2：手动绑定
-python scripts/dev/setup_zeroclaw.py    # 读取 MiniMax API Key 并配置
-zeroclaw agent                           # 启动 ZeroClaw Agent
-
-# 方式 3：独立 MCP 服务
-python -m askme.mcp.server --transport sse --port 8765
-```
-
-当前能力范围：知识检索、空间查询、技能目录、现场事件触发、运行时状态感知和受控 handoff，不提供原始硬件控制。更多细节见 `docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md` 和 `docs/ARCHITECTURE_V2.md`。
+`scripts/dev/setup_zeroclaw.py` 目前只配置模型控制面与清理直连 fallback，不负责建立 MCP 连接。
 
 ## 企业级特性
 
@@ -458,3 +455,4 @@ docker/
 - [产品手册](docs/PRODUCT.md)
 - [架构说明](docs/ARCHITECTURE.md)
 - [运维交付](docs/OPERATIONS.md)
+- [Warm Session 运维](docs/WARM_SESSIONS.md)

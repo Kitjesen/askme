@@ -10,7 +10,7 @@ Canonical wiring::
 
 The LLMClient is obtained from LLMModule via ``In[LLMClient]`` auto-wiring.
 After wiring, ``self.llm_client`` is the LLMModule instance (not the client
-directly). Access the client via ``self.llm_client.client``.
+directly). Access the data-plane client via ``self.llm_client.llm_client``.
 """
 
 from __future__ import annotations
@@ -103,8 +103,12 @@ def _knowledge_governance_fields(payload: dict[str, Any], *, filename: str = "")
         "linked_object_type": str(
             payload.get("linked_object_type") or payload.get("object_type") or ""
         ).strip(),
-        "linked_object_id": str(payload.get("linked_object_id") or payload.get("object_id") or "").strip(),
-        "document_type": str(payload.get("document_type") or profile["document_type"] or "").strip(),
+        "linked_object_id": str(
+            payload.get("linked_object_id") or payload.get("object_id") or ""
+        ).strip(),
+        "document_type": str(
+            payload.get("document_type") or profile["document_type"] or ""
+        ).strip(),
     }
 
 
@@ -120,7 +124,7 @@ class MemoryModule(Module):
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         # Get LLMClient from LLMModule (auto-wired In port gives module instance)
         llm_mod = self.llm_client
-        llm: LLMClient | None = getattr(llm_mod, "client", None) if llm_mod else None
+        llm: Any | None = getattr(llm_mod, "llm_client", None) if llm_mod else None
         self._config = cfg
         self._memory_cfg = cfg.get("memory", {}) if isinstance(cfg.get("memory"), dict) else {}
 
@@ -175,7 +179,7 @@ class MemoryModule(Module):
         """Unified memory system."""
         return self._memory_system
 
-    def replace_llm(self, llm: LLMClient) -> None:
+    def replace_llm(self, llm: Any) -> None:
         """Route future summaries and reflections to a replacement LLM client."""
 
         self._session_memory.set_llm(llm)
@@ -200,7 +204,7 @@ class MemoryModule(Module):
             robotmem = getattr(self._memory_bridge, "_robotmem", None)
             if robotmem and robotmem.available:
                 llm_mod = self.llm_client
-                llm = getattr(llm_mod, "client", None) if llm_mod else None
+                llm = getattr(llm_mod, "llm_client", None) if llm_mod else None
                 if llm:
                     n = await robotmem.consolidate(llm, batch_size=20)
                     if n:
@@ -328,13 +332,17 @@ class MemoryModule(Module):
 
     def _memory_strategy_payload(self, bridge_health: dict[str, Any]) -> dict[str, Any]:
         cfg = getattr(self, "_memory_cfg", {})
-        customer_backend = str(
-            cfg.get("customer_knowledge_backend")
-            or cfg.get("backend")
-            or bridge_health.get("configured_backend")
-            or bridge_health.get("backend")
-            or "vector"
-        ).strip().lower()
+        customer_backend = (
+            str(
+                cfg.get("customer_knowledge_backend")
+                or cfg.get("backend")
+                or bridge_health.get("configured_backend")
+                or bridge_health.get("backend")
+                or "vector"
+            )
+            .strip()
+            .lower()
+        )
         robot_backend = str(cfg.get("robot_behavior_memory_backend") or "robotmem").strip().lower()
         robot_enabled = bool(cfg.get("robot_behavior_memory_enabled", False))
         return {
@@ -519,9 +527,7 @@ class MemoryModule(Module):
                 "reason": "eligible_evidence_found",
             }
         reasons = {
-            str(item.get("drop_reason") or "")
-            for item in dropped_results
-            if isinstance(item, dict)
+            str(item.get("drop_reason") or "") for item in dropped_results if isinstance(item, dict)
         }
         if reasons:
             if any("conflict" in reason for reason in reasons):
@@ -610,7 +616,8 @@ class MemoryModule(Module):
                     project_id=governance["project_id"] or record.project_id,
                     product_area=governance["product_area"] or record.product_area,
                     workstream=governance["workstream"] or record.workstream,
-                    linked_object_type=governance["linked_object_type"] or record.linked_object_type,
+                    linked_object_type=governance["linked_object_type"]
+                    or record.linked_object_type,
                     linked_object_id=governance["linked_object_id"] or record.linked_object_id,
                     document_type=governance["document_type"] or record.document_type,
                 )
@@ -653,18 +660,16 @@ class MemoryModule(Module):
         imported = 0
         errors: list[str] = []
         preview_records = [
-            record
-            for record in preview.get("records", [])
-            if isinstance(record, dict)
+            record for record in preview.get("records", []) if isinstance(record, dict)
         ]
         catalog_result = self._knowledge_catalog.upsert_payloads(preview_records)
         sync_result = await self._sync_catalog_records(catalog_result.get("records", []))
         imported += int(sync_result.get("indexed", 0) or 0)
         errors.extend(sync_result.get("errors", []))
         skipped = max(0, int(preview.get("parsed", 0) or 0) - imported)
-        cataloged = len([
-            record for record in catalog_result.get("records", []) if isinstance(record, dict)
-        ])
+        cataloged = len(
+            [record for record in catalog_result.get("records", []) if isinstance(record, dict)]
+        )
         return {
             "source": preview.get("source", ""),
             "parsed": int(preview.get("parsed", 0) or 0),
@@ -691,10 +696,12 @@ class MemoryModule(Module):
             "catalog": catalog.get("catalog", {}),
             "operations": self._knowledge_operations_payload(catalog.get("records", [])),
             "category_taxonomy": knowledge_category_taxonomy_payload(),
-            "index_jobs": self._knowledge_job_store.list_jobs(limit=_int_or_default(
-                payload.get("job_limit"),
-                5,
-            )),
+            "index_jobs": self._knowledge_job_store.list_jobs(
+                limit=_int_or_default(
+                    payload.get("job_limit"),
+                    5,
+                )
+            ),
             "rag": self._memory_bridge.health(),
             "memory_health": await self.health_payload({}),
         }
@@ -729,25 +736,33 @@ class MemoryModule(Module):
                 "updated_at": record.get("updated_at", ""),
                 "evidence_version": record.get("evidence_version", ""),
             }
-            if state in {"unapproved", "pending_review"} or status in {"draft", "pending", "pending_review"}:
+            if state in {"unapproved", "pending_review"} or status in {
+                "draft",
+                "pending",
+                "pending_review",
+            }:
                 approval_queue.append({**item, "reason": "needs_approval"})
             if record.get("conflict_set_id") or state in {"conflict", "conflicted"}:
-                conflict_queue.append({
-                    **item,
-                    "reason": record.get("conflict_set_id") or "conflict",
-                })
+                conflict_queue.append(
+                    {
+                        **item,
+                        "reason": record.get("conflict_set_id") or "conflict",
+                    }
+                )
             if record.get("needs_reindex") or state == "needs_reindex":
                 reindex_queue.append({**item, "reason": "evidence_version_not_indexed"})
             expires_at = _parse_optional_time(record.get("expires_at"))
             if expires_at is not None:
                 days = (expires_at.date() - now.date()).days
                 if days <= 7:
-                    expiry_queue.append({
-                        **item,
-                        "expires_at": record.get("expires_at", ""),
-                        "expires_in_days": days,
-                        "reason": "expired" if days < 0 else "expiring_soon",
-                    })
+                    expiry_queue.append(
+                        {
+                            **item,
+                            "expires_at": record.get("expires_at", ""),
+                            "expires_in_days": days,
+                            "reason": "expired" if days < 0 else "expiring_soon",
+                        }
+                    )
         return {
             "approval_queue": approval_queue,
             "conflict_queue": conflict_queue,
@@ -779,7 +794,11 @@ class MemoryModule(Module):
     @staticmethod
     def _next_release_window() -> str:
         now = datetime.now(_UTC)
-        return (now + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0).isoformat()
+        return (
+            (now + timedelta(days=1))
+            .replace(hour=10, minute=0, second=0, microsecond=0)
+            .isoformat()
+        )
 
     async def update_knowledge_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Patch approval/deletion metadata for a knowledge record."""
@@ -793,7 +812,9 @@ class MemoryModule(Module):
             return await self.rollback_knowledge_payload(payload)
         if action in {"resolve_conflict", "resolve"}:
             return await self.resolve_knowledge_conflict_payload(payload)
-        if action in {"bulk", "bulk_update", "bulk_metadata"} or isinstance(payload.get("updates"), list):
+        if action in {"bulk", "bulk_update", "bulk_metadata"} or isinstance(
+            payload.get("updates"), list
+        ):
             return await self.bulk_update_knowledge_payload(payload)
         if isinstance(payload.get("record_ids"), list) and not record_id:
             return await self.bulk_update_knowledge_payload(payload)
@@ -812,7 +833,11 @@ class MemoryModule(Module):
                 "catalog": self._knowledge_catalog.health(),
                 "rag": self._memory_bridge.health(),
             }
-        return {**result, "catalog": self._knowledge_catalog.health(), "rag": self._memory_bridge.health()}
+        return {
+            **result,
+            "catalog": self._knowledge_catalog.health(),
+            "rag": self._memory_bridge.health(),
+        }
 
     async def bulk_update_knowledge_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Patch metadata for multiple knowledge records and sync changed records."""
@@ -829,9 +854,7 @@ class MemoryModule(Module):
 
         result = self._knowledge_catalog.update_metadata_many(updates)
         changed = [
-            record
-            for record in result.get("changed_records", [])
-            if isinstance(record, dict)
+            record for record in result.get("changed_records", []) if isinstance(record, dict)
         ]
         sync = await self._sync_catalog_records(changed)
         return {
@@ -868,9 +891,7 @@ class MemoryModule(Module):
             note=str(payload.get("review_note") or payload.get("reason") or "").strip(),
         )
         changed = [
-            record
-            for record in result.get("changed_records", [])
-            if isinstance(record, dict)
+            record for record in result.get("changed_records", []) if isinstance(record, dict)
         ]
         sync = await self._sync_catalog_records(changed)
         return {
@@ -917,11 +938,15 @@ class MemoryModule(Module):
             }
         if not conflict_id:
             conflict_id = str(keep.get("conflict_set_id") or "").strip()
-        reject_ids = [
-            str(record_id or "").strip()
-            for record_id in payload.get("reject_record_ids", [])
-            if str(record_id or "").strip()
-        ] if isinstance(payload.get("reject_record_ids"), list) else []
+        reject_ids = (
+            [
+                str(record_id or "").strip()
+                for record_id in payload.get("reject_record_ids", [])
+                if str(record_id or "").strip()
+            ]
+            if isinstance(payload.get("reject_record_ids"), list)
+            else []
+        )
         if not reject_ids and conflict_id:
             reject_ids = [
                 str(record.get("record_id") or "")
@@ -930,32 +955,35 @@ class MemoryModule(Module):
                 and record.get("conflict_set_id") == conflict_id
                 and record.get("record_id") != keep_record_id
             ]
-        updates = [{
-            "record_id": keep_record_id,
-            "patch": {
-                "approval_status": "published",
-                "conflict_set_id": "",
-                "approved_by": operator_id,
-                "approved_at": now,
-                "updated_by": operator_id,
-                "review_note": note,
-            },
-        }]
-        updates.extend({
-            "record_id": record_id,
-            "patch": {
-                "approval_status": "rejected",
-                "rejected_by": operator_id,
-                "rejected_at": now,
-                "updated_by": operator_id,
-                "review_note": note,
-            },
-        } for record_id in reject_ids)
+        updates = [
+            {
+                "record_id": keep_record_id,
+                "patch": {
+                    "approval_status": "published",
+                    "conflict_set_id": "",
+                    "approved_by": operator_id,
+                    "approved_at": now,
+                    "updated_by": operator_id,
+                    "review_note": note,
+                },
+            }
+        ]
+        updates.extend(
+            {
+                "record_id": record_id,
+                "patch": {
+                    "approval_status": "rejected",
+                    "rejected_by": operator_id,
+                    "rejected_at": now,
+                    "updated_by": operator_id,
+                    "review_note": note,
+                },
+            }
+            for record_id in reject_ids
+        )
         result = self._knowledge_catalog.update_metadata_many(updates)
         changed = [
-            record
-            for record in result.get("changed_records", [])
-            if isinstance(record, dict)
+            record for record in result.get("changed_records", []) if isinstance(record, dict)
         ]
         sync = await self._sync_catalog_records(changed)
         return {
@@ -974,11 +1002,15 @@ class MemoryModule(Module):
         started_at = started.isoformat(timespec="seconds")
         job_id = f"knowledge_rebuild_{started.strftime('%Y%m%dT%H%M%S%fZ')}"
         operator_id = str(payload.get("operator_id") or payload.get("updated_by") or "").strip()
-        record_ids = [
-            str(record_id or "").strip()
-            for record_id in payload.get("record_ids", [])
-            if str(record_id or "").strip()
-        ] if isinstance(payload.get("record_ids"), list) else None
+        record_ids = (
+            [
+                str(record_id or "").strip()
+                for record_id in payload.get("record_ids", [])
+                if str(record_id or "").strip()
+            ]
+            if isinstance(payload.get("record_ids"), list)
+            else None
+        )
         limit = payload.get("limit")
         selected = self._knowledge_catalog.records_for_rebuild(
             record_ids=record_ids,
@@ -986,35 +1018,33 @@ class MemoryModule(Module):
             limit=_int_or_default(limit, 0) if limit is not None else None,
             offset=_int_or_default(payload.get("offset"), 0),
         )
-        records = [
-            record
-            for record in selected.get("records", [])
-            if isinstance(record, dict)
-        ]
+        records = [record for record in selected.get("records", []) if isinstance(record, dict)]
         sync = await self._sync_catalog_records(records)
         status = "completed" if not sync.get("errors") else "completed_with_errors"
         completed = datetime.now(_UTC)
         bridge_health = self._memory_bridge.health()
-        job = self._knowledge_job_store.record({
-            "job_id": job_id,
-            "type": "knowledge_rebuild_index",
-            "status": status,
-            "operator_id": operator_id,
-            "started_at": started_at,
-            "completed_at": completed.isoformat(timespec="seconds"),
-            "duration_ms": int((completed - started).total_seconds() * 1000),
-            "requested_record_ids": record_ids or [],
-            "scanned": selected.get("total", 0),
-            "eligible": selected.get("eligible", 0),
-            "selected": len(records),
-            "indexed": sync.get("indexed", 0),
-            "skipped": sync.get("skipped", 0) + selected.get("skipped", 0),
-            "errors": sync.get("errors", []),
-            "record_ids": selected.get("record_ids", []),
-            "backend": bridge_health.get("last_backend") or bridge_health.get("backend") or "",
-            "fallback_reason": bridge_health.get("last_fallback_reason") or "",
-            "include_ineligible": bool(payload.get("include_ineligible", False)),
-        })
+        job = self._knowledge_job_store.record(
+            {
+                "job_id": job_id,
+                "type": "knowledge_rebuild_index",
+                "status": status,
+                "operator_id": operator_id,
+                "started_at": started_at,
+                "completed_at": completed.isoformat(timespec="seconds"),
+                "duration_ms": int((completed - started).total_seconds() * 1000),
+                "requested_record_ids": record_ids or [],
+                "scanned": selected.get("total", 0),
+                "eligible": selected.get("eligible", 0),
+                "selected": len(records),
+                "indexed": sync.get("indexed", 0),
+                "skipped": sync.get("skipped", 0) + selected.get("skipped", 0),
+                "errors": sync.get("errors", []),
+                "record_ids": selected.get("record_ids", []),
+                "backend": bridge_health.get("last_backend") or bridge_health.get("backend") or "",
+                "fallback_reason": bridge_health.get("last_fallback_reason") or "",
+                "include_ineligible": bool(payload.get("include_ineligible", False)),
+            }
+        )
         return {
             "job": job,
             "scanned": selected.get("total", 0),
@@ -1099,10 +1129,12 @@ class MemoryModule(Module):
                     **(payload.get("patch") if isinstance(payload.get("patch"), dict) else {}),
                     **(item.get("patch") if isinstance(item.get("patch"), dict) else {}),
                 }
-                updates.append({
-                    "record_id": item.get("record_id"),
-                    "patch": self._metadata_patch_for_action(item_payload),
-                })
+                updates.append(
+                    {
+                        "record_id": item.get("record_id"),
+                        "patch": self._metadata_patch_for_action(item_payload),
+                    }
+                )
             return updates
 
         record_ids = payload.get("record_ids")
@@ -1161,13 +1193,17 @@ class MemoryModule(Module):
             record_id = str(record.get("record_id") or "").strip()
             metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
             patch = {
-                "approval_status": record.get("approval_status") or metadata.get("approval_status") or "",
+                "approval_status": record.get("approval_status")
+                or metadata.get("approval_status")
+                or "",
                 "category": record.get("category") or metadata.get("category") or "",
                 "source": record.get("source") or metadata.get("source") or "",
                 "owner": record.get("owner") or metadata.get("owner") or "",
                 "updated_at": record.get("updated_at") or metadata.get("updated_at") or "",
                 "expires_at": record.get("expires_at") or metadata.get("expires_at") or "",
-                "quality_status": record.get("quality_status") or metadata.get("quality_status") or "",
+                "quality_status": record.get("quality_status")
+                or metadata.get("quality_status")
+                or "",
                 "visibility": record.get("visibility") or metadata.get("visibility") or "",
                 "customer_id": record.get("customer_id") or metadata.get("customer_id") or "",
                 "project_id": record.get("project_id") or metadata.get("project_id") or "",
@@ -1180,11 +1216,19 @@ class MemoryModule(Module):
                     record.get("linked_object_id") or metadata.get("linked_object_id") or ""
                 ),
                 "document_type": record.get("document_type") or metadata.get("document_type") or "",
-                "source_version": record.get("source_version") or metadata.get("source_version") or "",
-                "evidence_version": record.get("evidence_version") or metadata.get("evidence_version") or "",
-                "conflict_set_id": record.get("conflict_set_id") or metadata.get("conflict_set_id") or "",
+                "source_version": record.get("source_version")
+                or metadata.get("source_version")
+                or "",
+                "evidence_version": record.get("evidence_version")
+                or metadata.get("evidence_version")
+                or "",
+                "conflict_set_id": record.get("conflict_set_id")
+                or metadata.get("conflict_set_id")
+                or "",
                 "deleted_at": record.get("deleted_at") or metadata.get("deleted_at") or "",
-                "deleted_reason": record.get("deleted_reason") or metadata.get("deleted_reason") or "",
+                "deleted_reason": record.get("deleted_reason")
+                or metadata.get("deleted_reason")
+                or "",
                 "restored_at": record.get("restored_at") or metadata.get("restored_at") or "",
             }
             index_metadata = {
@@ -1204,9 +1248,7 @@ class MemoryModule(Module):
                         if inspect.isawaitable(result):
                             await result
                     except Exception as exc:  # pragma: no cover - bridge should degrade
-                        errors.append(
-                            f"catalog sync metadata {index}: {type(exc).__name__}: {exc}"
-                        )
+                        errors.append(f"catalog sync metadata {index}: {type(exc).__name__}: {exc}")
                 skipped += 1
                 continue
             text = str(record.get("memory_text") or record.get("text") or "").strip()
@@ -1217,9 +1259,7 @@ class MemoryModule(Module):
                 indexed_result = await self._memory_bridge.save_fact(text, index_metadata)
                 if indexed_result is False:
                     skipped += 1
-                    errors.append(
-                        f"catalog sync record {index}: backend rejected or unavailable"
-                    )
+                    errors.append(f"catalog sync record {index}: backend rejected or unavailable")
                     continue
                 if record_id:
                     metadata_result = self._memory_bridge.update_knowledge_metadata(

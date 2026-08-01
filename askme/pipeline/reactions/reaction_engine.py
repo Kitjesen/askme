@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from askme.interfaces.reaction import ReactionBackend
+from askme.llm.core.contracts import LLMCallContext
 from askme.schemas.events import ChangeEventType
 from askme.schemas.reaction import ReactionDecision, ReactionType, SceneContext
 
@@ -26,11 +28,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _reaction_llm_context() -> LLMCallContext:
+    return LLMCallContext(
+        call_id=uuid.uuid4().hex,
+        purpose="assistant_response",
+        channel="background",
+        request_class="robot_action",
+        privacy_class="restricted",
+        allow_cache=False,
+    )
+
+
 # -- Rule matrix -- priority-ordered, first match wins ------------------------
 
-_REACTION_RULES: list[
-    tuple[str, Callable[[SceneContext], bool], ReactionType, dict[str, Any]]
-] = [
+_REACTION_RULES: list[tuple[str, Callable[[SceneContext], bool], ReactionType, dict[str, Any]]] = [
     # ---- Safety / Security (highest priority) ----
     (
         "restricted_zone_person",
@@ -67,9 +79,7 @@ _REACTION_RULES: list[
     (
         "busy_ignore",
         lambda ctx: (
-            ctx.robot_busy
-            and ctx.event.is_person_event
-            and "restricted" not in ctx.zone_tags
+            ctx.robot_busy and ctx.event.is_person_event and "restricted" not in ctx.zone_tags
         ),
         ReactionType.OBSERVE,
         {},
@@ -123,8 +133,7 @@ _REACTION_RULES: list[
     (
         "entrance_greet",
         lambda ctx: (
-            ctx.event.event_type == ChangeEventType.PERSON_APPEARED
-            and "entrance" in ctx.zone_tags
+            ctx.event.event_type == ChangeEventType.PERSON_APPEARED and "entrance" in ctx.zone_tags
         ),
         ReactionType.GREET,
         {"template": "你好，欢迎。"},
@@ -208,6 +217,7 @@ def _dispatch(alert_dispatcher, decision: ReactionDecision, content: str) -> Non
         payload=decision.to_dict(),
     )
 
+
 # -- RuleBasedReaction -- pure rules, no LLM ----------------------------------
 
 
@@ -230,9 +240,7 @@ class RuleBasedReaction(ReactionBackend):
     async def decide(self, context: SceneContext) -> ReactionDecision:
         return evaluate_rules(context)
 
-    async def generate_content(
-        self, decision: ReactionDecision, context: SceneContext
-    ) -> str:
+    async def generate_content(self, decision: ReactionDecision, context: SceneContext) -> str:
         """Use template from metadata. No LLM."""
         template = decision.metadata.get("template", "")
         if not template:
@@ -288,9 +296,7 @@ class HybridReaction(ReactionBackend):
     async def decide(self, context: SceneContext) -> ReactionDecision:
         return evaluate_rules(context)
 
-    async def generate_content(
-        self, decision: ReactionDecision, context: SceneContext
-    ) -> str:
+    async def generate_content(self, decision: ReactionDecision, context: SceneContext) -> str:
         """Generate content: LLM for use_llm rules, template otherwise."""
         if decision.reaction_type in (ReactionType.IGNORE, ReactionType.OBSERVE):
             return ""
@@ -321,7 +327,10 @@ class HybridReaction(ReactionBackend):
                     reaction_type=decision.reaction_type.value,
                 )
 
-                chat_kwargs: dict[str, Any] = {"temperature": 0.7}
+                chat_kwargs: dict[str, Any] = {
+                    "temperature": 0.7,
+                    "context": _reaction_llm_context(),
+                }
                 if self._content_model:
                     chat_kwargs["model"] = self._content_model
 
@@ -354,6 +363,7 @@ class HybridReaction(ReactionBackend):
             return
         if self._alert_dispatcher:
             _dispatch(self._alert_dispatcher, decision, content)
+
 
 # -- LLMReaction -- full LLM decision (future) --------------------------------
 
@@ -397,9 +407,7 @@ class LLMReaction(ReactionBackend):
         # For now, delegate to rules. Full LLM decision is future work.
         return evaluate_rules(context)
 
-    async def generate_content(
-        self, decision: ReactionDecision, context: SceneContext
-    ) -> str:
+    async def generate_content(self, decision: ReactionDecision, context: SceneContext) -> str:
         """Always use LLM for content generation."""
         if decision.reaction_type in (ReactionType.IGNORE, ReactionType.OBSERVE):
             return ""
@@ -421,7 +429,10 @@ class LLMReaction(ReactionBackend):
                 reaction_type=decision.reaction_type.value,
             )
 
-            chat_kwargs: dict[str, Any] = {"temperature": 0.7}
+            chat_kwargs: dict[str, Any] = {
+                "temperature": 0.7,
+                "context": _reaction_llm_context(),
+            }
             if self._decision_model:
                 chat_kwargs["model"] = self._decision_model
 
@@ -448,4 +459,3 @@ class LLMReaction(ReactionBackend):
             return
         if self._alert_dispatcher:
             _dispatch(self._alert_dispatcher, decision, content)
-

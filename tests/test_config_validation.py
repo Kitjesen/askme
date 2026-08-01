@@ -6,14 +6,100 @@ from askme.config import _apply_feature_flags, validate_config
 class TestValidateConfig:
     def test_missing_api_key(self):
         """Empty api_key should produce a validation error."""
-        config = {"brain": {"api_key": "", "base_url": "https://api.deepseek.com"}}
+        config = {
+            "brain": {
+                "provider": "deepseek",
+                "api_key": "",
+                "base_url": "https://api.deepseek.com",
+            }
+        }
         errors = validate_config(config)
         assert any("api_key" in e for e in errors)
+
+    def test_litellm_missing_credentials_names_the_proxy_environment(self):
+        config = {
+            "brain": {
+                "provider": "litellm",
+                "api_key": "",
+                "base_url": "",
+                "max_retries": 0,
+                "fallback_models": [],
+                "health_model": "health-probe",
+            }
+        }
+
+        errors = validate_config(config)
+
+        assert "brain.api_key (LITELLM_VIRTUAL_KEY) is required" in errors
+        assert "brain.base_url (LITELLM_BASE_URL) is required" in errors
+        assert all("DEEPSEEK_" not in error for error in errors)
+
+    def test_litellm_rejects_competing_local_routing_policy(self):
+        config = {
+            "brain": {
+                "provider": "litellm",
+                "api_key": "sk-scoped-virtual-key",
+                "base_url": "http://127.0.0.1:4000/v1",
+                "max_retries": 1,
+                "fallback_models": ["voice-quality"],
+                "minimax_api_key": "direct-provider-key",
+                "health_model": "wrong-alias",
+            }
+        }
+
+        errors = validate_config(config)
+
+        assert any("brain.max_retries must be 0" in error for error in errors)
+        assert any("brain.fallback_models must be empty" in error for error in errors)
+        assert any("brain.minimax_api_key must be empty" in error for error in errors)
+
+    def test_litellm_omitted_max_retries_uses_fail_closed_zero_default(self):
+        config = {
+            "brain": {
+                "provider": "litellm",
+                "api_key": "sk-scoped-virtual-key",
+                "base_url": "http://127.0.0.1:4000/v1",
+                "model": "voice-fast",
+                "health_model": "health-probe",
+            }
+        }
+
+        assert validate_config(config) == []
+
+    def test_empty_provider_fails_closed(self):
+        errors = validate_config(
+            {
+                "brain": {
+                    "api_key": "sk-test",
+                    "base_url": "https://api.deepseek.com/v1",
+                }
+            }
+        )
+
+        assert "brain.provider is required" in errors
+
+    def test_litellm_requires_health_probe_alias(self):
+        errors = validate_config(
+            {
+                "brain": {
+                    "provider": "litellm",
+                    "api_key": "sk-scoped",
+                    "base_url": "http://127.0.0.1:4000/v1",
+                    "model": "voice-fast",
+                }
+            }
+        )
+
+        assert "brain.health_model must be 'health-probe' when provider=litellm" in errors
 
     def test_valid_minimal_config(self):
         """Config with required fields should pass."""
         config = {
-            "brain": {"api_key": "sk-test", "base_url": "https://api.deepseek.com"},
+            "brain": {
+                "provider": "deepseek",
+                "api_key": "sk-test",
+                "base_url": "https://api.deepseek.com",
+            },
         }
         errors = validate_config(config)
         assert len(errors) == 0
@@ -21,7 +107,11 @@ class TestValidateConfig:
     def test_voice_section_no_key_needed(self):
         """Edge TTS requires no API key -- voice section should pass validation."""
         config = {
-            "brain": {"api_key": "sk-test", "base_url": "https://api.deepseek.com"},
+            "brain": {
+                "provider": "deepseek",
+                "api_key": "sk-test",
+                "base_url": "https://api.deepseek.com",
+            },
             "voice": {"tts": {"voice": "zh-CN-YunxiNeural"}},
         }
         errors = validate_config(config)
@@ -30,7 +120,11 @@ class TestValidateConfig:
     def test_ota_enabled_requires_server_url(self):
         """OTA bridge config must include server_url when enabled."""
         config = {
-            "brain": {"api_key": "sk-test", "base_url": "https://api.deepseek.com"},
+            "brain": {
+                "provider": "deepseek",
+                "api_key": "sk-test",
+                "base_url": "https://api.deepseek.com",
+            },
             "ota": {"enabled": True, "device": {}},
         }
         errors = validate_config(config)
@@ -39,14 +133,24 @@ class TestValidateConfig:
     def test_ota_disabled_allows_empty_server_url(self):
         """Disabled OTA bridge should not fail validation."""
         config = {
-            "brain": {"api_key": "sk-test", "base_url": "https://api.deepseek.com"},
+            "brain": {
+                "provider": "deepseek",
+                "api_key": "sk-test",
+                "base_url": "https://api.deepseek.com",
+            },
             "ota": {"enabled": False, "server_url": ""},
         }
         errors = validate_config(config)
         assert len(errors) == 0
 
 
-_VALID_BASE = {"brain": {"api_key": "sk-test", "base_url": "https://api.example.com"}}
+_VALID_BASE = {
+    "brain": {
+        "provider": "openai_compatible",
+        "api_key": "sk-test",
+        "base_url": "https://api.example.com",
+    }
+}
 
 
 class TestValidateConfigNumericRules:
@@ -133,14 +237,21 @@ class TestValidateConfigNumericRules:
         assert any("conversation.chat_slow_threshold_ms" in e for e in errors)
 
     def test_conversation_diagnostics_history_limit_range(self):
-        assert validate_config({
-            **_VALID_BASE,
-            "conversation": {"chat_diagnostics_history_limit": 1},
-        }) == []
-        errors = validate_config({
-            **_VALID_BASE,
-            "conversation": {"chat_diagnostics_history_limit": 0},
-        })
+        assert (
+            validate_config(
+                {
+                    **_VALID_BASE,
+                    "conversation": {"chat_diagnostics_history_limit": 1},
+                }
+            )
+            == []
+        )
+        errors = validate_config(
+            {
+                **_VALID_BASE,
+                "conversation": {"chat_diagnostics_history_limit": 0},
+            }
+        )
         assert any("conversation.chat_diagnostics_history_limit" in e for e in errors)
 
     def test_conversation_chat_max_concurrency_range(self):
@@ -238,25 +349,39 @@ class TestValidateConfigNumericRules:
         assert any("memory must be a mapping" in e for e in errors)
 
     def test_memory_retrieve_cache_ttl_range(self):
-        assert validate_config({
-            **_VALID_BASE,
-            "memory": {"retrieve_cache_ttl_s": 0},
-        }) == []
-        errors = validate_config({
-            **_VALID_BASE,
-            "memory": {"retrieve_cache_ttl_s": -0.1},
-        })
+        assert (
+            validate_config(
+                {
+                    **_VALID_BASE,
+                    "memory": {"retrieve_cache_ttl_s": 0},
+                }
+            )
+            == []
+        )
+        errors = validate_config(
+            {
+                **_VALID_BASE,
+                "memory": {"retrieve_cache_ttl_s": -0.1},
+            }
+        )
         assert any("memory.retrieve_cache_ttl_s" in e for e in errors)
 
     def test_memory_retrieve_cache_max_entries_range(self):
-        assert validate_config({
-            **_VALID_BASE,
-            "memory": {"retrieve_cache_max_entries": 128},
-        }) == []
-        errors = validate_config({
-            **_VALID_BASE,
-            "memory": {"retrieve_cache_max_entries": 0},
-        })
+        assert (
+            validate_config(
+                {
+                    **_VALID_BASE,
+                    "memory": {"retrieve_cache_max_entries": 128},
+                }
+            )
+            == []
+        )
+        errors = validate_config(
+            {
+                **_VALID_BASE,
+                "memory": {"retrieve_cache_max_entries": 0},
+            }
+        )
         assert any("memory.retrieve_cache_max_entries" in e for e in errors)
 
     def test_empty_config_does_not_raise(self):

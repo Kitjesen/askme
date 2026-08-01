@@ -87,6 +87,23 @@ const ENDPOINTS = {
   parkBlueprint: "/api/blueprints/park",
 };
 
+const conversationThreadId = createConversationThreadId();
+
+function createConversationThreadId() {
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new Error("secure browser randomness is required for conversation isolation");
+  }
+  if (typeof globalThis.crypto.randomUUID === "function") {
+    return `web-${globalThis.crypto.randomUUID()}`;
+  }
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  return `web-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 const KNOWLEDGE_CATEGORIES = [
   { id: "route", label: "路线与带路", group: "空间", description: "道路、路线说明、带路路径、不可通行路段" },
   { id: "location", label: "地点与点位", group: "空间", description: "楼宇、入口、卫生间、服务点、打卡点" },
@@ -171,6 +188,7 @@ let operatorSession = null;
 let identityReadiness = null;
 let liveBaseline = null;
 let chatStarted = false;
+let chatRequestInFlight = false;
 let chatRenderedCount = 0;
 let selectedFieldEventId = null;
 let fieldActionResult = null;
@@ -1168,20 +1186,33 @@ function renderChatSpacePolicy(payload = {}) {
 
 async function sendChat() {
   const input = document.getElementById("chat-input");
+  const sendButton = document.getElementById("chat-send");
   const text = (input?.value || "").trim();
-  if (!text) return;
+  if (!text || chatRequestInFlight) return;
+  chatRequestInFlight = true;
+  if (input) input.disabled = true;
+  if (sendButton) sendButton.disabled = true;
   chatStarted = true;
   input.value = "";
   addChatMessage(text, "user");
-  const response = await postJson(ENDPOINTS.chat, {
-    text,
-    speak: true,
-    play_audio: true,
-    ...chatSpaceContextPayload(),
-  });
-  const payload = response.payload || {};
-  if (payload.reply) addChatMessage(payload.reply, "assistant", payload);
-  else addChatMessage(payload.error || "服务没有返回可展示内容", "system");
+  try {
+    const response = await postJson(ENDPOINTS.chat, {
+      text,
+      conversation_thread_id: conversationThreadId,
+      conversation_session_id: conversationThreadId,
+      speak: true,
+      play_audio: true,
+      ...chatSpaceContextPayload(),
+    });
+    const payload = response.payload || {};
+    if (payload.reply) addChatMessage(payload.reply, "assistant", payload);
+    else addChatMessage(payload.error || "服务没有返回可展示内容", "system");
+  } finally {
+    chatRequestInFlight = false;
+    if (input) input.disabled = false;
+    if (sendButton) sendButton.disabled = false;
+    input?.focus();
+  }
 }
 
 async function pollLive() {
@@ -2817,6 +2848,7 @@ function renderVoiceIssues(snapshot) {
 function renderVoiceModels(snapshot) {
   const runtime = snapshot.runtime || {};
   const catalog = snapshot.catalog || {};
+  const switches = runtime.switches || {};
   return `
     <section class="voice-model-intro">
       <div><p>在线热切换</p><h3>模型路由控制</h3><span>新请求使用新模型，正在处理的对话保持原实例。切换前先验证服务可用性。</span></div>
@@ -2824,8 +2856,8 @@ function renderVoiceModels(snapshot) {
     </section>
     <div class="voice-model-grid">
       ${renderVoiceModelCard("llm", "对话模型", runtime.llm || {}, catalog.llm || [])}
-      ${renderVoiceModelCard("asr", "语音识别", runtime.asr?.cloud || runtime.asr || {}, catalog.asr || [])}
-      ${renderVoiceModelCard("tts", "语音合成", runtime.tts || {}, catalog.tts || [])}
+      ${renderVoiceModelCard("asr", "语音识别", runtime.asr || {}, catalog.asr || [], switches.asr)}
+      ${renderVoiceModelCard("tts", "语音合成", runtime.tts || {}, catalog.tts || [], switches.tts)}
     </div>
     <section class="voice-switch-contract">
       <div><strong>切换语义</strong><span>LLM 原子发布；ASR 在下一监听周期生效；TTS 播放中时排队到播报结束。</span></div>
@@ -2835,32 +2867,85 @@ function renderVoiceModels(snapshot) {
   `;
 }
 
-function renderVoiceModelCard(component, title, active, entries) {
+function voiceLegacyModelSelection(component, runtimeState) {
+  if (component !== "asr") return runtimeState || {};
+  const asr = runtimeState || {};
+  const cloud = asr.cloud;
+  if (cloud && cloud.available !== false && asr.provider !== "local") return cloud;
+  const directCloudUnavailable = asr.available === false && asr.provider !== "local";
+  if (asr.provider === "local" || cloud?.available === false || directCloudUnavailable) {
+    const local = asr.local || {};
+    return {
+      ...local,
+      provider: "local",
+      model: local.model || "local",
+    };
+  }
+  return cloud || asr;
+}
+
+function voiceEffectiveModelSelection(component, runtimeState, switchState) {
+  const legacy = voiceLegacyModelSelection(component, runtimeState);
+  const effective = switchState?.effective;
+  if (!effective || typeof effective !== "object" || Array.isArray(effective)) return legacy;
+  return { ...legacy, ...effective };
+}
+
+function voiceModelState(component, switchState) {
+  const knownStates = new Set(["active", "pending", "failed"]);
+  const rawState = String(switchState?.state || "active").trim().toLowerCase();
+  const state = knownStates.has(rawState) ? rawState : "active";
+  let detail = "";
+  if (state === "pending") {
+    const pending = switchState?.pending || switchState?.desired || {};
+    const providerKey = component === "tts" ? "backend" : "provider";
+    const provider = voiceProviderLabel(pending[providerKey] || "", component);
+    detail = `待生效：${[pending.model, provider].filter(Boolean).join(" · ") || "新配置"}`;
+  }
+  if (state === "failed") {
+    const reason = String(switchState?.failed?.reason || "运行时验证失败");
+    detail = `最近切换失败：${reason}；当前运行保持不变`;
+  }
+  return { state, label: state.toUpperCase(), detail };
+}
+
+function renderVoiceModelCard(component, title, runtimeState, entries, switchState = null) {
   const providerKey = component === "tts" ? "backend" : "provider";
+  const active = voiceEffectiveModelSelection(component, runtimeState, switchState);
+  const authoritativeEffective = Boolean(
+    switchState?.effective
+      && typeof switchState.effective === "object"
+      && !Array.isArray(switchState.effective),
+  );
   const activeProvider = voiceCanonicalProvider(
     component,
-    active[providerKey] || (component === "asr" && active.available === false ? "local" : ""),
+    active[providerKey] || "",
   );
   const providerRuntime = component === "tts" ? (active[activeProvider] || {}) : {};
   // Volcengine V3 selects the account product/model through
   // X-Api-Resource-Id.  Display and submit that effective selector instead of
   // a descriptive model label that may not route the request.
   const activeModel = String(
-    component === "tts" && activeProvider === "volcengine"
+    authoritativeEffective
+      ? (active.model || "")
+      : component === "tts" && activeProvider === "volcengine"
       ? (providerRuntime.resource_id || providerRuntime.model || "")
       : (active.model || providerRuntime.model || active.minimax?.model || ""),
   );
   const activeVoiceId = component === "tts"
     ? String(
-      activeProvider === "volcengine"
+      authoritativeEffective
+        ? (active.voice_id || "")
+        : activeProvider === "volcengine"
         ? (providerRuntime.speaker || "")
         : (providerRuntime.voice_id || active.minimax?.voice_id || ""),
     )
     : "";
+  const modelState = voiceModelState(component, switchState);
   const normalizedEntries = entries.length ? entries : [{ [providerKey]: activeProvider || "unknown", models: [activeModel], credential_ready: true }];
   return `
-    <article class="voice-model-card" data-model-card="${component}">
-      <div class="voice-model-card-head"><div><small>${esc(component.toUpperCase())}</small><h3>${esc(title)}</h3></div><span class="voice-model-state">LIVE</span></div>
+    <article class="voice-model-card" data-model-card="${component}" data-model-state="${esc(modelState.state)}">
+      <div class="voice-model-card-head"><div><small>${esc(component.toUpperCase())}</small><h3>${esc(title)}</h3></div><span class="voice-model-state ${esc(modelState.state)}" title="${esc(modelState.detail)}" aria-label="${esc([modelState.label, modelState.detail].filter(Boolean).join("："))}">${esc(modelState.label)}</span></div>
       <div class="voice-current-model"><span>当前运行</span><strong>${esc(activeModel || activeProvider || "未配置")}</strong><small>${esc(voiceProviderLabel(activeProvider || "-", component))}</small></div>
       <div class="voice-model-fields">
         <label>Provider

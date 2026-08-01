@@ -104,12 +104,14 @@ class RuntimeHandoffModule(Module):
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._service.pause_payload(
             run_id,
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
     def resume_payload(
@@ -119,12 +121,14 @@ class RuntimeHandoffModule(Module):
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._service.resume_payload(
             run_id,
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
     def cancel_payload(
@@ -134,12 +138,14 @@ class RuntimeHandoffModule(Module):
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._service.cancel_payload(
             run_id,
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
     def advance_payload(
@@ -149,12 +155,14 @@ class RuntimeHandoffModule(Module):
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._service.advance_payload(
             run_id,
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
     def handle_chat_control(self, text: str) -> dict[str, Any] | None:
@@ -173,6 +181,13 @@ class RuntimeHandoffModule(Module):
         speak: bool = False,
         conversation_session_id: str | None = None,
         planning_session_id: str | None = None,
+        operator_id: str | None = None,
+        operator_roles: list[str] | tuple[str, ...] | None = None,
+        operator_authenticated: bool | None = None,
+        operator_source: str = "",
+        runtime_permission: str = "",
+        reason: str = "",
+        risk_acknowledgement: bool = False,
     ) -> dict[str, Any]:
         if not self.enabled:
             voice_turn: dict[str, Any] = {
@@ -201,6 +216,13 @@ class RuntimeHandoffModule(Module):
             speak=speak,
             conversation_session_id=conversation_session_id,
             planning_session_id=planning_session_id,
+            operator_id=operator_id,
+            operator_roles=operator_roles,
+            operator_authenticated=operator_authenticated,
+            operator_source=operator_source,
+            runtime_permission=runtime_permission,
+            reason=reason,
+            risk_acknowledgement=risk_acknowledgement,
         )
 
     def health(self) -> dict[str, Any]:
@@ -229,9 +251,7 @@ def _audit_config_from(handoff_cfg: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(audit_cfg, dict):
         audit_cfg = {}
     return {
-        "enabled": bool(
-            audit_cfg.get("enabled", handoff_cfg.get("audit_log_enabled", False))
-        ),
+        "enabled": bool(audit_cfg.get("enabled", handoff_cfg.get("audit_log_enabled", False))),
         "path": (
             audit_cfg.get("path")
             or audit_cfg.get("jsonl_path")
@@ -248,9 +268,7 @@ def _store_config_from(handoff_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         "enabled": bool(store_cfg.get("enabled", handoff_cfg.get("store_enabled", False))),
         "path": (
-            store_cfg.get("path")
-            or store_cfg.get("json_path")
-            or handoff_cfg.get("store_path")
+            store_cfg.get("path") or store_cfg.get("json_path") or handoff_cfg.get("store_path")
         ),
         "swallow_errors": bool(store_cfg.get("swallow_errors", True)),
     }

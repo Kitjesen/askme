@@ -23,6 +23,10 @@ COPY askme/ askme/
 # 安装依赖和项目本身
 RUN pip install --no-cache-dir -e ".[dev,embed]"
 
+# The runtime loader resolves this explicit immutable image contract.
+COPY config.yaml /app/config.yaml
+ENV ASKME_CONFIG_PATH=/app/config.yaml
+
 # 模型文件通过 volume 或 COPY 注入（运行时挂载 models/）
 # COPY models/ models/
 

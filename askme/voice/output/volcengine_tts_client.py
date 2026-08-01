@@ -60,9 +60,7 @@ class VolcengineTTSConfig:
         if not self.endpoint:
             raise VolcengineTTSClientError("Volcengine TTS endpoint is required")
         if not self.api_key and not (self.app_id and self.access_key):
-            raise VolcengineTTSClientError(
-                "Volcengine TTS credentials are missing"
-            )
+            raise VolcengineTTSClientError("Volcengine TTS credentials are missing")
         if not self.resource_id:
             raise VolcengineTTSClientError("Volcengine TTS resource_id is required")
         if not self.speaker:
@@ -75,9 +73,7 @@ class VolcengineTTSConfig:
             ("session_timeout", self.session_timeout),
         ):
             if value is not None and value <= 0:
-                raise VolcengineTTSClientError(
-                    f"Volcengine TTS {name} must be > 0"
-                )
+                raise VolcengineTTSClientError(f"Volcengine TTS {name} must be > 0")
 
     @property
     def effective_connect_timeout(self) -> float:
@@ -118,6 +114,7 @@ class VolcengineTTSClient:
         self._prewarm_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._active_session_id: str | None = None
+        self._opening_sockets: list[Any] = []
         self._connecting_sockets: list[Any] = []
         self._closing_sockets: list[Any] = []
         self._operation_epoch = 0
@@ -181,9 +178,8 @@ class VolcengineTTSClient:
             close_candidate = False
             try:
                 with self._state_lock:
-                    if (
-                        operation_epoch != self._operation_epoch
-                        or not self._is_connecting_locked(candidate)
+                    if operation_epoch != self._operation_epoch or not self._is_connecting_locked(
+                        candidate
                     ):
                         return {
                             "ok": False,
@@ -208,7 +204,7 @@ class VolcengineTTSClient:
     def interrupt(self) -> None:
         """Best-effort cross-thread cancellation that can unblock ``recv``."""
 
-        sockets, session_id = self._cancel_and_detach_connections()
+        sockets, session_id, _can_finish_connection = self._cancel_and_detach_connections()
         if not sockets:
             return
         if session_id:
@@ -243,13 +239,8 @@ class VolcengineTTSClient:
             try:
                 ws: Any = self._ensure_connection(operation_epoch)
                 with self._state_lock:
-                    if (
-                        operation_epoch != self._operation_epoch
-                        or self._ws is not ws
-                    ):
-                        raise VolcengineTTSClientError(
-                            "Volcengine TTS synthesis was interrupted"
-                        )
+                    if operation_epoch != self._operation_epoch or self._ws is not ws:
+                        raise VolcengineTTSClientError("Volcengine TTS synthesis was interrupted")
                     self._active_session_id = session_id
                 assert ws is not None
                 if not should_continue():
@@ -330,8 +321,7 @@ class VolcengineTTSClient:
                 self._close_unlocked(graceful=False)
                 suffix = " after audio" if received_audio else ""
                 raise VolcengineTTSClientError(
-                    f"Volcengine TTS synthesis failed{suffix}: "
-                    f"{self._safe_error(exc)}"
+                    f"Volcengine TTS synthesis failed{suffix}: {self._safe_error(exc)}"
                 ) from exc
             finally:
                 with self._state_lock:
@@ -341,12 +331,15 @@ class VolcengineTTSClient:
     def close(self) -> None:
         if self._lock.acquire(blocking=False):
             try:
-                sockets, _session_id = self._cancel_and_detach_connections()
-                self._close_sockets(sockets, graceful=True)
+                sockets, _session_id, can_finish_connection = self._cancel_and_detach_connections()
+                self._close_sockets(
+                    sockets,
+                    graceful=can_finish_connection,
+                )
             finally:
                 self._lock.release()
             return
-        sockets, _session_id = self._cancel_and_detach_connections()
+        sockets, _session_id, _can_finish_connection = self._cancel_and_detach_connections()
         self._close_sockets(sockets, graceful=False)
 
     def _ensure_connection(self, operation_epoch: int | None = None) -> Any:
@@ -360,10 +353,7 @@ class VolcengineTTSClient:
         ws = self._open_started_connection(operation_epoch)
         reusable_connection: Any | None = None
         with self._state_lock:
-            if (
-                operation_epoch != self._operation_epoch
-                or not self._is_connecting_locked(ws)
-            ):
+            if operation_epoch != self._operation_epoch or not self._is_connecting_locked(ws):
                 raise VolcengineTTSClientError(
                     "Volcengine TTS connection was interrupted before publication"
                 )
@@ -381,18 +371,15 @@ class VolcengineTTSClient:
 
     def _open_started_connection(self, operation_epoch: int) -> Any:
         ws = self._open_connection_cancellable(operation_epoch)
-        self._track_connecting(ws)
         try:
             if self._operation_cancelled(operation_epoch):
-                raise VolcengineTTSClientError(
-                    "Volcengine TTS connection was interrupted"
-                )
+                raise VolcengineTTSClientError("Volcengine TTS connection was interrupted")
             ws.send_binary(encode_start_connection())
+            if not self._promote_opening(ws, operation_epoch):
+                raise VolcengineTTSClientError("Volcengine TTS connection was interrupted")
             frame = self._recv_frame(ws)
             if self._operation_cancelled(operation_epoch):
-                raise VolcengineTTSClientError(
-                    "Volcengine TTS connection was interrupted"
-                )
+                raise VolcengineTTSClientError("Volcengine TTS connection was interrupted")
             if _event(frame) != EventType.CONNECTION_STARTED:
                 raise VolcengineTTSClientError("Volcengine TTS connection was not accepted")
             settimeout = getattr(ws, "settimeout", None)
@@ -400,7 +387,7 @@ class VolcengineTTSClient:
                 settimeout(self._config.effective_session_timeout)
             return ws
         except Exception:
-            self._discard_connecting(ws)
+            self._discard_tracked(ws)
             raise
 
     def _open_connection_cancellable(self, operation_epoch: int) -> Any:
@@ -412,9 +399,7 @@ class VolcengineTTSClient:
         socket after the caller has cancelled or timed out.
         """
 
-        results: queue.Queue[tuple[Any | None, BaseException | None]] = queue.Queue(
-            maxsize=1
-        )
+        results: queue.Queue[tuple[Any | None, BaseException | None]] = queue.Queue(maxsize=1)
         ownership_lock = threading.Lock()
         abandoned = False
 
@@ -427,7 +412,7 @@ class VolcengineTTSClient:
                 else:
                     results.put_nowait((ws, exc))
             if close_late_socket:
-                _safe_close(ws)
+                self._discard_tracked(ws)
 
         def connect_worker() -> None:
             try:
@@ -456,15 +441,13 @@ class VolcengineTTSClient:
             if self._operation_cancelled(operation_epoch):
                 late_socket = abandon()
                 if late_socket is not None:
-                    _safe_close(late_socket)
-                raise VolcengineTTSClientError(
-                    "Volcengine TTS connection was interrupted"
-                )
+                    self._discard_tracked(late_socket)
+                raise VolcengineTTSClientError("Volcengine TTS connection was interrupted")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 late_socket = abandon()
                 if late_socket is not None:
-                    _safe_close(late_socket)
+                    self._discard_tracked(late_socket)
                 raise VolcengineTTSClientError("Volcengine TTS connect timed out")
             try:
                 ws, exc = results.get(timeout=min(0.01, remaining))
@@ -474,16 +457,12 @@ class VolcengineTTSClient:
                 with ownership_lock:
                     abandoned = True
                 if ws is not None:
-                    _safe_close(ws)
-                raise VolcengineTTSClientError(
-                    "Volcengine TTS connection was interrupted"
-                )
+                    self._discard_tracked(ws)
+                raise VolcengineTTSClientError("Volcengine TTS connection was interrupted")
             if exc is not None:
                 raise exc
             if ws is None:
-                raise VolcengineTTSClientError(
-                    "Volcengine TTS connection returned no socket"
-                )
+                raise VolcengineTTSClientError("Volcengine TTS connection returned no socket")
             return ws
 
     def _open_connection(self) -> Any:
@@ -508,6 +487,9 @@ class VolcengineTTSClient:
             raise VolcengineTTSClientError(
                 f"Volcengine TTS connect failed: {self._safe_error(exc)}"
             ) from exc
+        # Make a raw-open socket visible to cross-thread cancellation without
+        # treating it as provider-started and eligible for FINISH_CONNECTION.
+        self._track_opening(ws)
         self._connect_id = connect_id
         return ws
 
@@ -526,13 +508,9 @@ class VolcengineTTSClient:
                 return
             event_code = _failed_event_code(event)
             if event_code is not None:
-                raise VolcengineTTSClientError(
-                    f"Volcengine TTS session start failed: {event_code}"
-                )
+                raise VolcengineTTSClientError(f"Volcengine TTS session start failed: {event_code}")
             if frame.message_type == MessageType.ERROR:
-                raise VolcengineTTSClientError(
-                    f"Volcengine TTS provider error: {frame.error_code}"
-                )
+                raise VolcengineTTSClientError(f"Volcengine TTS provider error: {frame.error_code}")
 
     def _session_payload(self, event: EventType, *, text: str | None = None) -> dict[str, Any]:
         req_params = {
@@ -550,15 +528,11 @@ class VolcengineTTSClient:
     def _recv_frame(self, ws: Any) -> VolcTTSFrame:
         raw = ws.recv()
         if isinstance(raw, str):
-            raise VolcengineTTSClientError(
-                "Volcengine TTS expected binary websocket frame"
-            )
+            raise VolcengineTTSClientError("Volcengine TTS expected binary websocket frame")
         try:
             return decode_server_frame(bytes(raw))
         except VolcProtocolError as exc:
-            raise VolcengineTTSClientError(
-                f"Volcengine TTS protocol error: {exc}"
-            ) from exc
+            raise VolcengineTTSClientError(f"Volcengine TTS protocol error: {exc}") from exc
 
     @staticmethod
     def _is_audio_frame(frame: VolcTTSFrame) -> bool:
@@ -576,9 +550,7 @@ class VolcengineTTSClient:
         if int(event or 0) < 100:
             return
         if frame.session_id != session_id:
-            raise VolcengineTTSClientError(
-                "Volcengine TTS provider returned mismatched session_id"
-            )
+            raise VolcengineTTSClientError("Volcengine TTS provider returned mismatched session_id")
 
     def _cancel_and_drop(self, ws: Any, session_id: str) -> None:
         try:
@@ -589,8 +561,11 @@ class VolcengineTTSClient:
         self._close_unlocked(graceful=False)
 
     def _close_unlocked(self, *, graceful: bool) -> None:
-        sockets, _session_id = self._detach_connections()
-        self._close_sockets(sockets, graceful=graceful)
+        sockets, _session_id, can_finish_connection = self._detach_connections()
+        self._close_sockets(
+            sockets,
+            graceful=graceful and can_finish_connection,
+        )
 
     @staticmethod
     def _close_sockets(sockets: list[Any], *, graceful: bool) -> None:
@@ -605,26 +580,32 @@ class VolcengineTTSClient:
         for socket in sockets:
             _safe_close(socket)
 
-    def _detach_connections(self) -> tuple[list[Any], str | None]:
+    def _detach_connections(self) -> tuple[list[Any], str | None, bool]:
         with self._state_lock:
             return self._detach_connections_locked()
 
-    def _cancel_and_detach_connections(self) -> tuple[list[Any], str | None]:
+    def _cancel_and_detach_connections(self) -> tuple[list[Any], str | None, bool]:
         with self._state_lock:
             self._operation_epoch += 1
             return self._detach_connections_locked()
 
-    def _detach_connections_locked(self) -> tuple[list[Any], str | None]:
+    def _detach_connections_locked(self) -> tuple[list[Any], str | None, bool]:
         ws = self._ws
         session_id = self._active_session_id
+        opening = list(self._opening_sockets)
         connecting = list(self._connecting_sockets)
+        can_finish_connection = ws is not None or bool(connecting)
+        self._opening_sockets.clear()
         self._connecting_sockets.clear()
         self._ws = None
         self._active_session_id = None
         sockets = ([ws] if ws is not None else []) + [
             candidate for candidate in connecting if candidate is not ws
         ]
-        return sockets, session_id
+        for candidate in opening:
+            if not any(candidate is tracked for tracked in sockets):
+                sockets.append(candidate)
+        return sockets, session_id, can_finish_connection
 
     def _begin_operation(self) -> int:
         with self._state_lock:
@@ -634,15 +615,47 @@ class VolcengineTTSClient:
         with self._state_lock:
             return operation_epoch != self._operation_epoch
 
-    def _track_connecting(self, ws: Any) -> None:
+    def _track_opening(self, ws: Any) -> None:
         with self._state_lock:
+            self._opening_sockets.append(ws)
+
+    def _promote_opening(self, ws: Any, operation_epoch: int) -> bool:
+        with self._state_lock:
+            if operation_epoch != self._operation_epoch or not self._is_opening_locked(ws):
+                return False
+            self._remove_opening_locked(ws)
             self._connecting_sockets.append(ws)
+            return True
+
+    def _discard_tracked(self, ws: Any) -> None:
+        with self._state_lock:
+            should_close = self._retire_opening_locked(ws)
+            if not should_close:
+                should_close = self._retire_connecting_locked(ws)
+        if should_close:
+            self._close_retired(ws)
 
     def _discard_connecting(self, ws: Any) -> None:
         with self._state_lock:
             should_close = self._retire_connecting_locked(ws)
         if should_close:
             self._close_retired(ws)
+
+    def _is_opening_locked(self, ws: Any) -> bool:
+        return any(candidate is ws for candidate in self._opening_sockets)
+
+    def _remove_opening_locked(self, ws: Any) -> None:
+        self._opening_sockets = [
+            candidate for candidate in self._opening_sockets if candidate is not ws
+        ]
+
+    def _retire_opening_locked(self, ws: Any) -> bool:
+        if not self._is_opening_locked(ws):
+            return False
+        self._remove_opening_locked(ws)
+        if not any(candidate is ws for candidate in self._closing_sockets):
+            self._closing_sockets.append(ws)
+        return True
 
     def _is_connecting_locked(self, ws: Any) -> bool:
         return any(candidate is ws for candidate in self._connecting_sockets)
@@ -666,9 +679,7 @@ class VolcengineTTSClient:
         finally:
             with self._state_lock:
                 self._closing_sockets = [
-                    candidate
-                    for candidate in self._closing_sockets
-                    if candidate is not ws
+                    candidate for candidate in self._closing_sockets if candidate is not ws
                 ]
 
     def _safe_error(self, exc: BaseException) -> str:

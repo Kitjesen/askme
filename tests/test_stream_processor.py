@@ -506,7 +506,103 @@ class TestStreamWithTools:
             model=None,
             source="text",
             conversation_session_id="conv-a",
+            turn_cancel_token=None,
+            llm_call_context=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_forwards_turn_identity_and_cancellation_to_tool_executor(self):
+        token = asyncio.Event()
+        context = LLMCallContext(
+            session_id="conv-a",
+            turn_id="turn-a",
+            channel="text",
+            operator_id="operator-a",
+        )
+        tool_executor = MagicMock()
+        tool_executor.execute_tools = AsyncMock(return_value="follow-up")
+        proc = _make_processor(tool_executor=tool_executor)
+        proc.consume_llm_stream = AsyncMock(
+            return_value=(
+                "",
+                {0: {"id": "tc-1", "name": "nav", "arguments": "{}"}},
+            )
+        )
+        proc._llm.chat_stream.return_value = _stream_chunks([])
+
+        await proc.stream_with_tools(
+            [],
+            "system",
+            source="text",
+            conversation_session_id="conv-a",
+            turn_cancel_token=token,
+            llm_call_context=context,
+        )
+
+        assert tool_executor.execute_tools.call_args.kwargs == {
+            "model": None,
+            "source": "text",
+            "conversation_session_id": "conv-a",
+            "turn_cancel_token": token,
+            "llm_call_context": context,
+        }
+
+    @pytest.mark.asyncio
+    async def test_legacy_tool_executor_signature_remains_supported(self):
+        class _LegacyToolExecutor:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def execute_tools(
+                self,
+                tool_calls,
+                system_prompt,
+                model=None,
+                source="voice",
+                conversation_session_id=None,
+            ):
+                del tool_calls, system_prompt
+                self.calls.append(
+                    {
+                        "model": model,
+                        "source": source,
+                        "conversation_session_id": conversation_session_id,
+                    }
+                )
+                return "legacy-follow-up"
+
+        legacy_executor = _LegacyToolExecutor()
+        proc = _make_processor(tool_executor=legacy_executor)
+        proc.consume_llm_stream = AsyncMock(
+            return_value=(
+                "",
+                {0: {"id": "tc-1", "name": "nav", "arguments": "{}"}},
+            )
+        )
+        token = asyncio.Event()
+        context = LLMCallContext(
+            session_id="conv-a",
+            turn_id="turn-a",
+            channel="text",
+        )
+
+        result = await proc.stream_with_tools(
+            [],
+            "system",
+            source="text",
+            conversation_session_id="conv-a",
+            turn_cancel_token=token,
+            llm_call_context=context,
+        )
+
+        assert result == "legacy-follow-up"
+        assert legacy_executor.calls == [
+            {
+                "model": None,
+                "source": "text",
+                "conversation_session_id": "conv-a",
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_externally_armed_processing_feedback_suppresses_second_fuse(self, monkeypatch):

@@ -18,22 +18,21 @@ brain:
   # Provider names: litellm, minimax, doubao, dashscope, deepseek, zhipu,
   # openai_compatible, openai, fake.  Endpoint/key remain config-owned.
   #
-  # DeepSeek V4 Flash is the verified low-latency primary for text and voice.
-  # Keep provider credentials in .env; never commit them here.
-  provider: deepseek
-  api_key: ${DEEPSEEK_API_KEY}
-  base_url: ${DEEPSEEK_BASE_URL}
-  model: deepseek-v4-flash
-  # For testing other providers (OpenAI-compatible), just change the three above.
-  # Doubao/Volcengine:  base_url = https://ark.cn-beijing.volces.com/api/v3
-  # DeepSeek:           base_url = https://api.deepseek.com/v1
-  # DashScope:          base_url = https://dashscope.aliyuncs.com/compatible-mode/v1
+  # LiteLLM is the single model-routing owner. AskMe keeps conversation,
+  # cancellation, tools and safety; provider credentials stay in the sidecar.
+  # Direct providers are an explicit manual rollback only, never an auto fallback.
+  provider: litellm
+  api_key: ${LITELLM_VIRTUAL_KEY}
+  base_url: ${LITELLM_BASE_URL}
+  model: voice-fast
   # Voice turns run with thinking disabled by the model policy for lower TTFT.
   # 2026-07-19: ~155-190ms was the first raw stream chunk and may be empty.
   # With the full runtime persona, first non-empty text measured p50/p95
   # 961.8/1140.7ms (n=20); do not treat raw-chunk timing as semantic TTFT.
   # MiniMax-M2.7 reasoning consumes the 50-token voice cap and delays content.
-  voice_model: deepseek-v4-flash
+  voice_model: voice-fast
+  # WarmSession probes use a separately authorized/cost-attributed alias.
+  health_model: health-probe
   # Voice path waits this long for memory before starting LLM without memory.
   voice_memory_retrieval_deadline_s: 0.25
   # First semantic LLM payload safety budget. This is a starting policy value,
@@ -54,28 +53,27 @@ brain:
   # Voice turns need short replies — cap tokens tightly to keep TTFT low.
   voice_max_tokens: 50
   temperature: 0.7
-  # Resilience: timeout, retry, model fallback.
-  # Voice turns need fast-fail; keep timeout tight and retries low.
+  # LiteLLM owns upstream retry and model fallback. Keep the AskMe layer at
+  # exactly one attempt/model to avoid multiplicative tail latency.
   timeout: 10.0
-  max_retries: 1
-  fallback_models:
-    - deepseek-v4-pro
-  # Optional runtime preset for the local LiteLLM sidecar. The application
-  # receives a scoped virtual key; provider credentials stay in LiteLLM.
-  # LiteLLM is the sole retry/fallback owner for this preset.
+  max_retries: 0
+  fallback_models: []
+  # Default LiteLLM control-plane preset. The application receives a scoped
+  # virtual key; provider credentials stay in the sidecar. A direct provider
+  # can exist only as an explicit, operator-selected rollback preset.
   provider_presets:
     litellm:
       api_key: ${LITELLM_VIRTUAL_KEY}
       base_url: ${LITELLM_BASE_URL}
       model: voice-fast
       voice_model: voice-fast
+      health_model: health-probe
       max_retries: 0
       fallback_models: []
       minimax_api_key: ""
 
-  # Optional direct MiniMax LLM client. The LiteLLM preset clears this field
-  # so model calls cannot bypass the proxy; MiniMax TTS has separate voice config.
-  minimax_api_key: ${MINIMAX_API_KEY}
+  # LLM calls must never bypass LiteLLM. MiniMax TTS uses voice.tts credentials.
+  minimax_api_key: ""
   minimax_base_url: https://api.minimaxi.com/v1
   minimax_model: MiniMax-M2.7-highspeed
   # Optional character file. Leave blank to generate prompt seed from persona.
@@ -366,6 +364,9 @@ voice:
   # interaction before ASR transcripts enter LLM/task planning.
   interaction_gate:
     enabled: true
+    # Anonymous public voice history rotates after this idle window; provider
+    # warm sessions remain independent and may stay warm for the Runtime lifetime.
+    anonymous_encounter_idle_seconds: 25.0
     wake_terms: [小算, 机器人]
     allow_unaddressed_public_help: false
     allow_unaddressed_robot_tasks: false
@@ -487,7 +488,7 @@ voice:
     minimax_live_session_prewarm_enabled: true
     # Reuse one provider task across short conversational clauses/turns.
     # Kept well below MiniMax's 120-second idle close.
-    minimax_ws_idle_timeout_seconds: 30
+    minimax_ws_idle_timeout_seconds: 90
     minimax_tts_model: speech-2.8-turbo
     minimax_voice_id: male-qn-qingse
     minimax_sample_rate: 32000
@@ -515,7 +516,7 @@ voice:
     volcengine_tts_audio_format: pcm
     volcengine_tts_connect_timeout_seconds: 10
     volcengine_tts_session_timeout_seconds: 30
-    volcengine_tts_idle_timeout_seconds: 30
+    volcengine_tts_idle_timeout_seconds: 90
     # When Volcengine is the selected backend, open the exact reusable V3
     # connection in the background so the first user turn does not pay the
     # connect/handshake tail. Missing credentials still fail closed locally.
@@ -639,10 +640,14 @@ vision:
   confidence_threshold: 0.40
   device: ""
   camera_index: 0
-  # VLM fallback (Claude Sonnet for scene understanding)
+  # Cloud VLM stays fail-closed until LiteLLM has a validated vision-scene
+  # alias and a dedicated virtual key. Local detection remains available.
   vlm_enabled: false
-  vlm_api_key: ${LLM_API_KEY}
-  vlm_model: claude-haiku-4-5-20251001
+  vlm_backend: openai
+  vlm_api_key: ${VISION_LITELLM_VIRTUAL_KEY}
+  vlm_base_url: ${LITELLM_BASE_URL}
+  vlm_model: vision-scene
+  vlm_timeout: 20.0
 
 # ----------------------------------------------------------
 # Robot: Mechanical arm control
@@ -1044,13 +1049,42 @@ perception:
       multi_person_arbitration: artifacts/perception/multi_person_arbitration.json
 
 # ----------------------------------------------------------
+# Warm provider sessions: boot-to-shutdown connection maintenance
+# ----------------------------------------------------------
+warm_sessions:
+  enabled: true
+  shutdown_timeout_seconds: 0.5
+  llm:
+    enabled: true
+    startup_delay_seconds: 0
+    refresh_interval_seconds: 45
+    # Startup handshakes can exceed the normal warm-path latency; this is a
+    # probe budget, not the business-response SLA.
+    timeout_seconds: 20
+    initial_backoff_seconds: 2
+    max_backoff_seconds: 120
+    busy_retry_seconds: 2
+    jitter_ratio: 0.1
+    max_attempts_per_hour: 80
+  tts:
+    enabled: true
+    startup_delay_seconds: 0.5
+    refresh_interval_seconds: 75
+    timeout_seconds: 10
+    initial_backoff_seconds: 2
+    max_backoff_seconds: 60
+    busy_retry_seconds: 1
+    jitter_ratio: 0.1
+    max_attempts_per_hour: 60
+
+# ----------------------------------------------------------
 # Health server: HTTP probes for OTA and local diagnostics
 # ----------------------------------------------------------
 health_server:
   enabled: true
-  # Default to loopback. Binding to 0.0.0.0 requires a control_api_key or an
-  # explicit allow_unsafe_remote=true override.
-  host: 127.0.0.1
+  # Empty/unset resolves to loopback in AskmeHealthServer. Containers set
+  # ASKME_HEALTH_HOST=0.0.0.0 together with a mandatory control_api_key.
+  host: ${ASKME_HEALTH_HOST}
   port: 8765
   control_api_key: ${ASKME_CONTROL_API_KEY}
   allow_unsafe_remote: false

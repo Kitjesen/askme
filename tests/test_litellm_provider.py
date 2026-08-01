@@ -62,6 +62,15 @@ def test_context_envelope_generates_unique_trace_and_replaces_reserved_headers()
     first = _request_with_context(untrusted, LLMCallContext())
     second = _request_with_context(untrusted, LLMCallContext())
     without_context = _request_with_context(untrusted, None)
+    operational = _request_with_context(
+        untrusted,
+        LLMCallContext(
+            purpose="health_probe",
+            channel="system",
+            request_class="health_probe",
+            privacy_class="operational",
+        ),
+    )
 
     first_traceparent = first["extra_headers"]["traceparent"]
     second_traceparent = second["extra_headers"]["traceparent"]
@@ -83,6 +92,8 @@ def test_context_envelope_generates_unique_trace_and_replaces_reserved_headers()
     assert "extra_headers" not in without_context
     assert "metadata" not in without_context
     assert "provider-secret" not in json.dumps(without_context, ensure_ascii=False)
+    assert operational["metadata"]["channel"] == "system"
+    assert operational["metadata"]["privacy_class"] == "operational"
 
 
 def test_litellm_provider_imports_in_a_clean_process() -> None:

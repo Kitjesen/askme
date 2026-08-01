@@ -5,9 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextvars import ContextVar
+from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from askme.conversation import (
+    InteractionInput,
+    InteractionTurnManager,
+    TurnOutcome,
+)
 from askme.pipeline.channels.external_turns import record_external_turn
 from askme.pipeline.channels.runtime_bridge_calls import (
     try_handle_runtime_bridge_turn,
@@ -52,6 +58,7 @@ class _TextClarificationAudio:
 
     def listen_loop(self) -> str | None:
         import queue
+
         q: queue.Queue[str | None] = queue.Queue()
 
         def _read() -> None:
@@ -61,12 +68,15 @@ class _TextClarificationAudio:
                 q.put(None)
 
         import threading as _threading
+
         t = _threading.Thread(target=_read, daemon=True)
         t.start()
         try:
             return q.get(timeout=self._LISTEN_TIMEOUT)
         except queue.Empty:
-            logger.info("TextClarification: listen_loop timed out after %.0fs", self._LISTEN_TIMEOUT)
+            logger.info(
+                "TextClarification: listen_loop timed out after %.0fs", self._LISTEN_TIMEOUT
+            )
             return None
 
 
@@ -124,9 +134,8 @@ class TextLoop:
         )
 
         from askme.pipeline.proactive import ProactiveOrchestrator
-        self._proactive = ProactiveOrchestrator.default(
-            pipeline=pipeline, dispatcher=dispatcher
-        )
+
+        self._proactive = ProactiveOrchestrator.default(pipeline=pipeline, dispatcher=dispatcher)
         self._text_audio = _TextClarificationAudio()
 
     async def run(self) -> None:
@@ -150,6 +159,9 @@ class TextLoop:
                 if not user_text:
                     continue
 
+                conversation_session_id = self._conversation_session_for("text", channel="text")
+                turn_correlation_id = f"text-turn-{uuid4().hex}"
+
                 _trace = _tracer.start_trace("text_turn")
                 _trace.metadata["user_text"] = user_text[:60]
                 consecutive_errors = 0  # reset on successful input
@@ -158,7 +170,16 @@ class TextLoop:
                 if idle_task and not idle_task.done():
                     idle_task.cancel()
 
-                pending_reply = await self._pipeline.handle_pending_tool_response(user_text)
+                pending_handler = self._pipeline.handle_pending_tool_response
+                pending_reply = await pending_handler(
+                    user_text,
+                    **self._supported_turn_context_kwargs(
+                        pending_handler,
+                        conversation_session_id=conversation_session_id,
+                        turn_correlation_id=turn_correlation_id,
+                        source="text",
+                    ),
+                )
                 if pending_reply is not None:
                     logger.info("[Assistant]: %s", pending_reply)
                     if idle_task and not idle_task.done():
@@ -177,17 +198,47 @@ class TextLoop:
 
                 if intent.type == IntentType.ESTOP:
                     self._pipeline.handle_estop()
+                    if memory_task and not memory_task.done():
+                        memory_task.cancel()
+                    memory_task = None
+                    reply = "急停已触发。"
+                    record_external_turn(
+                        self._pipeline,
+                        user_text,
+                        reply,
+                        source="text",
+                        channel="text",
+                        conversation_session_id=conversation_session_id,
+                        turn_id=turn_correlation_id,
+                        metadata={"intent_type": "estop"},
+                    )
+                    logger.info("[Assistant]: %s", reply)
                     continue
 
                 if intent.type == IntentType.COMMAND:
-                    if self._commands.handle(intent.command or ""):
+                    if memory_task and not memory_task.done():
+                        memory_task.cancel()
+                    memory_task = None
+                    handled = self._commands.handle(intent.command or "")
+                    self._suppress_direct_turn(
+                        user_text,
+                        source="text",
+                        conversation_session_id=conversation_session_id,
+                        turn_id=turn_correlation_id,
+                        reason="text_command",
+                        metadata={
+                            "command": intent.command or "",
+                            "handled": handled,
+                        },
+                    )
+                    if handled:
                         break
                     continue
-
                 cognition_reply = await self._maybe_handle_cognition_turn(
                     user_text,
                     source="text",
                     speak=False,
+                    conversation_session_id=conversation_session_id,
                 )
                 if cognition_reply is not None:
                     logger.info("[Assistant]: %s", cognition_reply)
@@ -205,7 +256,11 @@ class TextLoop:
                         memory_task.cancel()
                     memory_task = None
                     # Try runtime bridge first -edge service may route to arbiter
-                    bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
+                    bridge_handled = await self._maybe_handle_runtime_bridge(
+                        user_text,
+                        conversation_session_id=conversation_session_id,
+                        turn_correlation_id=turn_correlation_id,
+                    )
                     if bridge_handled:
                         if idle_task and not idle_task.done():
                             idle_task.cancel()
@@ -214,13 +269,21 @@ class TextLoop:
                     # Bridge not configured / failed -local skill dispatch
                     if self._dispatcher:
                         _result = await self._proactive.run(
-                            intent.skill_name or "", user_text, self._text_audio,
+                            intent.skill_name or "",
+                            user_text,
+                            self._text_audio,
                             source="text",
                         )
                         if _result.proceed:
                             await self._dispatcher.dispatch(
-                                intent.skill_name or "", _result.enriched_text,
+                                intent.skill_name or "",
+                                _result.enriched_text,
                                 source="text",
+                                **self._supported_turn_context_kwargs(
+                                    self._dispatcher.dispatch,
+                                    conversation_session_id=conversation_session_id,
+                                    turn_correlation_id=turn_correlation_id,
+                                ),
                             )
                         elif _result.interrupt_payload:
                             # User bailed out and issued a new intent in the same breath
@@ -250,31 +313,42 @@ class TextLoop:
                                         _reroute_intent.skill_name,
                                         _rr.enriched_text,
                                         source="text",
+                                        **self._supported_turn_context_kwargs(
+                                            self._dispatcher.dispatch,
+                                            conversation_session_id=conversation_session_id,
+                                            turn_correlation_id=turn_correlation_id,
+                                        ),
                                     )
                             else:
-                                conversation_session_id = self._conversation_session_for(
-                                    "text", channel="text"
-                                )
-                                if conversation_session_id is None:
-                                    reply = await self._dispatcher.handle_general(
-                                        _result.interrupt_payload,
-                                        source="text",
-                                    )
-                                else:
-                                    reply = await self._dispatcher.handle_general(
-                                        _result.interrupt_payload,
-                                        source="text",
+                                reply = await self._dispatcher.handle_general(
+                                    _result.interrupt_payload,
+                                    source="text",
+                                    **self._supported_turn_context_kwargs(
+                                        self._dispatcher.handle_general,
                                         conversation_session_id=conversation_session_id,
-                                    )
+                                        turn_correlation_id=turn_correlation_id,
+                                    ),
+                                )
                                 logger.info("[Assistant]: %s", reply or "")
                     else:
                         await self._pipeline.execute_skill(
-                            intent.skill_name or "", user_text,
+                            intent.skill_name or "",
+                            user_text,
+                            source="text",
+                            **self._supported_turn_context_kwargs(
+                                self._pipeline.execute_skill,
+                                conversation_session_id=conversation_session_id,
+                                turn_correlation_id=turn_correlation_id,
+                            ),
                         )
                     continue
 
                 if intent.type == IntentType.GENERAL:
-                    bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
+                    bridge_handled = await self._maybe_handle_runtime_bridge(
+                        user_text,
+                        conversation_session_id=conversation_session_id,
+                        turn_correlation_id=turn_correlation_id,
+                    )
                     if bridge_handled:
                         # Cancel the memory prefetch we started earlier -the bridge
                         # handled the turn so the prefetched context is no longer needed.
@@ -287,21 +361,27 @@ class TextLoop:
                         continue
 
                 # General ->LLM (pass pre-fetched memory)
-                conversation_session_id = self._conversation_session_for(
-                    "text", channel="text"
-                )
                 if self._dispatcher:
                     reply = await self._dispatcher.handle_general(
                         user_text,
                         source="text",
                         memory_task=memory_task,
-                        conversation_session_id=conversation_session_id,
+                        **self._supported_turn_context_kwargs(
+                            self._dispatcher.handle_general,
+                            conversation_session_id=conversation_session_id,
+                            turn_correlation_id=turn_correlation_id,
+                        ),
                     )
                 else:
                     reply = await self._pipeline.process(
                         user_text,
                         memory_task=memory_task,
-                        conversation_session_id=conversation_session_id,
+                        source="text",
+                        **self._supported_turn_context_kwargs(
+                            self._pipeline.process,
+                            conversation_session_id=conversation_session_id,
+                            turn_correlation_id=turn_correlation_id,
+                        ),
                     )
                 memory_task = None  # pipeline took ownership
                 logger.info("[Assistant]: %s", reply)
@@ -359,7 +439,18 @@ class TextLoop:
     ) -> str:
         """Serialize all routing paths for one Thread while other Threads run."""
 
-        thread_key = str(conversation_session_id or "").strip() or "__anonymous__"
+        source = "voice" if speak else "text"
+        resolved_conversation_session_id = str(conversation_session_id or "").strip() or None
+        if resolved_conversation_session_id is None:
+            resolved_conversation_session_id = self._conversation_session_for(
+                source, channel=source
+            )
+        else:
+            self._conversation_session_ids[self._conversation_cache_key(source, source)] = (
+                resolved_conversation_session_id
+            )
+        turn_correlation_id = f"text-turn-{uuid4().hex}"
+        thread_key = resolved_conversation_session_id or "__anonymous__"
         lock = self._thread_turn_locks.get(thread_key)
         if lock is None:
             lock = asyncio.Lock()
@@ -372,8 +463,9 @@ class TextLoop:
                     user_text,
                     speak=speak,
                     runtime_policy=runtime_policy,
-                    conversation_session_id=conversation_session_id,
+                    conversation_session_id=resolved_conversation_session_id,
                     planning_session_id=planning_session_id,
+                    turn_correlation_id=turn_correlation_id,
                 )
         finally:
             remaining = self._thread_turn_lock_users.get(thread_key, 1) - 1
@@ -392,6 +484,7 @@ class TextLoop:
         runtime_policy: str = "disabled",
         conversation_session_id: str | None = None,
         planning_session_id: str | None = None,
+        turn_correlation_id: str,
     ) -> str:
         """Execute a single turn through full intent routing + skill dispatch.
 
@@ -407,14 +500,6 @@ class TextLoop:
         self._text_audio.spoken.clear()
         self.last_cognition_result = None
         source = "voice" if speak else "text"
-        fallback_conversation_session_id: str | None = None
-        if conversation_session_id:
-            session_id = str(conversation_session_id).strip()
-            if session_id:
-                fallback_conversation_session_id = session_id
-                self._conversation_session_ids[
-                    self._conversation_cache_key(source, f"{source}-chat")
-                ] = session_id
         if planning_session_id:
             cleaned_planning_session_id = str(planning_session_id).strip()
             self._set_active_planning_session(
@@ -422,6 +507,19 @@ class TextLoop:
                 cleaned_planning_session_id or None,
             )
         runtime_policy = _normalize_runtime_policy(runtime_policy)
+        pending_handler = getattr(self._pipeline, "handle_pending_tool_response", None)
+        if callable(pending_handler):
+            pending_reply = await pending_handler(
+                user_text,
+                **self._supported_turn_context_kwargs(
+                    pending_handler,
+                    conversation_session_id=conversation_session_id,
+                    turn_correlation_id=turn_correlation_id,
+                    source=source,
+                ),
+            )
+            if pending_reply is not None:
+                return str(pending_reply)
         memory_task = self._pipeline.start_memory_prefetch(user_text)
         _tracer = get_tracer()
         _trace = _tracer.start_trace("text_process_turn")
@@ -436,46 +534,66 @@ class TextLoop:
             if intent.type == IntentType.ESTOP:
                 self._pipeline.handle_estop()
                 memory_task.cancel()
-                return "急停已触发。"
-
+                reply = "急停已触发。"
+                record_external_turn(
+                    self._pipeline,
+                    user_text,
+                    reply,
+                    source=source,
+                    channel=source,
+                    conversation_session_id=conversation_session_id,
+                    turn_id=turn_correlation_id,
+                    metadata={"intent_type": "estop"},
+                )
+                return reply
             if intent.type == IntentType.QUICK_REPLY:
                 memory_task.cancel()
                 reply = intent.reply_text or intent.skill_name or ""
-                if not speak:
-                    return reply
-                self._audio.speak(reply)
-                self._audio.start_playback()
-                try:
-                    await asyncio.to_thread(self._audio.wait_speaking_done)
-                finally:
-                    self._audio.stop_playback()
+                if speak:
+                    self._audio.speak(reply)
+                    self._audio.start_playback()
+                    try:
+                        await asyncio.to_thread(self._audio.wait_speaking_done)
+                    finally:
+                        self._audio.stop_playback()
+                record_external_turn(
+                    self._pipeline,
+                    user_text,
+                    reply,
+                    source="text",
+                    channel="text",
+                    conversation_session_id=conversation_session_id,
+                    turn_id=turn_correlation_id,
+                )
                 return reply
 
             if intent.type == IntentType.COMMAND:
                 memory_task.cancel()
+                self._suppress_direct_turn(
+                    user_text,
+                    source=source,
+                    conversation_session_id=conversation_session_id,
+                    turn_id=turn_correlation_id,
+                    reason="text_command",
+                    metadata={"command": intent.command or ""},
+                )
                 return ""
-
             if runtime_policy == "runtime_first":
                 runtime_reply = await self._maybe_handle_runtime_bridge_reply(
                     user_text,
-                    conversation_session_id=fallback_conversation_session_id,
+                    conversation_session_id=conversation_session_id,
+                    turn_correlation_id=turn_correlation_id,
                     source=source,
                 )
                 if runtime_reply is not None:
                     memory_task.cancel()
-                    if speak:
-                        await self._speak_reply(runtime_reply)
                     return runtime_reply
-                fallback_conversation_session_id = (
-                    fallback_conversation_session_id
-                    or self._conversation_session_for(source, channel=source)
-                )
 
             cognition_reply = await self._maybe_handle_cognition_turn(
                 user_text,
                 source=source,
                 speak=speak,
-                conversation_session_id=fallback_conversation_session_id,
+                conversation_session_id=conversation_session_id,
             )
             if cognition_reply is not None:
                 memory_task.cancel()
@@ -486,57 +604,66 @@ class TextLoop:
                 memory_task = None
                 if self._dispatcher:
                     _result = await self._proactive.run(
-                        intent.skill_name or "", user_text, self._text_audio,
+                        intent.skill_name or "",
+                        user_text,
+                        self._text_audio,
                         source=source,
                     )
                     if _result.proceed:
                         return await self._dispatcher.dispatch(
-                            intent.skill_name or "", _result.enriched_text,
+                            intent.skill_name or "",
+                            _result.enriched_text,
                             source=source,
+                            **self._supported_turn_context_kwargs(
+                                self._dispatcher.dispatch,
+                                conversation_session_id=conversation_session_id,
+                                turn_correlation_id=turn_correlation_id,
+                            ),
                         )
-                    elif _result.interrupt_payload:
-                        if fallback_conversation_session_id is None:
-                            return await self._dispatcher.handle_general(
-                                _result.interrupt_payload,
-                                source=source,
-                            )
+                    if _result.interrupt_payload:
                         return await self._dispatcher.handle_general(
                             _result.interrupt_payload,
                             source=source,
-                            conversation_session_id=fallback_conversation_session_id,
+                            **self._supported_turn_context_kwargs(
+                                self._dispatcher.handle_general,
+                                conversation_session_id=conversation_session_id,
+                                turn_correlation_id=turn_correlation_id,
+                            ),
                         )
                     return ""
                 return await self._pipeline.execute_skill(
-                    intent.skill_name or "", user_text, source=source,
+                    intent.skill_name or "",
+                    user_text,
+                    source=source,
+                    **self._supported_turn_context_kwargs(
+                        self._pipeline.execute_skill,
+                        conversation_session_id=conversation_session_id,
+                        turn_correlation_id=turn_correlation_id,
+                    ),
                 )
 
             # GENERAL
             if self._dispatcher:
-                if fallback_conversation_session_id is None:
-                    return await self._dispatcher.handle_general(
-                        user_text,
-                        source=source,
-                        memory_task=memory_task,
-                    )
                 return await self._dispatcher.handle_general(
                     user_text,
                     source=source,
                     memory_task=memory_task,
-                    conversation_session_id=fallback_conversation_session_id,
+                    **self._supported_turn_context_kwargs(
+                        self._dispatcher.handle_general,
+                        conversation_session_id=conversation_session_id,
+                        turn_correlation_id=turn_correlation_id,
+                    ),
                 )
-            if fallback_conversation_session_id is None:
-                reply = await self._pipeline.process(
-                    user_text,
-                    memory_task=memory_task,
-                    source=source,
-                )
-            else:
-                reply = await self._pipeline.process(
-                    user_text,
-                    memory_task=memory_task,
-                    source=source,
-                    conversation_session_id=fallback_conversation_session_id,
-                )
+            reply = await self._pipeline.process(
+                user_text,
+                memory_task=memory_task,
+                source=source,
+                **self._supported_turn_context_kwargs(
+                    self._pipeline.process,
+                    conversation_session_id=conversation_session_id,
+                    turn_correlation_id=turn_correlation_id,
+                ),
+            )
             memory_task = None
             return reply
         finally:
@@ -561,13 +688,10 @@ class TextLoop:
         if cognition is None:
             return None
 
-        conversation_session_id = (
-            str(conversation_session_id or "").strip()
-            or self._conversation_session_for(source)
-        )
-        active_planning_session_id = self._active_planning_session_for(
-            conversation_session_id
-        )
+        conversation_session_id = str(
+            conversation_session_id or ""
+        ).strip() or self._conversation_session_for(source)
+        active_planning_session_id = self._active_planning_session_for(conversation_session_id)
         if not self._should_route_to_cognition(
             user_text,
             active_planning_session_id=active_planning_session_id,
@@ -703,6 +827,77 @@ class TextLoop:
             return True
         return _looks_like_cognition_request(user_text)
 
+    @staticmethod
+    def _supported_turn_context_kwargs(
+        callback: Any,
+        *,
+        conversation_session_id: str | None,
+        turn_correlation_id: str,
+        source: str | None = None,
+        turn_cancel_token: Any | None = None,
+    ) -> dict[str, Any]:
+        """Pass admitted Turn context without breaking legacy adapters."""
+
+        signature_target = getattr(callback, "side_effect", None)
+        if not callable(signature_target):
+            signature_target = callback
+        try:
+            parameters = signature(signature_target).parameters
+            accepts_kwargs = any(
+                parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values()
+            )
+        except (TypeError, ValueError):
+            return {}
+
+        context: dict[str, Any] = {}
+        if conversation_session_id is not None and (
+            accepts_kwargs or "conversation_session_id" in parameters
+        ):
+            context["conversation_session_id"] = conversation_session_id
+        if accepts_kwargs or "voice_turn_id" in parameters:
+            context["voice_turn_id"] = turn_correlation_id
+        elif "turn_id" in parameters:
+            context["turn_id"] = turn_correlation_id
+        if source is not None and (accepts_kwargs or "source" in parameters):
+            context["source"] = source
+        if turn_cancel_token is not None and (accepts_kwargs or "turn_cancel_token" in parameters):
+            context["turn_cancel_token"] = turn_cancel_token
+        return context
+
+    def _suppress_direct_turn(
+        self,
+        user_text: str,
+        *,
+        source: str,
+        conversation_session_id: str | None,
+        turn_id: str,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record an admitted text turn that product policy excludes from chat."""
+
+        ledger = getattr(self._pipeline, "_turn_ledger", None)
+        if ledger is None:
+            return
+        manager = InteractionTurnManager(ledger)
+        context = manager.open(
+            InteractionInput(
+                user_text=user_text,
+                source=source,
+                thread_id=conversation_session_id,
+                turn_id=turn_id,
+                channel=source,
+                metadata=metadata or {},
+            )
+        )
+        manager.settle(
+            context,
+            TurnOutcome.suppress(
+                reason=reason,
+                metadata=metadata or {},
+            ),
+        )
+
     async def _speak_reply(self, reply: str) -> None:
         if not reply.strip():
             return
@@ -718,6 +913,7 @@ class TextLoop:
         user_text: str,
         *,
         conversation_session_id: str | None = None,
+        turn_correlation_id: str | None = None,
         source: str = "text",
     ) -> str | None:
         """Try the text runtime bridge for explicit single-turn chat policy."""
@@ -732,9 +928,14 @@ class TextLoop:
                 self._voice_runtime_bridge.handle_text_input,
                 user_text,
                 conversation_session_id=resolved_session_id,
+                voice_turn_id=turn_correlation_id,
                 pipeline=self._pipeline,
                 dispatcher=self._dispatcher,
-                on_spoken_reply=lambda reply: logger.info("[Assistant]: %s", reply),
+                on_spoken_reply=(
+                    self._speak_reply
+                    if source == "voice"
+                    else lambda reply: logger.info("[Assistant]: %s", reply)
+                ),
                 label="Text",
             )
         except Exception as exc:
@@ -744,18 +945,28 @@ class TextLoop:
             return None
         return outcome.reply
 
-    async def _maybe_handle_runtime_bridge(self, user_text: str) -> bool:
+    async def _maybe_handle_runtime_bridge(
+        self,
+        user_text: str,
+        *,
+        conversation_session_id: str | None = None,
+        turn_correlation_id: str | None = None,
+    ) -> bool:
         """Try the runtime bridge first and fall back locally on bridge failures."""
         if self._voice_runtime_bridge is None:
             return False
 
-        conversation_session_id = self._conversation_session_for("text", channel="text")
+        conversation_session_id = str(
+            conversation_session_id or ""
+        ).strip() or self._conversation_session_for("text", channel="text")
+        turn_correlation_id = str(turn_correlation_id or "").strip() or f"text-turn-{uuid4().hex}"
         try:
             return await try_handle_runtime_bridge_turn(
                 self._voice_runtime_bridge.handle_text_input,
                 user_text,
                 conversation_session_id=conversation_session_id,
                 pipeline=self._pipeline,
+                voice_turn_id=turn_correlation_id,
                 dispatcher=self._dispatcher,
                 on_spoken_reply=lambda reply: logger.info("[Assistant]: %s", reply),
                 label="Text",
@@ -766,11 +977,38 @@ class TextLoop:
 
 
 _COGNITION_KEYWORDS = (
-    "巡检", "检查", "巡逻", "拍照", "截图", "抓拍", "取证",
-    "状态", "电量", "导航", "去", "到", "拿", "抓", "夹取",
-    "急停", "停止", "停下",
-    "patrol", "inspect", "photo", "snapshot", "capture", "status",
-    "battery", "navigate", "go to", "pick", "grab", "stop", "estop", "e-stop",
+    "巡检",
+    "检查",
+    "巡逻",
+    "拍照",
+    "截图",
+    "抓拍",
+    "取证",
+    "状态",
+    "电量",
+    "导航",
+    "去",
+    "到",
+    "拿",
+    "抓",
+    "夹取",
+    "急停",
+    "停止",
+    "停下",
+    "patrol",
+    "inspect",
+    "photo",
+    "snapshot",
+    "capture",
+    "status",
+    "battery",
+    "navigate",
+    "go to",
+    "pick",
+    "grab",
+    "stop",
+    "estop",
+    "e-stop",
 )
 _CONFIRMATION_WORDS = {"确认", "可以", "是", "继续", "ok", "yes", "confirm", "confirmed"}
 _CANCEL_WORDS = {"取消", "算了", "不要了", "停止规划", "cancel", "abort", "stop"}

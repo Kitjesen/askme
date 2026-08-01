@@ -40,12 +40,14 @@ import json
 import logging
 import re
 import time
+import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from askme.config import get_config, project_root
+from askme.llm.core.contracts import LLMCallContext
 from askme.memory.core.admission import MemoryAdmissionControl
 from askme.memory.core.episode import (
     Episode,
@@ -61,21 +63,21 @@ logger = logging.getLogger(__name__)
 # ── Constants ──────────────────────────────────────────────
 
 # L1: Episode buffer limits
-MAX_BUFFER_SIZE = 200       # Max events in memory buffer
-FLUSH_THRESHOLD = 100       # Flush to disk when buffer reaches this
+MAX_BUFFER_SIZE = 200  # Max events in memory buffer
+FLUSH_THRESHOLD = 100  # Flush to disk when buffer reaches this
 EPISODE_RETENTION_HOURS = 24  # Keep raw episodes for this long
 
 # L2: Reflection triggers
-REFLECT_MIN_EVENTS = 10     # Minimum events before reflection makes sense
-REFLECT_COOLDOWN_S = 300    # At least 5 min between reflections
+REFLECT_MIN_EVENTS = 10  # Minimum events before reflection makes sense
+REFLECT_COOLDOWN_S = 300  # At least 5 min between reflections
 IMPORTANCE_THRESHOLD = 15.0  # Park 2023: cumulative importance to trigger reflection
 
 # L3: Knowledge categories for a robot agent
 KNOWLEDGE_CATEGORIES = {
-    "environment":    "环境布局、空间结构、地标、路径",
-    "entities":       "识别的人、动物、物体及其特征",
-    "routines":       "时间规律、日程、周期性事件",
-    "interactions":   "交互经验、命令响应、沟通模式",
+    "environment": "环境布局、空间结构、地标、路径",
+    "entities": "识别的人、动物、物体及其特征",
+    "routines": "时间规律、日程、周期性事件",
+    "interactions": "交互经验、命令响应、沟通模式",
     "self_knowledge": "自身能力、限制、校准、性能",
 }
 
@@ -122,19 +124,60 @@ REFLECT_PROMPT = """\
 
 # ── Zero-LLM event type classifier ────────────────────────
 
-_ET_ANOMALY = frozenset([
-    "错误", "失败", "异常", "超时", "警告", "故障", "不对", "无法", "崩溃",
-    "error", "timeout", "crash", "fail", "exception",
-])
-_ET_INTERACTION = frozenset([
-    "用户", "说", "问", "回答", "命令", "请", "帮", "告诉", "查一下", "你",
-])
-_ET_DECISION = frozenset([
-    "决定", "选择", "判断", "规划", "策略", "评估", "分析",
-])
-_ET_ROUTINE = frozenset([
-    "巡检", "巡逻", "定时", "周期", "例行", "patrol", "routine",
-])
+_ET_ANOMALY = frozenset(
+    [
+        "错误",
+        "失败",
+        "异常",
+        "超时",
+        "警告",
+        "故障",
+        "不对",
+        "无法",
+        "崩溃",
+        "error",
+        "timeout",
+        "crash",
+        "fail",
+        "exception",
+    ]
+)
+_ET_INTERACTION = frozenset(
+    [
+        "用户",
+        "说",
+        "问",
+        "回答",
+        "命令",
+        "请",
+        "帮",
+        "告诉",
+        "查一下",
+        "你",
+    ]
+)
+_ET_DECISION = frozenset(
+    [
+        "决定",
+        "选择",
+        "判断",
+        "规划",
+        "策略",
+        "评估",
+        "分析",
+    ]
+)
+_ET_ROUTINE = frozenset(
+    [
+        "巡检",
+        "巡逻",
+        "定时",
+        "周期",
+        "例行",
+        "patrol",
+        "routine",
+    ]
+)
 
 _ET_KIND_MAP: dict[str, str] = {
     "command": "interaction",
@@ -249,24 +292,16 @@ class EpisodicMemory:
         self._episode_retention_hours = int(
             episodic_cfg.get("episode_retention_hours", EPISODE_RETENTION_HOURS)
         )
-        self._reflect_min_events = int(
-            episodic_cfg.get("reflect_min_events", REFLECT_MIN_EVENTS)
-        )
+        self._reflect_min_events = int(episodic_cfg.get("reflect_min_events", REFLECT_MIN_EVENTS))
         self._reflect_cooldown_s = float(
             episodic_cfg.get("reflect_cooldown_seconds", REFLECT_COOLDOWN_S)
         )
         self._importance_threshold = float(
             episodic_cfg.get("importance_threshold", IMPORTANCE_THRESHOLD)
         )
-        self._knowledge_context_chars = int(
-            episodic_cfg.get("knowledge_context_chars", 1000)
-        )
-        self._digest_context_chars = int(
-            episodic_cfg.get("digest_context_chars", 600)
-        )
-        self._relevant_context_chars = int(
-            episodic_cfg.get("relevant_context_chars", 600)
-        )
+        self._knowledge_context_chars = int(episodic_cfg.get("knowledge_context_chars", 1000))
+        self._digest_context_chars = int(episodic_cfg.get("digest_context_chars", 600))
+        self._relevant_context_chars = int(episodic_cfg.get("relevant_context_chars", 600))
         self._relevant_top_k = int(episodic_cfg.get("relevant_top_k", 5))
 
         # L1: In-memory episode buffer
@@ -314,7 +349,9 @@ class EpisodicMemory:
         # Admission control — skip trivial/duplicate events
         admitted, _score = self._admission.should_admit(event_type, description, importance)
         if not admitted:
-            logger.debug("Admission rejected [%s] imp=%.2f: %s", event_type, importance, description[:60])
+            logger.debug(
+                "Admission rejected [%s] imp=%.2f: %s", event_type, importance, description[:60]
+            )
             # Return a throwaway episode so callers don't need None checks
             return Episode(event_type, description, context, importance=importance)
 
@@ -333,7 +370,8 @@ class EpisodicMemory:
                     )
                     logger.debug(
                         "[EpisodicMemory] Evicted low-importance episode (%.2f) for new one (%.2f)",
-                        min_ep.importance, importance,
+                        min_ep.importance,
+                        importance,
                     )
                 except ValueError:
                     pass  # Already removed (concurrent access guard)
@@ -361,10 +399,7 @@ class EpisodicMemory:
         """
         keywords = set(query.lower().split())
         now = time.time()
-        scored = [
-            (ep, ep.retrieval_score(keywords, now))
-            for ep in self._buffer
-        ]
+        scored = [(ep, ep.retrieval_score(keywords, now)) for ep in self._buffer]
         scored.sort(key=lambda x: x[1], reverse=True)
 
         # Mark retrieved episodes as accessed (Hebbian strengthening)
@@ -401,8 +436,10 @@ class EpisodicMemory:
             # Check cooldown
             now = time.time()
             if not force and (now - self._last_reflect_time) < self._reflect_cooldown_s:
-                logger.debug("Reflection skipped: cooldown (%.0fs remaining)",
-                             self._reflect_cooldown_s - (now - self._last_reflect_time))
+                logger.debug(
+                    "Reflection skipped: cooldown (%.0fs remaining)",
+                    self._reflect_cooldown_s - (now - self._last_reflect_time),
+                )
                 return None
 
             # Check minimum events
@@ -422,10 +459,24 @@ class EpisodicMemory:
 
         try:
             response = await asyncio.wait_for(
-                self._llm.chat([
-                    {"role": "system", "content": "你是一个机器人的认知反思系统。用中文回答，直接输出JSON，不要思考过程。"},
-                    {"role": "user", "content": prompt},
-                ]),
+                self._llm.chat(
+                    [
+                        {
+                            "role": "system",
+                            "content": "你是一个机器人的认知反思系统。用中文回答，直接输出JSON，不要思考过程。",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    model="memory-compact",
+                    context=LLMCallContext(
+                        call_id=uuid.uuid4().hex,
+                        purpose="memory_compact",
+                        channel="background",
+                        request_class="memory",
+                        privacy_class="sensitive",
+                        allow_cache=False,
+                    ),
+                ),
                 timeout=30.0,
             )
 
@@ -434,8 +485,9 @@ class EpisodicMemory:
                 self._save_digest(reflection)
                 self._update_knowledge(reflection)
                 self._last_reflect_time = time.time()
-                logger.info("[EpisodicMemory] Reflection complete: %s",
-                            reflection.get("summary", "")[:80])
+                logger.info(
+                    "[EpisodicMemory] Reflection complete: %s", reflection.get("summary", "")[:80]
+                )
 
                 # Clear only the episodes we reflected on (preserve items added during await).
                 # Use identity-based drain: if maxlen eviction occurred during the 15s LLM
@@ -621,9 +673,7 @@ class EpisodicMemory:
                         payload = json.loads(line)
                         ep = Episode.from_dict(payload)
                     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
-                        logger.warning(
-                            "Episode journal: skipping corrupt line: %s", exc
-                        )
+                        logger.warning("Episode journal: skipping corrupt line: %s", exc)
                         skipped_corrupt += 1
                         continue
                     # Skip episodes older than retention window — restoring
@@ -639,7 +689,9 @@ class EpisodicMemory:
                 logger.info(
                     "[EpisodicMemory] Restored %d live episodes from journal "
                     "(skipped: %d expired, %d corrupt)",
-                    len(self._buffer), skipped_expired, skipped_corrupt,
+                    len(self._buffer),
+                    skipped_expired,
+                    skipped_corrupt,
                 )
         except Exception as exc:
             logger.warning("Episode journal restore failed: %s", exc)
@@ -672,7 +724,9 @@ class EpisodicMemory:
                     ents = item.get("entities", [])
                     et_tag = f"[{et}]" if et else ""
                     ent_tag = f" @{','.join(ents[:3])}" if ents else ""
-                    lines.append(f"- [{item.get('category', '?')}]{et_tag} {item.get('fact', item)}{ent_tag}")
+                    lines.append(
+                        f"- [{item.get('category', '?')}]{et_tag} {item.get('fact', item)}{ent_tag}"
+                    )
                 else:
                     lines.append(f"- {item}")
         if patterns:
@@ -680,7 +734,9 @@ class EpisodicMemory:
             for item in patterns:
                 if isinstance(item, dict):
                     conf = item.get("confidence", "?")
-                    lines.append(f"- [{item.get('category', '?')}] {item.get('pattern', item)} (conf={conf})")
+                    lines.append(
+                        f"- [{item.get('category', '?')}] {item.get('pattern', item)} (conf={conf})"
+                    )
                 else:
                     lines.append(f"- {item}")
 
@@ -769,8 +825,12 @@ class EpisodicMemory:
                     for i, line in enumerate(lines):
                         if old_fact in line:
                             lines[i] = f"- {new_fact}"
-                            logger.info("[Knowledge/%s] Updated: %s -> %s",
-                                        category, old_fact[:30], new_fact[:30])
+                            logger.info(
+                                "[Knowledge/%s] Updated: %s -> %s",
+                                category,
+                                old_fact[:30],
+                                new_fact[:30],
+                            )
                             break
 
             # Append new facts (fuzzy dedup — normalized 80% overlap)
@@ -793,11 +853,9 @@ class EpisodicMemory:
     def _load_all_knowledge(self) -> str:
         """Load all knowledge .md files into a single string (cached 10s)."""
         import time as _time
+
         now = _time.monotonic()
-        if (
-            self._knowledge_cache is not None
-            and (now - self._knowledge_cache_time) < 10.0
-        ):
+        if self._knowledge_cache is not None and (now - self._knowledge_cache_time) < 10.0:
             return self._knowledge_cache
         parts = []
         for f in sorted(self._knowledge_dir.glob("*.md")):
@@ -854,9 +912,7 @@ class EpisodicMemory:
                         try:
                             return self._normalized_reflection(json.loads(repaired))
                         except (json.JSONDecodeError, ValueError):
-                            logger.warning(
-                                "Failed to parse reflection JSON: %s", response[:100]
-                            )
+                            logger.warning("Failed to parse reflection JSON: %s", response[:100])
                             return self._reflection_from_embedded_summary(response)
         logger.warning("Failed to parse reflection JSON: %s", response[:100])
         return self._reflection_from_embedded_summary(response)
@@ -902,9 +958,7 @@ class EpisodicMemory:
             "patterns": payload.get("patterns")
             if isinstance(payload.get("patterns"), list)
             else [],
-            "updates": payload.get("updates")
-            if isinstance(payload.get("updates"), list)
-            else [],
+            "updates": payload.get("updates") if isinstance(payload.get("updates"), list) else [],
             "importance": str(payload.get("importance") or "medium"),
         }
 

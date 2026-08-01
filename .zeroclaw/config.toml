@@ -1,5 +1,19 @@
-# ZeroClaw Configuration --- Askme Integration
+# ZeroClaw Configuration --- experimental LiteLLM routing only
+# This does not configure AskMe MCP; native integration remains blocked.
 # 启动: zeroclaw gateway --config .zeroclaw/config.toml
+
+# API credentials are injected at launch; never persist them here.
+api_key = ""
+default_provider = "custom:http://127.0.0.1:4000/v1"
+default_model = "robot-action"
+model_routes = []
+
+[reliability]
+provider_retries = 0
+fallback_providers = []
+api_keys = []
+model_fallbacks = {}
+
 
 [agent]
 identity_file = "agent/IDENTITY.md"
@@ -8,13 +22,3 @@ tools_file = "agent/TOOLS.md"
 memory_file = "agent/MEMORY.md"
 max_tool_iterations = 50
 parallel_tools = true
-
-[mcp]
-enabled = true
-deferred_loading = false
-
-[[mcp.servers]]
-name = "askme"
-command = "python"
-args = ["-m", "askme.mcp.server"]
-cwd = "."

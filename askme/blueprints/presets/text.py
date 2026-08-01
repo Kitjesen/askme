@@ -25,6 +25,7 @@ def _build_text():
         SkillModule,
         TextModule,
         ToolsModule,
+        WarmSessionModule,
     )
 
     return compose_runtime(
@@ -39,9 +40,11 @@ def _build_text():
             SkillModule,
             ExecutorModule,
             TextModule,
+            WarmSessionModule,
             HealthModule,
         )
     )
+
 
 __all__ = ["text"]
 

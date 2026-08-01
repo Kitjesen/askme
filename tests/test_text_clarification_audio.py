@@ -8,9 +8,11 @@ import pytest
 
 # ── _TextClarificationAudio ───────────────────────────────────────────────────
 
+
 class TestTextClarificationAudio:
     def _make(self):
         from askme.pipeline.text_loop import _TextClarificationAudio
+
         return _TextClarificationAudio()
 
     def test_speak_appends_to_spoken(self):
@@ -67,6 +69,7 @@ class TestTextClarificationAudio:
 
 # ── TextLoop process_turn integration ────────────────────────────────────────
 
+
 class TestTextLoopProcessTurn:
     def _make_text_loop(self):
         from askme.pipeline.text_loop import TextLoop
@@ -108,10 +111,13 @@ class TestTextLoopProcessTurn:
         )
         pipeline = MagicMock()
         pipeline.process = AsyncMock(return_value="助手的回答")
+        pipeline.handle_pending_tool_response = AsyncMock(return_value=None)
 
-        with patch("askme.pipeline.proactive.ProactiveOrchestrator"), \
-             patch("askme.pipeline.proactive.orchestrator.ProactiveOrchestrator"), \
-             patch("askme.pipeline.text_loop.record_external_turn"):
+        with (
+            patch("askme.pipeline.proactive.ProactiveOrchestrator"),
+            patch("askme.pipeline.proactive.orchestrator.ProactiveOrchestrator"),
+            patch("askme.pipeline.text_loop.record_external_turn"),
+        ):
             loop = TextLoop(
                 router=router,
                 pipeline=pipeline,

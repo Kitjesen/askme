@@ -174,4 +174,4 @@ def test_runtime_voice_turn_checks_runtime_submit_before_dispatch() -> None:
         )
 
     assert response.status_code == 403
-    assert permissions == ["runtime:submit"]
+    assert permissions == ["runtime:pause"]

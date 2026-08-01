@@ -17,12 +17,13 @@ def _build_lingtu_voice():
     from askme.runtime.modules import (
         LLMModule,
         MemoryModule,
-    PipelineModule,
-    SkillModule,
-    TelegramModule,
-    TextModule,
-    ToolsModule,
+        PipelineModule,
+        SkillModule,
+        TelegramModule,
+        TextModule,
+        ToolsModule,
         VoiceModule,
+        WarmSessionModule,
     )
 
     return compose_runtime(
@@ -33,10 +34,12 @@ def _build_lingtu_voice():
             PipelineModule,
             SkillModule,
             VoiceModule,
+            WarmSessionModule,
             TextModule,
             TelegramModule,
         )
     )
+
 
 __all__ = ["lingtu_voice"]
 

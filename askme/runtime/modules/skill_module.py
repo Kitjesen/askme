@@ -44,7 +44,7 @@ class SkillModule(Module):
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         llm_mod = self.llm_in
-        llm = getattr(llm_mod, "client", None) if llm_mod else None
+        llm = getattr(llm_mod, "llm_client", None) if llm_mod else None
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else None
 
         tools_mod = self.tool_registry_in
@@ -154,6 +154,7 @@ class SkillModule(Module):
             "skill_count": len(self._skill_manager.get_all()),
             "enabled_count": len(enabled),
         }
+
     def capabilities(self) -> dict[str, Any]:
         center = self._skill_manager.get_capability_center()
         return {

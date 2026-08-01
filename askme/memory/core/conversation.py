@@ -20,12 +20,14 @@ import json
 import logging
 import os
 import time
+import uuid
 from copy import deepcopy
 from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING, Any
 
 from askme.config import get_config, project_root
+from askme.llm.core.contracts import LLMCallContext
 from askme.telemetry.ota_bridge import OTABridgeMetrics
 
 if TYPE_CHECKING:
@@ -34,9 +36,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Sliding window compression constants
-COMPRESS_THRESHOLD = 30   # Start compressing when history exceeds this
-KEEP_RECENT = 10          # Keep this many recent messages verbatim
-HARD_LIMIT = 80           # Absolute max messages — truncate even if compression failed
+COMPRESS_THRESHOLD = 30  # Start compressing when history exceeds this
+KEEP_RECENT = 10  # Keep this many recent messages verbatim
+HARD_LIMIT = 80  # Absolute max messages — truncate even if compression failed
 SUMMARY_TAG = "[对话摘要]"
 
 COMPRESS_PROMPT = """\
@@ -154,17 +156,21 @@ class ConversationManager:
         if not tool_calls:
             return
         history = self._history_for(conversation_session_id)
-        history.append({
-            "role": "assistant",
-            "content": None,
-            "tool_calls": tool_calls,
-        })
+        history.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": tool_calls,
+            }
+        )
         for tr in tool_results:
-            history.append({
-                "role": "tool",
-                "tool_call_id": tr["tool_call_id"],
-                "content": tr["content"],
-            })
+            history.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tr["tool_call_id"],
+                    "content": tr["content"],
+                }
+            )
 
     def get_messages(
         self,
@@ -259,15 +265,16 @@ class ConversationManager:
         history = self._history_for(conversation_session_id)
         # Hard limit: drop oldest messages immediately if compression keeps failing.
         regular = [
-            m for m in history
-            if m.get("role") in ("user", "assistant") and m.get("content")
+            m for m in history if m.get("role") in ("user", "assistant") and m.get("content")
         ]
         if len(regular) > HARD_LIMIT:
             dropped_count = len(regular) - HARD_LIMIT
             logger.warning(
                 "[Conversation] Hard limit %d exceeded (%d messages) — "
                 "dropping %d oldest messages without compression",
-                HARD_LIMIT, len(regular), dropped_count,
+                HARD_LIMIT,
+                len(regular),
+                dropped_count,
             )
             self._set_history(regular[-HARD_LIMIT:], conversation_session_id)
             self._save()
@@ -295,8 +302,7 @@ class ConversationManager:
             return
 
         regular = [
-            m for m in history
-            if m.get("role") in ("user", "assistant") and m.get("content")
+            m for m in history if m.get("role") in ("user", "assistant") and m.get("content")
         ]
         if len(regular) <= COMPRESS_THRESHOLD:
             return
@@ -327,12 +333,25 @@ class ConversationManager:
 
         try:
             summary = await asyncio.wait_for(
-                llm.chat([
-                    {"role": "system", "content": "你是一个对话压缩助手。"},
-                    {"role": "user", "content": COMPRESS_PROMPT.format(
-                        conversation="\n".join(lines)
-                    )},
-                ]),
+                llm.chat(
+                    [
+                        {"role": "system", "content": "你是一个对话压缩助手。"},
+                        {
+                            "role": "user",
+                            "content": COMPRESS_PROMPT.format(conversation="\n".join(lines)),
+                        },
+                    ],
+                    model="memory-compact",
+                    context=LLMCallContext(
+                        session_id=conversation_session_id,
+                        call_id=uuid.uuid4().hex,
+                        purpose="memory_compact",
+                        channel="background",
+                        request_class="memory",
+                        privacy_class="sensitive",
+                        allow_cache=False,
+                    ),
+                ),
                 timeout=10.0,
             )
             summary = summary.strip()
@@ -347,7 +366,8 @@ class ConversationManager:
             # while the LLM was running.  Take KEEP_RECENT from the live state.
             current_history = self._history_for(conversation_session_id)
             current_regular = [
-                m for m in current_history
+                m
+                for m in current_history
                 if m.get("role") in ("user", "assistant") and m.get("content")
             ]
             recent = current_regular[-KEEP_RECENT:]
@@ -356,7 +376,8 @@ class ConversationManager:
             self._save()
             logger.info(
                 "[Conversation] Compressed %d messages into summary (%d new arrivals preserved)",
-                len(to_compress), new_count,
+                len(to_compress),
+                new_count,
             )
         except Exception as exc:
             logger.warning("[Conversation] Compression failed: %s", exc)
@@ -374,13 +395,10 @@ class ConversationManager:
         Trimmed messages are sent to SessionMemory for summarization.
         """
         history = self._history_for(conversation_session_id)
-        clean = [
-            m for m in history
-            if m.get("role") in ("user", "assistant") and m.get("content")
-        ]
+        clean = [m for m in history if m.get("role") in ("user", "assistant") and m.get("content")]
         if len(clean) > self.max_history:
-            dropped = clean[:-self.max_history]
-            clean = clean[-self.max_history:]
+            dropped = clean[: -self.max_history]
+            clean = clean[-self.max_history :]
             # Summarize dropped messages in background (fire-and-forget)
             if dropped and self._session_memory:
                 try:
@@ -438,9 +456,7 @@ class ConversationManager:
         with self._persistence_lock:
             try:
                 os.makedirs(self._history_file.parent, exist_ok=True)
-                temporary = self._history_file.with_name(
-                    f".{self._history_file.name}.tmp"
-                )
+                temporary = self._history_file.with_name(f".{self._history_file.name}.tmp")
                 with open(temporary, "w", encoding="utf-8") as fh:
                     json.dump(self._dump_state(), fh, ensure_ascii=False, indent=2)
                     fh.flush()
@@ -524,9 +540,7 @@ class ConversationManager:
                 # (multiple tool results from the same assistant tool_calls are all valid)
                 prev = clean[-1] if clean else None
                 preceded_by_assistant = (
-                    prev is not None
-                    and prev.get("role") == "assistant"
-                    and prev.get("tool_calls")
+                    prev is not None and prev.get("role") == "assistant" and prev.get("tool_calls")
                 )
                 preceded_by_tool = prev is not None and prev.get("role") == "tool"
                 if preceded_by_assistant or preceded_by_tool:

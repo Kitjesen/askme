@@ -36,6 +36,9 @@ def call_bridge_turn(
     text: str,
     *,
     conversation_session_id: str | None = None,
+    voice_turn_id: str | None = None,
+    turn_cancel_token: Any | None = None,
+    person_id: str | None = None,
     operator_id: str | None = None,
     robot_id: str | None = None,
     site_id: str | None = None,
@@ -46,6 +49,9 @@ def call_bridge_turn(
     context = {
         "conversation_session_id": conversation_session_id,
         "session_id": conversation_session_id,
+        "voice_turn_id": voice_turn_id,
+        "turn_cancel_token": turn_cancel_token,
+        "person_id": person_id,
         "operator_id": operator_id,
         "robot_id": robot_id,
         "site_id": site_id,
@@ -61,6 +67,13 @@ async def try_handle_runtime_bridge_turn(
     user_text: str,
     *,
     conversation_session_id: str | None = None,
+    voice_turn_id: str | None = None,
+    turn_cancel_token: Any | None = None,
+    person_id: str | None = None,
+    operator_id: str | None = None,
+    robot_id: str | None = None,
+    site_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
     pipeline: Any,
     dispatcher: Any | None = None,
     on_spoken_reply: ReplyHandler | None = None,
@@ -71,6 +84,13 @@ async def try_handle_runtime_bridge_turn(
         method,
         user_text,
         conversation_session_id=conversation_session_id,
+        voice_turn_id=voice_turn_id,
+        turn_cancel_token=turn_cancel_token,
+        person_id=person_id,
+        operator_id=operator_id,
+        robot_id=robot_id,
+        site_id=site_id,
+        metadata=metadata,
         pipeline=pipeline,
         dispatcher=dispatcher,
         on_spoken_reply=on_spoken_reply,
@@ -84,17 +104,33 @@ async def try_runtime_bridge_turn(
     user_text: str,
     *,
     conversation_session_id: str | None = None,
+    voice_turn_id: str | None = None,
+    turn_cancel_token: Any | None = None,
+    person_id: str | None = None,
+    operator_id: str | None = None,
+    robot_id: str | None = None,
+    site_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
     pipeline: Any,
     dispatcher: Any | None = None,
     on_spoken_reply: ReplyHandler | None = None,
     label: str,
 ) -> RuntimeBridgeOutcome:
     """Call a bridge method and return the handled outcome."""
+    downstream_metadata = dict(metadata) if metadata is not None else None
+    bridge_metadata = dict(downstream_metadata) if downstream_metadata is not None else None
     bridge_result = await asyncio.to_thread(
         call_bridge_turn,
         method,
         user_text,
         conversation_session_id=conversation_session_id,
+        voice_turn_id=voice_turn_id,
+        turn_cancel_token=turn_cancel_token,
+        person_id=person_id,
+        operator_id=operator_id,
+        robot_id=robot_id,
+        site_id=site_id,
+        metadata=bridge_metadata,
         defer_recording=True,
     )
 
@@ -102,6 +138,13 @@ async def try_runtime_bridge_turn(
         bridge_result,
         user_text=user_text,
         conversation_session_id=conversation_session_id,
+        voice_turn_id=voice_turn_id,
+        turn_cancel_token=turn_cancel_token,
+        person_id=person_id,
+        operator_id=operator_id,
+        robot_id=robot_id,
+        site_id=site_id,
+        metadata=downstream_metadata,
         pipeline=pipeline,
         dispatcher=dispatcher,
         on_spoken_reply=on_spoken_reply,
@@ -139,6 +182,13 @@ async def handle_runtime_bridge_result(
     *,
     user_text: str,
     conversation_session_id: str | None = None,
+    voice_turn_id: str | None = None,
+    turn_cancel_token: Any | None = None,
+    person_id: str | None = None,
+    operator_id: str | None = None,
+    robot_id: str | None = None,
+    site_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
     pipeline: Any,
     dispatcher: Any | None = None,
     on_spoken_reply: ReplyHandler | None = None,
@@ -149,6 +199,13 @@ async def handle_runtime_bridge_result(
         bridge_result,
         user_text=user_text,
         conversation_session_id=conversation_session_id,
+        voice_turn_id=voice_turn_id,
+        turn_cancel_token=turn_cancel_token,
+        person_id=person_id,
+        operator_id=operator_id,
+        robot_id=robot_id,
+        site_id=site_id,
+        metadata=metadata,
         pipeline=pipeline,
         dispatcher=dispatcher,
         on_spoken_reply=on_spoken_reply,
@@ -162,6 +219,13 @@ async def runtime_bridge_result_outcome(
     *,
     user_text: str,
     conversation_session_id: str | None = None,
+    voice_turn_id: str | None = None,
+    turn_cancel_token: Any | None = None,
+    person_id: str | None = None,
+    operator_id: str | None = None,
+    robot_id: str | None = None,
+    site_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
     pipeline: Any,
     dispatcher: Any | None = None,
     on_spoken_reply: ReplyHandler | None = None,
@@ -183,13 +247,30 @@ async def runtime_bridge_result_outcome(
     action_type = turn.get("action_type")
     skill_name = turn.get("skill_name")
 
-    if isinstance(skill_name, str) and skill_name and (
-        action_type == "skill" or action_type == "general"
+    if (
+        isinstance(skill_name, str)
+        and skill_name
+        and (action_type == "skill" or action_type == "general")
     ):
-        if dispatcher:
-            result = await dispatcher.dispatch(skill_name, user_text, source="runtime")
-        else:
-            result = await pipeline.execute_skill(skill_name, user_text)
+        callback = dispatcher.dispatch if dispatcher else pipeline.execute_skill
+        result = await callback(
+            skill_name,
+            user_text,
+            **_supported_kwargs(
+                callback,
+                {
+                    "source": "runtime",
+                    "conversation_session_id": conversation_session_id,
+                    "voice_turn_id": voice_turn_id,
+                    "turn_cancel_token": turn_cancel_token,
+                    "person_id": person_id,
+                    "operator_id": operator_id,
+                    "robot_id": robot_id,
+                    "site_id": site_id,
+                    "metadata": metadata,
+                },
+            ),
+        )
         return RuntimeBridgeOutcome(
             handled=True,
             reply=result if isinstance(result, str) else "",
@@ -203,8 +284,10 @@ async def runtime_bridge_result_outcome(
             user_text,
             source="runtime",
             conversation_session_id=conversation_session_id,
+            turn_id=voice_turn_id,
             provider="runtime_bridge",
             response_text=reply,
+            metadata=metadata,
         )
         try:
             if on_spoken_reply is not None:
@@ -219,6 +302,7 @@ async def runtime_bridge_result_outcome(
                 source="runtime",
                 reason="runtime_reply_delivery_failed",
                 conversation_session_id=conversation_session_id,
+                metadata=metadata,
             )
             raise
         complete_external_turn(
@@ -228,6 +312,7 @@ async def runtime_bridge_result_outcome(
             assistant_text=reply,
             source="runtime",
             conversation_session_id=conversation_session_id,
+            metadata=metadata,
         )
         return RuntimeBridgeOutcome(handled=True, reply=reply)
 
@@ -245,18 +330,16 @@ def _supported_kwargs(
     method: Callable[..., Any],
     context: dict[str, Any],
 ) -> dict[str, Any]:
+    signature_target = method
+    side_effect = getattr(method, "side_effect", None)
+    if callable(side_effect):
+        signature_target = side_effect
     try:
-        params = signature(method).parameters
+        params = signature(signature_target).parameters
     except (TypeError, ValueError):
         return {}
 
-    accepts_kwargs = any(
-        param.kind is Parameter.VAR_KEYWORD for param in params.values()
-    )
+    accepts_kwargs = any(param.kind is Parameter.VAR_KEYWORD for param in params.values())
     if accepts_kwargs:
         return {key: value for key, value in context.items() if value is not None}
-    return {
-        key: value
-        for key, value in context.items()
-        if value is not None and key in params
-    }
+    return {key: value for key, value in context.items() if value is not None and key in params}

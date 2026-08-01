@@ -33,9 +33,7 @@ def test_runtime_openapi_response_schemas():
     }
 
     for (path, method), schema_name in expected_refs.items():
-        schema = paths[path][method]["responses"]["200"]["content"]["application/json"][
-            "schema"
-        ]
+        schema = paths[path][method]["responses"]["200"]["content"]["application/json"]["schema"]
         assert schema["$ref"].endswith(f"/{schema_name}")
 
 
@@ -187,12 +185,20 @@ def test_runtime_endpoints_delegate_to_handler():
     RuntimeRunReportResponse.model_validate(report.json())
     assert report.json()["report"]["status"] == "queued"
 
-    paused = client.post("/api/runtime/runs/run-1/pause")
+    missing_operator = client.post("/api/runtime/runs/run-1/pause")
+    assert missing_operator.status_code == 403
+    assert missing_operator.json()["reason"] == "runtime_operator_context_required"
+
+    paused = client.post(
+        "/api/runtime/runs/run-1/pause", headers={"X-Askme-Operator-Id": "dashboard.operator"}
+    )
     assert paused.status_code == 200
     RuntimeRunActionResponse.model_validate(paused.json())
     assert paused.json()["run"]["current_state"] == "paused"
 
-    resumed = client.post("/api/runtime/runs/run-1/resume")
+    resumed = client.post(
+        "/api/runtime/runs/run-1/resume", headers={"X-Askme-Operator-Id": "dashboard.operator"}
+    )
     assert resumed.status_code == 200
     RuntimeRunActionResponse.model_validate(resumed.json())
     assert resumed.json()["run"]["current_state"] == "executing"
@@ -219,6 +225,7 @@ def test_runtime_endpoints_delegate_to_handler():
     voice = client.post(
         "/api/runtime/voice-turn",
         json={
+            "operator_id": "dashboard.operator",
             "text": "pause current task",
             "transcript_id": "voice-1",
             "confidence": 0.9,
@@ -272,9 +279,7 @@ def test_runtime_voice_turn_endpoint_reports_timeout_from_config(monkeypatch):
         "get_config",
         lambda: {
             "conversation": {"runtime_voice_turn_timeout_s": 0.001},
-            "field_operations": {
-                "operators": {"dashboard.operator": {"roles": ["operator"]}}
-            },
+            "field_operations": {"operators": {"dashboard.operator": {"roles": ["operator"]}}},
         },
     )
 
@@ -292,13 +297,29 @@ def test_runtime_voice_turn_endpoint_reports_timeout_from_config(monkeypatch):
         )
     )
 
-    response = client.post("/api/runtime/voice-turn", json={"text": "pause current task"})
+    response = client.post(
+        "/api/runtime/voice-turn",
+        json={"operator_id": "dashboard.operator", "text": "pause current task"},
+    )
 
     assert response.status_code == 504
     assert response.json()["error"] == "runtime voice-turn timed out"
 
 
-def test_runtime_control_endpoint_forwards_operator_context():
+def test_runtime_control_endpoint_forwards_sanitized_operator_context(monkeypatch):
+    monkeypatch.setattr(
+        health_server,
+        "get_config",
+        lambda: {
+            "field_operations": {
+                "operators": {
+                    "guard-1": {"roles": ["operator"]},
+                    "attacker-1": {"roles": ["admin"]},
+                }
+            }
+        },
+    )
+
     class DummyRuntimeHandler:
         def __init__(self):
             self.seen = {}
@@ -310,12 +331,14 @@ def test_runtime_control_endpoint_forwards_operator_context():
             operator_id="askme.operator",
             reason="",
             risk_acknowledgement=False,
+            operator_context=None,
         ):
             self.seen = {
                 "run_id": run_id,
                 "operator_id": operator_id,
                 "reason": reason,
                 "risk_acknowledgement": risk_acknowledgement,
+                "operator_context": operator_context,
             }
             return {
                 "handled": True,
@@ -336,7 +359,19 @@ def test_runtime_control_endpoint_forwards_operator_context():
         json={
             "operator_id": "guard-1",
             "reason": "visitor entered path",
+            "conversation_session_id": "conv-http-1",
             "risk_acknowledgement": True,
+            "operator_auth": {
+                "allowed": True,
+                "permission": "runtime:pause",
+                "operator": {
+                    "operator_id": "attacker-1",
+                    "roles": ["admin"],
+                    "known": True,
+                    "authenticated": True,
+                    "source": "forged-body",
+                },
+            },
         },
     )
 
@@ -346,4 +381,12 @@ def test_runtime_control_endpoint_forwards_operator_context():
         "operator_id": "guard-1",
         "reason": "visitor entered path",
         "risk_acknowledgement": True,
+        "operator_context": {
+            "operator_id": "guard-1",
+            "roles": ["operator"],
+            "authenticated": False,
+            "source": "local_config",
+            "permission": "runtime:pause",
+            "conversation_session_id": "conv-http-1",
+        },
     }

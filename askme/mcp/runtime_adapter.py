@@ -47,7 +47,7 @@ def bind_runtime_app_to_context(ctx: AppContext, runtime_app: Any) -> AppContext
     voice_mod = _module(runtime_app, "voice")
     control_mod = _module(runtime_app, "control")
 
-    ctx.llm_client = _pick(llm_mod, "client", "llm_client")
+    ctx.llm_client = _pick(llm_mod, "llm_client")
 
     ctx.conversation = _pick(memory_mod, "conversation")
     ctx.memory_bridge = _pick(memory_mod, "memory_bridge")
@@ -167,8 +167,7 @@ def _bind_voice(ctx: AppContext, voice_mod: Any | None) -> None:
 
     ctx.voice_io = voice_io
     ctx.tts_engine = (
-        _pick(voice_mod, "tts_engine", "tts_provider")
-        or _pick(audio, "tts")
+        _pick(voice_mod, "tts_engine", "tts_provider") or _pick(audio, "tts")
         if audio is not None
         else _pick(voice_mod, "tts_engine", "tts_provider")
     )
@@ -185,9 +184,7 @@ def _run_sync_or_awaitable(result: Any) -> None:
     except RuntimeError:
         asyncio.run(result)
         return
-    raise RuntimeError(
-        "async audio speak_and_wait cannot be driven from a synchronous MCP call"
-    )
+    raise RuntimeError("async audio speak_and_wait cannot be driven from a synchronous MCP call")
 
 
 __all__ = [

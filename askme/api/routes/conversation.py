@@ -6,6 +6,7 @@ import asyncio
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
+from inspect import isawaitable
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
@@ -22,9 +23,12 @@ from askme.api.services.conversation_service import (
     ChatUnavailable,
     ConversationService,
     EmptyChatText,
+    authorized_runtime_context_from_body,
+    runtime_control_permission_from_body,
 )
 from askme.api.services.http_helpers import require_json_object
 from askme.conversation import TurnInProgress, canonical_thread_id
+from askme.runtime.control_intent import runtime_control_permission
 
 DispatchRuntime = Callable[..., Awaitable[dict[str, Any]]]
 CorsOptions = Callable[[str], Response]
@@ -86,6 +90,18 @@ def create_conversation_router(
         trace_headers = _with_trace(_CORS_HEADERS, trace_id)
         try:
             body = require_json_object(await request.json())
+            body.pop("operator_auth", None)
+            runtime_permission = runtime_control_permission_from_body(body)
+            if runtime_permission is not None and not await _chat_runtime_target_available(
+                configured=runtime_available,
+                dispatch_runtime=dispatch_runtime,
+            ):
+                runtime_permission = None
+            if runtime_permission is not None:
+                failure = authorize(request, body, runtime_permission)
+                if failure is not None:
+                    failure.headers["X-Askme-Trace-Id"] = trace_id
+                    return failure
             payload = await conversation_service.chat_payload_from_body(body, trace_id=trace_id)
             ChatResponse.model_validate(payload)
             return JSONResponse(payload, headers=_with_trace(_NO_STORE_HEADERS, trace_id))
@@ -147,7 +163,16 @@ def create_conversation_router(
         """Route a final voice transcript to runtime controls only."""
         try:
             body = require_json_object(await request.json())
-            failure = authorize(request, body, "runtime:submit")
+            body.pop("operator_auth", None)
+            header_operator_id = _clean_optional_text(
+                request.headers.get("x-askme-operator-id") or request.headers.get("x-operator-id")
+            )
+            if header_operator_id:
+                body["operator_id"] = header_operator_id
+            raw_text = body.get("text") or body.get("message") or body.get("transcript") or ""
+            text = str(raw_text).strip()
+            runtime_permission = runtime_control_permission(text, default="runtime:submit")
+            failure = authorize(request, body, str(runtime_permission))
             if failure is not None:
                 return failure
             if not runtime_available:
@@ -156,8 +181,6 @@ def create_conversation_router(
                     status_code=503,
                     headers=_CORS_HEADERS,
                 )
-            raw_text = body.get("text") or body.get("message") or body.get("transcript") or ""
-            text = str(raw_text).strip()
             if not text:
                 return JSONResponse(
                     {
@@ -171,6 +194,33 @@ def create_conversation_router(
                     status_code=400,
                     headers=_CORS_HEADERS,
                 )
+            conversation_session_id = canonical_thread_id(
+                thread_id=_clean_optional_text(body.get("thread_id")),
+                conversation_thread_id=_clean_optional_text(body.get("conversation_thread_id")),
+                conversation_session_id=_clean_optional_text(body.get("conversation_session_id")),
+                conversation_id=_clean_optional_text(body.get("conversation_id")),
+                chat_session_id=_clean_optional_text(body.get("chat_session_id")),
+                session_id=_clean_optional_text(body.get("session_id")),
+            )
+            operator_context = authorized_runtime_context_from_body(
+                body,
+                conversation_session_id=conversation_session_id or "",
+                permission=str(runtime_permission),
+            )
+            if operator_context is None:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "operator authorization provenance unavailable",
+                        "reason": "runtime_control_provenance_mismatch",
+                        "message": (
+                            "Runtime voice control requires a trusted, action-scoped "
+                            "operator identity."
+                        ),
+                    },
+                    status_code=403,
+                    headers=_CORS_HEADERS,
+                )
             dispatch = dispatch_runtime(
                 "voice_turn_payload",
                 text,
@@ -179,19 +229,19 @@ def create_conversation_router(
                 confidence=body.get("asr_confidence", body.get("confidence")),
                 is_final=bool(body.get("is_final", True)),
                 channel=str(body.get("channel") or "voice"),
-                conversation_session_id=canonical_thread_id(
-                    thread_id=_clean_optional_text(body.get("thread_id")),
-                    conversation_thread_id=_clean_optional_text(
-                        body.get("conversation_thread_id")
-                    ),
-                    conversation_session_id=_clean_optional_text(
-                        body.get("conversation_session_id")
-                    ),
-                    conversation_id=_clean_optional_text(body.get("conversation_id")),
-                    chat_session_id=_clean_optional_text(body.get("chat_session_id")),
-                    session_id=_clean_optional_text(body.get("session_id")),
-                ),
+                conversation_session_id=conversation_session_id,
                 planning_session_id=_clean_optional_text(body.get("planning_session_id")),
+                operator_id=operator_context.operator_id,
+                operator_roles=list(operator_context.operator_roles),
+                operator_authenticated=operator_context.operator_authenticated,
+                operator_source=operator_context.operator_source,
+                runtime_permission=operator_context.permission,
+                reason=str(body.get("reason") or ""),
+                risk_acknowledgement=bool(
+                    body.get("risk_acknowledgement")
+                    or body.get("risk_ack")
+                    or body.get("acknowledged")
+                ),
             )
             if runtime_voice_turn_timeout_s is not None and runtime_voice_turn_timeout_s > 0:
                 payload = await asyncio.wait_for(dispatch, timeout=runtime_voice_turn_timeout_s)
@@ -233,6 +283,29 @@ def create_conversation_router(
         return cors_options_response("POST, OPTIONS")
 
     return router
+
+
+async def _chat_runtime_target_available(
+    *,
+    configured: bool,
+    dispatch_runtime: DispatchRuntime,
+) -> bool:
+    if not configured:
+        return False
+    try:
+        context = dispatch_runtime("runtime_context_payload")
+        if isawaitable(context):
+            await context
+    except RuntimeError as exc:
+        if str(exc).strip().lower() == "runtime handler not configured":
+            return False
+        return True
+    except Exception:
+        # An unhealthy configured runtime still requires authorization.  The
+        # HealthModule control path will deny the mutation if provenance or
+        # target validation cannot be completed.
+        return True
+    return True
 
 
 def _request_trace_id(request: Request) -> str:

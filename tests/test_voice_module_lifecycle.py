@@ -83,6 +83,16 @@ async def test_voice_module_persists_volcengine_tts_selection() -> None:
     }
 
 
+def test_voice_module_forwards_tts_activation_callback_to_audio_frontend() -> None:
+    mod = VoiceModule()
+    mod._audio = MagicMock()
+    callback = MagicMock()
+
+    mod.set_tts_activation_callback(callback)
+
+    mod._audio.set_tts_activation_callback.assert_called_once_with(callback)
+
+
 @pytest.mark.asyncio
 async def test_voice_module_uses_audio_input_lifecycle() -> None:
     started = asyncio.Event()
@@ -214,81 +224,29 @@ async def test_voice_module_phrase_prime_failure_does_not_fail_startup(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_voice_module_tts_provider_prewarm_is_background_and_harvested() -> None:
+async def test_voice_module_defers_provider_prewarm_to_warm_session_manager() -> None:
     loop_started = asyncio.Event()
-    prewarm_started = threading.Event()
-    prewarm_released = threading.Event()
-    prewarm_finished = threading.Event()
 
     async def _run() -> None:
         loop_started.set()
         await asyncio.Event().wait()
 
     class FakeTTS:
+        def __init__(self) -> None:
+            self.prewarm_calls = 0
+            self.cancel_calls = 0
+
         def prewarm_provider_session(self) -> dict[str, object]:
-            prewarm_started.set()
-            prewarm_released.wait(timeout=2.0)
-            prewarm_finished.set()
+            self.prewarm_calls += 1
             return {"ok": True, "status": "opened"}
 
-    mod = VoiceModule()
-    mod._audio = MagicMock()
-    mod._audio.tts = FakeTTS()
-    mod._voice_loop = MagicMock(run=_run)
-    mod._task = None
-    mod._router = MagicMock()
-    mod._router._policy.quick_replies = {}
-    mod._voice_cfg = {"tts": {"phrase_prime_enabled": False}}
-    mod._phrase_prime_task = None
-    mod._phrase_prime_stop = threading.Event()
-    mod._tts_provider_prewarm_task = None
-
-    await mod.start()
-    await asyncio.wait_for(loop_started.wait(), timeout=1.0)
-    assert prewarm_started.wait(timeout=1.0)
-    assert mod._tts_provider_prewarm_task is not None
-    assert not mod._tts_provider_prewarm_task.done()
-
-    prewarm_released.set()
-    await mod.stop()
-
-    assert prewarm_finished.is_set()
-    assert mod._tts_provider_prewarm_task.done()
-    mod._audio.shutdown.assert_called_once_with()
-
-
-@pytest.mark.asyncio
-async def test_voice_module_stop_bounds_uncooperative_provider_prewarm(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import askme.runtime.modules.voice_module as voice_module
-
-    loop_started = asyncio.Event()
-    prewarm_started = threading.Event()
-    release_prewarm = threading.Event()
-    cancel_called = threading.Event()
-
-    async def _run() -> None:
-        loop_started.set()
-        await asyncio.Event().wait()
-
-    class SlowTTS:
-        def prewarm_provider_session(self) -> dict[str, object]:
-            prewarm_started.set()
-            release_prewarm.wait(timeout=2.0)
-            return {"ok": False, "status": "cancelled"}
-
         def cancel_provider_prewarm(self) -> None:
-            cancel_called.set()
+            self.cancel_calls += 1
 
-    monkeypatch.setattr(
-        voice_module,
-        "_BACKGROUND_TASK_STOP_TIMEOUT_SECONDS",
-        0.05,
-    )
+    tts = FakeTTS()
     mod = VoiceModule()
     mod._audio = MagicMock()
-    mod._audio.tts = SlowTTS()
+    mod._audio.tts = tts
     mod._voice_loop = MagicMock(run=_run)
     mod._task = None
     mod._router = MagicMock()
@@ -296,47 +254,14 @@ async def test_voice_module_stop_bounds_uncooperative_provider_prewarm(
     mod._voice_cfg = {"tts": {"phrase_prime_enabled": False}}
     mod._phrase_prime_task = None
     mod._phrase_prime_stop = threading.Event()
-    mod._tts_provider_prewarm_task = None
 
     await mod.start()
     await asyncio.wait_for(loop_started.wait(), timeout=1.0)
-    assert await asyncio.to_thread(prewarm_started.wait, 1.0)
-
-    started_at = asyncio.get_running_loop().time()
-    await mod.stop()
-    elapsed = asyncio.get_running_loop().time() - started_at
-    release_prewarm.set()
-
-    assert elapsed < 0.5
-    assert cancel_called.is_set()
-    mod._audio.shutdown.assert_called_once_with()
-
-
-@pytest.mark.asyncio
-async def test_voice_module_tts_provider_prewarm_is_optional() -> None:
-    loop_started = asyncio.Event()
-
-    async def _run() -> None:
-        loop_started.set()
-        await asyncio.Event().wait()
-
-    mod = VoiceModule()
-    mod._audio = MagicMock()
-    mod._audio.tts = object()
-    mod._voice_loop = MagicMock(run=_run)
-    mod._task = None
-    mod._router = MagicMock()
-    mod._router._policy.quick_replies = {}
-    mod._voice_cfg = {"tts": {"phrase_prime_enabled": False}}
-    mod._phrase_prime_task = None
-    mod._phrase_prime_stop = threading.Event()
-    mod._tts_provider_prewarm_task = None
-
-    await mod.start()
-    await asyncio.wait_for(loop_started.wait(), timeout=1.0)
+    await asyncio.sleep(0.02)
     await mod.stop()
 
-    assert mod._tts_provider_prewarm_task is None
+    assert tts.prewarm_calls == 0
+    assert tts.cancel_calls == 0
 
 
 def test_runtime_voice_stack_builds_shared_audio_router_and_gateway(monkeypatch) -> None:
@@ -463,7 +388,9 @@ def test_voice_module_injects_runtime_stack_gate_components(monkeypatch) -> None
     )
     monkeypatch.setattr("askme.pipeline.channels.voice_loop.VoiceLoop", VoiceLoop)
 
+    pipeline = MagicMock()
     mod = VoiceModule()
+    mod.pipeline_in = SimpleNamespace(brain_pipeline=pipeline)
     mod.build({}, ModuleRegistry())
 
     assert mod.address_detector is address_detector
@@ -473,11 +400,12 @@ def test_voice_module_injects_runtime_stack_gate_components(monkeypatch) -> None
     assert callable(captured["mission_context_provider"])
     assert captured["voice_loop_kwargs"] == {
         "router": stack.router,
-        "pipeline": None,
+        "pipeline": pipeline,
         "audio": stack.audio,
         "voice_runtime_bridge": stack.voice_gateway,
         "dispatcher": None,
         "audio_router": stack.audio_router,
+        "anonymous_encounter_idle_seconds": 25.0,
     }
 
 

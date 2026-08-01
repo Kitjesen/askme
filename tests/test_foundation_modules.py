@@ -51,6 +51,22 @@ def _patch_ota_metrics():
     return patch("askme.runtime.modules.llm_module.OTABridgeMetrics", _MockOTAMetrics)
 
 
+def _minimal_litellm_cfg() -> dict[str, Any]:
+    """Small valid product LLM config for tests that mock the transport."""
+
+    return {
+        "brain": {
+            "provider": "litellm",
+            "api_key": "sk-test-scoped-virtual-key",
+            "base_url": "http://litellm.test/v1",
+            "model": "voice-fast",
+            "health_model": "health-probe",
+            "max_retries": 0,
+            "fallback_models": [],
+        }
+    }
+
+
 # Stub for LLMModule that doesn't touch real config
 class StubLLMModule(Module):
     """LLMModule replacement for tests — no real API config needed."""
@@ -110,7 +126,7 @@ class TestLLMModule:
         with _patch_llm_client(), _patch_ota_metrics():
             mod = LLMModule()
             reg = ModuleRegistry()
-            mod.build({}, reg)
+            mod.build(_minimal_litellm_cfg(), reg)
             assert mod.client is not None
             assert mod.client.model == "test-model"
             assert mod.ota_metrics is not None
@@ -120,7 +136,7 @@ class TestLLMModule:
 
         with _patch_llm_client(), _patch_ota_metrics():
             mod = LLMModule()
-            mod.build({}, ModuleRegistry())
+            mod.build(_minimal_litellm_cfg(), ModuleRegistry())
             h = mod.health()
             assert h["status"] == "ok"
             assert h["model"] == "test-model"
@@ -402,7 +418,4 @@ class TestComposition:
         wr = app.wire_result
         # Should have at least one wired connection (memory.llm_client ← llm)
         assert len(wr.wired) >= 1
-        assert any(
-            w[0] == "memory" and w[1] == "llm_client" and w[2] == "llm"
-            for w in wr.wired
-        )
+        assert any(w[0] == "memory" and w[1] == "llm_client" and w[2] == "llm" for w in wr.wired)

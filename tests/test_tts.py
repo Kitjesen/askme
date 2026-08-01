@@ -19,9 +19,7 @@ def test_cloud_tts_coalesces_adjacent_response_fragments() -> None:
     engine.tts_text_queue = queue.Queue()
     engine.tts_text_queue.put((7, "后半句。"))
 
-    text, acknowledgements, stop_after_item = engine._coalesce_tts_text(
-        7, "前半句，"
-    )
+    text, acknowledgements, stop_after_item = engine._coalesce_tts_text(7, "前半句，")
 
     assert text == "前半句，后半句。"
     assert acknowledgements == 1
@@ -182,9 +180,7 @@ def test_sounddevice_stream_open_failure_reports_transport_failure(monkeypatch):
         engine._playback_loop()
 
         assert failed.wait(timeout=1.0)
-        assert engine.status_snapshot()["render_reference"][
-            "transport_failure_latched"
-        ] is True
+        assert engine.status_snapshot()["render_reference"]["transport_failure_latched"] is True
     finally:
         engine.shutdown()
 
@@ -429,9 +425,7 @@ def test_usb_direct_warm_playback_adds_stream_guard(monkeypatch):
     monkeypatch.setattr(engine, "_play_chunk_usb_direct_locked", fake_usb_play)
     try:
         engine._last_aplay_close = time.monotonic()
-        ok = engine._play_chunk_usb_direct_with_preroll(
-            np.ones(160, dtype=np.float32) * 0.2
-        )
+        ok = engine._play_chunk_usb_direct_with_preroll(np.ones(160, dtype=np.float32) * 0.2)
     finally:
         engine.shutdown()
 
@@ -850,9 +844,7 @@ def test_usb_direct_persistent_stream_writes_pcm_without_one_shot(monkeypatch):
         lambda _chunk: pytest.fail("one-shot playback should not run"),
     )
     try:
-        assert engine._play_chunk_usb_direct_locked(
-            np.ones(480, dtype=np.float32) * 0.25
-        )
+        assert engine._play_chunk_usb_direct_locked(np.ones(480, dtype=np.float32) * 0.25)
     finally:
         engine.shutdown()
 
@@ -936,9 +928,7 @@ def test_usb_one_shot_anchors_reference_after_first_device_write(monkeypatch):
         lambda samples, **kwargs: order.append("publish"),
     )
     try:
-        assert engine._play_chunk_usb_direct_one_shot_locked(
-            np.ones(320, dtype=np.float32)
-        )
+        assert engine._play_chunk_usb_direct_one_shot_locked(np.ones(320, dtype=np.float32))
     finally:
         engine.shutdown()
 
@@ -1120,11 +1110,13 @@ def test_output_tail_silence_is_queued_for_current_generation():
     import numpy as np
     from askme.voice.tts import TTSEngine
 
-    engine = TTSEngine({
-        "backend": "edge",
-        "sample_rate": 16000,
-        "output_tail_silence_seconds": 0.25,
-    })
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "sample_rate": 16000,
+            "output_tail_silence_seconds": 0.25,
+        }
+    )
 
     generation = engine._get_generation()
     engine._queue_output_tail_silence(generation)
@@ -1226,9 +1218,7 @@ def test_aplay_drain_timeout_reports_transport_failure() -> None:
     engine._aplay_drain_timeout_seconds = 0.01
     engine._stop_requested = threading.Event()
     failures: list[str] = []
-    engine.report_render_transport_failure = lambda reason, exc=None: failures.append(
-        reason
-    )
+    engine.report_render_transport_failure = lambda reason, exc=None: failures.append(reason)
     process = FakeProcess()
 
     assert engine._wait_for_aplay_drain(process) is False
@@ -1251,18 +1241,13 @@ def test_aplay_nonzero_exit_reports_transport_failure_unless_stop_is_intentional
     engine._aplay_drain_timeout_seconds = 1.0
     engine._stop_requested = threading.Event()
     failures: list[str] = []
-    engine.report_render_transport_failure = lambda reason, exc=None: failures.append(
-        reason
-    )
+    engine.report_render_transport_failure = lambda reason, exc=None: failures.append(reason)
 
     assert engine._wait_for_aplay_drain(FakeProcess()) is False
     assert failures == ["aplay_exit_7"]
 
     failures.clear()
-    assert (
-        engine._wait_for_aplay_drain(FakeProcess(), intentional_stop=True)
-        is False
-    )
+    assert engine._wait_for_aplay_drain(FakeProcess(), intentional_stop=True) is False
     assert failures == []
 
 
@@ -1426,6 +1411,7 @@ def test_cached_phrase_pcm_returns_a_defensive_copy_without_queueing(tmp_path):
     finally:
         engine.shutdown()
 
+
 def test_drain_buffers_clears_cached_pcm_and_advances_generation():
     import numpy as np
     from askme.voice.tts import TTSEngine
@@ -1478,9 +1464,7 @@ def test_minimax_websocket_reuses_one_started_task_for_sequential_fragments(
                     }
                 )
             elif event["event"] == "task_finish":
-                self.responses.append(
-                    {"event": "task_finished", "base_resp": {"status_code": 0}}
-                )
+                self.responses.append({"event": "task_finished", "base_resp": {"status_code": 0}})
 
         def recv(self):
             return json.dumps(self.responses.popleft())
@@ -1515,14 +1499,10 @@ def test_minimax_websocket_reuses_one_started_task_for_sequential_fragments(
     )
     generation = engine._get_generation()
     try:
-        assert engine._run_async(
-            engine._generate_minimax_websocket("first", generation)
-        )
+        assert engine._run_async(engine._generate_minimax_websocket("first", generation))
         engine.prepare_turn()
         generation = engine._get_generation()
-        assert engine._run_async(
-            engine._generate_minimax_websocket("second", generation)
-        )
+        assert engine._run_async(engine._generate_minimax_websocket("second", generation))
 
         socket = sockets[0]
         sent_events = [event["event"] for event in socket.events]
@@ -1532,12 +1512,8 @@ def test_minimax_websocket_reuses_one_started_task_for_sequential_fragments(
         assert sent_events.count("task_finish") == 0
 
         with engine._minimax_ws_state_lock:
-            engine._minimax_ws_last_used -= (
-                engine._minimax_ws_idle_timeout_seconds + 1.0
-            )
-        assert engine._run_async(
-            engine._generate_minimax_websocket("after idle", generation)
-        )
+            engine._minimax_ws_last_used -= engine._minimax_ws_idle_timeout_seconds + 1.0
+        assert engine._run_async(engine._generate_minimax_websocket("after idle", generation))
         assert len(create_calls) == 2
         assert [event["event"] for event in socket.events].count("task_finish") == 1
         assert [event["event"] for event in sockets[1].events].count("task_start") == 1
@@ -1607,6 +1583,24 @@ def test_prewarm_provider_session_opens_and_reuses_minimax_websocket(monkeypatch
         assert [event["event"] for event in socket.events] == ["task_start"]
         assert opened["buffered_samples_delta"] == 0
         assert reused["buffered_samples_delta"] == 0
+        assert not engine._has_buffered_audio()
+
+        refreshed = engine.prewarm_provider_session(force_refresh=True)
+
+        assert refreshed["ok"] is True
+        assert refreshed["status"] == "refreshed"
+        assert refreshed["reused"] is False
+        assert refreshed["buffered_samples_delta"] == 0
+        assert len(sockets) == 2
+        refreshed_socket, refreshed_kwargs = sockets[1]
+        assert refreshed_kwargs["timeout"] == 10
+        assert socket.connected is False
+        assert refreshed_socket.connected is True
+        assert [event["event"] for event in socket.events] == [
+            "task_start",
+            "task_finish",
+        ]
+        assert [event["event"] for event in refreshed_socket.events] == ["task_start"]
         assert not engine._has_buffered_audio()
     finally:
         engine.shutdown()
@@ -1728,12 +1722,8 @@ def test_slow_prewarm_never_blocks_real_minimax_synthesis(monkeypatch):
             if self.recv_count == 1:
                 prewarm_handshake_started.set()
                 assert release_prewarm.wait(timeout=2.0)
-                return json.dumps(
-                    {"event": "connected_success", "base_resp": {"status_code": 0}}
-                )
-            return json.dumps(
-                {"event": "task_started", "base_resp": {"status_code": 0}}
-            )
+                return json.dumps({"event": "connected_success", "base_resp": {"status_code": 0}})
+            return json.dumps({"event": "task_started", "base_resp": {"status_code": 0}})
 
         def close(self, *args, **kwargs) -> None:
             self.connected = False
@@ -1896,11 +1886,10 @@ def test_minimax_websocket_reconnects_once_before_falling_back(monkeypatch):
             engine._generate_minimax_websocket("retry me", engine._get_generation())
         )
         assert len(sockets) == 2
-        assert sum(
-            event["event"] == "task_continue"
-            for socket in sockets
-            for event in socket.events
-        ) == 2
+        assert (
+            sum(event["event"] == "task_continue" for socket in sockets for event in socket.events)
+            == 2
+        )
     finally:
         engine.shutdown()
 
@@ -1968,17 +1957,13 @@ def test_drain_buffers_invalidates_warm_minimax_websocket(monkeypatch):
     )
     try:
         generation = engine._get_generation()
-        assert engine._run_async(
-            engine._generate_minimax_websocket("old turn", generation)
-        )
+        assert engine._run_async(engine._generate_minimax_websocket("old turn", generation))
 
         engine.drain_buffers()
 
         assert sockets[0].aborted is True
         assert engine._run_async(
-            engine._generate_minimax_websocket(
-                "new turn", engine._get_generation()
-            )
+            engine._generate_minimax_websocket("new turn", engine._get_generation())
         )
         assert len(sockets) == 2
     finally:
@@ -2374,6 +2359,7 @@ def test_render_reference_queue_overflow_reports_failure_and_unhealthy_status():
             "phrase_cache_enabled": False,
         }
     )
+
     def slow_failure_callback(exc):
         del exc
         time.sleep(0.25)
@@ -2458,9 +2444,7 @@ def test_render_transport_failure_prefers_dedicated_handler_over_native_aec() ->
         engine.report_render_transport_failure("duplicate")
 
         assert transport_failed.wait(timeout=1.0)
-        assert transport_failures == [
-            "TTS render transport failed: speaker disconnected"
-        ]
+        assert transport_failures == ["TTS render transport failed: speaker disconnected"]
         assert aec_failures == []
         status = engine.status_snapshot()["render_reference"]
         assert status["last_reset_reason"] == "transport_failure"
@@ -2584,14 +2568,10 @@ def test_callback_change_cannot_discard_new_epoch_publish():
 
     engine._discard_render_reference_queue_locked = blocking_discard
     setter_thread = threading.Thread(
-        target=lambda: engine.set_render_reference_callback(
-            lambda samples, rate: delivered.set()
-        )
+        target=lambda: engine.set_render_reference_callback(lambda samples, rate: delivered.set())
     )
     publisher_thread = threading.Thread(
-        target=lambda: engine._publish_render_reference(
-            np.ones(160, dtype=np.float32)
-        )
+        target=lambda: engine._publish_render_reference(np.ones(160, dtype=np.float32))
     )
     try:
         setter_thread.start()
@@ -2639,12 +2619,101 @@ def test_shutdown_marks_reference_unhealthy_and_consumes_exit_sentinel():
 
         release_callback.set()
         deadline = time.monotonic() + 1.0
-        while (
-            engine._render_reference_thread.is_alive()
-            and time.monotonic() < deadline
-        ):
+        while engine._render_reference_thread.is_alive() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert not engine._render_reference_thread.is_alive()
         assert engine._render_reference_queue.unfinished_tasks == 0
     finally:
         release_callback.set()
+
+
+def test_force_refresh_keeps_live_minimax_socket_when_real_use_wins(monkeypatch):
+    import json
+    import sys
+    from collections import deque
+
+    from askme.voice.tts import TTSEngine
+
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+    sockets = []
+
+    class FakeSocket:
+        def __init__(self, *, block_connect):
+            self.block_connect = block_connect
+            self.connected = True
+            self.events = []
+            self.responses = deque(
+                [
+                    {"event": "connected_success", "base_resp": {"status_code": 0}},
+                    {"event": "task_started", "base_resp": {"status_code": 0}},
+                ]
+            )
+
+        def send(self, raw):
+            self.events.append(json.loads(raw))
+
+        def recv(self):
+            if self.block_connect and len(self.responses) == 2:
+                refresh_started.set()
+                assert release_refresh.wait(timeout=2.0)
+            return json.dumps(self.responses.popleft())
+
+        def close(self, *args, **kwargs):
+            self.connected = False
+
+    def create_connection(*args, **kwargs):
+        socket = FakeSocket(block_connect=bool(sockets))
+        sockets.append(socket)
+        return socket
+
+    monkeypatch.setitem(
+        sys.modules,
+        "websocket",
+        types.SimpleNamespace(create_connection=create_connection),
+    )
+    engine = TTSEngine(
+        {
+            "backend": "minimax",
+            "minimax_api_key": "test-key",
+            "minimax_tts_transport": "websocket",
+            "minimax_live_session_prewarm_enabled": True,
+            "phrase_cache_enabled": False,
+        }
+    )
+    refresh_result = {}
+    refresh_thread = threading.Thread(
+        target=lambda: refresh_result.update(engine.prewarm_provider_session(force_refresh=True))
+    )
+    try:
+        assert engine.prewarm_provider_session()["status"] == "opened"
+        live_socket = sockets[0]
+
+        refresh_thread.start()
+        assert refresh_started.wait(timeout=1.0)
+        with engine._minimax_ws_use_lock:
+            engine._mark_minimax_websocket_used(live_socket)
+
+        release_refresh.set()
+        refresh_thread.join(timeout=2.0)
+
+        assert not refresh_thread.is_alive()
+        assert refresh_result["status"] == "superseded_by_live_session"
+        assert engine._minimax_ws_connection is live_socket
+        assert live_socket.connected is True
+        assert sockets[1].connected is False
+    finally:
+        release_refresh.set()
+        refresh_thread.join(timeout=2.0)
+        engine.shutdown()
+
+
+def test_default_provider_idle_windows_outlive_warm_refresh_interval() -> None:
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine({"backend": "edge", "phrase_cache_enabled": False})
+    try:
+        assert engine._minimax_ws_idle_timeout_seconds == 90.0
+        assert engine._volcengine_tts_idle_timeout_seconds == 90.0
+    finally:
+        engine.shutdown()

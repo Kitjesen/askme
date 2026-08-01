@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from askme.runtime.control_intent import (
+    runtime_control_intent,
+    runtime_control_permission,
+)
 from askme.runtime.task.arbiter_client import EXTERNAL_RUNTIME_PROFILES, RuntimeArbiterClient
 from askme.runtime.task.audit import RuntimeAuditConfig, RuntimeAuditLog
 
@@ -76,9 +80,7 @@ class SkillRegistry:
         if skill is None:
             return [f"unregistered_skill:{step.skill_name}"]
         missing = [
-            name
-            for name in skill.required_parameters
-            if step.parameters.get(name) in (None, "")
+            name for name in skill.required_parameters if step.parameters.get(name) in (None, "")
         ]
         return [f"missing_parameter:{step.skill_name}.{name}" for name in missing]
 
@@ -195,7 +197,9 @@ class TaskHandoff:
         operator_id = (
             _first_text(
                 plan.get("operator_id"),
-                plan.get("session", {}).get("operator_id") if isinstance(plan.get("session"), dict) else None,
+                plan.get("session", {}).get("operator_id")
+                if isinstance(plan.get("session"), dict)
+                else None,
                 mission.get("operator_id"),
                 default_operator_id,
             )
@@ -213,24 +217,18 @@ class TaskHandoff:
             target_area=_target_area(plan, mission),
             target_object=_target_object(plan, mission),
             constraints=[
-                str(item)
-                for item in plan.get("safety_constraints", [])
-                if str(item).strip()
+                str(item) for item in plan.get("safety_constraints", []) if str(item).strip()
             ],
             steps=steps,
             risk_level=_risk_for(task_type, mission),
             required_capabilities=skill_registry.capabilities_for(steps),
             missing_info=[
-                str(item)
-                for item in plan.get("missing_inputs", [])
-                if str(item).strip()
+                str(item) for item in plan.get("missing_inputs", []) if str(item).strip()
             ],
             confirmation_status=confirmation_status,
             world_state_snapshot_id=snapshot_id,
             safety_notes=[
-                str(item)
-                for item in mission.get("safety_notes", [])
-                if str(item).strip()
+                str(item) for item in mission.get("safety_notes", []) if str(item).strip()
             ],
             created_at=current,
             expires_at=current + max(1.0, float(ttl_s)),
@@ -537,16 +535,14 @@ def _task_run_from_dict(payload: dict[str, Any]) -> TaskRun:
             else None
         ),
         runtime_events=[
-            _runtime_event_from_dict(item)
-            for item in _dict_items(payload.get("runtime_events"))
+            _runtime_event_from_dict(item) for item in _dict_items(payload.get("runtime_events"))
         ],
         safety_assessments=[
             _safety_assessment_from_dict(item)
             for item in _dict_items(payload.get("safety_assessments"))
         ],
         skill_results=[
-            _skill_result_from_dict(item)
-            for item in _dict_items(payload.get("skill_results"))
+            _skill_result_from_dict(item) for item in _dict_items(payload.get("skill_results"))
         ],
         replan_proposals=[
             _replan_proposal_from_dict(item)
@@ -558,7 +554,9 @@ def _task_run_from_dict(payload: dict[str, Any]) -> TaskRun:
         shadow_plan=(
             dict(payload["shadow_plan"]) if isinstance(payload.get("shadow_plan"), dict) else None
         ),
-        sim_state=dict(payload["sim_state"]) if isinstance(payload.get("sim_state"), dict) else None,
+        sim_state=dict(payload["sim_state"])
+        if isinstance(payload.get("sim_state"), dict)
+        else None,
     )
     return run
 
@@ -575,9 +573,7 @@ def _task_handoff_from_dict(payload: dict[str, Any]) -> TaskHandoff:
             str(payload.get("target_area")) if payload.get("target_area") is not None else None
         ),
         target_object=(
-            str(payload.get("target_object"))
-            if payload.get("target_object") is not None
-            else None
+            str(payload.get("target_object")) if payload.get("target_object") is not None else None
         ),
         constraints=[str(item) for item in payload.get("constraints", [])],
         steps=[_task_step_from_dict(item) for item in _dict_items(payload.get("steps"))],
@@ -621,9 +617,7 @@ def _safety_assessment_from_dict(payload: dict[str, Any]) -> SafetyAssessment:
             _active_perception_request_from_dict(item)
             for item in _dict_items(payload.get("perception_requests"))
         ],
-        required_operator_confirmation=bool(
-            payload.get("required_operator_confirmation", False)
-        ),
+        required_operator_confirmation=bool(payload.get("required_operator_confirmation", False)),
         recommended_fix=str(payload.get("recommended_fix") or ""),
         profile_decision=str(payload.get("profile_decision") or "fake"),
         checked_at=float(payload.get("checked_at") or time.time()),
@@ -640,9 +634,7 @@ def _active_perception_request_from_dict(payload: dict[str, Any]) -> ActivePerce
             str(payload.get("target_area")) if payload.get("target_area") is not None else None
         ),
         target_object=(
-            str(payload.get("target_object"))
-            if payload.get("target_object") is not None
-            else None
+            str(payload.get("target_object")) if payload.get("target_object") is not None else None
         ),
         priority=str(payload.get("priority") or "normal"),
         created_at=float(payload.get("created_at") or time.time()),
@@ -693,9 +685,7 @@ def _replan_proposal_from_dict(payload: dict[str, Any]) -> ReplanProposal:
             dict(item) for item in _dict_items(payload.get("perception_requests"))
         ],
         safety_notes=[str(item) for item in payload.get("safety_notes", [])],
-        operator_confirmation_required=bool(
-            payload.get("operator_confirmation_required", True)
-        ),
+        operator_confirmation_required=bool(payload.get("operator_confirmation_required", True)),
         status=str(payload.get("status") or "proposed"),
         created_at=float(payload.get("created_at") or time.time()),
         expires_at=_optional_float(payload.get("expires_at")),
@@ -985,9 +975,7 @@ class TaskReportService:
                 for observation in result.get("observations", [])
             ],
             "artifacts": [
-                artifact
-                for result in skill_results
-                for artifact in result.get("artifacts", [])
+                artifact for result in skill_results for artifact in result.get("artifacts", [])
             ],
             "replan_proposals": [item.to_dict() for item in run.replan_proposals],
             "event_count": len(run.runtime_events),
@@ -1165,6 +1153,7 @@ class TaskRunService:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         run = self.require(run_id)
         if run.current_state not in {"queued", "executing"}:
@@ -1175,6 +1164,7 @@ class TaskRunService:
             operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
         self.transition(run, "paused", "task_paused", "TaskRun paused by operator.")
         return {"handled": True, "run": run.to_dict(), "reply": "TaskRun paused."}
@@ -1186,6 +1176,7 @@ class TaskRunService:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         run = self.require(run_id)
         if run.current_state != "paused":
@@ -1196,6 +1187,7 @@ class TaskRunService:
             operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
         self.transition(run, "executing", "execution_resumed", "TaskRun resumed by operator.")
         return {"handled": True, "run": run.to_dict(), "reply": "TaskRun resumed."}
@@ -1207,6 +1199,7 @@ class TaskRunService:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         run = self.require(run_id)
         if run.terminal:
@@ -1217,6 +1210,7 @@ class TaskRunService:
             operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
         self.transition(run, "cancel_requested", "cancel_requested", "TaskRun cancel requested.")
         self.transition(run, "cancelled", "task_cancelled", "TaskRun cancelled by operator.")
@@ -1229,6 +1223,7 @@ class TaskRunService:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         run = self.require(run_id)
         if run.profile != "sim":
@@ -1254,6 +1249,7 @@ class TaskRunService:
             operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
         step = steps[next_index - 1]
         run.current_step_index = next_index
@@ -1339,12 +1335,14 @@ class TaskRunService:
         *,
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> None:
         record = _operator_action(
             action,
             operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
         run.operator_actions.append(record)
         self._audit_log.append_operator_action(run, record)
@@ -1396,8 +1394,12 @@ class FakeRuntimeArbiter(RuntimeArbiter):
     def submit(self, handoff: TaskHandoff) -> dict[str, Any]:
         run = self.run_service.create(handoff, profile=self.profile)
         self.run_service.transition(run, "submitted", "plan_submitted", "TaskHandoff submitted.")
-        self.run_service.transition(run, "validating", "plan_validated", "TaskHandoff schema validated.")
-        self.run_service.transition(run, "preflight", "preflight_started", "Safety preflight started.")
+        self.run_service.transition(
+            run, "validating", "plan_validated", "TaskHandoff schema validated."
+        )
+        self.run_service.transition(
+            run, "preflight", "preflight_started", "Safety preflight started."
+        )
         assessment = self.safety_preflight.assess(
             handoff,
             skill_registry=self.skill_registry,
@@ -1419,7 +1421,9 @@ class FakeRuntimeArbiter(RuntimeArbiter):
         }
 
     def _complete_run(self, run: TaskRun) -> None:
-        self.run_service.transition(run, "executing", "execution_started", "TaskRun execution started.")
+        self.run_service.transition(
+            run, "executing", "execution_started", "TaskRun execution started."
+        )
         for index, step in enumerate(run.handoff.steps, start=1):
             run.current_step_index = index
             self.run_service.emit(
@@ -1444,7 +1448,9 @@ class FakeRuntimeArbiter(RuntimeArbiter):
                     "skill_result_status": skill_result.status,
                 },
             )
-        self.run_service.transition(run, "completed", "task_completed", "TaskRun completed in fake runtime.")
+        self.run_service.transition(
+            run, "completed", "task_completed", "TaskRun completed in fake runtime."
+        )
 
 
 class ShadowRuntimeArbiter(RuntimeArbiter):
@@ -1466,8 +1472,12 @@ class ShadowRuntimeArbiter(RuntimeArbiter):
     def submit(self, handoff: TaskHandoff) -> dict[str, Any]:
         run = self.run_service.create(handoff, profile=self.profile)
         self.run_service.transition(run, "submitted", "plan_submitted", "TaskHandoff submitted.")
-        self.run_service.transition(run, "validating", "plan_validated", "TaskHandoff schema validated.")
-        self.run_service.transition(run, "preflight", "preflight_started", "Safety preflight started.")
+        self.run_service.transition(
+            run, "validating", "plan_validated", "TaskHandoff schema validated."
+        )
+        self.run_service.transition(
+            run, "preflight", "preflight_started", "Safety preflight started."
+        )
         assessment = self.safety_preflight.assess(
             handoff,
             skill_registry=self.skill_registry,
@@ -1517,8 +1527,12 @@ class SimRuntimeArbiter(RuntimeArbiter):
     def submit(self, handoff: TaskHandoff) -> dict[str, Any]:
         run = self.run_service.create(handoff, profile=self.profile)
         self.run_service.transition(run, "submitted", "plan_submitted", "TaskHandoff submitted.")
-        self.run_service.transition(run, "validating", "plan_validated", "TaskHandoff schema validated.")
-        self.run_service.transition(run, "preflight", "preflight_started", "Safety preflight started.")
+        self.run_service.transition(
+            run, "validating", "plan_validated", "TaskHandoff schema validated."
+        )
+        self.run_service.transition(
+            run, "preflight", "preflight_started", "Safety preflight started."
+        )
         assessment = self.safety_preflight.assess(
             handoff,
             skill_registry=self.skill_registry,
@@ -1562,7 +1576,9 @@ class ExternalRuntimeArbiter(RuntimeArbiter):
     def submit(self, handoff: TaskHandoff) -> dict[str, Any]:
         run = self.run_service.create(handoff, profile=self.profile)
         self.run_service.transition(run, "submitted", "plan_submitted", "TaskHandoff submitted.")
-        self.run_service.transition(run, "validating", "plan_validated", "TaskHandoff schema validated.")
+        self.run_service.transition(
+            run, "validating", "plan_validated", "TaskHandoff schema validated."
+        )
 
         client_error = self.client.validate_submit_ready()
         if client_error is not None:
@@ -1586,7 +1602,9 @@ class ExternalRuntimeArbiter(RuntimeArbiter):
                 "hardware_dispatch": False,
             }
 
-        self.run_service.transition(run, "preflight", "preflight_started", "Safety preflight started.")
+        self.run_service.transition(
+            run, "preflight", "preflight_started", "Safety preflight started."
+        )
         assessment = self.safety_preflight.assess(
             handoff,
             skill_registry=self.skill_registry,
@@ -1780,13 +1798,21 @@ class RuntimeHandoffService:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        run = self.run_service.get(run_id)
+        if run is None:
+            return {"handled": False, "error": "run not found", "run_id": run_id}
+        failure = _runtime_operator_context_failure("pause", operator_id, operator_context)
+        if failure:
+            return _runtime_operator_rejected_payload(run, "pause", failure)
         try:
             result = self.run_service.pause(
                 run_id,
                 operator_id=operator_id,
                 reason=reason,
                 risk_acknowledgement=risk_acknowledgement,
+                operator_context=operator_context,
             )
         except KeyError:
             return {"handled": False, "error": "run not found", "run_id": run_id}
@@ -1800,13 +1826,21 @@ class RuntimeHandoffService:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        run = self.run_service.get(run_id)
+        if run is None:
+            return {"handled": False, "error": "run not found", "run_id": run_id}
+        failure = _runtime_operator_context_failure("resume", operator_id, operator_context)
+        if failure:
+            return _runtime_operator_rejected_payload(run, "resume", failure)
         try:
             result = self.run_service.resume(
                 run_id,
                 operator_id=operator_id,
                 reason=reason,
                 risk_acknowledgement=risk_acknowledgement,
+                operator_context=operator_context,
             )
         except KeyError:
             return {"handled": False, "error": "run not found", "run_id": run_id}
@@ -1820,13 +1854,21 @@ class RuntimeHandoffService:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        run = self.run_service.get(run_id)
+        if run is None:
+            return {"handled": False, "error": "run not found", "run_id": run_id}
+        failure = _runtime_operator_context_failure("cancel", operator_id, operator_context)
+        if failure:
+            return _runtime_operator_rejected_payload(run, "cancel", failure)
         try:
             result = self.run_service.cancel(
                 run_id,
                 operator_id=operator_id,
                 reason=reason,
                 risk_acknowledgement=risk_acknowledgement,
+                operator_context=operator_context,
             )
         except KeyError:
             return {"handled": False, "error": "run not found", "run_id": run_id}
@@ -1840,21 +1882,41 @@ class RuntimeHandoffService:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        run = self.run_service.get(run_id)
+        if run is None:
+            return {"handled": False, "error": "run not found", "run_id": run_id}
+        failure = _runtime_operator_context_failure("advance", operator_id, operator_context)
+        if failure:
+            return _runtime_operator_rejected_payload(run, "advance", failure)
         try:
             result = self.run_service.advance(
                 run_id,
                 operator_id=operator_id,
                 reason=reason,
                 risk_acknowledgement=risk_acknowledgement,
+                operator_context=operator_context,
             )
         except KeyError:
             return {"handled": False, "error": "run not found", "run_id": run_id}
         self._update_runtime_facts(result["run"])
         return result
 
-    def handle_chat_control(self, text: str) -> dict[str, Any] | None:
-        intent = _runtime_control_intent(text)
+    def handle_chat_control(
+        self,
+        text: str,
+        *,
+        operator_id: str | None = None,
+        operator_roles: list[str] | tuple[str, ...] | None = None,
+        operator_authenticated: bool | None = None,
+        operator_source: str = "",
+        runtime_permission: str = "",
+        conversation_session_id: str | None = None,
+        reason: str = "",
+        risk_acknowledgement: bool = False,
+    ) -> dict[str, Any] | None:
+        intent = runtime_control_intent(text)
         if intent is None:
             return None
         active = self.run_service.active_run()
@@ -1862,30 +1924,79 @@ class RuntimeHandoffService:
         if latest is None:
             if intent != "status":
                 return None
+            resolved_operator_id = str(operator_id or "").strip()
+            operator_context = _runtime_operator_provenance(
+                operator_id=(resolved_operator_id if operator_id is not None else None),
+                operator_roles=operator_roles,
+                operator_authenticated=operator_authenticated,
+                operator_source=operator_source,
+                runtime_permission=runtime_permission,
+                conversation_session_id=conversation_session_id,
+            )
+            failure = _runtime_operator_context_failure(
+                "read",
+                resolved_operator_id,
+                operator_context or None,
+            )
+            if failure:
+                return {
+                    "handled": False,
+                    "reason": failure,
+                    "reply": f"TaskRun status rejected: {failure}.",
+                    "runtime": self.context_payload(),
+                }
             return {
                 "handled": True,
                 "reply": "No TaskRun is active yet.",
                 "runtime": self.context_payload(),
             }
+        resolved_operator_id = str(operator_id or "").strip()
+        operator_context = _runtime_operator_provenance(
+            operator_id=(resolved_operator_id if operator_id is not None else None),
+            operator_roles=operator_roles,
+            operator_authenticated=operator_authenticated,
+            operator_source=operator_source,
+            runtime_permission=runtime_permission,
+            conversation_session_id=conversation_session_id,
+        )
         if intent == "status":
+            failure = _runtime_operator_context_failure(
+                "read",
+                resolved_operator_id,
+                operator_context or None,
+            )
+            if failure:
+                return _runtime_operator_rejected_payload(latest, "status", failure)
             return {
                 "handled": True,
                 "reply": f"TaskRun {latest.run_id} is {latest.current_state}.",
-                "runtime": {"run": latest.to_dict(), "active_run": active.to_dict() if active else None},
+                "runtime": {
+                    "run": latest.to_dict(),
+                    "active_run": active.to_dict() if active else None,
+                },
             }
         if active is None:
             return None
+        action_kwargs = {
+            "operator_id": resolved_operator_id,
+            "reason": reason,
+            "risk_acknowledgement": risk_acknowledgement,
+            "operator_context": operator_context or None,
+        }
         if intent == "pause":
-            result = self.pause_payload(latest.run_id)
+            result = self.pause_payload(latest.run_id, **action_kwargs)
         elif intent == "resume":
-            result = self.resume_payload(latest.run_id)
+            result = self.resume_payload(latest.run_id, **action_kwargs)
         else:
-            result = self.cancel_payload(latest.run_id)
-        return {
-            "handled": True,
+            result = self.cancel_payload(latest.run_id, **action_kwargs)
+        payload = {
+            "handled": bool(result.get("handled", False)),
             "reply": result.get("reply", ""),
             "runtime": result,
         }
+        if result.get("reason"):
+            payload["reason"] = result["reason"]
+        return payload
 
     def voice_turn_payload(
         self,
@@ -1898,6 +2009,13 @@ class RuntimeHandoffService:
         channel: str = "voice",
         conversation_session_id: str | None = None,
         planning_session_id: str | None = None,
+        operator_id: str | None = None,
+        operator_roles: list[str] | tuple[str, ...] | None = None,
+        operator_authenticated: bool | None = None,
+        operator_source: str = "",
+        runtime_permission: str = "",
+        reason: str = "",
+        risk_acknowledgement: bool = False,
     ) -> dict[str, Any]:
         recognized = str(text or "").strip()
         voice_turn = _voice_turn_metadata(
@@ -1909,6 +2027,20 @@ class RuntimeHandoffService:
             conversation_session_id=conversation_session_id,
             planning_session_id=planning_session_id,
         )
+        control_intent = runtime_control_intent(recognized)
+        expected_permission = runtime_control_permission(recognized)
+        operator_provenance = _runtime_operator_provenance(
+            operator_id=operator_id,
+            operator_roles=operator_roles,
+            operator_authenticated=operator_authenticated,
+            operator_source=operator_source,
+            runtime_permission=runtime_permission,
+            conversation_session_id=conversation_session_id,
+        )
+        if operator_provenance:
+            voice_turn["operator"] = operator_provenance
+        if runtime_permission:
+            voice_turn["runtime_permission"] = runtime_permission
         if not recognized:
             return {
                 "handled": False,
@@ -1917,7 +2049,29 @@ class RuntimeHandoffService:
                 "spoken": False if speak else None,
                 "voice_turn": voice_turn,
             }
-        control = self.handle_chat_control(recognized)
+        if (
+            control_intent is not None
+            and runtime_permission
+            and runtime_permission != expected_permission
+        ):
+            return {
+                "handled": False,
+                "reason": "runtime_control_permission_mismatch",
+                "reply": "",
+                "spoken": False if speak else None,
+                "voice_turn": voice_turn,
+            }
+        control = self.handle_chat_control(
+            recognized,
+            operator_id=operator_id,
+            operator_roles=operator_roles,
+            operator_authenticated=operator_authenticated,
+            operator_source=operator_source,
+            runtime_permission=runtime_permission,
+            conversation_session_id=conversation_session_id,
+            reason=reason,
+            risk_acknowledgement=risk_acknowledgement,
+        )
         if control is None:
             return {
                 "handled": False,
@@ -1930,7 +2084,7 @@ class RuntimeHandoffService:
         payload = dict(control)
         payload["voice_turn"] = {
             **voice_turn,
-            "runtime_control_intent": _runtime_control_intent(recognized),
+            "runtime_control_intent": control_intent,
             "handled_by": "runtime_handoff",
         }
         if speak:
@@ -2076,7 +2230,9 @@ def _runtime_client_assessment(
         warnings=[],
         perception_requests=[],
         required_operator_confirmation=True,
-        recommended_fix=str(error.get("remediation") or "Configure external runtime before handoff."),
+        recommended_fix=str(
+            error.get("remediation") or "Configure external runtime before handoff."
+        ),
         profile_decision=_normalize_runtime_profile(profile),
     )
 
@@ -2095,7 +2251,9 @@ def _shadow_plan_for(
                 "step_id": step.step_id,
                 "skill_name": step.skill_name,
                 "parameters": dict(step.parameters),
-                "required_capabilities": list(definition.required_capabilities) if definition else [],
+                "required_capabilities": list(definition.required_capabilities)
+                if definition
+                else [],
                 "requires_confirmation": bool(step.requires_confirmation),
                 "timeout_ms": step.timeout_ms,
                 "would_dispatch_to": "runtime_arbiter",
@@ -2123,11 +2281,7 @@ def _sim_state(run: TaskRun) -> dict[str, Any]:
         "total_steps": total,
         "completed_steps": completed,
         "remaining_steps": max(0, total - completed),
-        "next_step": (
-            run.handoff.steps[completed].to_dict()
-            if completed < total
-            else None
-        ),
+        "next_step": (run.handoff.steps[completed].to_dict() if completed < total else None),
     }
 
 
@@ -2402,10 +2556,7 @@ def _field_incident_response_sequence(
     policy = str(event.get("robot_motion_policy") or "").strip().lower()
     scenario_id = str(event.get("scenario_id") or "field_event")
     destination = str(
-        event.get("destination")
-        or event.get("target_location")
-        or event.get("location")
-        or area_id
+        event.get("destination") or event.get("target_location") or event.get("location") or area_id
     )
     reason = f"{scenario_id}:{policy or 'field_incident'}"
     if policy in {"stop_and_hold", "hold_position"}:
@@ -2561,21 +2712,6 @@ def _normalize_roles(values: list[Any]) -> list[str]:
     return cleaned or ["operator"]
 
 
-def _runtime_control_intent(text: str) -> str | None:
-    lowered = str(text or "").strip().lower()
-    if not lowered:
-        return None
-    if any(token in lowered for token in ("pause", "hold", "stop for now", "暂停", "停一下", "先停", "等一下")):
-        return "pause"
-    if any(token in lowered for token in ("resume", "continue", "go on", "继续", "恢复", "接着执行")):
-        return "resume"
-    if any(token in lowered for token in ("cancel task", "cancel run", "取消任务", "取消执行", "终止任务")):
-        return "cancel"
-    if any(token in lowered for token in ("status", "progress", "where are we", "执行到哪", "现在状态", "任务状态", "到哪了")):
-        return "status"
-    return None
-
-
 def _normalize_runtime_profile(value: str) -> str:
     profile = str(value or "fake").strip().lower()
     return profile if profile in _SUPPORTED_RUNTIME_PROFILES else "fake"
@@ -2589,7 +2725,9 @@ def _world_snapshot_id(snapshot: dict[str, Any]) -> str:
 
 def _infer_area(text: str) -> str | None:
     normalized = text.replace(",", " ").replace("，", " ").replace("。", " ")
-    explicit = re.search(r"\b(?:area|zone|checkpoint|route)-[a-z0-9_-]+\b", normalized, re.IGNORECASE)
+    explicit = re.search(
+        r"\b(?:area|zone|checkpoint|route)-[a-z0-9_-]+\b", normalized, re.IGNORECASE
+    )
     if explicit:
         return explicit.group(0).lower()
     compact = re.sub(r"\s+", "", normalized)
@@ -2668,20 +2806,132 @@ def _robot_id_from_handoff(handoff: TaskHandoff) -> str | None:
     return None
 
 
+def _sanitize_runtime_operator_context(
+    operator_context: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(operator_context, dict):
+        return None
+    cleaned: dict[str, Any] = {}
+    operator_id = str(operator_context.get("operator_id") or "").strip()
+    if operator_id:
+        cleaned["operator_id"] = operator_id
+    roles = operator_context.get("roles")
+    if isinstance(roles, (list, tuple, set)):
+        cleaned["roles"] = _unique([str(role).strip() for role in roles if str(role).strip()])
+    if "authenticated" in operator_context:
+        cleaned["authenticated"] = bool(operator_context.get("authenticated"))
+    source = str(operator_context.get("source") or "").strip()
+    if source:
+        cleaned["source"] = source
+    permission = str(operator_context.get("permission") or "").strip()
+    if permission:
+        cleaned["permission"] = permission
+    session_id = str(operator_context.get("conversation_session_id") or "").strip()
+    if session_id:
+        cleaned["conversation_session_id"] = session_id
+    return cleaned
+
+
+def _runtime_operator_context_failure(
+    action: str,
+    operator_id: str | None,
+    operator_context: dict[str, Any] | None,
+) -> str:
+    operator_context = _sanitize_runtime_operator_context(operator_context)
+    if not isinstance(operator_context, dict):
+        return "runtime_operator_context_required"
+    expected_permission = f"runtime:{action}"
+    context_operator_id = str(operator_context.get("operator_id") or "").strip()
+    requested_operator_id = str(operator_id or "").strip()
+    if not context_operator_id or context_operator_id != requested_operator_id:
+        return "runtime_operator_context_mismatch"
+    roles = operator_context.get("roles")
+    if not isinstance(roles, list) or not any(str(role).strip() for role in roles):
+        return "runtime_operator_context_incomplete"
+    if not str(operator_context.get("source") or "").strip():
+        return "runtime_operator_context_incomplete"
+    if str(operator_context.get("permission") or "").strip() != expected_permission:
+        return "runtime_control_permission_mismatch"
+    return ""
+
+
+def _runtime_operator_rejected_payload(
+    run: TaskRun,
+    action: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "handled": False,
+        "reason": reason,
+        "run": run.to_dict(),
+        "reply": f"TaskRun {action} rejected: {reason}.",
+    }
+
+
+def _runtime_operator_provenance(
+    *,
+    operator_id: str | None,
+    operator_roles: list[str] | tuple[str, ...] | None,
+    operator_authenticated: bool | None,
+    operator_source: str,
+    runtime_permission: str,
+    conversation_session_id: str | None,
+) -> dict[str, Any]:
+    """Return the non-secret identity fields safe for runtime audit records."""
+    has_provenance = any(
+        (
+            operator_id is not None,
+            operator_roles is not None,
+            operator_authenticated is not None,
+            bool(str(operator_source or "").strip()),
+            bool(str(runtime_permission or "").strip()),
+            bool(str(conversation_session_id or "").strip()),
+        )
+    )
+    if not has_provenance:
+        return {}
+
+    payload: dict[str, Any] = {}
+    cleaned_operator_id = str(operator_id or "").strip()
+    if cleaned_operator_id:
+        payload["operator_id"] = cleaned_operator_id
+    if operator_roles is not None:
+        payload["roles"] = _unique(
+            [str(role).strip() for role in operator_roles if str(role).strip()]
+        )
+    if operator_authenticated is not None:
+        payload["authenticated"] = bool(operator_authenticated)
+    cleaned_source = str(operator_source or "").strip()
+    if cleaned_source:
+        payload["source"] = cleaned_source
+    cleaned_permission = str(runtime_permission or "").strip()
+    if cleaned_permission:
+        payload["permission"] = cleaned_permission
+    cleaned_session_id = str(conversation_session_id or "").strip()
+    if cleaned_session_id:
+        payload["conversation_session_id"] = cleaned_session_id
+    return payload
+
+
 def _operator_action(
     action: str,
     operator_id: str,
     *,
     reason: str = "",
     risk_acknowledgement: bool = False,
+    operator_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "action": action,
         "operator_id": operator_id,
         "reason": str(reason or ""),
         "risk_acknowledgement": bool(risk_acknowledgement),
         "created_at": time.time(),
     }
+    cleaned_context = _sanitize_runtime_operator_context(operator_context)
+    if cleaned_context:
+        record["operator_context"] = cleaned_context
+    return record
 
 
 def _voice_turn_metadata(
@@ -2719,8 +2969,7 @@ def _run_summary(run: TaskRun) -> str:
         )
     if run.current_state == "shadowed":
         return (
-            f"Shadowed {run.handoff.task_type} with "
-            f"{len(run.handoff.steps)} would-execute step(s)."
+            f"Shadowed {run.handoff.task_type} with {len(run.handoff.steps)} would-execute step(s)."
         )
     if run.current_state == "blocked":
         checks = []

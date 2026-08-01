@@ -1,8 +1,8 @@
 # LiteLLM 网关接入与运行手册
 
-> 状态：可靠网关和模型调用控制上下文已接入，默认仍保持现有 DeepSeek
-> 直连。真实凭据 A/B、故障演练和真机声学验收完成前，不把 LiteLLM
-> 宣称为已提速或默认主通道。
+> 状态：LiteLLM 已是 AskMe 的产品默认 LLM 控制面。ZeroClaw v0.1.7 只保留在
+> 显式 `experimental-zeroclaw` profile 中，默认产品栈不启动；即使实验进程运行，它也尚未接通 AskMe MCP，不能视为集成可用。Proxy、readiness 或 scoped virtual key 缺失时会 fail-closed，不会自动回退直连。
+> 真实凭据 A/B、故障演练和真机声学验收尚未完成，因此不宣称已经提速。
 
 ## 1. 产品边界
 
@@ -14,7 +14,7 @@ LiteLLM 以独立 Proxy sidecar 运行，不安装进机器人 Python 进程，�
 | 模型别名、上游密钥、负载均衡、模型重试与 fallback | LiteLLM |
 | ASR、TTS、AEC、全双工打断 | AskMe 语音链路 |
 | 本地向量化与检索 | AskMe FastEmbed/ONNX |
-| 视觉采集与 VLM 调用 | AskMe VisionBridge（尚未并入本次网关验收） |
+| 视觉采集与 VLM 调用 | AskMe VisionBridge；云 VLM 默认关闭，待 `vision-scene` 别名验收后再启用 |
 
 这条边界避免两层重试造成尾延迟放大。使用 `provider: litellm` 时，AskMe 会自动清空本地模型 fallback、把 transport retry 固定为 0，并禁止已有 MiniMax 直连客户端绕过代理。
 
@@ -92,12 +92,15 @@ cosign verify --key https://raw.githubusercontent.com/BerriAI/litellm/0112e53046
 Copy-Item docker/litellm.env.example docker/.env.litellm
 ```
 
-2. 填写 `docker/.env.litellm`。`LITELLM_MASTER_KEY` 只用于管理，必须以 `sk-` 开头；`LITELLM_SALT_KEY` 一旦用于加密数据库凭据就要稳定保存。数据库密码请使用 URL 安全字符。
+2. 填写 `docker/.env.litellm`。`LITELLM_MASTER_KEY` 只用于管理，必须以 `sk-` 开头；`LITELLM_SALT_KEY` 一旦用于加密数据库凭据就要稳定保存。master、salt、数据库密码必须分别生成，至少 24 个字符，不能包含 `replace`、`placeholder`、`example`、`generated`、`changeme` 等模板标记，不能使用低多样性或重复块。数据库密码只允许 URL unreserved 字符（`A-Z a-z 0-9 . _ ~ -`），因为当前 Compose 会把它插入 `DATABASE_URL`。
+可选的 MiniMax LLM 上游使用 `LITELLM_MINIMAX_PROVIDER_API_KEY`；它与 `docker/.env` 中仅供 TTS 的 `MINIMAX_API_KEY` 必须分名、分文件管理。
 
-3. 启动：
+3. 启动。独立 sidecar Compose 会先运行不联网的 `--control-plane-only`
+门禁；PostgreSQL 和 LiteLLM 都等待 master/salt/DB 检查成功。此阶段尚未签发
+AskMe virtual key，所以不会要求它：
 
 ```powershell
-docker compose --env-file docker/.env.litellm -f docker/docker-compose.litellm.yml up -d
+docker compose --env-file docker/.env.litellm -f docker/docker-compose.litellm.yml up -d --wait litellm
 docker compose --env-file docker/.env.litellm -f docker/docker-compose.litellm.yml ps
 ```
 
@@ -106,10 +109,10 @@ Proxy 只绑定 `127.0.0.1:4000`，不会直接暴露到局域网。PostgreSQL �
 4. 检查健康：
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:4000/health/liveliness
+curl.exe --noproxy 127.0.0.1 http://127.0.0.1:4000/health/readiness
 ```
 
-容器按 API-only、read-only root filesystem 运行；迁移目录与 Prisma/XDG cache 分别映射到可写 tmpfs。首次启动必须等 `/health/readiness` 成功，不能只看进程存活。
+容器按 API-only、read-only root filesystem 运行；迁移目录与 Prisma/XDG cache 分别映射到可写 tmpfs。首次启动必须等 `/health/readiness` 成功，不能只看进程存活。开发机若设置了 `HTTP_PROXY`/`HTTPS_PROXY`，必须保留 `NO_PROXY=127.0.0.1,localhost,litellm` 或显式使用 `--noproxy 127.0.0.1`，否则本地探测可能被系统代理劫持。
 
 部署配置还默认启用 `LITELLM_MODE=PRODUCTION`、JSON 日志、消息正文禁记和
 调用方密钥信息脱敏。不要用 `--detailed_debug` 覆盖这些生产默认值。
@@ -119,26 +122,35 @@ Invoke-RestMethod http://127.0.0.1:4000/health/liveliness
 不要把 master key 或 DeepSeek/MiniMax provider key 放到 AskMe `.env`。使用 master key 调用 `/key/generate`，只授权机器人需要的模型：
 
 ```powershell
-curl.exe -X POST http://127.0.0.1:4000/key/generate `
+# AskMe：语音、工具、记忆与健康别名
+curl.exe --noproxy 127.0.0.1 -X POST http://127.0.0.1:4000/key/generate `
   -H "Authorization: Bearer <LITELLM_MASTER_KEY>" `
   -H "Content-Type: application/json" `
   -d '{"models":["voice-fast","voice-quality","robot-action","memory-compact","health-probe"],"user_id":"askme-robot","duration":"30d","max_parallel_requests":4,"rpm_limit":120,"metadata":{"service":"askme-robot"}}'
+
+# 可选实验 ZeroClaw：仅启用 experimental-zeroclaw 时单独签发，只允许 robot-action
+curl.exe --noproxy 127.0.0.1 -X POST http://127.0.0.1:4000/key/generate `
+  -H "Authorization: Bearer <LITELLM_MASTER_KEY>" `
+  -H "Content-Type: application/json" `
+  -d '{"models":["robot-action"],"user_id":"askme-zeroclaw","duration":"30d","max_parallel_requests":2,"rpm_limit":60,"metadata":{"service":"askme-zeroclaw"}}'
 ```
 
-把返回的 `sk-...` 写入项目根目录 `.env`：
+把 AskMe 返回的 `sk-...` 写入 `docker/.env`（本机原生 quickstart 也读取该文件）。只有计划运行实验 ZeroClaw 时才写入它的独立 key：
 
 ```dotenv
 LITELLM_BASE_URL=http://127.0.0.1:4000/v1
-LITELLM_VIRTUAL_KEY=sk-generated-virtual-key
+LITELLM_VIRTUAL_KEY=<paste-the-issued-AskMe-sk-key-here>
+ZEROCLAW_LITELLM_VIRTUAL_KEY=<paste-the-issued-ZeroClaw-sk-key-here>
+NO_PROXY=127.0.0.1,localhost,litellm
 ```
 
-该 key 只授权当前产品能力，并设置 30 天有效期、并发和 RPM 上限。到期前先生成新 key、灰度切换，再撤销旧 key；不要给默认 key 加未使用的厂商模型权限。
+默认 Compose 与 `local` quickstart 校验 master、AskMe virtual key、salt 与数据库密码均满足强度要求且两两不同；不要求 ZeroClaw key。启用 `experimental-zeroclaw`、`docker-zeroclaw` 或 `local-zeroclaw` 时，独立门禁再要求 ZeroClaw virtual key，并纳入全部角色隔离。错误只报告变量名与规则，不打印 secret。每把 virtual key 都应设置有效期、并发和 RPM 上限；到期前先生成新 key、灰度切换，再撤销旧 key。云 VLM 关闭时不应签发预留的视觉 key。
 
-根 `.env` 中的 `MINIMAX_API_KEY` 只在 MiniMax TTS 或明确回退到直连 LLM 时保留；LiteLLM preset 会把 LLM 的 `minimax_api_key` 清空。若不使用 MiniMax TTS，也应从应用环境删除该 provider key。
+根 `.env` 中的 `MINIMAX_API_KEY` 只供 MiniMax TTS 使用；默认 LLM 路径不会读取它，也不会把它当作自动直连回退。若不使用 MiniMax TTS，也应从应用环境删除该 provider key。
 
-## 6. 切换 AskMe
+## 6. 默认产品启动
 
-`config.yaml` 已提供 `brain.provider_presets.litellm`，运行中的控制面可以选择 `litellm`。要让重启后也默认使用代理，将 brain 的入口改成：
+`config.yaml` 与 `config.board.yaml` 已把 LiteLLM 设为默认控制面：
 
 ```yaml
 brain:
@@ -147,13 +159,40 @@ brain:
   base_url: ${LITELLM_BASE_URL}
   model: voice-fast
   voice_model: voice-fast
+  health_model: health-probe
   max_retries: 0
   fallback_models: []
 ```
 
-模型 fallback 只配置在 `docker/litellm-config.yaml`。不要同时恢复 AskMe 的 `fallback_models`；适配器仍会在运行时强制单一 routing owner，但配置保持一致更利于审计。
+模型 retry/fallback 只配置在 `docker/litellm-config.yaml`。应用层缺少
+`LITELLM_BASE_URL` 或 `LITELLM_VIRTUAL_KEY` 时会在创建 transport 前失败；
+不会创建 dummy client，也不会因为存在 MiniMax/DeepSeek 凭据而自动直连。
 
-如果 AskMe 也运行在容器内，`127.0.0.1` 指向 AskMe 容器本身。应把两个服务加入同一内部网络并使用 `http://litellm:4000/v1`，同时不要额外暴露 Proxy 公网端口。
+容器产品栈使用两份职责分离的环境文件，并严格分两阶段：
+
+```powershell
+docker compose --env-file docker/.env.litellm -f docker/docker-compose.litellm.yml up -d --wait litellm
+docker compose --env-file docker/.env --env-file docker/.env.litellm -f docker/docker-compose.yml -f docker/docker-compose.edge-linux.yml up -d
+```
+
+默认 Compose 与独立 sidecar 使用同一 `name: askme-litellm`、`askme-net`
+和 PostgreSQL volume。先按第 4、5 节启动 sidecar 并签发 AskMe key，再运行默认
+Compose；后者会复用控制面状态，并等待 LiteLLM readiness 与默认 key-policy
+成功后才启动 AskMe。AskMe 容器 healthcheck 使用聚合 `/ready`；
+`/healthz` 只承担 liveness。容器内 AskMe 固定使用
+`http://litellm:4000/v1`，不接受远端 URL override；本机原生进程才使用
+`http://127.0.0.1:4000/v1`。远端 Proxy 必须另建显式部署 profile，不能让本地 sidecar 与远端 Proxy 同时成为 routing owner。
+
+ZeroClaw 不属于默认产品启动。只为调试模型路由时，签发独立
+`robot-action` key 后显式运行：
+
+```powershell
+docker compose --env-file docker/.env --env-file docker/.env.litellm -f docker/docker-compose.yml -f docker/docker-compose.edge-linux.yml --profile experimental-zeroclaw up -d
+```
+
+实验进程被限制到 `custom:http://litellm:4000/v1` 与
+`robot-action`，并由独立 key-policy fail-closed；但 v0.1.7 schema
+没有 MCP connector，当前容器并未接通 AskMe MCP。该进程启动不能作为工具、记忆或 handoff 集成证据。
 
 ## 7. 验收门禁
 
@@ -183,14 +222,15 @@ brain:
 ```
 
 `/health/liveliness` 只说明进程活着，`/health/readiness` 用于流量准入；
-会触发真实模型检查和费用的 `/health` 只能由独立 `health-probe` key
-受控调用。
+会触发真实模型检查和费用的 `/health` 只能由拥有 `health-probe`
+别名权限的 AskMe scoped key 受控调用。
 
 ## 8. 视觉、向量化与语音的关系
 
 - LiteLLM 只进入 LLM/VLM/embedding 的 API 管理面，不处理麦克风、ASR、TTS、AEC 或声学打断；因此不需要 ROS2。
 - 当前记忆检索继续使用本地 FastEmbed/ONNX，启动后热态快、无云端网络延迟，也不会把记忆文本外发。除非远端 embedding 的准确率有实测收益，不应为了“统一”而牺牲实时性和隐私。
-- 当前 `VisionBridge` 是独立客户端。本次不能把 `supports_vision` 当作已经完成的多模态验收。后续应先在 LiteLLM 配置一个经过验证的 vision model alias，再让 VisionBridge 使用 scoped virtual key/base URL，并做图像泄露与延迟验收。
+- `config.yaml` 与 `config.board.yaml` 当前都将云端 `vlm_enabled` 设为 `false`。VisionBridge 已预留 `openai` backend、`vision-scene`、LiteLLM base URL 与独立 scoped key，但在代理中建立并验证该别名前必须保持 fail-closed；不能把 `supports_vision` 当作已经完成的多模态验收。
+  VLM 启用后也只允许通过同一个 LiteLLM Proxy 控制面：`brain.provider=litellm`、`vision.vlm_model=vision-scene`、`vision.vlm_base_url` 必须与 `brain.base_url` 相同，并且视觉 key 必须和 AskMe 文本 key 分离。VisionBridge 复用中央 LiteLLM envelope，只发送 allowlist metadata、AskMe 生成的 `traceparent` 和匿名 `x-litellm-call-id`；prompt、图像内容、session/operator/evidence 标识、provider key 和任意调用方 header 不进入代理控制面字段。
 - 火山端到端 S2S 是自由对话声学通道；机器人命令、工具、审批和急停仍走 AskMe 级联裁决。它与 LiteLLM 是并行能力，不互相替代。
 
 ## 9. 缓存边界
@@ -204,10 +244,16 @@ brain:
 
 ## 10. 回滚
 
-将 `brain.provider`、`api_key`、`base_url` 切回原 DeepSeek 直连配置即可；会话、记忆和轮次数据不受影响。停止 sidecar：
+默认路径没有自动直连 fallback。回滚必须走变更审批：优先在
+`docker/litellm-config.yaml` 内把稳定能力别名切回已验证上游；只有 Proxy
+本身不可恢复时，才配置一个显式、审计过的 direct provider preset，并分别
+迁移 AskMe 与 ZeroClaw。直接路径的 key、retry、fallback 和健康检查必须
+重新明确唯一负责人，不能复用默认 LiteLLM 环境契约。
+
+确认所有消费者已迁出且业务健康后，才停止 sidecar：
 
 ```powershell
 docker compose --env-file docker/.env.litellm -f docker/docker-compose.litellm.yml down
 ```
 
-不要加 `-v`，除非明确要删除 LiteLLM 的 PostgreSQL 数据和虚拟密钥。
+不要加 `-v`，除非已经审批并确认要永久删除 LiteLLM 的 PostgreSQL 数据、virtual key 与审计状态。会话、记忆和轮次仍由 AskMe 持有，但模型路由审计数据不会随 direct 回滚自动迁移。

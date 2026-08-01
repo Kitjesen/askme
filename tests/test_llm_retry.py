@@ -12,17 +12,21 @@ def _make_client(monkeypatch, **overrides):
     """Create an LLMClient with test defaults."""
     monkeypatch.setattr(
         "askme.llm.core.client.get_config",
-        lambda: {"brain": {
-            "api_key": "test-key",
-            "base_url": "https://test.example.com/v1",
-            "model": "primary-model",
-            "max_retries": 1,
-            "timeout": 5.0,
-            "fallback_models": ["fallback-1", "fallback-2"],
-            **overrides,
-        }},
+        lambda: {
+            "brain": {
+                "provider": "openai_compatible",
+                "api_key": "test-key",
+                "base_url": "https://test.example.com/v1",
+                "model": "primary-model",
+                "max_retries": 1,
+                "timeout": 5.0,
+                "fallback_models": ["fallback-1", "fallback-2"],
+                **overrides,
+            }
+        },
     )
     from askme.llm.client import LLMClient
+
     return LLMClient()
 
 
@@ -153,9 +157,7 @@ async def test_chat_raises_on_all_models_exhausted(monkeypatch):
 
 async def test_model_chain_no_duplicates(monkeypatch):
     """_model_chain() doesn't duplicate primary model in fallbacks."""
-    client = _make_client(
-        monkeypatch, fallback_models=["primary-model", "other-model"]
-    )
+    client = _make_client(monkeypatch, fallback_models=["primary-model", "other-model"])
     chain = client._model_chain()
     assert chain == ["primary-model", "other-model"]
 

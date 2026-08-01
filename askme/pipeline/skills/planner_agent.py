@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
+
+from askme.llm.core.contracts import LLMCallContext
 
 if TYPE_CHECKING:
     from askme.llm.core.client import LLMClient
@@ -95,7 +98,12 @@ class PlannerAgent:
         # when None (e.g. no voice_model configured).
         self._model = model
 
-    async def plan(self, user_text: str) -> list[PlanStep] | None:
+    async def plan(
+        self,
+        user_text: str,
+        *,
+        llm_call_context: LLMCallContext | None = None,
+    ) -> list[PlanStep] | None:
         """Return an ordered plan, or None if the intent is single-step/conversational.
 
         Always returns None on LLM/parse errors — callers fall back to normal LLM processing.
@@ -107,6 +115,19 @@ class PlannerAgent:
         catalog = "\n".join(f"- {s.name}: {s.description}" for s in skills)
         user_msg = f"可用技能：\n{catalog}\n\n用户请求：{user_text}"
 
+        base_context = llm_call_context or LLMCallContext(
+            purpose="general",
+            channel="text",
+            request_class="robot_action",
+            privacy_class="conversation",
+            allow_cache=False,
+        )
+        call_context = replace(
+            base_context,
+            call_id=uuid.uuid4().hex,
+            purpose="general",
+        )
+
         try:
             raw = await self._llm.chat(
                 messages=[
@@ -115,6 +136,7 @@ class PlannerAgent:
                 ],
                 temperature=0,
                 model=self._model,
+                context=call_context,
             )
             # Strip markdown code fences if model wraps in ```json
             text = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()

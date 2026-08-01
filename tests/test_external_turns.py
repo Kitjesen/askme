@@ -1,5 +1,7 @@
 from askme.pipeline.external_turns import record_external_turn
 
+from askme.conversation import VoiceTurnLedger
+
 
 class _Conversation:
     def __init__(self) -> None:
@@ -39,3 +41,25 @@ def test_record_external_turn_updates_conversation_and_episodic() -> None:
     assert pipeline._conversation.assistant_messages == ["当前没有进行中的任务。"]
     assert pipeline._episodic.entries[0][0] == "command"
     assert pipeline._episodic.entries[1][0] == "outcome"
+
+
+def test_record_external_turn_accepts_text_channel(tmp_path) -> None:
+    pipeline = _Pipeline()
+    pipeline._turn_ledger = VoiceTurnLedger(tmp_path / "external-text.jsonl")
+
+    record_external_turn(
+        pipeline,
+        "hello",
+        "hi",
+        source="text",
+        channel="text",
+        conversation_session_id="text-thread",
+        turn_id="text-turn-1",
+    )
+
+    thread = pipeline._turn_ledger.get_thread("text-thread")
+    turns = pipeline._turn_ledger.list_turns(thread_id="text-thread")
+    assert thread.channel == "text"
+    assert [turn.source for turn in turns] == ["text"]
+    assert pipeline._conversation.user_messages == ["hello"]
+    assert pipeline._conversation.assistant_messages == ["hi"]

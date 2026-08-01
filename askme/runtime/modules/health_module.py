@@ -19,8 +19,19 @@ from pathlib import Path
 from typing import Any
 
 from askme.api.routes.health import register_health_routes
+from askme.api.services.conversation_service import current_chat_runtime_context
 from askme.api.services.health_service import HealthService
 from askme.config import project_root
+from askme.pipeline.channels.external_turns import (
+    begin_external_turn,
+    cancel_external_turn,
+    complete_external_turn,
+    record_external_turn,
+)
+from askme.runtime.control_intent import (
+    runtime_control_candidate_intent,
+    runtime_control_intent,
+)
 from askme.runtime.core.module import Module, ModuleRegistry
 from askme.voice.diagnostics.status_privacy import sanitize_voice_status
 
@@ -39,6 +50,7 @@ class HealthModule(Module):
         "mission",
         "cognition",
         "runtime_handoff",
+        "warm_sessions",
     )
     provides = ("health_http", "http_chat", "capabilities", "missions", "runtime_handoff")
 
@@ -140,10 +152,13 @@ class HealthModule(Module):
             model = health.get("model", "unknown")
             provider = health.get("provider", "unknown")
             routing_owner = health.get("routing_owner", "askme")
+            fallback_models = health.get("fallback_models", [])
             return {
                 "status": "healthy" if health.get("status") == "ok" else "degraded",
                 "provider": str(provider),
                 "model": str(model),
+                "health_model": str(health.get("health_model") or ""),
+                "fallback_models": list(fallback_models or []),
                 "routing_owner": str(routing_owner),
             }
 
@@ -242,14 +257,10 @@ class HealthModule(Module):
             health = pipeline_mod.health()
             raw_conversation_core = health.get("conversation_core")
             conversation_core: dict[str, Any] = (
-                dict(raw_conversation_core)
-                if isinstance(raw_conversation_core, dict)
-                else {}
+                dict(raw_conversation_core) if isinstance(raw_conversation_core, dict) else {}
             )
             enabled = bool(conversation_core.get("enabled", False))
-            raw_status = str(
-                conversation_core.get("status") or health.get("status") or "ok"
-            )
+            raw_status = str(conversation_core.get("status") or health.get("status") or "ok")
             if not enabled:
                 status = "healthy"
             elif raw_status in {"ok", "healthy"}:
@@ -265,6 +276,36 @@ class HealthModule(Module):
             }
 
         self.health_service.register("conversation_core", _check_conversation_core)
+
+        # ── Warm Provider Sessions ───────────────────────────────────────
+        def _check_warm_sessions() -> dict[str, Any]:
+            warm_mod = registry.get("warm_sessions")
+            if warm_mod is None:
+                return {
+                    "status": "healthy",
+                    "enabled": False,
+                    "latency_warm": False,
+                    "message": "Warm session manager not wired in this runtime",
+                }
+            health = warm_mod.health()
+            enabled = bool(health.get("enabled", False))
+            if not enabled:
+                status = "healthy"
+            elif health.get("status") == "ok":
+                status = "healthy"
+            else:
+                status = "degraded"
+            return {
+                "status": status,
+                "enabled": enabled,
+                "running": bool(health.get("running", False)),
+                "latency_warm": bool(health.get("latency_warm", False)),
+                "manager_status": str(health.get("manager_status", "")),
+                "degraded_targets": health.get("degraded_targets", []),
+                "targets": health.get("targets", {}),
+            }
+
+        self.health_service.register("warm_sessions", _check_warm_sessions)
 
     @staticmethod
     def _tts_from_text_module(registry: ModuleRegistry) -> Any | None:
@@ -292,9 +333,7 @@ class HealthModule(Module):
             )
 
         if hasattr(self.server, "set_conversation_provider"):
-            self.server.set_conversation_provider(
-                lambda: self._conversation_snapshot(registry)
-            )
+            self.server.set_conversation_provider(lambda: self._conversation_snapshot(registry))
 
         mission_handler = self._mission_handler(registry)
         if mission_handler is not None and hasattr(self.server, "set_mission_handler"):
@@ -316,7 +355,7 @@ class HealthModule(Module):
         if voice_handler is not None and hasattr(self.server, "set_voice_handler"):
             self.server.set_voice_handler(voice_handler)
 
-        field_operations_handler = self._field_operations_handler(cfg)
+        field_operations_handler = self._field_operations_handler(cfg, registry)
         if hasattr(self.server, "set_field_operations_handler"):
             self.server.set_field_operations_handler(field_operations_handler)
 
@@ -339,6 +378,8 @@ class HealthModule(Module):
                 runtime_control = await self._maybe_handle_runtime_control(
                     runtime_handler,
                     text,
+                    text_loop=text_loop,
+                    conversation_session_id=conversation_session_id,
                 )
                 if runtime_control is not None:
                     return runtime_control
@@ -433,7 +474,35 @@ class HealthModule(Module):
         pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
         process = getattr(pipeline, "process", None)
         if callable(process):
-            return process
+            if runtime_handler is None:
+                return process
+
+            async def _handle_pipeline_chat(
+                text: str,
+                *,
+                speak: bool = False,
+                conversation_session_id: str | None = None,
+                planning_session_id: str | None = None,
+                runtime_policy: str = "disabled",
+            ) -> dict[str, Any] | str:
+                del speak, planning_session_id, runtime_policy
+                runtime_control = await self._maybe_handle_runtime_control(
+                    runtime_handler,
+                    text,
+                    text_loop=pipeline,
+                    conversation_session_id=conversation_session_id,
+                )
+                if runtime_control is not None:
+                    return runtime_control
+                process_kwargs: dict[str, Any] = {}
+                if self._call_accepts_keyword(process, "conversation_session_id"):
+                    process_kwargs["conversation_session_id"] = conversation_session_id
+                if self._call_accepts_keyword(process, "source"):
+                    process_kwargs["source"] = "text"
+                result = process(text, **process_kwargs)
+                return await result if asyncio.iscoroutine(result) else result
+
+            return _handle_pipeline_chat
         return None
 
     def _voice_handler(self, registry: ModuleRegistry) -> Any | None:
@@ -443,26 +512,39 @@ class HealthModule(Module):
         audio = getattr(voice_mod, "audio", None) if voice_mod else None
         return getattr(audio, "tts", None) if audio is not None else None
 
-    def _field_operations_handler(self, cfg: dict[str, Any]) -> Any:
+    def _field_operations_handler(self, cfg: dict[str, Any], registry: ModuleRegistry) -> Any:
         from askme.pipeline.field.field_operations import FieldOperationsService
 
         field_cfg = dict(cfg.get("field_operations", {}) or {})
-        llm_client = None
-        if field_cfg.get("llm_narrative_enabled"):
-            try:
-                from askme.llm.core.client import LLMClient
-
-                llm_client = LLMClient()
-            except Exception as exc:
-                logger.warning("HealthModule: field LLM narrative disabled: %s", exc)
+        llm_mod = registry.get("llm")
+        llm_client = getattr(llm_mod, "llm_client", None) if llm_mod is not None else None
+        if field_cfg.get("llm_narrative_enabled") and llm_client is None:
+            logger.warning(
+                "HealthModule: field LLM narrative disabled; llm module is not available"
+            )
         return FieldOperationsService(config=field_cfg, llm_client=llm_client)
 
     async def _maybe_handle_runtime_control(
         self,
         runtime_handler: Any | None,
         text: str,
+        *,
+        text_loop: Any,
+        conversation_session_id: str | None = None,
     ) -> dict[str, Any] | None:
         if runtime_handler is None:
+            return None
+        candidate_intent = runtime_control_candidate_intent(text)
+        intent = runtime_control_intent(text)
+        if intent in {"pause", "resume", "cancel"}:
+            return await self._handle_authorized_runtime_mutation(
+                runtime_handler,
+                intent,
+                text=text,
+                text_loop=text_loop,
+                conversation_session_id=conversation_session_id,
+            )
+        if candidate_intent is not None and intent is None:
             return None
         handle = getattr(runtime_handler, "handle_chat_control", None)
         if not callable(handle):
@@ -476,10 +558,232 @@ class HealthModule(Module):
             return None
         if not isinstance(result, dict) or not result.get("handled"):
             return None
-        return {
+        payload = {
             "reply": str(result.get("reply", "")),
             "runtime": result.get("runtime", result),
         }
+        self._record_runtime_control_turn(
+            text_loop,
+            text,
+            payload,
+            conversation_session_id=conversation_session_id,
+        )
+        return payload
+
+    async def _handle_authorized_runtime_mutation(
+        self,
+        runtime_handler: Any,
+        intent: str,
+        *,
+        text: str,
+        text_loop: Any,
+        conversation_session_id: str | None,
+    ) -> dict[str, Any] | None:
+        context = current_chat_runtime_context()
+        session_id = str(conversation_session_id or "").strip()
+        expected_permission = f"runtime:{intent}"
+
+        def denied(reason: str) -> dict[str, Any]:
+            payload = self._runtime_control_denied(intent, reason=reason)
+            self._record_runtime_control_turn(
+                text_loop,
+                text,
+                payload,
+                conversation_session_id=conversation_session_id,
+            )
+            return payload
+
+        if context is None:
+            return denied("runtime_control_authorization_required")
+        authorization = context.authorization
+        operator = authorization.get("operator")
+        authorized_roles = (
+            tuple(str(role).strip() for role in operator.get("roles", ()) if str(role).strip())
+            if isinstance(operator, dict)
+            else ()
+        )
+        if (
+            not session_id
+            or session_id != context.conversation_session_id
+            or context.permission != expected_permission
+            or authorization.get("allowed") is not True
+            or str(authorization.get("permission") or "") != expected_permission
+            or not isinstance(operator, dict)
+            or str(operator.get("operator_id") or "").strip() != context.operator_id
+            or authorized_roles != context.operator_roles
+            or bool(operator.get("authenticated")) != context.operator_authenticated
+            or str(operator.get("source") or "").strip() != context.operator_source
+        ):
+            return denied("runtime_control_provenance_mismatch")
+
+        context_payload = getattr(runtime_handler, "context_payload", None)
+        if not callable(context_payload):
+            return denied("runtime_control_target_unavailable")
+        try:
+            runtime_context = context_payload()
+            if asyncio.iscoroutine(runtime_context):
+                runtime_context = await runtime_context
+        except Exception as exc:
+            logger.warning("HealthModule: runtime context lookup failed: %s", exc)
+            return denied("runtime_control_target_unavailable")
+        active_run = (
+            runtime_context.get("active_run") if isinstance(runtime_context, dict) else None
+        )
+        run_id = str(active_run.get("run_id") or "").strip() if isinstance(active_run, dict) else ""
+        if not run_id:
+            return denied("runtime_control_no_active_run")
+
+        action = getattr(runtime_handler, f"{intent}_payload", None)
+        if not callable(action) or not self._call_accepts_keyword(action, "operator_id"):
+            return denied("runtime_control_operator_provenance_unsupported")
+        candidate_kwargs: dict[str, Any] = {
+            "operator_id": context.operator_id,
+            "operator_roles": list(context.operator_roles),
+            "operator_authenticated": context.operator_authenticated,
+            "operator_source": context.operator_source,
+            "operator_auth": dict(context.authorization),
+            "conversation_session_id": session_id,
+        }
+        kwargs = {
+            name: value
+            for name, value in candidate_kwargs.items()
+            if self._call_accepts_keyword(action, name)
+        }
+        pipeline = self._runtime_control_pipeline(text_loop)
+        if pipeline is None:
+            return denied("conversation_turn_owner_unavailable")
+        metadata = self._runtime_control_turn_metadata(text)
+        turn_handle = begin_external_turn(
+            pipeline,
+            text,
+            source="runtime_control",
+            channel="text",
+            conversation_session_id=conversation_session_id,
+            metadata=metadata,
+        )
+        if turn_handle is None:
+            return denied("conversation_turn_admission_unavailable")
+        try:
+            result = action(run_id, **kwargs)
+            if asyncio.iscoroutine(result):
+                result = await result
+        except asyncio.CancelledError:
+            cancel_external_turn(
+                pipeline,
+                turn_handle,
+                user_text=text,
+                source="runtime_control",
+                reason="runtime_control_interrupted",
+                conversation_session_id=conversation_session_id,
+                metadata=metadata,
+            )
+            raise
+        except Exception as exc:
+            logger.warning("HealthModule: authorized runtime control failed: %s", exc)
+            payload = self._runtime_control_denied(
+                intent,
+                reason="runtime_control_execution_failed",
+            )
+        else:
+            payload = (
+                {
+                    "reply": str(result.get("reply", "")),
+                    "runtime": result,
+                }
+                if isinstance(result, dict)
+                else self._runtime_control_denied(
+                    intent,
+                    reason="runtime_control_invalid_response",
+                )
+            )
+        complete_external_turn(
+            pipeline,
+            turn_handle,
+            user_text=text,
+            assistant_text=str(payload.get("reply") or ""),
+            source="runtime_control",
+            conversation_session_id=conversation_session_id,
+            metadata=metadata,
+        )
+        return payload
+
+    @staticmethod
+    def _runtime_control_denied(intent: str, *, reason: str) -> dict[str, Any]:
+        if reason == "runtime_control_no_active_run":
+            reply = "Runtime control was not applied because no TaskRun is active."
+            error = "no active run"
+        elif reason in {
+            "runtime_control_authorization_required",
+            "runtime_control_provenance_mismatch",
+        }:
+            reply = (
+                "Runtime control was not applied because operator authorization "
+                "could not be verified."
+            )
+            error = "operator not authorized"
+        else:
+            reply = "Runtime control was not applied because its safe control path is unavailable."
+            error = "runtime control unavailable"
+        return {
+            "reply": reply,
+            "runtime": {
+                "handled": False,
+                "error": error,
+                "reason": reason,
+                "runtime_control_intent": intent,
+            },
+        }
+
+    @staticmethod
+    def _runtime_control_turn_metadata(text: str) -> dict[str, Any]:
+        intent = runtime_control_intent(text)
+        context = current_chat_runtime_context()
+        metadata: dict[str, Any] = {
+            "handled_by": "runtime_handoff",
+            "runtime_control_intent": intent or "",
+        }
+        if context is not None:
+            metadata.update(
+                {
+                    "operator_id": context.operator_id,
+                    "operator_roles": list(context.operator_roles),
+                    "operator_authenticated": context.operator_authenticated,
+                    "operator_source": context.operator_source,
+                    "runtime_permission": context.permission,
+                }
+            )
+        return metadata
+
+    @staticmethod
+    def _runtime_control_pipeline(turn_owner: Any) -> Any | None:
+        process = getattr(turn_owner, "process", None)
+        process_turn = getattr(turn_owner, "process_turn", None)
+        if callable(process) and not callable(process_turn):
+            return turn_owner
+        return getattr(turn_owner, "_pipeline", None)
+
+    @staticmethod
+    def _record_runtime_control_turn(
+        text_loop: Any,
+        text: str,
+        payload: dict[str, Any],
+        *,
+        conversation_session_id: str | None,
+    ) -> None:
+        reply = str(payload.get("reply") or "").strip()
+        pipeline = HealthModule._runtime_control_pipeline(text_loop)
+        if not reply or pipeline is None:
+            return
+        metadata = HealthModule._runtime_control_turn_metadata(text)
+        record_external_turn(
+            pipeline,
+            text,
+            reply,
+            source="runtime_control",
+            channel="text",
+            conversation_session_id=conversation_session_id,
+            metadata=metadata,
+        )
 
     async def _maybe_submit_runtime_handoff(
         self,
@@ -516,10 +820,7 @@ class HealthModule(Module):
             return True
         if name in parameters:
             return True
-        return any(
-            param.kind == Parameter.VAR_KEYWORD
-            for param in parameters.values()
-        )
+        return any(param.kind == Parameter.VAR_KEYWORD for param in parameters.values())
 
     async def _speak_text_loop_reply(self, text_loop: Any, reply: str) -> bool:
         if not isinstance(reply, str) or not reply.strip():
@@ -564,9 +865,7 @@ class HealthModule(Module):
             rag = turn_rag.get("rag")
             if isinstance(rag, dict) and rag.get("turn_scoped") is True:
                 return {
-                    "evidence": [
-                        dict(item) for item in evidence if isinstance(item, dict)
-                    ]
+                    "evidence": [dict(item) for item in evidence if isinstance(item, dict)]
                     if isinstance(evidence, list)
                     else [],
                     "rag": dict(rag),
@@ -701,10 +1000,7 @@ class HealthModule(Module):
         if not callable(get_enabled):
             return []
         try:
-            return [
-                getattr(skill, "name", str(skill))
-                for skill in get_enabled()
-            ]
+            return [getattr(skill, "name", str(skill)) for skill in get_enabled()]
         except Exception as exc:
             logger.debug("HealthModule: active skill snapshot failed: %s", exc)
             return []
@@ -843,9 +1139,7 @@ class HealthModule(Module):
                 {
                     "name": str(item.get("name") or ""),
                     "passed": bool(item.get("passed")),
-                    "gate_action": str(
-                        (item.get("interaction_gate") or {}).get("action") or ""
-                    ),
+                    "gate_action": str((item.get("interaction_gate") or {}).get("action") or ""),
                 }
                 for item in scenarios[:20]
                 if isinstance(item, dict)
@@ -967,18 +1261,14 @@ class HealthModule(Module):
         voice_cfg = cfg.get("voice", {}) if isinstance(cfg.get("voice"), dict) else {}
         tts_cfg = voice_cfg.get("tts", {}) if isinstance(voice_cfg.get("tts"), dict) else {}
         cloud_asr_cfg = (
-            voice_cfg.get("cloud_asr", {})
-            if isinstance(voice_cfg.get("cloud_asr"), dict)
-            else {}
+            voice_cfg.get("cloud_asr", {}) if isinstance(voice_cfg.get("cloud_asr"), dict) else {}
         )
 
         voice_status = snapshot.get("voice_pipeline_status", {})
         asr_status = voice_status.get("asr", {}) if isinstance(voice_status, dict) else {}
         cloud_asr_status = asr_status.get("cloud", {}) if isinstance(asr_status, dict) else {}
         tts_status = voice_status.get("tts", {}) if isinstance(voice_status, dict) else {}
-        tts_backend = str(
-            voice_status.get("tts_backend") or tts_cfg.get("backend") or "unknown"
-        )
+        tts_backend = str(voice_status.get("tts_backend") or tts_cfg.get("backend") or "unknown")
         provider_tts_status = (
             tts_status.get(tts_backend, {}) if isinstance(tts_status, dict) else {}
         )
@@ -1008,15 +1298,11 @@ class HealthModule(Module):
                 ),
                 "asr_provider": str(asr_status.get("provider") or "unknown"),
                 "asr_model": str(
-                    cloud_asr_status.get("model")
-                    or cloud_asr_cfg.get("model")
-                    or "unknown"
+                    cloud_asr_status.get("model") or cloud_asr_cfg.get("model") or "unknown"
                 ),
                 "tts_backend": tts_backend,
                 "tts_model": str(
-                    provider_tts_status.get("model")
-                    or configured_tts_model
-                    or "unknown"
+                    provider_tts_status.get("model") or configured_tts_model or "unknown"
                 ),
                 "voice_profile": str(
                     provider_tts_status.get("active_profile")
@@ -1038,9 +1324,13 @@ class HealthModule(Module):
                 if shell is not None
                 else "unavailable",
                 "replacement": agent_shell_replacement,
-                "model": str(getattr(shell, "_model", "") or brain_cfg.get("agent_model") or "unknown"),
+                "model": str(
+                    getattr(shell, "_model", "") or brain_cfg.get("agent_model") or "unknown"
+                ),
                 "profile": str(agent_profile or ""),
-                "timeout_seconds": getattr(shell, "_default_timeout", brain_cfg.get("agent_timeout")),
+                "timeout_seconds": getattr(
+                    shell, "_default_timeout", brain_cfg.get("agent_timeout")
+                ),
                 "max_iterations": getattr(shell, "_iteration_limit", None),
             },
         }
@@ -1134,28 +1424,26 @@ class HealthModule(Module):
                 "enabled_count": len(skill_manager.get_enabled()) if skill_manager else 0,
                 "contract_count": len(contracts),
                 "code_contract_count": sum(
-                    1 for contract in contracts
-                    if getattr(contract, "source", None) == "code"
+                    1 for contract in contracts if getattr(contract, "source", None) == "code"
                 ),
                 "legacy_contract_count": sum(
-                    1 for contract in contracts
-                    if getattr(contract, "source", None) != "code"
+                    1 for contract in contracts if getattr(contract, "source", None) != "code"
                 ),
-                "catalog": (
-                    skill_manager.get_contract_catalog()
-                    if skill_manager else []
-                ),
+                "catalog": (skill_manager.get_contract_catalog() if skill_manager else []),
                 "capability_center": (
                     skill_manager.get_capability_center()
-                    if skill_manager and hasattr(skill_manager, "get_capability_center") else {}
+                    if skill_manager and hasattr(skill_manager, "get_capability_center")
+                    else {}
                 ),
                 "generated_skill_governance": (
                     skill_manager.get_generated_skill_governance()
-                    if skill_manager and hasattr(skill_manager, "get_generated_skill_governance") else {}
+                    if skill_manager and hasattr(skill_manager, "get_generated_skill_governance")
+                    else {}
                 ),
                 "skill_packages": (
                     skill_manager.get_skill_packages()
-                    if skill_manager and hasattr(skill_manager, "get_skill_packages") else {}
+                    if skill_manager and hasattr(skill_manager, "get_skill_packages")
+                    else {}
                 ),
             },
             "openapi": {
@@ -1171,8 +1459,7 @@ class HealthModule(Module):
         has_voice = "voice" in registry
         has_text = "text" in registry
         has_robot = any(
-            name in registry
-            for name in ("control", "executor", "led", "perception", "safety")
+            name in registry for name in ("control", "executor", "led", "perception", "safety")
         )
         if has_voice and has_robot and not has_text:
             return MCP_PROFILE

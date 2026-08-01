@@ -31,10 +31,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def _resolve_env_vars(value: Any) -> Any:
     """Recursively resolve ``${VAR}`` placeholders in strings from env."""
     if isinstance(value, str):
+
         def _replacer(match: re.Match) -> str:
             var_name = match.group(1)
             env_val = os.environ.get(var_name, "")
             return env_val
+
         return _ENV_VAR_PATTERN.sub(_replacer, value)
     if isinstance(value, dict):
         return {k: _resolve_env_vars(v) for k, v in value.items()}
@@ -203,9 +205,7 @@ def _apply_platform_audio_overrides(config: dict) -> None:
 
     platform_overrides = voice_cfg.get("platform_overrides", {})
     windows_overrides = (
-        platform_overrides.get("windows", {})
-        if isinstance(platform_overrides, dict)
-        else {}
+        platform_overrides.get("windows", {}) if isinstance(platform_overrides, dict) else {}
     )
     if isinstance(windows_overrides, dict):
         for key in (
@@ -313,6 +313,7 @@ def get_config(*, reload: bool = False) -> dict:
 # Convenience accessors
 # ---------------------------------------------------------------------------
 
+
 def get_section(section: str) -> dict:
     """Shortcut to ``get_config()[section]``."""
     return get_config().get(section, {})
@@ -326,6 +327,7 @@ def project_root() -> Path:
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
+
 
 def validate_config(config: dict | None = None) -> list[str]:
     """Return a list of configuration problems (empty = all OK).
@@ -341,10 +343,16 @@ def validate_config(config: dict | None = None) -> list[str]:
 
     # Brain (required)
     brain = config.get("brain", {})
+    provider = str(brain.get("provider") or "").strip().lower().replace("_", "-")
+    if not provider:
+        errors.append("brain.provider is required")
+    uses_litellm = provider in {"litellm", "litellm-proxy", "llm-gateway"}
+    api_key_env = "LITELLM_VIRTUAL_KEY" if uses_litellm else "DEEPSEEK_API_KEY"
+    base_url_env = "LITELLM_BASE_URL" if uses_litellm else "DEEPSEEK_BASE_URL"
     if not brain.get("api_key"):
-        errors.append("brain.api_key (DEEPSEEK_API_KEY) is required")
+        errors.append(f"brain.api_key ({api_key_env}) is required")
     if not brain.get("base_url"):
-        errors.append("brain.base_url (DEEPSEEK_BASE_URL) is required")
+        errors.append(f"brain.base_url ({base_url_env}) is required")
 
     # brain.timeout — must be a number > 0
     timeout_val = brain.get("timeout")
@@ -352,13 +360,9 @@ def validate_config(config: dict | None = None) -> list[str]:
         try:
             timeout_f = float(timeout_val)
             if timeout_f <= 0:
-                errors.append(
-                    f"brain.timeout must be > 0, got {timeout_val!r}"
-                )
+                errors.append(f"brain.timeout must be > 0, got {timeout_val!r}")
         except (TypeError, ValueError):
-            errors.append(
-                f"brain.timeout must be a number, got {timeout_val!r}"
-            )
+            errors.append(f"brain.timeout must be a number, got {timeout_val!r}")
 
     # brain.max_retries — must be integer 0-10
     max_retries_val = brain.get("max_retries")
@@ -366,13 +370,23 @@ def validate_config(config: dict | None = None) -> list[str]:
         try:
             max_retries_i = int(max_retries_val)
             if not (0 <= max_retries_i <= 10):
-                errors.append(
-                    f"brain.max_retries must be 0-10, got {max_retries_val!r}"
-                )
+                errors.append(f"brain.max_retries must be 0-10, got {max_retries_val!r}")
         except (TypeError, ValueError):
-            errors.append(
-                f"brain.max_retries must be an integer, got {max_retries_val!r}"
-            )
+            errors.append(f"brain.max_retries must be an integer, got {max_retries_val!r}")
+
+    if uses_litellm:
+        if str(brain.get("health_model") or "").strip() != "health-probe":
+            errors.append("brain.health_model must be 'health-probe' when provider=litellm")
+        try:
+            resolved_retries = 0 if max_retries_val is None else int(max_retries_val)
+        except (TypeError, ValueError):
+            resolved_retries = None
+        if resolved_retries is not None and resolved_retries != 0:
+            errors.append("brain.max_retries must be 0 when provider=litellm")
+        if brain.get("fallback_models"):
+            errors.append("brain.fallback_models must be empty when provider=litellm")
+        if brain.get("minimax_api_key"):
+            errors.append("brain.minimax_api_key must be empty when provider=litellm")
 
     # brain.model — must not be empty when present
     model_val = brain.get("model")
@@ -386,13 +400,9 @@ def validate_config(config: dict | None = None) -> list[str]:
         try:
             max_history_i = int(max_history_val)
             if not (10 <= max_history_i <= 200):
-                errors.append(
-                    f"conversation.max_history must be 10-200, got {max_history_val!r}"
-                )
+                errors.append(f"conversation.max_history must be 10-200, got {max_history_val!r}")
         except (TypeError, ValueError):
-            errors.append(
-                f"conversation.max_history must be an integer, got {max_history_val!r}"
-            )
+            errors.append(f"conversation.max_history must be an integer, got {max_history_val!r}")
 
     for timeout_key in (
         "chat_timeout_s",
@@ -405,13 +415,9 @@ def validate_config(config: dict | None = None) -> list[str]:
         try:
             timeout_f = float(timeout_val)
             if timeout_f < 0:
-                errors.append(
-                    f"conversation.{timeout_key} must be >= 0, got {timeout_val!r}"
-                )
+                errors.append(f"conversation.{timeout_key} must be >= 0, got {timeout_val!r}")
         except (TypeError, ValueError):
-            errors.append(
-                f"conversation.{timeout_key} must be a number, got {timeout_val!r}"
-            )
+            errors.append(f"conversation.{timeout_key} must be a number, got {timeout_val!r}")
 
     history_limit_val = conv.get("chat_diagnostics_history_limit")
     if history_limit_val is not None:
@@ -434,13 +440,11 @@ def validate_config(config: dict | None = None) -> list[str]:
             concurrency_i = int(concurrency_val)
             if not (1 <= concurrency_i <= 256):
                 errors.append(
-                    "conversation.chat_max_concurrency must be 1-256, "
-                    f"got {concurrency_val!r}"
+                    f"conversation.chat_max_concurrency must be 1-256, got {concurrency_val!r}"
                 )
         except (TypeError, ValueError):
             errors.append(
-                "conversation.chat_max_concurrency must be an integer, "
-                f"got {concurrency_val!r}"
+                f"conversation.chat_max_concurrency must be an integer, got {concurrency_val!r}"
             )
 
     # health_server.port — must be integer 1024-65535
@@ -483,13 +487,11 @@ def validate_config(config: dict | None = None) -> list[str]:
             retrieve_cache_ttl_f = float(retrieve_cache_ttl_val)
             if retrieve_cache_ttl_f < 0:
                 errors.append(
-                    "memory.retrieve_cache_ttl_s must be >= 0, "
-                    f"got {retrieve_cache_ttl_val!r}"
+                    f"memory.retrieve_cache_ttl_s must be >= 0, got {retrieve_cache_ttl_val!r}"
                 )
         except (TypeError, ValueError):
             errors.append(
-                "memory.retrieve_cache_ttl_s must be a number, "
-                f"got {retrieve_cache_ttl_val!r}"
+                f"memory.retrieve_cache_ttl_s must be a number, got {retrieve_cache_ttl_val!r}"
             )
 
     retrieve_cache_max_entries_val = memory_cfg.get("retrieve_cache_max_entries")
@@ -513,13 +515,9 @@ def validate_config(config: dict | None = None) -> list[str]:
         try:
             port_i = int(port_val)
             if not (1024 <= port_i <= 65535):
-                errors.append(
-                    f"health_server.port must be 1024-65535, got {port_val!r}"
-                )
+                errors.append(f"health_server.port must be 1024-65535, got {port_val!r}")
         except (TypeError, ValueError):
-            errors.append(
-                f"health_server.port must be an integer, got {port_val!r}"
-            )
+            errors.append(f"health_server.port must be an integer, got {port_val!r}")
 
     # tools.general_chat_max_safety_level — must be one of the allowed values
     _ALLOWED_SAFETY_LEVELS = {"normal", "dangerous", "critical"}
@@ -549,9 +547,7 @@ def validate_config(config: dict | None = None) -> list[str]:
         try:
             int_val = int(val)
             if not (min_value <= int_val <= max_value):
-                errors.append(
-                    f"tools.{key} must be {min_value}-{max_value}, got {val!r}"
-                )
+                errors.append(f"tools.{key} must be {min_value}-{max_value}, got {val!r}")
         except (TypeError, ValueError):
             errors.append(f"tools.{key} must be an integer, got {val!r}")
 
@@ -572,9 +568,7 @@ def validate_config(config: dict | None = None) -> list[str]:
             errors.append("tools.priority_by_safety must be a mapping")
         else:
             invalid_levels = [
-                level
-                for level in priority_by_safety
-                if str(level) not in _ALLOWED_SAFETY_LEVELS
+                level for level in priority_by_safety if str(level) not in _ALLOWED_SAFETY_LEVELS
             ]
             if invalid_levels:
                 errors.append(
@@ -586,8 +580,7 @@ def validate_config(config: dict | None = None) -> list[str]:
                     int(priority)
                 except (TypeError, ValueError):
                     errors.append(
-                        f"tools.priority_by_safety.{level} must be an integer, "
-                        f"got {priority!r}"
+                        f"tools.priority_by_safety.{level} must be an integer, got {priority!r}"
                     )
 
     # Optional realtime speech-to-speech lane.  Validation is offline and

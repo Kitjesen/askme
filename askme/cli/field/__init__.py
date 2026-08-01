@@ -18,11 +18,14 @@ from askme.cli.utils import (
     _field_signed_payload_text,
     _get_json,
     _load_field_ingest_events,
+    _loopback_proxy_environment,
+    _loopback_proxy_kwargs,
     _normalise_server_url,
     _post_json,
     _post_json_with_retries,
     _resolve_field_action_audit_hmac_secret,
     _resolve_field_device_signing_secret,
+    _server_auth_headers,
     _single_device_id,
     _start_field_smoke_server,
     _start_local_webhook_collector,
@@ -158,6 +161,27 @@ def _emit_field_ingest_file_payload(payload: dict[str, Any]) -> None:
         )
 
 
+def _field_ingest_post_json(
+    url: str,
+    body: dict[str, Any],
+    timeout_s: float,
+) -> dict[str, Any]:
+    """POST a field-ingest payload with control auth and loopback proxy safety."""
+    kwargs: dict[str, Any] = {
+        "json": body,
+        "timeout": timeout_s,
+    }
+    kwargs.update(_loopback_proxy_kwargs(url))
+    headers = _server_auth_headers()
+    if headers:
+        kwargs["headers"] = headers
+    http_requests = _cli_root_override("requests", requests)
+    response = http_requests.post(url, **kwargs)
+    response.raise_for_status()
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {"status": "invalid_response"}
+
+
 def _run_field_ingest_bridge(
     *,
     source: str,
@@ -178,6 +202,7 @@ def _run_field_ingest_bridge(
         limit=limit,
         timeout_s=timeout_s,
         device_secrets=device_secrets,
+        post_func=_field_ingest_post_json,
     )
 
 
@@ -203,6 +228,7 @@ def _watch_field_ingest_bridge(
         limit=limit,
         timeout_s=timeout_s,
         device_secrets=device_secrets,
+        post_func=_field_ingest_post_json,
     )
 
 
@@ -216,10 +242,20 @@ def _emit_field_ingest_bridge_payload(payload: dict[str, Any]) -> None:
         f"state={payload.get('state_path') or '-'}"
     )
     if summary:
-        scenarios = summary.get("scenario_counts") if isinstance(summary.get("scenario_counts"), dict) else {}
-        sources = summary.get("source_counts") if isinstance(summary.get("source_counts"), dict) else {}
-        devices = summary.get("device_counts") if isinstance(summary.get("device_counts"), dict) else {}
-        scenario_text = ", ".join(f"{key}:{value}" for key, value in sorted(scenarios.items())) or "-"
+        scenarios = (
+            summary.get("scenario_counts")
+            if isinstance(summary.get("scenario_counts"), dict)
+            else {}
+        )
+        sources = (
+            summary.get("source_counts") if isinstance(summary.get("source_counts"), dict) else {}
+        )
+        devices = (
+            summary.get("device_counts") if isinstance(summary.get("device_counts"), dict) else {}
+        )
+        scenario_text = (
+            ", ".join(f"{key}:{value}" for key, value in sorted(scenarios.items())) or "-"
+        )
         source_text = ", ".join(f"{key}:{value}" for key, value in sorted(sources.items())) or "-"
         device_text = ", ".join(f"{key}:{value}" for key, value in sorted(devices.items())) or "-"
         print(
@@ -282,7 +318,9 @@ def _run_field_sign_device_payload(
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
-            _field_signed_payload_text(signed_events, source_path=source_path, output_path=output_path),
+            _field_signed_payload_text(
+                signed_events, source_path=source_path, output_path=output_path
+            ),
             encoding="utf-8",
             newline="\n",
         )
@@ -295,8 +333,12 @@ def _run_field_sign_device_payload(
         "signature_alg": "hmac-sha256",
         "signature_timestamp": signature_timestamp,
         "secret_source": f"env:{secret_env}" if secret_env else "argument",
-        "signed_payload": signed_events[0] if len(signed_events) == 1 and output_path is None else None,
-        "signed_payloads": signed_events if len(signed_events) > 1 and output_path is None else None,
+        "signed_payload": signed_events[0]
+        if len(signed_events) == 1 and output_path is None
+        else None,
+        "signed_payloads": signed_events
+        if len(signed_events) > 1 and output_path is None
+        else None,
     }
 
 
@@ -345,10 +387,12 @@ def _run_field_ingest_smoke(
     base_url = server.strip()
     operator_action_payload: dict[str, Any] = {}
     if not base_url:
-        field_config: dict[str, Any] = {"action_audit": _field_action_audit_config(
-            action_audit_path,
-            hmac_secret=audit_hmac_secret,
-        )}
+        field_config: dict[str, Any] = {
+            "action_audit": _field_action_audit_config(
+                action_audit_path,
+                hmac_secret=audit_hmac_secret,
+            )
+        }
         if require_device_signatures:
             field_config.update(_field_ingest_smoke_trusted_device_config())
         local_server = _start_field_smoke_server(
@@ -374,7 +418,9 @@ def _run_field_ingest_smoke(
             headers=read_headers,
         )
         events = events_payload.get("events") if isinstance(events_payload, dict) else []
-        first_event = next((item for item in events if isinstance(item, dict) and item.get("event_id")), None)
+        first_event = next(
+            (item for item in events if isinstance(item, dict) and item.get("event_id")), None
+        )
         if first_event:
             operator_action_payload = _post_json(
                 f"{_normalise_server_url(base_url)}/api/field/events/{first_event['event_id']}/acknowledge",
@@ -393,11 +439,7 @@ def _run_field_ingest_smoke(
             local_server["thread"].join(timeout=5)
 
     events = events_payload.get("events") if isinstance(events_payload, dict) else []
-    scenario_ids = {
-        str(item.get("scenario_id") or "")
-        for item in events
-        if isinstance(item, dict)
-    }
+    scenario_ids = {str(item.get("scenario_id") or "") for item in events if isinstance(item, dict)}
     required = {
         "illegal_parking",
         "fire_or_smoke",
@@ -405,7 +447,9 @@ def _run_field_ingest_smoke(
         "trash_bin_full",
         "crowd_gathering",
     }
-    bridge_summary = bridge_payload.get("summary") if isinstance(bridge_payload.get("summary"), dict) else {}
+    bridge_summary = (
+        bridge_payload.get("summary") if isinstance(bridge_payload.get("summary"), dict) else {}
+    )
     passed = (
         bridge_payload.get("status") == "ok"
         and int(bridge_payload.get("count") or 0) == 8
@@ -587,11 +631,13 @@ def _run_field_voice_smoke(
     response_payload: dict[str, Any] = {}
     status_code = 0
     try:
+        endpoint = f"{_normalise_server_url(base_url)}/api/field/events"
         http_requests = _cli_root_override("requests", requests)
         response = http_requests.post(
-            f"{_normalise_server_url(base_url)}/api/field/events",
+            endpoint,
             json=request_payload,
             timeout=10,
+            **_loopback_proxy_kwargs(endpoint),
         )
         status_code = response.status_code
         response_payload = response.json()
@@ -635,8 +681,12 @@ def _run_field_voice_smoke(
 
 
 def _emit_field_voice_smoke_payload(payload: dict[str, Any]) -> None:
-    directive = payload.get("voice_directive") if isinstance(payload.get("voice_directive"), dict) else {}
-    delivery = payload.get("voice_delivery") if isinstance(payload.get("voice_delivery"), dict) else {}
+    directive = (
+        payload.get("voice_directive") if isinstance(payload.get("voice_directive"), dict) else {}
+    )
+    delivery = (
+        payload.get("voice_delivery") if isinstance(payload.get("voice_delivery"), dict) else {}
+    )
     print(
         "field-voice-smoke: "
         f"{payload.get('status')} "
@@ -644,7 +694,9 @@ def _emit_field_voice_smoke_payload(payload: dict[str, Any]) -> None:
         f"delivery={delivery.get('status', '-')}"
     )
     print(f"server: {payload.get('server')}")
-    print(f"voice: {directive.get('requested_profile', '-')} -> {directive.get('resolved_profile', '-')}")
+    print(
+        f"voice: {directive.get('requested_profile', '-')} -> {directive.get('resolved_profile', '-')}"
+    )
     print(f"report: {payload.get('report_path')}")
 
 
@@ -678,16 +730,17 @@ def _run_field_notification_smoke(
 
     results: list[dict[str, Any]] = []
     try:
-        for group in group_names:
-            response = _post_json(
-                f"{_normalise_server_url(base_url)}/api/field/notification-test",
-                {
-                    "notification_group": group,
-                    "operator_id": "supervisor-1",
-                    "message": f"Askme现场通知联调：{group}响应组。",
-                },
-            )
-            results.append(response)
+        with _loopback_proxy_environment():
+            for group in group_names:
+                response = _post_json(
+                    f"{_normalise_server_url(base_url)}/api/field/notification-test",
+                    {
+                        "notification_group": group,
+                        "operator_id": "supervisor-1",
+                        "message": f"Askme现场通知联调：{group}响应组。",
+                    },
+                )
+                results.append(response)
     finally:
         if local_server:
             local_server["server"].should_exit = True
@@ -698,9 +751,7 @@ def _run_field_notification_smoke(
 
     collector_requests = list(collector["requests"]) if collector else []
     sent_groups = [
-        str(item.get("notification_group") or "")
-        for item in results
-        if item.get("sent") is True
+        str(item.get("notification_group") or "") for item in results if item.get("sent") is True
     ]
     passed = set(group_names).issubset(set(sent_groups))
     if collector is not None:
@@ -751,7 +802,9 @@ def _run_field_notification_preflight(
     from askme.pipeline.field.field_operations import FieldOperationsService
 
     cfg = get_config()
-    field_cfg = dict(cfg.get("field_operations", {}) if isinstance(cfg.get("field_operations"), dict) else {})
+    field_cfg = dict(
+        cfg.get("field_operations", {}) if isinstance(cfg.get("field_operations"), dict) else {}
+    )
     service = FieldOperationsService(config=field_cfg)
     return service.notification_preflight_payload(
         groups=group_names,
@@ -793,10 +846,12 @@ def _run_field_disposition_smoke(
     if not base_url:
         local_server = _start_field_smoke_server(
             archive_path=archive_path,
-            field_config={"action_audit": _field_action_audit_config(
-                output / "field-action-audit.jsonl",
-                hmac_secret=audit_hmac_secret,
-            )},
+            field_config={
+                "action_audit": _field_action_audit_config(
+                    output / "field-action-audit.jsonl",
+                    hmac_secret=audit_hmac_secret,
+                )
+            },
         )
         base_url = str(local_server["base_url"])
 
@@ -838,7 +893,9 @@ def _run_field_disposition_smoke(
                     "supervisor_id": "supervisor-1",
                 },
             )
-            report = _get_json(f"{_normalise_server_url(base_url)}/api/field/events/{event_id}/report")
+            report = _get_json(
+                f"{_normalise_server_url(base_url)}/api/field/events/{event_id}/report"
+            )
             integrity = _get_json(f"{_normalise_server_url(base_url)}/api/field/audit/integrity")
     finally:
         if local_server:
@@ -999,7 +1056,9 @@ def _run_field_smoke_suite(
         "readiness": readiness,
         "audit_anchor": audit_anchor,
     }
-    suite_report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    suite_report_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     html_report_path.write_text(_field_smoke_suite_html(payload), encoding="utf-8")
     return payload
 
@@ -1024,7 +1083,9 @@ def _field_smoke_customer_summary(
     warnings = [str(item) for item in readiness.get("warnings", []) if item]
     blockers = [str(item) for item in readiness.get("blockers", []) if item]
     return {
-        "headline": "现场能力链路已通过本地实验室验证" if all(checks.values()) else "现场能力链路仍有未通过项",
+        "headline": "现场能力链路已通过本地实验室验证"
+        if all(checks.values())
+        else "现场能力链路仍有未通过项",
         "readiness_status": readiness.get("status", "unknown"),
         "passed_checks": [name for name, passed in checks.items() if passed],
         "failed_checks": [name for name, passed in checks.items() if not passed],
@@ -1039,7 +1100,9 @@ def _field_smoke_customer_summary(
 
 
 def _field_smoke_suite_html(payload: dict[str, Any]) -> str:
-    summary = payload.get("customer_summary") if isinstance(payload.get("customer_summary"), dict) else {}
+    summary = (
+        payload.get("customer_summary") if isinstance(payload.get("customer_summary"), dict) else {}
+    )
     readiness = payload.get("readiness") if isinstance(payload.get("readiness"), dict) else {}
     checks = payload.get("checks") if isinstance(payload.get("checks"), dict) else {}
     warnings = summary.get("warnings") if isinstance(summary.get("warnings"), list) else []
@@ -1054,9 +1117,15 @@ def _field_smoke_suite_html(payload: dict[str, Any]) -> str:
         f"<li><strong>{_html_escape(name)}</strong>: {'通过' if value else '未通过'}</li>"
         for name, value in gates.items()
     )
-    blocker_rows = "".join(f"<li>{_html_escape(item)}</li>" for item in blockers) or "<li>无阻塞项</li>"
-    warning_rows = "".join(f"<li>{_html_escape(item)}</li>" for item in warnings) or "<li>无提醒项</li>"
-    action_rows = "".join(f"<li>{_html_escape(item)}</li>" for item in actions) or "<li>无需额外动作</li>"
+    blocker_rows = (
+        "".join(f"<li>{_html_escape(item)}</li>" for item in blockers) or "<li>无阻塞项</li>"
+    )
+    warning_rows = (
+        "".join(f"<li>{_html_escape(item)}</li>" for item in warnings) or "<li>无提醒项</li>"
+    )
+    action_rows = (
+        "".join(f"<li>{_html_escape(item)}</li>" for item in actions) or "<li>无需额外动作</li>"
+    )
     status = str(payload.get("status") or "unknown")
     readiness_status = str(summary.get("readiness_status") or readiness.get("status") or "unknown")
     headline = str(summary.get("headline") or "现场验收报告")
@@ -1078,8 +1147,8 @@ def _field_smoke_suite_html(payload: dict[str, Any]) -> str:
 <body>
   <h1>Askme 现场能力验收报告</h1>
   <div class="card">
-    <p class="status{' warn' if status != 'passed' else ''}">Suite: {_html_escape(status)}</p>
-    <p class="status{' warn' if readiness_status != 'production_ready' else ''}">Readiness: {_html_escape(readiness_status)}</p>
+    <p class="status{" warn" if status != "passed" else ""}">Suite: {_html_escape(status)}</p>
+    <p class="status{" warn" if readiness_status != "production_ready" else ""}">Readiness: {_html_escape(readiness_status)}</p>
     <h2>{_html_escape(headline)}</h2>
     <p>这份报告面向演示、实验室验收和部署前自检。它证明本地链路是否打通，同时明确哪些能力仍未接入真实设备或真实外部服务。</p>
   </div>
@@ -1090,7 +1159,7 @@ def _field_smoke_suite_html(payload: dict[str, Any]) -> str:
   <div class="card"><h2>下一步</h2><ul>{action_rows}</ul></div>
   <div class="card">
     <h2>原始证据</h2>
-    <p>JSON 报告：<code>{_html_escape(str(payload.get('report_path') or '-'))}</code></p>
+    <p>JSON 报告：<code>{_html_escape(str(payload.get("report_path") or "-"))}</code></p>
   </div>
 </body>
 </html>
@@ -1176,9 +1245,8 @@ def _run_field_deployed_smoke(
             )
         ),
         "field_voice_smoke": voice.get("status") == "passed",
-        "field_notification_smoke": notification.get("status") == "passed" or (
-            not require_notification_ready and notification.get("status") == "skipped"
-        ),
+        "field_notification_smoke": notification.get("status") == "passed"
+        or (not require_notification_ready and notification.get("status") == "skipped"),
         "readiness_reachable": bool(readiness.get("status")),
     }
     payload = {
@@ -1252,9 +1320,13 @@ def _emit_field_readiness_payload(payload: dict[str, Any]) -> None:
     if brief:
         print(f"product-stage: {brief.get('stage_code') or '-'}")
         print(f"release-scope: {brief.get('release_scope') or '-'}")
-    site_profile = payload.get("site_profile") if isinstance(payload.get("site_profile"), dict) else {}
+    site_profile = (
+        payload.get("site_profile") if isinstance(payload.get("site_profile"), dict) else {}
+    )
     if site_profile:
-        summary = site_profile.get("summary") if isinstance(site_profile.get("summary"), dict) else {}
+        summary = (
+            site_profile.get("summary") if isinstance(site_profile.get("summary"), dict) else {}
+        )
         print(
             "site-profile: "
             f"configured={bool(site_profile.get('configured'))} "
@@ -1263,7 +1335,9 @@ def _emit_field_readiness_payload(payload: dict[str, Any]) -> None:
             f"zones={summary.get('zone_count', 0)} "
             f"devices={summary.get('device_count', 0)}"
         )
-    device_trust = payload.get("device_trust") if isinstance(payload.get("device_trust"), dict) else {}
+    device_trust = (
+        payload.get("device_trust") if isinstance(payload.get("device_trust"), dict) else {}
+    )
     if device_trust:
         unsigned = device_trust.get("unsigned_device_ids")
         unsigned_ids = unsigned if isinstance(unsigned, list) else []
@@ -1322,17 +1396,19 @@ def _run_field_device_trust(*, site_profile: str) -> dict[str, Any]:
             continue
         secret_env = str(device.get("secret_env") or "").strip()
         secret_configured = bool(secret_env and os.getenv(secret_env))
-        rows.append({
-            "device_id": str(device_id),
-            "name": str(device.get("name") or ""),
-            "source": str(device.get("source") or ""),
-            "zone_id": str(device.get("zone_id") or ""),
-            "secret_env": secret_env,
-            "secret_configured": secret_configured,
-            "require_signature": True,
-            "status": "ready" if secret_configured else "missing_secret",
-            "signing_command": _field_device_signing_command(str(device_id), secret_env),
-        })
+        rows.append(
+            {
+                "device_id": str(device_id),
+                "name": str(device.get("name") or ""),
+                "source": str(device.get("source") or ""),
+                "zone_id": str(device.get("zone_id") or ""),
+                "secret_env": secret_env,
+                "secret_configured": secret_configured,
+                "require_signature": True,
+                "status": "ready" if secret_configured else "missing_secret",
+                "signing_command": _field_device_signing_command(str(device_id), secret_env),
+            }
+        )
     missing = [row for row in rows if not row["secret_configured"]]
     valid = report.get("status") == "passed"
     if not valid:
@@ -1353,11 +1429,7 @@ def _run_field_device_trust(*, site_profile: str) -> dict[str, Any]:
             "signature_ready_count": len(rows) - len(missing),
             "missing_secret_count": len(missing),
             "missing_secret_envs": sorted(
-                {
-                    str(row.get("secret_env") or "")
-                    for row in missing
-                    if row.get("secret_env")
-                }
+                {str(row.get("secret_env") or "") for row in missing if row.get("secret_env")}
             ),
         },
         "next_actions": _field_device_trust_next_actions(status, missing),
@@ -1375,7 +1447,9 @@ def _emit_field_device_trust_payload(payload: dict[str, Any], *, show_commands: 
     )
     if payload.get("reason"):
         print(f"reason: {payload.get('reason')}")
-    warnings = payload.get("profile_warnings") if isinstance(payload.get("profile_warnings"), list) else []
+    warnings = (
+        payload.get("profile_warnings") if isinstance(payload.get("profile_warnings"), list) else []
+    )
     for warning in warnings[:8]:
         print(f"warning: {warning}")
     devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []

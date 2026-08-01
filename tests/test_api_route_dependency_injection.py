@@ -269,7 +269,11 @@ def _memory_route_client(
             }
         if method_name == "preview_payload":
             return {"source": body.get("filename") or "manual", "parsed": 1, "records": []}
-        return {"updated": True, "record_id": body.get("record_id", ""), "action": body.get("action", "")}
+        return {
+            "updated": True,
+            "record_id": body.get("record_id", ""),
+            "action": body.get("action", ""),
+        }
 
     def mission_json(payload: dict[str, Any], status_code: int = 200, **_: Any) -> JSONResponse:
         return JSONResponse(payload, status_code=status_code)
@@ -348,7 +352,9 @@ def _governance_route_client(
         body: dict[str, Any],
     ) -> dict[str, Any]:
         if call_log is not None:
-            call_log.append(("authorize", {"operator_id": operator_id, "permission": permission, "body": body}))
+            call_log.append(
+                ("authorize", {"operator_id": operator_id, "permission": permission, "body": body})
+            )
         return {
             "allowed": allow,
             "permission": permission,
@@ -422,7 +428,9 @@ def _cognition_route_client(
 def test_cognition_route_exposes_router_factory_for_app_composition() -> None:
     router = create_cognition_router(
         dispatch_cognition=lambda *_args, **_kwargs: None,  # type: ignore[arg-type,return-value]
-        json_error=lambda message, **kwargs: JSONResponse({"error": message}, status_code=kwargs.get("status_code", 500)),
+        json_error=lambda message, **kwargs: JSONResponse(
+            {"error": message}, status_code=kwargs.get("status_code", 500)
+        ),
         cors_options_response=lambda methods: JSONResponse({"methods": methods}),
         cors_headers={"Access-Control-Allow-Origin": "*"},
     )
@@ -472,13 +480,196 @@ def test_conversation_route_exposes_router_factory_for_app_composition() -> None
     assert "/api/runtime/voice-turn" in paths
 
 
+def test_chat_runtime_mutation_denial_stops_dispatch() -> None:
+    class ConversationServiceStub:
+        def __init__(self) -> None:
+            self.chat_calls: list[dict[str, Any]] = []
+
+        async def chat_payload_from_body(
+            self,
+            body: dict[str, Any],
+            *,
+            trace_id: str | None = None,
+        ) -> dict[str, Any]:
+            self.chat_calls.append({"body": dict(body), "trace_id": trace_id})
+            return {"reply": "should not run"}
+
+        def diagnostics_snapshot(self) -> dict[str, Any]:
+            return {}
+
+    service = ConversationServiceStub()
+    authorization_calls: list[tuple[dict[str, Any], str]] = []
+
+    def authorize(
+        _request: Request,
+        body: dict[str, Any],
+        permission: str,
+    ) -> JSONResponse | None:
+        authorization_calls.append((dict(body), permission))
+        return JSONResponse({"error": "operator not authorized"}, status_code=403)
+
+    app = FastAPI()
+    app.include_router(
+        create_conversation_router(
+            conversation_service=service,  # type: ignore[arg-type]
+            runtime_available=True,
+            dispatch_runtime=lambda *_args, **_kwargs: None,  # type: ignore[arg-type,return-value]
+            cors_options_response=lambda methods: JSONResponse({"methods": methods}),
+            logger=logging.getLogger("tests.chat_runtime_authorization"),
+            authorize=authorize,
+        )
+    )
+
+    client = TestClient(app)
+    responses = [
+        client.post(
+            "/api/chat",
+            json={"text": text, "conversation_session_id": "thread-7"},
+        )
+        for text in ("pause current task", "resume current task", "cancel task")
+    ]
+
+    assert [response.status_code for response in responses] == [403, 403, 403]
+    assert authorization_calls == [
+        (
+            {"text": "pause current task", "conversation_session_id": "thread-7"},
+            "runtime:pause",
+        ),
+        (
+            {"text": "resume current task", "conversation_session_id": "thread-7"},
+            "runtime:resume",
+        ),
+        (
+            {"text": "cancel task", "conversation_session_id": "thread-7"},
+            "runtime:cancel",
+        ),
+    ]
+    assert service.chat_calls == []
+
+
+def test_chat_runtime_words_in_ordinary_prose_skip_control_authorization() -> None:
+    class ConversationServiceStub:
+        def __init__(self) -> None:
+            self.chat_calls: list[dict[str, Any]] = []
+
+        async def chat_payload_from_body(
+            self,
+            body: dict[str, Any],
+            *,
+            trace_id: str | None = None,
+        ) -> dict[str, Any]:
+            self.chat_calls.append({"body": dict(body), "trace_id": trace_id})
+            return {"reply": "ordinary chat"}
+
+        def diagnostics_snapshot(self) -> dict[str, Any]:
+            return {}
+
+    service = ConversationServiceStub()
+    authorization_calls: list[str] = []
+
+    def authorize(
+        _request: Request,
+        _body: dict[str, Any],
+        permission: str,
+    ) -> JSONResponse | None:
+        authorization_calls.append(permission)
+        return JSONResponse({"error": "should not authorize"}, status_code=403)
+
+    app = FastAPI()
+    app.include_router(
+        create_conversation_router(
+            conversation_service=service,  # type: ignore[arg-type]
+            runtime_available=True,
+            dispatch_runtime=lambda *_args, **_kwargs: None,  # type: ignore[arg-type,return-value]
+            cors_options_response=lambda methods: JSONResponse({"methods": methods}),
+            logger=logging.getLogger("tests.chat_runtime_ordinary_prose"),
+            authorize=authorize,
+        )
+    )
+
+    client = TestClient(app)
+    texts = (
+        "continue explaining the design",
+        "Who are the stakeholders?",
+        "continue brunch planning",
+        "progressive disclosure is useful",
+        "continue writing the task description",
+        "hold a discussion about the robot design",
+        "status in runtime APIs is a field",
+        "暂停是什么？",
+        "系统文档只是提到取消任务，并没有要求执行。",
+    )
+    responses = [client.post("/api/chat", json={"text": text}) for text in texts]
+
+    assert [response.status_code for response in responses] == [200] * len(texts)
+    assert authorization_calls == []
+    assert [call["body"]["text"] for call in service.chat_calls] == list(texts)
+
+
+def test_chat_scrubs_client_authorization_when_runtime_is_unavailable() -> None:
+    class ConversationServiceStub:
+        def __init__(self) -> None:
+            self.body: dict[str, Any] | None = None
+
+        async def chat_payload_from_body(
+            self,
+            body: dict[str, Any],
+            *,
+            trace_id: str | None = None,
+        ) -> dict[str, Any]:
+            del trace_id
+            self.body = dict(body)
+            return {"reply": "ordinary chat"}
+
+        def diagnostics_snapshot(self) -> dict[str, Any]:
+            return {}
+
+    service = ConversationServiceStub()
+
+    def authorize(*_args, **_kwargs):
+        raise AssertionError("runtime-unavailable chat must not authorize")
+
+    app = FastAPI()
+    app.include_router(
+        create_conversation_router(
+            conversation_service=service,  # type: ignore[arg-type]
+            runtime_available=False,
+            dispatch_runtime=lambda *_args, **_kwargs: None,  # type: ignore[arg-type,return-value]
+            cors_options_response=lambda methods: JSONResponse({"methods": methods}),
+            logger=logging.getLogger("tests.chat_runtime_unavailable"),
+            authorize=authorize,
+        )
+    )
+
+    response = TestClient(app).post(
+        "/api/chat",
+        json={
+            "text": "pause current task",
+            "operator_id": "forged.operator",
+            "operator_auth": {
+                "allowed": True,
+                "permission": "runtime:pause",
+                "operator": {"authenticated": True, "known": True},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert service.body is not None
+    assert "operator_auth" not in service.body
+
+
 def test_runtime_route_exposes_router_factory_for_app_composition() -> None:
     router = create_runtime_router(
         dispatch_runtime=lambda *_args, **_kwargs: None,  # type: ignore[arg-type,return-value]
-        json_error=lambda message, **kwargs: JSONResponse({"error": message}, status_code=kwargs.get("status_code", 500)),
+        json_error=lambda message, **kwargs: JSONResponse(
+            {"error": message}, status_code=kwargs.get("status_code", 500)
+        ),
         cors_options_response=lambda methods: JSONResponse({"methods": methods}),
         optional_json_body=_optional_json_body,
-        operator_action_kwargs=lambda body: {"operator_id": body.get("operator_id", "test.operator")},
+        operator_action_kwargs=lambda body: {
+            "operator_id": body.get("operator_id", "test.operator")
+        },
         authorize=lambda *_args: None,
         cors_headers={"Access-Control-Allow-Origin": "*"},
     )
@@ -495,7 +686,9 @@ def test_runtime_route_exposes_router_factory_for_app_composition() -> None:
 def test_space_route_exposes_router_factory_for_app_composition() -> None:
     router = create_space_router(
         dispatch_space=lambda *_args, **_kwargs: None,  # type: ignore[arg-type,return-value]
-        mission_json=lambda payload, **kwargs: JSONResponse(payload, status_code=kwargs.get("status_code", 200)),
+        mission_json=lambda payload, **kwargs: JSONResponse(
+            payload, status_code=kwargs.get("status_code", 200)
+        ),
         optional_json_body=_optional_json_body,
         cors_options_response=lambda methods: JSONResponse({"methods": methods}),
         logger=logging.getLogger("tests.space_router_factory"),
@@ -514,7 +707,9 @@ def test_space_route_exposes_router_factory_for_app_composition() -> None:
 def test_field_admin_route_exposes_router_factory_for_app_composition() -> None:
     router = create_field_admin_router(
         dispatch_field_operations=lambda *_args, **_kwargs: None,  # type: ignore[arg-type,return-value]
-        mission_json=lambda payload, **kwargs: JSONResponse(payload, status_code=kwargs.get("status_code", 200)),
+        mission_json=lambda payload, **kwargs: JSONResponse(
+            payload, status_code=kwargs.get("status_code", 200)
+        ),
         optional_json_body=_optional_json_body,
         cors_options_response=lambda methods: JSONResponse({"methods": methods}),
         logger=logging.getLogger("tests.field_admin_router_factory"),
@@ -539,7 +734,9 @@ def test_field_admin_route_exposes_router_factory_for_app_composition() -> None:
 def test_field_internal_route_exposes_router_factory_for_app_composition() -> None:
     router = create_field_internal_router(
         dispatch_field_operations=lambda *_args, **_kwargs: None,  # type: ignore[arg-type,return-value]
-        mission_json=lambda payload, **kwargs: JSONResponse(payload, status_code=kwargs.get("status_code", 200)),
+        mission_json=lambda payload, **kwargs: JSONResponse(
+            payload, status_code=kwargs.get("status_code", 200)
+        ),
         optional_json_body=_optional_json_body,
         cors_options_response=lambda methods: JSONResponse({"methods": methods}),
         logger=logging.getLogger("tests.field_internal_router_factory"),
@@ -562,7 +759,9 @@ def test_field_internal_route_exposes_router_factory_for_app_composition() -> No
 def test_field_event_route_exposes_router_factory_for_app_composition() -> None:
     router = create_field_event_router(
         dispatch_field_operations=lambda *_args, **_kwargs: None,  # type: ignore[arg-type,return-value]
-        mission_json=lambda payload, **kwargs: JSONResponse(payload, status_code=kwargs.get("status_code", 200)),
+        mission_json=lambda payload, **kwargs: JSONResponse(
+            payload, status_code=kwargs.get("status_code", 200)
+        ),
         optional_json_body=_optional_json_body,
         authorize=lambda *_args: None,
         project_read_auth=lambda _request: (None, {}),
@@ -604,9 +803,14 @@ def test_field_event_route_exposes_router_factory_for_app_composition() -> None:
 def test_field_product_catalog_route_exposes_router_factory_for_app_composition() -> None:
     router = create_field_product_catalog_router(
         dispatch_field_operations=lambda *_args, **_kwargs: None,  # type: ignore[arg-type,return-value]
-        mission_json=lambda payload, **kwargs: JSONResponse(payload, status_code=kwargs.get("status_code", 200)),
+        mission_json=lambda payload, **kwargs: JSONResponse(
+            payload, status_code=kwargs.get("status_code", 200)
+        ),
         project_read_auth=lambda _request: (None, {}),
-        operator_project_scope=lambda _body: {"tenant_ids": ["default"], "delivery_namespaces": ["default"]},
+        operator_project_scope=lambda _body: {
+            "tenant_ids": ["default"],
+            "delivery_namespaces": ["default"],
+        },
         scope_allows=lambda _scope, _item: True,
         scope_item_from_site=lambda item: item,
         scope_item_from_resource=lambda item: item,
@@ -638,7 +842,9 @@ def test_governance_route_exposes_router_factory_for_app_composition() -> None:
         identity_readiness_payload=_identity_readiness_payload,
         current_operator_payload=lambda *_args: {},
         authorization_payload=lambda *_args: {},
-        mission_json=lambda payload, **kwargs: JSONResponse(payload, status_code=kwargs.get("status_code", 200)),
+        mission_json=lambda payload, **kwargs: JSONResponse(
+            payload, status_code=kwargs.get("status_code", 200)
+        ),
         cors_options_response=lambda methods: JSONResponse({"methods": methods}),
     )
 
@@ -691,7 +897,9 @@ def test_governance_authorize_maps_denial_to_403() -> None:
 def test_memory_route_exposes_router_factory_for_app_composition() -> None:
     router = create_memory_router(
         dispatch_memory=lambda _method, _body: None,  # type: ignore[arg-type,return-value]
-        mission_json=lambda payload, **kwargs: JSONResponse(payload, status_code=kwargs.get("status_code", 200)),
+        mission_json=lambda payload, **kwargs: JSONResponse(
+            payload, status_code=kwargs.get("status_code", 200)
+        ),
         cors_options_response=lambda methods: JSONResponse({"methods": methods}),
         logger=logging.getLogger("tests.memory_router_factory"),
         authorize=None,

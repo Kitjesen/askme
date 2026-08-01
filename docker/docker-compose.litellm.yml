@@ -1,6 +1,26 @@
 name: askme-litellm
 
+x-key-policy-common: &key-policy-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.askme
+  restart: "no"
+  network_mode: none
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
 services:
+  litellm-key-policy:
+    <<: *key-policy-common
+    entrypoint: ["python", "-m", "askme.llm.key_policy", "--control-plane-only"]
+    environment:
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}"
+      LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?set LITELLM_SALT_KEY}"
+      LITELLM_DATABASE_PASSWORD: "${LITELLM_DATABASE_PASSWORD:?set LITELLM_DATABASE_PASSWORD}"
+
   litellm-db:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -10,6 +30,11 @@ services:
       POSTGRES_PASSWORD: "${LITELLM_DATABASE_PASSWORD:?set LITELLM_DATABASE_PASSWORD}"
     volumes:
       - litellm_db:/var/lib/postgresql/data
+    networks:
+      - askme-net
+    depends_on:
+      litellm-key-policy:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
       interval: 10s
@@ -28,7 +53,7 @@ services:
       LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?set LITELLM_SALT_KEY}"
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY}"
       DEEPSEEK_BASE_URL: "${DEEPSEEK_BASE_URL:?set DEEPSEEK_BASE_URL}"
-      MINIMAX_API_KEY: "${MINIMAX_API_KEY:-}"
+      MINIMAX_API_KEY: "${LITELLM_MINIMAX_PROVIDER_API_KEY:-}"
       NO_DOCS: "True"
       NO_REDOC: "True"
       LITELLM_MODE: PRODUCTION
@@ -49,8 +74,12 @@ services:
     security_opt:
       - no-new-privileges:true
     depends_on:
+      litellm-key-policy:
+        condition: service_completed_successfully
       litellm-db:
         condition: service_healthy
+    networks:
+      - askme-net
     healthcheck:
       test:
         - CMD-SHELL
@@ -61,6 +90,10 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+
+networks:
+  askme-net:
+    driver: bridge
 
 volumes:
   litellm_db:

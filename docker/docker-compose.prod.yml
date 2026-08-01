@@ -2,7 +2,7 @@
 # Askme + ZeroClaw — 生产环境 Compose 覆盖
 # ─────────────────────────────────────────────────────────────
 # 使用方式：
-#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#   docker compose --env-file docker/.env --env-file docker/.env.litellm -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
 #
 # 此文件覆盖 docker-compose.yml 中的 dev 默认值，
 # 用于正式生产部署。
@@ -17,6 +17,9 @@ x-logging: &prod-logging
 
 services:
   zeroclaw:
+    # Compose merges service lists by default; !reset is required to remove
+    # the development host-port publication inherited from the base file.
+    ports: !reset []
     logging: *prod-logging
     deploy:
       resources:
@@ -27,21 +30,21 @@ services:
           cpus: "0.1"
           memory: "32M"
     environment:
-      - RUST_LOG=warn
-      - ZEROCLAW_LOG_LEVEL=warn
+      RUST_LOG: warn
+      ZEROCLAW_LOG_LEVEL: warn
 
   askme:
     logging: *prod-logging
     # 生产环境：关闭 hot-reload，更严格的资源限制
     environment:
       # 日志级别提升到 WARNING，减少生产日志量
-      - ASKME_LOG_LEVEL=WARNING
-      - ASKME_HEALTH_LOG_LEVEL=warning
+      ASKME_LOG_LEVEL: WARNING
+      ASKME_HEALTH_LOG_LEVEL: warning
       # 关闭热重载（如果支持）
-      - ASKME_HOT_RELOAD=0
-      - ASKME_DEV_MODE=0
+      ASKME_HOT_RELOAD: "0"
+      ASKME_DEV_MODE: "0"
       # 控制 API 密钥（生产必须设置）
-      - ASKME_CONTROL_API_KEY=${ASKME_CONTROL_API_KEY}
+      ASKME_CONTROL_API_KEY: "${ASKME_CONTROL_API_KEY:?set ASKME_CONTROL_API_KEY}"
     deploy:
       resources:
         limits:
@@ -52,6 +55,5 @@ services:
           memory: "1G"
     # 生产：重启限制，防止无限循环
     restart: unless-stopped
-    # 生产环境不暴露端口到宿主机（通过反向代理暴露）
-    # ports:
-    #   - "8765:8765"
+    # 生产环境不暴露端口到宿主机（通过同网络反向代理暴露）。
+    ports: !reset []

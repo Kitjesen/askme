@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 import pytest
 
 from askme.conversation import VoiceTurnLedger
@@ -60,6 +62,7 @@ async def test_handle_runtime_bridge_result_dispatches_general_skill() -> None:
     handled = await handle_runtime_bridge_result(
         {"handled": True, "turn": {"action_type": "general", "skill_name": "get_time"}},
         user_text="what time is it",
+        conversation_session_id="thread-legacy-dispatcher",
         pipeline=object(),
         dispatcher=dispatcher,
         label="Text",
@@ -67,6 +70,259 @@ async def test_handle_runtime_bridge_result_dispatches_general_skill() -> None:
 
     assert handled is True
     assert dispatcher.calls == [("get_time", "what time is it", "runtime")]
+
+
+@pytest.mark.asyncio
+async def test_runtime_skill_dispatch_receives_conversation_session_id() -> None:
+    class Dispatcher:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str, str]] = []
+
+        async def dispatch(
+            self,
+            skill_name: str,
+            user_text: str,
+            *,
+            source: str,
+            conversation_session_id: str,
+        ) -> str:
+            self.calls.append((skill_name, user_text, source, conversation_session_id))
+            return "done"
+
+    dispatcher = Dispatcher()
+
+    handled = await handle_runtime_bridge_result(
+        {"handled": True, "turn": {"action_type": "skill", "skill_name": "patrol"}},
+        user_text="patrol zone a",
+        conversation_session_id="thread-runtime-skill",
+        pipeline=object(),
+        dispatcher=dispatcher,
+        label="Voice",
+    )
+
+    assert handled is True
+    assert dispatcher.calls == [("patrol", "patrol zone a", "runtime", "thread-runtime-skill")]
+
+
+@pytest.mark.asyncio
+async def test_runtime_skill_dispatch_forwards_supported_caller_context() -> None:
+    bridge_context: dict[str, object] = {}
+
+    def bridge_method(
+        text: str,
+        *,
+        conversation_session_id: str,
+        voice_turn_id: str,
+        turn_cancel_token: object,
+        person_id: str,
+        operator_id: str,
+        robot_id: str,
+        site_id: str,
+        metadata: dict[str, object],
+        defer_recording: bool,
+    ) -> dict[str, object]:
+        bridge_context.update(
+            {
+                "text": text,
+                "conversation_session_id": conversation_session_id,
+                "voice_turn_id": voice_turn_id,
+                "turn_cancel_token": turn_cancel_token,
+                "person_id": person_id,
+                "operator_id": operator_id,
+                "robot_id": robot_id,
+                "site_id": site_id,
+                "metadata": dict(metadata),
+                "defer_recording": defer_recording,
+            }
+        )
+        metadata["operator_id"] = "untrusted-bridge-mutation"
+        return {
+            "handled": True,
+            "turn": {
+                "action_type": "skill",
+                "skill_name": "patrol",
+                "operator_id": "untrusted-bridge-actor",
+            },
+        }
+
+    class Dispatcher:
+        def __init__(self) -> None:
+            self.context: dict[str, object] = {}
+
+        async def dispatch(
+            self,
+            skill_name: str,
+            user_text: str,
+            *,
+            source: str,
+            conversation_session_id: str,
+            voice_turn_id: str,
+            turn_cancel_token: object,
+            person_id: str,
+            operator_id: str,
+            robot_id: str,
+            site_id: str,
+            metadata: dict[str, object],
+        ) -> str:
+            self.context = {
+                "skill_name": skill_name,
+                "user_text": user_text,
+                "source": source,
+                "conversation_session_id": conversation_session_id,
+                "voice_turn_id": voice_turn_id,
+                "turn_cancel_token": turn_cancel_token,
+                "person_id": person_id,
+                "operator_id": operator_id,
+                "robot_id": robot_id,
+                "site_id": site_id,
+                "metadata": metadata,
+            }
+            return "done"
+
+    dispatcher = Dispatcher()
+    cancel_token = object()
+    metadata = {"locale": "zh-CN"}
+
+    outcome = await try_runtime_bridge_turn(
+        bridge_method,
+        "patrol zone a",
+        conversation_session_id="thread-runtime-skill",
+        voice_turn_id="turn-runtime-skill",
+        turn_cancel_token=cancel_token,
+        person_id="person-1",
+        operator_id="operator-1",
+        robot_id="robot-1",
+        site_id="site-a",
+        metadata=metadata,
+        pipeline=object(),
+        dispatcher=dispatcher,
+        label="Voice",
+    )
+
+    assert outcome.handled is True
+    assert metadata == {"locale": "zh-CN"}
+    assert bridge_context == {
+        "text": "patrol zone a",
+        "conversation_session_id": "thread-runtime-skill",
+        "voice_turn_id": "turn-runtime-skill",
+        "turn_cancel_token": cancel_token,
+        "person_id": "person-1",
+        "operator_id": "operator-1",
+        "robot_id": "robot-1",
+        "site_id": "site-a",
+        "metadata": {"locale": "zh-CN"},
+        "defer_recording": True,
+    }
+    assert dispatcher.context == {
+        "skill_name": "patrol",
+        "user_text": "patrol zone a",
+        "source": "runtime",
+        "conversation_session_id": "thread-runtime-skill",
+        "voice_turn_id": "turn-runtime-skill",
+        "turn_cancel_token": cancel_token,
+        "person_id": "person-1",
+        "operator_id": "operator-1",
+        "robot_id": "robot-1",
+        "site_id": "site-a",
+        "metadata": {"locale": "zh-CN"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_skill_dispatch_keeps_strict_legacy_async_fake_compatible() -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    async def legacy_dispatch(
+        skill_name: str,
+        user_text: str,
+        *,
+        source: str,
+    ) -> str:
+        calls.append((skill_name, user_text, source))
+        return "done"
+
+    class Dispatcher:
+        def __init__(self) -> None:
+            self.dispatch = AsyncMock(side_effect=legacy_dispatch)
+
+    handled = await handle_runtime_bridge_result(
+        {"handled": True, "turn": {"action_type": "skill", "skill_name": "patrol"}},
+        user_text="patrol zone a",
+        conversation_session_id="thread-runtime-skill",
+        voice_turn_id="turn-runtime-skill",
+        turn_cancel_token=object(),
+        person_id="person-1",
+        operator_id="operator-1",
+        robot_id="robot-1",
+        site_id="site-a",
+        metadata={"locale": "zh-CN"},
+        pipeline=object(),
+        dispatcher=Dispatcher(),
+        label="Voice",
+    )
+
+    assert handled is True
+    assert calls == [("patrol", "patrol zone a", "runtime")]
+
+
+@pytest.mark.asyncio
+async def test_runtime_skill_leaves_one_canonical_turn_to_pipeline(
+    tmp_path,
+) -> None:
+    class Pipeline:
+        def __init__(self) -> None:
+            self.turn_ledger = VoiceTurnLedger(tmp_path / "runtime-skill.jsonl")
+
+        async def execute_skill(
+            self,
+            skill_name: str,
+            user_text: str,
+            *,
+            source: str,
+            conversation_session_id: str,
+            voice_turn_id: str,
+            turn_cancel_token: object,
+        ) -> str:
+            del skill_name, turn_cancel_token
+            thread = self.turn_ledger.resolve_thread(
+                conversation_session_id=conversation_session_id,
+                channel="voice",
+            )
+            turn = self.turn_ledger.start_turn(
+                thread.thread_id,
+                turn_id=voice_turn_id,
+                source=source,
+                user_text=user_text,
+            )
+            self.turn_ledger.commit_turn(
+                turn.turn_id,
+                assistant_text="patrol complete",
+                heard_text="patrol complete",
+            )
+            return "patrol complete"
+
+    pipeline = Pipeline()
+
+    handled = await handle_runtime_bridge_result(
+        {"handled": True, "turn": {"action_type": "skill", "skill_name": "patrol"}},
+        user_text="patrol zone a",
+        conversation_session_id="thread-runtime-skill",
+        voice_turn_id="turn-runtime-skill",
+        turn_cancel_token=object(),
+        person_id="person-1",
+        operator_id="operator-1",
+        robot_id="robot-1",
+        site_id="site-a",
+        metadata={"locale": "zh-CN"},
+        pipeline=pipeline,
+        label="Voice",
+    )
+
+    turns = pipeline.turn_ledger.list_turns(thread_id="thread-runtime-skill")
+    assert handled is True
+    assert len(turns) == 1
+    assert turns[0].turn_id == "turn-runtime-skill"
+    assert turns[0].assistant_text == "patrol complete"
 
 
 @pytest.mark.asyncio
@@ -131,12 +387,14 @@ async def test_runtime_reply_is_not_committed_when_delivery_fails(tmp_path) -> N
             {"handled": True, "turn": {"spoken_reply": "not delivered"}},
             user_text="status",
             conversation_session_id="thread-runtime",
+            voice_turn_id="turn-runtime-delivery",
             pipeline=pipeline,
             on_spoken_reply=fail_delivery,
             label="Voice",
         )
 
     turn = pipeline._turn_ledger.list_turns(thread_id="thread-runtime")[0]
+    assert turn.turn_id == "turn-runtime-delivery"
     assert turn.status.value == "cancelled"
     assert turn.assistant_text == ""
     assert pipeline._conversation.messages == [("user", "status")]

@@ -59,6 +59,23 @@ class _FakeDogSafetyClient:
         raise AssertionError("runtime preflight must not call dog-safety network query")
 
 
+def _operator_context(
+    permission: str,
+    *,
+    operator_id: str = "operator-1",
+    roles: list[str] | None = None,
+    conversation_session_id: str = "runtime-test-thread",
+) -> dict:
+    return {
+        "operator_id": operator_id,
+        "roles": roles or ["operator"],
+        "authenticated": True,
+        "source": "test",
+        "permission": permission,
+        "conversation_session_id": conversation_session_id,
+    }
+
+
 def _perception_reasons(payload: dict) -> set[str]:
     return {
         str(item.get("reason"))
@@ -88,14 +105,8 @@ def test_runtime_handoff_accepts_confirmed_plan_and_completes_fake_run() -> None
     assert len(result["run"]["skill_results"]) == 5
     assert result["run"]["skill_results"][2]["skill_name"] == "inspect_equipment"
     assert result["run"]["report"]["observations"]
-    assert any(
-        item["type"] == "image_ref"
-        for item in result["run"]["report"]["artifacts"]
-    )
-    assert any(
-        event["kind"] == "runtime.task_completed"
-        for event in world.snapshot()["events"]
-    )
+    assert any(item["type"] == "image_ref" for item in result["run"]["report"]["artifacts"])
+    assert any(event["kind"] == "runtime.task_completed" for event in world.snapshot()["events"])
 
 
 def test_runtime_handoff_maps_field_incident_policy_to_high_level_skills() -> None:
@@ -259,12 +270,10 @@ def test_safety_preflight_rejects_unknown_target_area_when_catalog_exists() -> N
     assert result["replan_proposal"]["recommended_action"] == "load_site_catalog_or_clarify_area"
     assert result["run"]["replan_proposals"][0]["operator_confirmation_required"] is True
     assert any(
-        event["event_type"] == "perception_requested"
-        for event in result["run"]["runtime_events"]
+        event["event_type"] == "perception_requested" for event in result["run"]["runtime_events"]
     )
     assert any(
-        event["event_type"] == "replan_proposed"
-        for event in result["run"]["runtime_events"]
+        event["event_type"] == "replan_proposed" for event in result["run"]["runtime_events"]
     )
 
 
@@ -365,7 +374,10 @@ def test_dog_safety_estop_blocks_runtime_handoff_without_network_query() -> None
     assert result["reason"] == "preflight_failed"
     assert "dog_safety_estop_active" in result["preflight"]["failed_checks"]
     assert "Clear E-STOP" in result["preflight"]["recommended_fix"]
-    assert result["run"]["report"]["replan_proposals"][0]["recommended_action"] == "clear_estop_then_retry"
+    assert (
+        result["run"]["report"]["replan_proposals"][0]["recommended_action"]
+        == "clear_estop_then_retry"
+    )
     assert client.is_estop_calls == 1
     assert client.query_estop_state_calls == 0
 
@@ -419,14 +431,21 @@ def test_runtime_handoff_can_pause_resume_and_cancel_non_autocomplete_run() -> N
         operator_id="operator-1",
         reason="visitor entered path",
         risk_acknowledgement=True,
+        operator_context=_operator_context("runtime:pause"),
     )
     resume = service.resume_payload(
         run_id,
         operator_id="operator-1",
         reason="path clear",
         risk_acknowledgement=True,
+        operator_context=_operator_context("runtime:resume"),
     )
-    cancel = service.cancel_payload(run_id, operator_id="operator-1", reason="demo complete")
+    cancel = service.cancel_payload(
+        run_id,
+        operator_id="operator-1",
+        reason="demo complete",
+        operator_context=_operator_context("runtime:cancel"),
+    )
 
     assert pause["handled"] is True
     assert pause["run"]["current_state"] == "paused"
@@ -457,8 +476,7 @@ def test_shadow_profile_generates_would_execute_plan_without_step_execution() ->
         "follow_patrol_route",
     ]
     assert not any(
-        event["event_type"] == "step_completed"
-        for event in result["run"]["runtime_events"]
+        event["event_type"] == "step_completed" for event in result["run"]["runtime_events"]
     )
 
 
@@ -468,8 +486,12 @@ def test_sim_profile_advances_steps_and_exposes_sim_state() -> None:
     result = service.submit_plan_payload(plan)
     run_id = result["run"]["run_id"]
 
-    first = service.advance_payload(run_id, operator_id="operator-1")
-    second = service.advance_payload(run_id, operator_id="operator-1")
+    first = service.advance_payload(
+        run_id, operator_id="operator-1", operator_context=_operator_context("runtime:advance")
+    )
+    second = service.advance_payload(
+        run_id, operator_id="operator-1", operator_context=_operator_context("runtime:advance")
+    )
 
     assert result["run"]["current_state"] == "queued"
     assert first["handled"] is True
@@ -487,7 +509,9 @@ def test_runtime_events_payload_returns_cursor_and_active_run() -> None:
     service = RuntimeHandoffService(world_state=world, profile="sim", auto_complete=False)
     result = service.submit_plan_payload(plan)
     run_id = result["run"]["run_id"]
-    service.advance_payload(run_id, operator_id="operator-1")
+    service.advance_payload(
+        run_id, operator_id="operator-1", operator_context=_operator_context("runtime:advance")
+    )
 
     payload = service.events_payload(limit=50)
     events = payload["events"]
@@ -523,8 +547,7 @@ def test_task_run_store_recovers_completed_run_after_restart(tmp_path) -> None:
     assert restored["run"]["current_state"] == "completed"
     assert restored["run"]["report"]["status"] == "completed"
     assert any(
-        event["event_type"] == "task_completed"
-        for event in restored["run"]["runtime_events"]
+        event["event_type"] == "task_completed" for event in restored["run"]["runtime_events"]
     )
 
 
@@ -538,8 +561,15 @@ def test_task_run_store_recovers_operator_actions_and_sim_state(tmp_path) -> Non
         store_config={"enabled": True, "path": str(store_path)},
     )
     run_id = service.submit_plan_payload(plan)["run"]["run_id"]
-    service.advance_payload(run_id, operator_id="operator-1")
-    service.pause_payload(run_id, operator_id="operator-1", reason="visitor in path")
+    service.advance_payload(
+        run_id, operator_id="operator-1", operator_context=_operator_context("runtime:advance")
+    )
+    service.pause_payload(
+        run_id,
+        operator_id="operator-1",
+        reason="visitor in path",
+        operator_context=_operator_context("runtime:pause"),
+    )
 
     restarted = RuntimeHandoffService(
         world_state=world,
@@ -560,10 +590,22 @@ def test_sim_profile_rejects_advance_while_paused() -> None:
     world, plan = _confirmed_plan()
     service = RuntimeHandoffService(world_state=world, profile="sim", auto_complete=False)
     run_id = service.submit_plan_payload(plan)["run"]["run_id"]
-    service.advance_payload(run_id)
-    paused = service.pause_payload(run_id)
+    service.advance_payload(
+        run_id,
+        operator_id="operator-1",
+        operator_context=_operator_context("runtime:advance"),
+    )
+    paused = service.pause_payload(
+        run_id,
+        operator_id="operator-1",
+        operator_context=_operator_context("runtime:pause"),
+    )
 
-    advanced = service.advance_payload(run_id)
+    advanced = service.advance_payload(
+        run_id,
+        operator_id="operator-1",
+        operator_context=_operator_context("runtime:advance"),
+    )
 
     assert paused["run"]["current_state"] == "paused"
     assert advanced["handled"] is False
@@ -574,15 +616,33 @@ def test_voice_turn_controls_active_runtime_without_bypassing_state_machine() ->
     world, plan = _confirmed_plan()
     service = RuntimeHandoffService(world_state=world, profile="sim", auto_complete=False)
     run_id = service.submit_plan_payload(plan)["run"]["run_id"]
-    service.advance_payload(run_id)
+    service.advance_payload(
+        run_id,
+        operator_id="operator-1",
+        operator_context=_operator_context("runtime:advance"),
+    )
 
     paused = service.voice_turn_payload(
         "先停一下",
         speak=True,
         transcript_id="voice-1",
         confidence=0.91,
+        conversation_session_id="voice-control-thread",
+        operator_id="operator-1",
+        operator_roles=["operator"],
+        operator_authenticated=True,
+        operator_source="test",
+        runtime_permission="runtime:pause",
     )
-    resumed = service.voice_turn_payload("继续")
+    resumed = service.voice_turn_payload(
+        "继续",
+        conversation_session_id="voice-control-thread",
+        operator_id="operator-1",
+        operator_roles=["operator"],
+        operator_authenticated=True,
+        operator_source="test",
+        runtime_permission="runtime:resume",
+    )
 
     assert paused["handled"] is True
     assert paused["runtime"]["run"]["current_state"] == "paused"
@@ -691,8 +751,24 @@ def test_chinese_runtime_control_and_area_id_are_stable() -> None:
     service = RuntimeHandoffService(world_state=world, profile="sim", auto_complete=False)
     run_id = service.submit_plan_payload(plan)["run"]["run_id"]
 
-    paused = service.handle_chat_control("先停一下")
-    status = service.handle_chat_control("现在执行到哪了")
+    paused = service.handle_chat_control(
+        "先停一下",
+        conversation_session_id="chat-control-thread",
+        operator_id="operator-1",
+        operator_roles=["operator"],
+        operator_authenticated=True,
+        operator_source="test",
+        runtime_permission="runtime:pause",
+    )
+    status = service.handle_chat_control(
+        "现在执行到哪了",
+        conversation_session_id="chat-control-thread",
+        operator_id="operator-1",
+        operator_roles=["operator"],
+        operator_authenticated=True,
+        operator_source="test",
+        runtime_permission="runtime:read",
+    )
     handoff = service.get_payload(run_id)["run"]["handoff"]
 
     assert handoff["target_area"] == "area-a"
@@ -701,3 +777,116 @@ def test_chinese_runtime_control_and_area_id_are_stable() -> None:
     assert paused["runtime"]["run"]["current_state"] == "paused"
     assert status is not None
     assert "TaskRun" in status["reply"]
+
+
+def test_runtime_mutation_owner_rejects_missing_operator_context() -> None:
+    world, plan = _confirmed_plan()
+    service = RuntimeHandoffService(world_state=world, profile="sim", auto_complete=False)
+    run_id = service.submit_plan_payload(plan)["run"]["run_id"]
+
+    result = service.pause_payload(run_id, operator_id="operator-1")
+    voice = service.voice_turn_payload(
+        "pause current task",
+        runtime_permission="runtime:pause",
+    )
+
+    assert result["handled"] is False
+    assert result["reason"] == "runtime_operator_context_required"
+    assert voice["handled"] is False
+    assert voice["reason"] == "runtime_operator_context_mismatch"
+    assert result["run"]["operator_actions"] == []
+
+
+def test_voice_runtime_control_persists_sanitized_operator_provenance() -> None:
+    world, plan = _confirmed_plan()
+    service = RuntimeHandoffService(world_state=world, profile="sim", auto_complete=False)
+    run_id = service.submit_plan_payload(plan)["run"]["run_id"]
+    service.advance_payload(
+        run_id,
+        operator_id="operator-1",
+        operator_context=_operator_context("runtime:advance"),
+    )
+
+    paused = service.voice_turn_payload(
+        "pause current task",
+        conversation_session_id="voice-thread-1",
+        operator_id="security-1",
+        operator_roles=["operator"],
+        operator_authenticated=True,
+        operator_source="oidc",
+        runtime_permission="runtime:pause",
+        reason="visitor entered the path",
+        risk_acknowledgement=True,
+    )
+
+    action = paused["runtime"]["run"]["operator_actions"][-1]
+    assert action["action"] == "pause"
+    assert action["operator_id"] == "security-1"
+    assert action["reason"] == "visitor entered the path"
+    assert action["risk_acknowledgement"] is True
+    assert action["operator_context"] == {
+        "operator_id": "security-1",
+        "roles": ["operator"],
+        "authenticated": True,
+        "source": "oidc",
+        "permission": "runtime:pause",
+        "conversation_session_id": "voice-thread-1",
+    }
+    assert paused["voice_turn"]["operator"] == action["operator_context"]
+    assert paused["voice_turn"]["runtime_permission"] == "runtime:pause"
+
+
+def test_runtime_operator_actions_store_only_sanitized_provenance() -> None:
+    world, plan = _confirmed_plan()
+    service = RuntimeHandoffService(world_state=world, profile="sim", auto_complete=False)
+    run_id = service.submit_plan_payload(plan)["run"]["run_id"]
+    context = _operator_context(
+        "runtime:pause",
+        roles=["operator", "operator", " "],
+    )
+    context["api_key"] = "secret"
+    context["headers"] = {"authorization": "bearer secret"}
+
+    paused = service.pause_payload(
+        run_id,
+        operator_id="operator-1",
+        operator_context=context,
+    )
+
+    action_context = paused["run"]["operator_actions"][-1]["operator_context"]
+    assert action_context == {
+        "operator_id": "operator-1",
+        "roles": ["operator"],
+        "authenticated": True,
+        "source": "test",
+        "permission": "runtime:pause",
+        "conversation_session_id": "runtime-test-thread",
+    }
+
+
+def test_voice_runtime_control_rejects_keyword_prose_and_permission_mismatch() -> None:
+    world, plan = _confirmed_plan()
+    service = RuntimeHandoffService(world_state=world, profile="sim", auto_complete=False)
+    run_id = service.submit_plan_payload(plan)["run"]["run_id"]
+    service.advance_payload(
+        run_id,
+        operator_id="operator-1",
+        operator_context=_operator_context("runtime:advance"),
+    )
+
+    prose = service.voice_turn_payload(
+        "Please explain how to cancel task safely",
+        runtime_permission="runtime:submit",
+    )
+    mismatch = service.voice_turn_payload(
+        "cancel current task",
+        runtime_permission="runtime:submit",
+    )
+
+    assert prose["handled"] is False
+    assert prose["reason"] == "no_runtime_control_intent"
+    assert mismatch["handled"] is False
+    assert mismatch["reason"] == "runtime_control_permission_mismatch"
+    run = service.get_payload(run_id)["run"]
+    assert run["current_state"] == "executing"
+    assert all(action["action"] != "cancel" for action in run["operator_actions"])

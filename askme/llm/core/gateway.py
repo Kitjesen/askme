@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import re
 import secrets
 import threading
@@ -98,7 +99,10 @@ class LLMGateway(LLMBackend):
         self.api_key = llm_config.api_key
         self.base_url = llm_config.base_url
         self.model = llm_config.model
-        self.provider_name = resolve_provider_name(llm_config)
+        if provider is not None and not str(llm_config.provider or "").strip():
+            self.provider_name = "fake"
+        else:
+            self.provider_name = resolve_provider_name(llm_config)
         self.provider_profile = provider_profile(self.provider_name)
         self.max_tokens = llm_config.max_tokens
         self.temperature = llm_config.temperature
@@ -120,12 +124,110 @@ class LLMGateway(LLMBackend):
         self._minimax_client = self._provider.minimax_client
         self._call_diagnostics: deque[dict[str, Any]] = deque(maxlen=100)
         self._call_diagnostics_lock = threading.Lock()
+        self._request_activity_lock = threading.Lock()
+        self._active_business_requests = 0
+        self._active_warm_probes: set[asyncio.Event] = set()
+        self._transport_started = False
+        self._closed = False
 
     @property
     def raw_client(self) -> Any:
         """Direct access to the underlying provider client."""
 
         return self._provider.raw_client
+
+    def request_activity(self) -> dict[str, int]:
+        """Return an allowlisted snapshot used by warm-session admission."""
+
+        with self._request_activity_lock:
+            return {
+                "active_business_requests": self._active_business_requests,
+                "active_warm_probes": len(self._active_warm_probes),
+            }
+
+    def cancel_warm_probes(self) -> int:
+        """Signal only in-flight health probes, leaving business requests untouched."""
+
+        with self._request_activity_lock:
+            warm_tokens = tuple(self._active_warm_probes)
+            for cancel_token in warm_tokens:
+                cancel_token.set()
+            return len(warm_tokens)
+
+    def close_sync(self) -> bool:
+        """Logically close an unused gateway without running async transport code.
+
+        Once a provider request has started, its transport may be bound to an
+        event loop and must be closed through :meth:`aclose` on that loop.
+        """
+
+        with self._request_activity_lock:
+            if self._closed:
+                return True
+            if (
+                self._transport_started
+                or self._active_business_requests
+                or self._active_warm_probes
+            ):
+                return False
+            self._closed = True
+            return True
+
+    async def aclose(self) -> None:
+        """Release provider transports owned by this gateway."""
+
+        with self._request_activity_lock:
+            self._closed = True
+            for cancel_token in tuple(self._active_warm_probes):
+                cancel_token.set()
+        close = getattr(self._provider, "aclose", None)
+        if not callable(close):
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+    def _begin_request_activity(
+        self,
+        context: LLMCallContext | None,
+        cancel_token: asyncio.Event | None,
+    ) -> str:
+        is_warm_probe = bool(
+            context is not None
+            and (context.request_class == "health_probe" or context.purpose == "health_probe")
+        )
+        with self._request_activity_lock:
+            if self._closed:
+                raise RuntimeError("LLM gateway is closed")
+            if is_warm_probe:
+                if self._active_business_requests:
+                    if cancel_token is not None:
+                        cancel_token.set()
+                    return "deferred"
+                if cancel_token is not None:
+                    self._active_warm_probes.add(cancel_token)
+                self._transport_started = True
+                return "warm"
+
+            self._transport_started = True
+            self._active_business_requests += 1
+            for warm_cancel in tuple(self._active_warm_probes):
+                warm_cancel.set()
+            return "business"
+
+    def _end_request_activity(
+        self,
+        activity_kind: str,
+        cancel_token: asyncio.Event | None,
+    ) -> None:
+        with self._request_activity_lock:
+            if activity_kind == "business":
+                self._active_business_requests = max(
+                    0,
+                    self._active_business_requests - 1,
+                )
+            elif activity_kind == "warm" and cancel_token is not None:
+                self._active_warm_probes.discard(cancel_token)
 
     async def chat_stream(
         self,
@@ -152,6 +254,9 @@ class LLMGateway(LLMBackend):
         semantic_observed = False
         deadline_at = self._deadline_at(started_at, context)
         last_failure: Exception | None = None
+        activity_kind = self._begin_request_activity(context, cancel_token)
+        if activity_kind == "deferred":
+            return
 
         try:
             kwargs = self._completion_kwargs(
@@ -266,6 +371,7 @@ class LLMGateway(LLMBackend):
             outcome = self._diagnostic_outcome(exc)
             raise
         finally:
+            self._end_request_activity(activity_kind, cancel_token)
             self._record_metrics(started_at, success=success, model=last_model_name, mode="stream")
             self._record_call_diagnostic(
                 started_at=started_at,
@@ -310,7 +416,12 @@ class LLMGateway(LLMBackend):
         thinking: bool = False,
         context: LLMCallContext | None = None,
     ) -> Any:
-        """Return the raw non-streaming completion object."""
+        """Return the raw non-streaming completion object.
+
+        Health probes wait outside the activity counters while business work is
+        active, then enter as a tracked warm probe immediately before transport.
+        Business completions continue to be admitted and counted immediately.
+        """
 
         context = self._ensure_context_identity(context)
         started_at = time.perf_counter()
@@ -320,8 +431,25 @@ class LLMGateway(LLMBackend):
         resolved_model = requested_model
         outcome = "failed"
         deadline_at = self._deadline_at(started_at, context)
+        activity_kind = "deferred"
+        activity_cancel = asyncio.Event()
 
         try:
+            while activity_kind == "deferred":
+                activity_cancel = asyncio.Event()
+                activity_kind = self._begin_request_activity(context, activity_cancel)
+                if activity_kind != "deferred":
+                    break
+                if deadline_at is None:
+                    await asyncio.sleep(0.01)
+                    continue
+                remaining = self._remaining_seconds(
+                    deadline_at,
+                    context,
+                    phase="admission",
+                )
+                await asyncio.sleep(min(0.01, remaining))
+
             kwargs = self._completion_kwargs(
                 messages,
                 stream=False,
@@ -388,6 +516,7 @@ class LLMGateway(LLMBackend):
             outcome = self._diagnostic_outcome(exc)
             raise
         finally:
+            self._end_request_activity(activity_kind, activity_cancel)
             self._record_metrics(
                 started_at, success=success, model=last_model_name, mode="completion"
             )

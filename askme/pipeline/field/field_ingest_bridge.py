@@ -105,6 +105,7 @@ def watch_field_ingest_bridge(
     limit: int = 0,
     timeout_s: float = 8.0,
     device_secrets: dict[str, str] | None = None,
+    post_func: PostFunc | None = None,
 ) -> None:
     """Run a long-lived bridge loop until interrupted."""
     while True:
@@ -116,20 +117,25 @@ def watch_field_ingest_bridge(
             limit=limit,
             timeout_s=timeout_s,
             device_secrets=device_secrets,
+            post_func=post_func,
         )
         if payload["count"]:
             logger.info(_summary_line(payload))
         time.sleep(max(0.1, interval_s))
 
 
-def _read_new_events(path: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _read_new_events(
+    path: Path, state: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     suffix = path.suffix.lower()
     if suffix in {".jsonl", ".ndjson"}:
         return _read_new_jsonl_events(path, state)
     return _read_changed_json_events(path, state)
 
 
-def _read_new_jsonl_events(path: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _read_new_jsonl_events(
+    path: Path, state: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     offset = int(state.get("offset") or 0)
     size = path.stat().st_size
     if size < offset:
@@ -145,7 +151,9 @@ def _read_new_jsonl_events(path: Path, state: dict[str, Any]) -> tuple[list[dict
     return events, {**state, "offset": new_offset, "source": str(path), "format": "jsonl"}
 
 
-def _read_changed_json_events(path: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _read_changed_json_events(
+    path: Path, state: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     stat = path.stat()
     fingerprint = f"{stat.st_mtime_ns}:{stat.st_size}"
     if state.get("fingerprint") == fingerprint:

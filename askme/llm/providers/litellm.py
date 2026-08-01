@@ -41,11 +41,11 @@ _PURPOSES = frozenset(
         "general",
     }
 )
-_CHANNELS = frozenset({"voice", "text", "vision", "background"})
+_CHANNELS = frozenset({"voice", "text", "vision", "background", "system"})
 _REQUEST_CLASSES = frozenset(
     {"voice_fast", "robot_action", "memory", "vision", "health_probe", "text"}
 )
-_PRIVACY_CLASSES = frozenset({"public", "conversation", "sensitive", "restricted"})
+_PRIVACY_CLASSES = frozenset({"public", "conversation", "sensitive", "restricted", "operational"})
 
 
 def _allowlisted(value: str, allowed: frozenset[str], fallback: str) -> str:
@@ -90,7 +90,7 @@ def _traceparent(trace_id: str | None) -> tuple[str, str]:
     return normalized, f"00-{normalized}-{secrets.token_hex(8)}-01"
 
 
-def _request_with_context(
+def build_litellm_proxy_request(
     kwargs: dict[str, Any],
     context: LLMCallContext | None,
 ) -> dict[str, Any]:
@@ -142,6 +142,10 @@ def _request_with_context(
         extra_body["cache"] = {"no-cache": True, "no-store": True}
         request["extra_body"] = extra_body
     return request
+
+
+# Backward-compatible name for older focused tests and local diagnostics.
+_request_with_context = build_litellm_proxy_request
 
 
 async def _await_or_cancel(
@@ -209,7 +213,7 @@ class LiteLLMProxyProvider(OpenAICompatibleProvider):
             logger.info("[LLM] cancel_token set; aborting LiteLLM request")
             return
 
-        kwargs = _request_with_context(kwargs, context)
+        kwargs = build_litellm_proxy_request(kwargs, context)
         client = self.client_for_model(str(kwargs.get("model", "")))
         response = await _await_or_cancel(
             client.chat.completions.create(**kwargs),
@@ -248,7 +252,7 @@ class LiteLLMProxyProvider(OpenAICompatibleProvider):
     ) -> Any:
         """Send non-streaming calls through the same safe control-plane envelope."""
 
-        request = _request_with_context(kwargs, context)
+        request = build_litellm_proxy_request(kwargs, context)
         return await super().completion_with_retry(request, context=context)
 
     def client_for_model(self, model: str) -> AsyncOpenAI:

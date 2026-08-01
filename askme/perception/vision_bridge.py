@@ -30,6 +30,9 @@ from askme.constants import (
     DAEMON_ROS2_FRAME_PATH,
     DEFAULT_BPU_MODEL_PATH,
 )
+from askme.llm.core.contracts import LLMCallContext
+from askme.llm.providers.litellm import build_litellm_proxy_request
+from askme.llm.providers.profiles import normalize_provider_name
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +40,17 @@ logger = logging.getLogger(__name__)
 def _count_persons(objects: list[dict[str, Any]]) -> int:
     total = 0
     for item in objects:
-        label = str(
-            item.get("label")
-            or item.get("class_id")
-            or item.get("class")
-            or item.get("name")
-            or ""
-        ).strip().lower()
+        label = (
+            str(
+                item.get("label")
+                or item.get("class_id")
+                or item.get("class")
+                or item.get("name")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         if label in {"person", "human", "visitor", "\u4eba", "\u6e38\u5ba2"}:
             total += 1
     return total
@@ -52,6 +59,7 @@ def _count_persons(objects: list[dict[str, Any]]) -> int:
 # ---------------------------------------------------------------------------
 # ROS2 frame grabber — persistent subscriber, grabs latest frame on demand
 # ---------------------------------------------------------------------------
+
 
 class _ROS2FrameGrabber:
     """Grabs frames from a ROS2 Image topic via subprocess.
@@ -62,7 +70,7 @@ class _ROS2FrameGrabber:
     """
 
     # Small ROS2 script executed by system Python (outside venv)
-    _GRAB_SCRIPT = '''\
+    _GRAB_SCRIPT = """\
 import sys, time, struct
 import rclpy
 from rclpy.node import Node
@@ -87,7 +95,7 @@ out = sys.argv[2]
 with open(out, "wb") as f:
     f.write(struct.pack("II", m.width, m.height))
     f.write(bytes(m.data))
-'''
+"""
 
     def __init__(self, topic: str = "/camera/color/image_raw", timeout: float = 5.0) -> None:
         self._topic = topic
@@ -103,16 +111,17 @@ with open(out, "wb") as f:
 
         # Use bash -c to source ROS2 setup, then run grab script with system python
         cmd = (
-            f'source /opt/ros/humble/setup.bash && '
-            f'python3 -c {_shell_quote(self._GRAB_SCRIPT)} '
-            f'{_shell_quote(self._topic)} '
-            f'{_shell_quote(self._tmp_path)} '
-            f'{self._timeout}'
+            f"source /opt/ros/humble/setup.bash && "
+            f"python3 -c {_shell_quote(self._GRAB_SCRIPT)} "
+            f"{_shell_quote(self._topic)} "
+            f"{_shell_quote(self._tmp_path)} "
+            f"{self._timeout}"
         )
         try:
             result = subprocess.run(
                 ["bash", "-c", cmd],
-                capture_output=True, timeout=self._timeout + 5,
+                capture_output=True,
+                timeout=self._timeout + 5,
             )
             if result.returncode != 0:
                 stderr = result.stderr.decode(errors="replace")[:200]
@@ -140,6 +149,7 @@ with open(out, "wb") as f:
 def _shell_quote(s: str) -> str:
     """Shell-quote a string for bash -c."""
     import shlex
+
     return shlex.quote(s)
 
 
@@ -148,15 +158,18 @@ class VisionBridge:
 
     Supports two vision backends:
       - **YOLO** (primary): Real-time object detection via qp-perception
-      - **VLM** (fallback): Rich scene understanding via Claude Sonnet API
+      - **VLM** (fallback): Rich scene understanding via the LiteLLM proxy
 
     If YOLO is unavailable (qp-perception not installed), falls back to VLM
     for ``describe_scene()``.
     """
 
-    def __init__(self) -> None:
-        cfg = get_config()
-        self._vision_cfg: dict[str, Any] = cfg.get("vision", {})
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        cfg = config if isinstance(config, dict) else get_config()
+        brain_cfg = cfg.get("brain", {})
+        self._brain_cfg: dict[str, Any] = brain_cfg if isinstance(brain_cfg, dict) else {}
+        vision_cfg = cfg.get("vision", {})
+        self._vision_cfg: dict[str, Any] = vision_cfg if isinstance(vision_cfg, dict) else {}
 
         self._enabled: bool = self._vision_cfg.get("enabled", False)
         self._model_path: str = self._vision_cfg.get(
@@ -169,39 +182,27 @@ class VisionBridge:
         self._capture_backend: str = self._vision_cfg.get("capture_backend", "auto")
         self._ros2_topic: str = self._vision_cfg.get("ros2_topic", "/camera/color/image_raw")
         self._ros2_grabber: _ROS2FrameGrabber | None = None
-        self._lingtu_repo: str = self._vision_cfg.get(
-            "lingtu_repo", "/opt/lingtu/current"
-        )
+        self._lingtu_repo: str = self._vision_cfg.get("lingtu_repo", "/opt/lingtu/current")
         self._lingtu_color_shm: str = self._vision_cfg.get(
             "lingtu_color_shm", "/dev/shm/lingtu_camera_color"
         )
         self._lingtu_max_age_s: float = max(
             0.05, float(self._vision_cfg.get("lingtu_max_age_s", 1.0))
         )
-        self._lingtu_rotate_180: bool = bool(
-            self._vision_cfg.get("lingtu_rotate_180", True)
-        )
+        self._lingtu_rotate_180: bool = bool(self._vision_cfg.get("lingtu_rotate_180", True))
 
         # VLM fallback config
         self._vlm_enabled: bool = self._vision_cfg.get("vlm_enabled", False)
-        self._vlm_api_key: str = self._vision_cfg.get("vlm_api_key", "")
-        self._vlm_model: str = self._vision_cfg.get("vlm_model", "qwen-vl-max")
-        # VLM base URL: vision-specific first, then brain relay fallback
-        self._vlm_base_url: str = self._vision_cfg.get(
-            "vlm_base_url",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        )
-        self._vlm_timeout: float = max(
-            5.0, float(self._vision_cfg.get("vlm_timeout", 20.0))
-        )
+        self._vlm_api_key: str = str(self._vision_cfg.get("vlm_api_key") or "").strip()
+        self._vlm_model: str = str(self._vision_cfg.get("vlm_model") or "").strip()
+        self._vlm_base_url: str = str(self._vision_cfg.get("vlm_base_url") or "").strip()
+        self._vlm_timeout: float = max(5.0, float(self._vision_cfg.get("vlm_timeout", 20.0)))
         self._vlm_image_max_width: int = max(
             160, int(self._vision_cfg.get("vlm_image_max_width", 320))
         )
 
         # BPU YOLO (fast path, ~3ms on Horizon J6)
-        self._bpu_model_path: str = self._vision_cfg.get(
-            "bpu_model_path", DEFAULT_BPU_MODEL_PATH
-        )
+        self._bpu_model_path: str = self._vision_cfg.get("bpu_model_path", DEFAULT_BPU_MODEL_PATH)
         self._bpu_detector: Any | None = None
         self._bpu_init_attempted: bool = False
 
@@ -210,7 +211,7 @@ class VisionBridge:
         self._selector: Any | None = None
         self._init_attempted: bool = False
         self._vlm_client: Any | None = None
-        self._vlm_backend: str = self._vision_cfg.get("vlm_backend", "openai")
+        self._vlm_backend: str = str(self._vision_cfg.get("vlm_backend") or "").strip().lower()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -223,6 +224,7 @@ class VisionBridge:
         Returns None if daemon is stale/missing.
         """
         import json as _json
+
         det_path = DAEMON_DETECTIONS_PATH
         try:
             with open(det_path) as f:
@@ -270,13 +272,15 @@ class VisionBridge:
         objects = [dict(item) for item in detections if isinstance(item, dict)]
         for item in objects:
             bbox = item.get("bbox")
-            if len(bbox or []) == 4 and item.get("distance_m") is None:
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            if item.get("distance_m") is None:
                 cx = (float(bbox[0]) + float(bbox[2])) / 2.0
                 cy = (float(bbox[1]) + float(bbox[3])) / 2.0
                 depth_m = self.read_depth_at(int(cx), int(cy))
                 if depth_m is not None:
                     item["distance_m"] = round(depth_m, 2)
-            if len(bbox or []) == 4 and item.get("angle_deg") is None:
+            if item.get("angle_deg") is None:
                 center_x = (float(bbox[0]) + float(bbox[2])) / 2.0
                 item["angle_deg"] = round(((center_x / max(frame_width, 1.0)) - 0.5) * 70.0, 2)
                 item["frame_width"] = frame_width
@@ -374,16 +378,15 @@ class VisionBridge:
             return await self._describe_scene_vlm(frame)
 
         # Try CPU YOLO (qp-perception) — only when daemon is not running
-        if self._ensure_detector():
+        tracker = self._tracker if self._ensure_detector() else None
+        if tracker is not None:
             try:
                 if frame is None:
                     frame = await asyncio.to_thread(self._capture_frame)
                 if frame is None:
                     return await self._describe_scene_vlm()
 
-                tracks = await asyncio.to_thread(
-                    self._tracker.detect_and_track, frame, time.monotonic()
-                )
+                tracks = await asyncio.to_thread(tracker.detect_and_track, frame, time.monotonic())
                 if tracks:
                     return self._tracks_to_description(tracks)
             except Exception as exc:
@@ -408,7 +411,8 @@ class VisionBridge:
             # BPU ran but target not found — don't fall through to slow CPU YOLO
             return None
 
-        if not self._ensure_detector():
+        tracker = self._tracker if self._ensure_detector() else None
+        if tracker is None:
             return None
 
         try:
@@ -417,9 +421,7 @@ class VisionBridge:
             if frame is None:
                 return None
 
-            tracks = await asyncio.to_thread(
-                self._tracker.detect_and_track, frame, time.monotonic()
-            )
+            tracks = await asyncio.to_thread(tracker.detect_and_track, frame, time.monotonic())
 
             target_lower = target.lower()
             for track in tracks:
@@ -453,6 +455,9 @@ class VisionBridge:
         if not self._ensure_vlm_client():
             # No VLM — fall back to generic describe
             return await self.describe_scene(frame)
+        vlm_client = self._vlm_client
+        if vlm_client is None:
+            return await self.describe_scene(frame)
 
         try:
             if frame is None:
@@ -485,40 +490,22 @@ class VisionBridge:
                 )
 
             def _call_vlm() -> str:
-                if self._vlm_backend == "minimax_vision":
-                    response = self._vlm_client.post(
-                        "/v1/coding_plan/vlm",
-                        json={
-                            "prompt": prompt,
-                            "image_url": f"data:{media_type};base64,{image_b64}",
-                        },
-                    )
-                    response.raise_for_status()
-                    payload = response.json()
-                    base_resp = payload.get("base_resp") or {}
-                    if int(base_resp.get("status_code", 0)) != 0:
-                        raise RuntimeError(
-                            base_resp.get("status_msg") or "MiniMax vision request failed"
-                        )
-                    return str(payload.get("content") or "")
-                if self._vlm_backend == "anthropic":
-                    response = self._vlm_client.messages.create(
-                        model=self._vlm_model, max_tokens=150,
-                        messages=[{"role": "user", "content": [
-                            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
-                            {"type": "text", "text": prompt},
-                        ]}],
-                    )
-                    return response.content[0].text if response.content else ""
-                else:
-                    response = self._vlm_client.chat.completions.create(
-                        model=self._vlm_model, max_tokens=150,
-                        messages=[{"role": "user", "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}"}},
-                            {"type": "text", "text": prompt},
-                        ]}],
-                    )
-                    return response.choices[0].message.content or ""
+                response = self._create_vlm_completion(
+                    max_tokens=150,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{media_type};base64,{image_b64}"},
+                                },
+                                {"type": "text", "text": prompt},
+                            ],
+                        }
+                    ],
+                )
+                return response.choices[0].message.content or ""
 
             raw = await asyncio.to_thread(_call_vlm)
             # Targeted Q&A: keep the short Chinese answer, but remove a
@@ -535,13 +522,12 @@ class VisionBridge:
 
         Returns an empty list if vision is unavailable.
         """
-        if not self._ensure_detector():
+        tracker = self._tracker if self._ensure_detector() else None
+        if tracker is None:
             return []
 
         try:
-            tracks = await asyncio.to_thread(
-                self._tracker.detect_and_track, frame, time.monotonic()
-            )
+            tracks = await asyncio.to_thread(tracker.detect_and_track, frame, time.monotonic())
             return tracks
         except Exception as exc:
             logger.warning("[Vision] get_tracks error: %s", exc)
@@ -577,16 +563,19 @@ class VisionBridge:
         filepath = os.path.join(output_dir, filename)
         try:
             import cv2  # type: ignore[import-untyped]
+
             cv2.imwrite(filepath, frame)
         except ImportError:
             try:
                 import numpy as np
                 from PIL import Image as PILImage
+
                 img = PILImage.fromarray(np.asarray(frame))
                 img.save(filepath, quality=85)
             except ImportError:
                 # Last resort: save as PPM (no dependencies)
                 import numpy as np
+
                 arr = np.asarray(frame)
                 filepath = filepath.replace(".jpg", ".ppm")
                 with open(filepath, "wb") as f:
@@ -596,13 +585,11 @@ class VisionBridge:
         return filepath
 
     # ------------------------------------------------------------------
-    # VLM (Claude Sonnet) fallback
+    # VLM LiteLLM fallback
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _encode_frame_for_vlm(
-        frame: Any, *, max_width: int = 320
-    ) -> tuple[str, str]:
+    def _encode_frame_for_vlm(frame: Any, *, max_width: int = 320) -> tuple[str, str]:
         """Encode a compact OpenCV-style BGR frame without optional codecs."""
         import base64
 
@@ -621,9 +608,7 @@ class VisionBridge:
         try:
             import cv2  # type: ignore[import-untyped]
 
-            ok, encoded = cv2.imencode(
-                ".jpg", array, [cv2.IMWRITE_JPEG_QUALITY, 80]
-            )
+            ok, encoded = cv2.imencode(".jpg", array, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if ok:
                 return "image/jpeg", base64.b64encode(encoded).decode("ascii")
         except ImportError:
@@ -638,9 +623,7 @@ class VisionBridge:
         array = ((array.astype(np.uint16) // 8) * 8).astype(np.uint8)
         rgb = np.ascontiguousarray(array[:, :, ::-1])
         height, width = rgb.shape[:2]
-        scanlines = b"".join(
-            b"\x00" + rgb[row].tobytes() for row in range(height)
-        )
+        scanlines = b"".join(b"\x00" + rgb[row].tobytes() for row in range(height))
 
         def _png_chunk(kind: bytes, payload: bytes) -> bytes:
             body = kind + payload
@@ -659,53 +642,81 @@ class VisionBridge:
         png += _png_chunk(b"IEND", b"")
         return "image/png", base64.b64encode(png).decode("ascii")
 
-    def _ensure_vlm_client(self) -> bool:
-        """Lazily initialise the VLM client. Returns True if ready.
+    def _vlm_policy_error(self) -> str:
+        """Return why the product VLM route is not safe to construct."""
 
-        Tries Anthropic native SDK first (better for relay), falls back to
-        OpenAI-compatible client.
-        """
+        if not self._vlm_enabled:
+            return "VLM is disabled"
+        if normalize_provider_name(self._brain_cfg.get("provider")) != "litellm":
+            return "brain.provider must be litellm"
+        if self._vlm_backend != "openai":
+            return "vision.vlm_backend must be openai"
+        if self._vlm_model != "vision-scene":
+            return "vision.vlm_model must be vision-scene"
+        if not self._vlm_api_key:
+            return "vision.vlm_api_key is required"
+        if not self._vlm_base_url:
+            return "vision.vlm_base_url is required"
+
+        brain_base_url = str(self._brain_cfg.get("base_url") or "").strip()
+        if not brain_base_url:
+            return "brain.base_url is required"
+        if self._vlm_base_url.rstrip("/") != brain_base_url.rstrip("/"):
+            return "vision.vlm_base_url must match brain.base_url"
+
+        brain_api_key = str(self._brain_cfg.get("api_key") or "").strip()
+        if not brain_api_key:
+            return "brain.api_key is required"
+        if self._vlm_api_key == brain_api_key:
+            return "vision.vlm_api_key must be a dedicated scoped key"
+        return ""
+
+    def _vlm_call_context(self) -> LLMCallContext:
+        """Return the controlled LiteLLM context for one visual grounding call."""
+
+        return LLMCallContext(
+            purpose="vision_grounding",
+            channel="vision",
+            request_class="vision",
+            latency_budget_ms=int(self._vlm_timeout * 1000),
+            privacy_class="restricted",
+            allow_cache=False,
+        )
+
+    def _create_vlm_completion(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+    ) -> Any:
+        """Create a VLM completion through the shared LiteLLM proxy envelope."""
+
+        if self._vlm_client is None:
+            raise RuntimeError("VLM client is not initialised")
+        request = build_litellm_proxy_request(
+            {
+                "model": self._vlm_model,
+                "max_tokens": max_tokens,
+                "messages": messages,
+            },
+            self._vlm_call_context(),
+        )
+        return self._vlm_client.chat.completions.create(**request)
+
+    def _ensure_vlm_client(self) -> bool:
+        """Construct the sole product VLM route after validating its policy."""
+
+        policy_error = self._vlm_policy_error()
+        if policy_error:
+            logger.warning("[Vision] VLM route rejected: %s", policy_error)
+            return False
         if self._vlm_client is not None:
             return True
-        if not self._vlm_enabled or not self._vlm_api_key:
-            return False
 
-        if self._vlm_backend == "minimax_vision":
-            try:
-                import httpx
-
-                self._vlm_client = httpx.Client(
-                    base_url=self._vlm_base_url,
-                    headers={"Authorization": f"Bearer {self._vlm_api_key}"},
-                    timeout=self._vlm_timeout,
-                )
-                logger.info("[Vision] VLM client: MiniMax vision service.")
-                return True
-            except Exception as exc:
-                logger.warning("[Vision] MiniMax VLM client init failed: %s", exc)
-                return False
-
-        # Try Anthropic native SDK (relay: /api endpoint, no dev-assistant injection)
-        anthropic_url = self._vlm_base_url.rstrip("/").removesuffix("/v1")
-        try:
-            import anthropic
-            self._vlm_client = anthropic.Anthropic(
-                api_key=self._vlm_api_key,
-                base_url=anthropic_url,
-                timeout=self._vlm_timeout,
-                max_retries=0,
-            )
-            self._vlm_backend = "anthropic"
-            logger.info("[Vision] VLM client: Anthropic SDK (model=%s).", self._vlm_model)
-            return True
-        except ImportError:
-            pass
-        except Exception as exc:
-            logger.debug("[Vision] Anthropic SDK init failed: %s — trying OpenAI", exc)
-
-        # Fallback: OpenAI-compatible client
+        # Explicit OpenAI-compatible path through LiteLLM Proxy.
         try:
             from openai import OpenAI
+
             self._vlm_client = OpenAI(
                 api_key=self._vlm_api_key,
                 base_url=self._vlm_base_url,
@@ -716,7 +727,7 @@ class VisionBridge:
             logger.info("[Vision] VLM client: OpenAI compat (model=%s).", self._vlm_model)
             return True
         except ImportError:
-            logger.warning("[Vision] Neither anthropic nor openai SDK installed — VLM disabled.")
+            logger.warning("[Vision] OpenAI SDK not installed — VLM disabled.")
             self._vlm_enabled = False
             return False
         except Exception as exc:
@@ -732,6 +743,9 @@ class VisionBridge:
         """
         if not self._ensure_vlm_client():
             return ""
+        vlm_client = self._vlm_client
+        if vlm_client is None:
+            return ""
 
         try:
             if frame is None:
@@ -739,75 +753,35 @@ class VisionBridge:
             if frame is None:
                 return ""
 
-            # Encode frame as base64 JPEG (cv2 → PIL → raw PPM fallback)
-            import base64
-
-            import numpy as np
-
-            image_b64 = ""
-            try:
-                import cv2  # type: ignore[import-untyped]
-                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                image_b64 = base64.b64encode(buf).decode("utf-8")
-            except ImportError:
-                try:
-                    import io
-
-                    from PIL import Image as PILImage
-                    img = PILImage.fromarray(np.asarray(frame))
-                    buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=80)
-                    image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                except ImportError:
-                    logger.warning("[Vision] Neither cv2 nor PIL available for JPEG encoding.")
-                    return ""
+            media_type, image_b64 = self._encode_frame_for_vlm(
+                frame, max_width=self._vlm_image_max_width
+            )
             if not image_b64:
                 return ""
 
             _VLM_TEXT = (
-                    "I'm building a YOLO object detection test dataset. "
-                    "List all visible objects in this image for annotation. "
-                    "Output format: Chinese comma-separated list, no explanation."
-                )
+                "I'm building a YOLO object detection test dataset. "
+                "List all visible objects in this image for annotation. "
+                "Output format: Chinese comma-separated list, no explanation."
+            )
 
-            # Call VLM — use Anthropic or OpenAI backend depending on what initialised
             def _call_vlm() -> str:
-                if getattr(self, "_vlm_backend", "openai") == "anthropic":
-                    response = self._vlm_client.messages.create(
-                        model=self._vlm_model,
-                        max_tokens=150,
-                        messages=[{
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": "image/jpeg",
-                                        "data": image_b64,
-                                    },
-                                },
-                                {"type": "text", "text": _VLM_TEXT},
-                            ],
-                        }],
-                    )
-                    raw = response.content[0].text if response.content else ""
-                else:
-                    response = self._vlm_client.chat.completions.create(
-                        model=self._vlm_model,
-                        max_tokens=150,
-                        messages=[{
+                response = self._create_vlm_completion(
+                    max_tokens=150,
+                    messages=[
+                        {
                             "role": "user",
                             "content": [
                                 {
                                     "type": "image_url",
-                                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                                    "image_url": {"url": f"data:{media_type};base64,{image_b64}"},
                                 },
                                 {"type": "text", "text": _VLM_TEXT},
                             ],
-                        }],
-                    )
-                    raw = response.choices[0].message.content or ""
+                        }
+                    ],
+                )
+                raw = response.choices[0].message.content or ""
                 return VisionBridge._clean_vlm_response(raw)
 
             return await asyncio.to_thread(_call_vlm)
@@ -818,12 +792,25 @@ class VisionBridge:
 
     _VLM_REFUSAL_MARKERS = (
         # English relay identity markers
-        "I can't help", "I cannot", "I won't", "I appreciate",
-        "I'm Claude", "I need to clarify", "privacy", "consent",
+        "I can't help",
+        "I cannot",
+        "I won't",
+        "I appreciate",
+        "I'm Claude",
+        "I need to clarify",
+        "privacy",
+        "consent",
         # Chinese relay dev-assistant refusals
-        "无法", "不在我的", "核心能力", "无法帮助", "很乐意协助",
-        "如果您需要帮助构建", "软件开发", "专注于软件",
-        "图像分析和数据集", "我很乐意",
+        "无法",
+        "不在我的",
+        "核心能力",
+        "无法帮助",
+        "很乐意协助",
+        "如果您需要帮助构建",
+        "软件开发",
+        "专注于软件",
+        "图像分析和数据集",
+        "我很乐意",
     )
 
     @staticmethod
@@ -836,31 +823,76 @@ class VisionBridge:
             return ""
         sentences = re.split(r"(?<=[。！？.!?])|[\r\n]+", raw)
         risky_terms = (
-            "风扇", "电风扇", "叶片", "扇叶", "旋转", "线条", "线缆", "电线",
-            "板面", "网状", "网格", "墙面", "地面", "天花板", "平面", "纹理",
-            "阴影", "光影",
+            "风扇",
+            "电风扇",
+            "叶片",
+            "扇叶",
+            "旋转",
+            "线条",
+            "线缆",
+            "电线",
+            "板面",
+            "网状",
+            "网格",
+            "墙面",
+            "地面",
+            "天花板",
+            "平面",
+            "纹理",
+            "阴影",
+            "光影",
         )
         object_terms = (
-            "瓶", "杯", "手机", "电话", "纸箱", "箱子", "椅", "桌", "沙发",
-            "电脑", "键盘", "显示器", "门", "窗", "人", "手", "衣服", "包",
-            "书", "袋", "玩具", "车", "猫", "狗", "植物", "垃圾桶", "灯", "设备",
+            "瓶",
+            "杯",
+            "手机",
+            "电话",
+            "纸箱",
+            "箱子",
+            "椅",
+            "桌",
+            "沙发",
+            "电脑",
+            "键盘",
+            "显示器",
+            "门",
+            "窗",
+            "人",
+            "手",
+            "衣服",
+            "包",
+            "书",
+            "袋",
+            "玩具",
+            "车",
+            "猫",
+            "狗",
+            "植物",
+            "垃圾桶",
+            "灯",
+            "设备",
         )
         negative_terms = ("未见", "没看到", "没有", "无法确认", "不确定", "未发现")
         kept = []
         for sentence in sentences:
             has_risky = any(term in sentence for term in risky_terms)
             has_object = any(term in sentence for term in object_terms)
-            if has_risky and not has_object and not any(
-                marker in sentence for marker in negative_terms
+            if (
+                has_risky
+                and not has_object
+                and not any(marker in sentence for marker in negative_terms)
             ):
                 continue
-            if has_risky and has_object and not any(
-                marker in sentence for marker in negative_terms
+            if (
+                has_risky
+                and has_object
+                and not any(marker in sentence for marker in negative_terms)
             ):
                 clauses = re.split(r"[，,；;]", sentence)
                 if len(clauses) > 1:
                     clauses = [
-                        clause for clause in clauses
+                        clause
+                        for clause in clauses
                         if not any(term in clause for term in risky_terms)
                     ]
                     sentence = "，".join(clauses)
@@ -982,9 +1014,7 @@ class VisionBridge:
                 )
                 return None
             rows = raw[:expected].reshape(int(frame.height), row_bytes)
-            image = rows[:, : int(frame.width) * 3].reshape(
-                int(frame.height), int(frame.width), 3
-            )
+            image = rows[:, : int(frame.width) * 3].reshape(int(frame.height), int(frame.width), 3)
             # The rest of VisionBridge follows OpenCV's BGR convention.
             if encoding == "rgb8":
                 image = image[:, :, ::-1]
@@ -1006,7 +1036,8 @@ class VisionBridge:
         try:
             if self._ros2_grabber is None:
                 self._ros2_grabber = _ROS2FrameGrabber(
-                    topic=self._ros2_topic, timeout=5.0,
+                    topic=self._ros2_topic,
+                    timeout=5.0,
                 )
             return self._ros2_grabber.grab()
         except Exception as exc:
@@ -1146,6 +1177,7 @@ class VisionBridge:
                 parts.append(name)
 
         from collections import Counter
+
         counts: Counter[str] = Counter(parts)
         items = ", ".join(f"{c}个{n}" if c > 1 else n for n, c in counts.items())
         return f"我看到了: {items}"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -2393,6 +2394,42 @@ def test_customer_project_onsite_evidence_ignores_claimed_sha256(tmp_path: Path)
     assert registered["accepted"] is True
     assert registered["receipt"]["sha256"] == actual_sha
     assert registered["receipt"]["sha256"] != claimed_sha
+
+
+def test_customer_project_onsite_evidence_accepts_profile_bundle_sibling_evidence() -> None:
+    with tempfile.TemporaryDirectory(prefix="askme-field-evidence-") as temp_dir:
+        temp_path = Path(temp_dir)
+        profile_root = temp_path / "profiles"
+        shutil.copytree(Path("deploy/site-profiles"), profile_root)
+        evidence_path = temp_path / "manual-device-ingest.json"
+        evidence_path.write_text(
+            json.dumps(_forged_onsite_evidence_payload("device_ingest")),
+            encoding="utf-8",
+        )
+        claimed_sha = "f" * 64
+
+        registered = register_customer_project_onsite_evidence(
+            profile_root,
+            "demo-field-ops",
+            {
+                "evidence_type": "device_ingest",
+                "status": "passed",
+                "path": str(evidence_path),
+                "sha256": claimed_sha,
+                "production_eligible": True,
+            },
+            operator_id="delivery.lead",
+            reason="Profile-bundle-local manual evidence should remain auditable.",
+        )
+
+        actual_sha = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+        assert registered["accepted"] is True
+        receipt = registered["receipt"]
+        assert receipt["sha256"] == actual_sha
+        assert receipt["sha256"] != claimed_sha
+        assert receipt["production_eligible"] is False
+        assert receipt["trust_status"] == "manual_check"
+        assert receipt["acceptance_gate_eligible"] is False
 
 
 def test_customer_project_onsite_evidence_plain_file_does_not_open_acceptance_gate(

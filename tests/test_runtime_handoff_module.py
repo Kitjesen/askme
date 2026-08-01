@@ -153,3 +153,89 @@ def test_runtime_handoff_module_wires_external_runtime_client_contract() -> None
     assert payload["runtime_client"]["endpoint_configured"] is True
     assert payload["runtime_client"]["enable_external_runtime"] is True
     assert payload["runtime_client"]["hardware_dispatch"] is False
+
+
+def test_runtime_handoff_module_forwards_voice_operator_provenance() -> None:
+    class FakeCognitionModule:
+        name = "cognition"
+
+        def __init__(self) -> None:
+            self.world_state = WorldStateService()
+
+    registry = ModuleRegistry()
+    registry.register(FakeCognitionModule())
+    module = RuntimeHandoffModule()
+    module.build({"runtime_handoff": {"profile": "fake"}}, registry)
+
+    payload = module.voice_turn_payload(
+        "confirm",
+        conversation_session_id="voice-module-thread",
+        operator_id="operator-7",
+        operator_roles=["operator"],
+        operator_authenticated=True,
+        operator_source="oidc",
+        runtime_permission="runtime:submit",
+        reason="test provenance",
+        risk_acknowledgement=True,
+    )
+
+    assert payload["handled"] is False
+    assert payload["voice_turn"]["operator"] == {
+        "operator_id": "operator-7",
+        "roles": ["operator"],
+        "authenticated": True,
+        "source": "oidc",
+        "permission": "runtime:submit",
+        "conversation_session_id": "voice-module-thread",
+    }
+    assert payload["voice_turn"]["runtime_permission"] == "runtime:submit"
+
+
+def test_runtime_handoff_module_forwards_action_operator_context() -> None:
+    class FakeCognitionModule:
+        name = "cognition"
+
+        def __init__(self) -> None:
+            self.world_state = WorldStateService()
+
+    registry = ModuleRegistry()
+    registry.register(FakeCognitionModule())
+    module = RuntimeHandoffModule()
+    module.build({"runtime_handoff": {"profile": "sim"}}, registry)
+    submitted = module.submit_plan_payload(
+        {
+            "plan_id": "operator-context-plan",
+            "planning_session_id": "plan-context",
+            "intent": "visitor_escort",
+            "handoff_ready": True,
+            "confirmation_status": "confirmed",
+            "mission": {"mission": {"mission_type": "visitor_escort"}},
+        }
+    )
+    run_id = submitted["run"]["run_id"]
+
+    payload = module.pause_payload(
+        run_id,
+        operator_id="security-1",
+        reason="visitor entered path",
+        risk_acknowledgement=True,
+        operator_context={
+            "operator_id": "security-1",
+            "roles": ["operator"],
+            "authenticated": True,
+            "source": "oidc",
+            "permission": "runtime:pause",
+            "conversation_session_id": "conv-action-1",
+        },
+    )
+
+    action = payload["run"]["operator_actions"][-1]
+    assert action["operator_id"] == "security-1"
+    assert action["operator_context"] == {
+        "operator_id": "security-1",
+        "roles": ["operator"],
+        "authenticated": True,
+        "source": "oidc",
+        "permission": "runtime:pause",
+        "conversation_session_id": "conv-action-1",
+    }

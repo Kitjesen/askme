@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from askme.pipeline.text_loop import TextLoop, _TextClarificationAudio
 
@@ -14,6 +14,7 @@ from askme.robot_interaction import Intent, IntentType
 # Helper: build a TextLoop with controlled mocks
 # ---------------------------------------------------------------------------
 
+
 def _make_text_loop(input_answers, router_side_effect, proactive_side_effect=None):
     """Build TextLoop with mocked dependencies."""
     mock_router = MagicMock()
@@ -22,6 +23,7 @@ def _make_text_loop(input_answers, router_side_effect, proactive_side_effect=Non
     mock_pipeline = MagicMock()
     mock_pipeline.start_idle_reflection.return_value = None
     mock_pipeline.handle_pending_tool_response = AsyncMock(return_value=None)
+    mock_pipeline.execute_skill = AsyncMock(return_value="")
     mock_pipeline.start_memory_prefetch = MagicMock(
         return_value=asyncio.create_task(asyncio.sleep(0))
     )
@@ -74,6 +76,7 @@ def _make_text_loop(input_answers, router_side_effect, proactive_side_effect=Non
 # Class 1: slot filling via proactive
 # ---------------------------------------------------------------------------
 
+
 class TestTextLoopProactiveSlotFilling:
     """Proactive.run() result controls whether dispatcher.dispatch is called."""
 
@@ -97,8 +100,12 @@ class TestTextLoopProactiveSlotFilling:
         with patch("builtins.input", side_effect=input_fn):
             await loop.run()
 
-        mock_dispatcher.dispatch.assert_called_once_with(
-            "navigate", enriched, source="text"
+        mock_dispatcher.dispatch.assert_awaited_once_with(
+            "navigate",
+            enriched,
+            source="text",
+            conversation_session_id=ANY,
+            voice_turn_id=ANY,
         )
 
     async def test_slot_not_filled_does_not_dispatch(self):
@@ -140,13 +147,20 @@ class TestTextLoopProactiveSlotFilling:
         with patch("builtins.input", side_effect=input_fn):
             await loop.run()
 
-        loop._pipeline.execute_skill.assert_called_once_with("navigate", "去仓库A")
+        loop._pipeline.execute_skill.assert_awaited_once_with(
+            "navigate",
+            "去仓库A",
+            source="text",
+            conversation_session_id=ANY,
+            voice_turn_id=ANY,
+        )
         mock_dispatcher.dispatch.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
 # Class 2: reroute logic
 # ---------------------------------------------------------------------------
+
 
 class TestTextLoopReroute:
     """interrupt_payload triggers reroute; original skill is not dispatched."""
@@ -178,9 +192,7 @@ class TestTextLoopReroute:
             router_calls[0] += 1
             if router_calls[0] == 1:
                 # First router call — original navigate trigger
-                return Intent(
-                    type=IntentType.VOICE_TRIGGER, skill_name="navigate", raw_text=text
-                )
+                return Intent(type=IntentType.VOICE_TRIGGER, skill_name="navigate", raw_text=text)
             # Subsequent calls — reroute
             return reroute_intent
 
@@ -217,9 +229,7 @@ class TestTextLoopReroute:
 
     async def test_reroute_to_general_calls_handle_general(self):
         """interrupt_payload routes to GENERAL → dispatcher.handle_general called."""
-        reroute_intent = Intent(
-            type=IntentType.GENERAL, raw_text="查个时间"
-        )
+        reroute_intent = Intent(type=IntentType.GENERAL, raw_text="查个时间")
         # Second proactive.run won't be called for GENERAL branch
         reroute_result = ProactiveResult(enriched_text="查个时间", proceed=True)
 
@@ -262,6 +272,7 @@ class TestTextLoopReroute:
 # Class 3: _TextClarificationAudio unit tests
 # ---------------------------------------------------------------------------
 
+
 class TestTextClarificationAudio:
     """Unit tests for the _TextClarificationAudio adapter."""
 
@@ -286,6 +297,7 @@ class TestTextClarificationAudio:
 # ---------------------------------------------------------------------------
 # Class 4: reroute logging
 # ---------------------------------------------------------------------------
+
 
 class TestTextLoopRerouteLogging:
     """Verify that reroute events are logged."""
@@ -314,9 +326,7 @@ class TestTextLoopRerouteLogging:
         def router_side_effect(text):
             router_calls[0] += 1
             if router_calls[0] == 1:
-                return Intent(
-                    type=IntentType.VOICE_TRIGGER, skill_name="navigate", raw_text=text
-                )
+                return Intent(type=IntentType.VOICE_TRIGGER, skill_name="navigate", raw_text=text)
             return reroute_intent
 
         loop, mock_dispatcher, input_fn = _make_text_loop(

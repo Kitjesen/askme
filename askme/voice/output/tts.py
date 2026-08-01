@@ -38,11 +38,16 @@ from askme.voice.output.volcengine_tts_client import (
 try:
     import sounddevice as sd
 except ModuleNotFoundError:
+
     class _SoundDeviceStub:
         InputStream = None
-        class CallbackFlags: pass
+
+        class CallbackFlags:
+            pass
+
         class default:
             device = (None, None)
+
         @staticmethod
         def play(*args: object, **kwargs: object) -> None: ...
         @staticmethod
@@ -52,10 +57,14 @@ except ModuleNotFoundError:
         @staticmethod
         def query_devices(device: object = None, kind: object = None) -> object:
             return {}
+
         class OutputStream:
             def __init__(self, *args: object, **kwargs: object) -> None: ...
-            def __enter__(self) -> _SoundDeviceStub.OutputStream: return self
+            def __enter__(self) -> _SoundDeviceStub.OutputStream:
+                return self
+
             def __exit__(self, *args: object) -> None: ...
+
     sd = _SoundDeviceStub()  # type: ignore[assignment]
 
 if TYPE_CHECKING:
@@ -136,14 +145,14 @@ class TTSEngine(TTSBackend):
     }
 
     # Regex patterns for cleaning text before TTS
-    _RE_EMOJI = re.compile(r'[\U00010000-\U0010ffff]')
-    _RE_BOLD = re.compile(r'\*\*(.+?)\*\*')
-    _RE_ITALIC = re.compile(r'\*(.+?)\*')
-    _RE_CODE = re.compile(r'`(.+?)`')
-    _RE_HEADER = re.compile(r'^#+\s*', flags=re.MULTILINE)
-    _RE_LIST = re.compile(r'^[-*]\s+', flags=re.MULTILINE)
-    _RE_IMG = re.compile(r'!\[.*?\]\(.*?\)')
-    _RE_LINK = re.compile(r'\[(.+?)\]\(.*?\)')
+    _RE_EMOJI = re.compile(r"[\U00010000-\U0010ffff]")
+    _RE_BOLD = re.compile(r"\*\*(.+?)\*\*")
+    _RE_ITALIC = re.compile(r"\*(.+?)\*")
+    _RE_CODE = re.compile(r"`(.+?)`")
+    _RE_HEADER = re.compile(r"^#+\s*", flags=re.MULTILINE)
+    _RE_LIST = re.compile(r"^[-*]\s+", flags=re.MULTILINE)
+    _RE_IMG = re.compile(r"!\[.*?\]\(.*?\)")
+    _RE_LINK = re.compile(r"\[(.+?)\]\(.*?\)")
     _INTERNAL_TEXT_MARKERS = (
         "[SILENT]",
         "DSML",
@@ -160,9 +169,7 @@ class TTSEngine(TTSBackend):
 
     def __init__(self, config: dict[str, Any], *, audio_router: AudioRouter | None = None) -> None:
         self._backend: str = self._normalize_backend(config.get("backend", "local"))
-        self._fallback_backend: str = str(
-            config.get("fallback_backend", "edge")
-        ).strip().lower()
+        self._fallback_backend: str = str(config.get("fallback_backend", "edge")).strip().lower()
         if self._fallback_backend not in {"local", "edge"}:
             logger.warning(
                 "Unknown TTS fallback_backend=%s, using edge",
@@ -200,9 +207,7 @@ class TTSEngine(TTSBackend):
         self._minimax_tts_ws_url: str = config.get(
             "minimax_tts_ws_url", "wss://api.minimax.io/ws/v1/t2a_v2"
         )
-        self._minimax_tts_transport: str = str(
-            config.get("minimax_tts_transport", "sse")
-        ).lower()
+        self._minimax_tts_transport: str = str(config.get("minimax_tts_transport", "sse")).lower()
         self._minimax_live_session_prewarm_enabled: bool = bool(
             config.get("minimax_live_session_prewarm_enabled", False)
         )
@@ -230,17 +235,11 @@ class TTSEngine(TTSBackend):
         )
         self._volcengine_tts_api_key: str = str(config.get("volcengine_tts_api_key", ""))
         self._volcengine_tts_app_id: str = str(config.get("volcengine_tts_app_id", ""))
-        self._volcengine_tts_access_key: str = str(
-            config.get("volcengine_tts_access_key", "")
-        )
-        self._volcengine_tts_resource_id: str = str(
-            config.get("volcengine_tts_resource_id", "")
-        )
+        self._volcengine_tts_access_key: str = str(config.get("volcengine_tts_access_key", ""))
+        self._volcengine_tts_resource_id: str = str(config.get("volcengine_tts_resource_id", ""))
         self._volcengine_tts_speaker: str = str(config.get("volcengine_tts_speaker", ""))
         self._volcengine_tts_model: str = str(
-            config.get("volcengine_tts_model")
-            or self._volcengine_tts_resource_id
-            or "seed-tts-2.0"
+            config.get("volcengine_tts_model") or self._volcengine_tts_resource_id or "seed-tts-2.0"
         )
         self._volcengine_tts_sample_rate: int = int(
             config.get("volcengine_tts_sample_rate", self._sample_rate)
@@ -260,7 +259,7 @@ class TTSEngine(TTSBackend):
             1.0,
             min(
                 110.0,
-                float(config.get("volcengine_tts_idle_timeout_seconds", 30.0)),
+                float(config.get("volcengine_tts_idle_timeout_seconds", 90.0)),
             ),
         )
         self._volcengine_live_session_prewarm_enabled: bool = bool(
@@ -276,9 +275,7 @@ class TTSEngine(TTSBackend):
         )
         self._voice_profile_state_path: Path | None = Path(state_path) if state_path else None
         self._voice_profile_persistence_error: str | None = None
-        self._active_voice_profile_id: str = str(
-            config.get("voice_profile", "patrol_default")
-        )
+        self._active_voice_profile_id: str = str(config.get("voice_profile", "patrol_default"))
         persisted_profile_id = self._load_persisted_voice_profile_id()
         if persisted_profile_id:
             self._active_voice_profile_id = persisted_profile_id
@@ -296,12 +293,8 @@ class TTSEngine(TTSBackend):
         self._minimax_leading_silence_preserve_seconds: float = float(
             config.get("minimax_leading_silence_preserve_seconds", 0.16)
         )
-        self._minimax_onset_threshold: float = float(
-            config.get("minimax_onset_threshold", 0.0005)
-        )
-        legacy_stream_ms = (
-            1000.0 * self._MINIMAX_MIN_STREAM_SAMPLES / max(1, self._sample_rate)
-        )
+        self._minimax_onset_threshold: float = float(config.get("minimax_onset_threshold", 0.0005))
+        legacy_stream_ms = 1000.0 * self._MINIMAX_MIN_STREAM_SAMPLES / max(1, self._sample_rate)
         self._minimax_stream_first_chunk_ms = max(
             1.0,
             float(config.get("minimax_stream_first_chunk_ms", legacy_stream_ms)),
@@ -336,7 +329,7 @@ class TTSEngine(TTSBackend):
             1.0,
             min(
                 110.0,
-                float(config.get("minimax_ws_idle_timeout_seconds", 30.0)),
+                float(config.get("minimax_ws_idle_timeout_seconds", 90.0)),
             ),
         )
         self._minimax_ws_use_lock = threading.Lock()
@@ -344,6 +337,7 @@ class TTSEngine(TTSBackend):
         self._minimax_ws_connection: Any | None = None
         self._minimax_ws_signature: tuple[Any, ...] | None = None
         self._minimax_ws_last_used: float = 0.0
+        self._minimax_ws_use_revision: int = 0
         self._minimax_ws_epoch: int = 0
         self._minimax_last_complete_generation: int | None = None
         # Live prewarm builds a provisional socket without holding the real
@@ -363,6 +357,7 @@ class TTSEngine(TTSBackend):
         self._volcengine_client: VolcengineTTSClient | None = None
         self._volcengine_client_signature: tuple[Any, ...] | None = None
         self._volcengine_client_last_used: float = 0.0
+        self._volcengine_client_use_revision: int = 0
         self._volcengine_client_epoch: int = 0
         self._volcengine_last_complete_generation: int | None = None
         self._volcengine_prewarm_lock = threading.Lock()
@@ -427,12 +422,8 @@ class TTSEngine(TTSBackend):
         self._render_reference_lock = threading.Lock()
         self._render_reference_delivery_lock = threading.Lock()
         self._render_reference_callback: RenderReferenceCallback | None = None
-        self._render_reference_failure_callback: (
-            RenderReferenceFailureCallback | None
-        ) = None
-        self._render_transport_failure_callback: (
-            RenderReferenceFailureCallback | None
-        ) = None
+        self._render_reference_failure_callback: RenderReferenceFailureCallback | None = None
+        self._render_transport_failure_callback: RenderReferenceFailureCallback | None = None
         self._render_transport_failure_latched = False
         self._render_reference_reset_callback: RenderReferenceResetCallback | None = None
         self._render_reference_queue: queue.Queue[_RenderReferenceItem | None] = queue.Queue(
@@ -483,9 +474,7 @@ class TTSEngine(TTSBackend):
         self._usb_direct_speech_warm_leadin_seconds: float = float(
             config.get("usb_direct_speech_warm_leadin_seconds", 0.12)
         )
-        self._usb_direct_speech_gain: float = float(
-            config.get("usb_direct_speech_gain", 1.0)
-        )
+        self._usb_direct_speech_gain: float = float(config.get("usb_direct_speech_gain", 1.0))
         self._usb_direct_speech_wake_signal_seconds: float = float(
             config.get("usb_direct_speech_wake_signal_seconds", 0.0)
         )
@@ -544,7 +533,9 @@ class TTSEngine(TTSBackend):
                 logger.warning("MiniMax TTS: no API key configured, falling back to edge-tts")
                 self._backend = "edge"
         if self._backend == "local" and not os.path.isdir(self._model_dir):
-            logger.warning("Local TTS model not found at %s, falling back to edge-tts", self._model_dir)
+            logger.warning(
+                "Local TTS model not found at %s, falling back to edge-tts", self._model_dir
+            )
             self._backend = "edge"
         if self._output_transport not in {"auto", "aplay", "sounddevice", "usb_direct"}:
             logger.warning("Unknown TTS output_transport=%s, using auto", self._output_transport)
@@ -580,10 +571,14 @@ class TTSEngine(TTSBackend):
             output_lines: list[str] = []
             for i, dev in enumerate(devices):
                 if dev["max_output_channels"] > 0:
-                    marker = " << SELECTED" if (
-                        self._output_device == i
-                        or (self._output_device is None and i == default_out)
-                    ) else ""
+                    marker = (
+                        " << SELECTED"
+                        if (
+                            self._output_device == i
+                            or (self._output_device is None and i == default_out)
+                        )
+                        else ""
+                    )
                     output_lines.append(
                         f"  [{i}] {dev['name']} (ch={dev['max_output_channels']}){marker}"
                     )
@@ -663,7 +658,8 @@ class TTSEngine(TTSBackend):
             self._local_sample_rate = warmup_audio.sample_rate
             logger.info(
                 "Local TTS initialized: model=%s, sample_rate=%d",
-                os.path.basename(model_file), self._local_sample_rate,
+                os.path.basename(model_file),
+                self._local_sample_rate,
             )
 
         except Exception as exc:
@@ -680,14 +676,14 @@ class TTSEngine(TTSBackend):
         if not text:
             return
         clean = text
-        clean = self._RE_EMOJI.sub('', clean)
-        clean = self._RE_BOLD.sub(r'\1', clean)
-        clean = self._RE_ITALIC.sub(r'\1', clean)
-        clean = self._RE_CODE.sub(r'\1', clean)
-        clean = self._RE_HEADER.sub('', clean)
-        clean = self._RE_LIST.sub('', clean)
-        clean = self._RE_IMG.sub('', clean)
-        clean = self._RE_LINK.sub(r'\1', clean)
+        clean = self._RE_EMOJI.sub("", clean)
+        clean = self._RE_BOLD.sub(r"\1", clean)
+        clean = self._RE_ITALIC.sub(r"\1", clean)
+        clean = self._RE_CODE.sub(r"\1", clean)
+        clean = self._RE_HEADER.sub("", clean)
+        clean = self._RE_LIST.sub("", clean)
+        clean = self._RE_IMG.sub("", clean)
+        clean = self._RE_LINK.sub(r"\1", clean)
         clean = clean.strip()
         if clean and self._is_speakable_text(clean):
             logger.info("speak queued: %r", clean[:60])
@@ -763,9 +759,7 @@ class TTSEngine(TTSBackend):
                 return False
             chunks.append(prepared.astype(np.float32, copy=True))
         if final:
-            tail_count = int(
-                self._sample_rate * self._output_tail_silence_seconds
-            )
+            tail_count = int(self._sample_rate * self._output_tail_silence_seconds)
             if tail_count > 0:
                 chunks.append(np.zeros(tail_count, dtype=np.float32))
         return self._append_streaming_audio_for_generation(
@@ -927,7 +921,7 @@ class TTSEngine(TTSBackend):
                 "reason": "" if created else "cache_write_failed",
             }
 
-    def prewarm_provider_session(self) -> dict[str, Any]:
+    def prewarm_provider_session(self, *, force_refresh: bool = False) -> dict[str, Any]:
         """Open/reuse the live provider session without sending text.
 
         For MiniMax WebSocket this warms the exact socket used by real
@@ -938,7 +932,7 @@ class TTSEngine(TTSBackend):
         """
 
         if self._backend == "volcengine":
-            return self._prewarm_volcengine_provider_session()
+            return self._prewarm_volcengine_provider_session(force_refresh=force_refresh)
         if self._backend != "minimax":
             return {"ok": False, "status": "skipped", "reason": "backend_not_minimax"}
         if self._minimax_tts_transport not in {"websocket", "ws"}:
@@ -981,14 +975,15 @@ class TTSEngine(TTSBackend):
                         and getattr(existing, "connected", True) is not False
                     )
                     last_used = self._minimax_ws_last_used
-                if reusable:
+                    use_revision = self._minimax_ws_use_revision
+                if reusable and not force_refresh:
                     return self._minimax_prewarm_result(
                         started_at=started_at,
                         status="reused",
                         reused=True,
                         last_used=last_used,
                     )
-                if existing is not None:
+                if existing is not None and not force_refresh:
                     self._invalidate_minimax_websocket(
                         expected=existing,
                         graceful=True,
@@ -1015,8 +1010,10 @@ class TTSEngine(TTSBackend):
                     "status": "superseded",
                     "reason": "synthesis_started",
                 }
+            lock_released = False
             try:
                 accepted = False
+                replaced = None
                 with self._minimax_ws_state_lock:
                     current = self._minimax_ws_connection
                     current_reusable = (
@@ -1031,21 +1028,37 @@ class TTSEngine(TTSBackend):
                         not self._minimax_prewarm_cancel.is_set()
                         and not self._shutdown_requested.is_set()
                         and self._minimax_ws_epoch == open_epoch
-                        and current is None
+                        and (
+                            current is None
+                            or (
+                                force_refresh
+                                and current is existing
+                                and self._minimax_ws_use_revision == use_revision
+                                and self._minimax_ws_signature == signature
+                            )
+                        )
                         and self._is_generation_current(generation)
                     ):
+                        replaced = current
                         self._minimax_ws_connection = candidate
                         self._minimax_ws_signature = signature
                         self._minimax_ws_last_used = time.monotonic()
+                        if replaced is not None:
+                            self._minimax_ws_epoch += 1
                         current_last_used = self._minimax_ws_last_used
                         accepted = True
                 if accepted:
-                    return self._minimax_prewarm_result(
+                    result = self._minimax_prewarm_result(
                         started_at=started_at,
-                        status="opened",
+                        status="refreshed" if replaced is not None else "opened",
                         reused=False,
                         last_used=current_last_used,
                     )
+                    self._minimax_ws_use_lock.release()
+                    lock_released = True
+                    if replaced is not None:
+                        self._close_minimax_ws_connection(replaced, graceful=True)
+                    return result
                 self._close_minimax_ws_connection(candidate, graceful=True)
                 if current_reusable:
                     return self._minimax_prewarm_result(
@@ -1060,7 +1073,8 @@ class TTSEngine(TTSBackend):
                     "reason": "provider_state_changed",
                 }
             finally:
-                self._minimax_ws_use_lock.release()
+                if not lock_released:
+                    self._minimax_ws_use_lock.release()
         except Exception as exc:
             if self._minimax_prewarm_cancel.is_set() or self._shutdown_requested.is_set():
                 return {"ok": False, "status": "cancelled", "reason": "cancelled"}
@@ -1230,11 +1244,10 @@ class TTSEngine(TTSBackend):
             generation = self._generation
             with self._playback_hold_condition:
                 self._playback_hold_attempts += 1
-                if (
-                    self._stop_requested.is_set()
-                    or self._playback_render_mode
-                    not in {"starting", "sounddevice_callback"}
-                ):
+                if self._stop_requested.is_set() or self._playback_render_mode not in {
+                    "starting",
+                    "sounddevice_callback",
+                }:
                     self._playback_hold_rejected += 1
                     self._playback_hold_last_reason = "unsupported_output_path"
                     return None
@@ -1261,10 +1274,7 @@ class TTSEngine(TTSBackend):
                     )
 
         with self._playback_hold_condition:
-            while (
-                self._playback_hold_token == token
-                and not self._playback_hold_acknowledged
-            ):
+            while self._playback_hold_token == token and not self._playback_hold_acknowledged:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._playback_hold_timeouts += 1
@@ -1282,10 +1292,7 @@ class TTSEngine(TTSBackend):
 
             if waiting_for_ack:
                 self._release_playback_hold_waiter_locked(token)
-            if (
-                self._playback_hold_token == token
-                and self._playback_hold_acknowledged
-            ):
+            if self._playback_hold_token == token and self._playback_hold_acknowledged:
                 return token
             return None
 
@@ -1425,7 +1432,9 @@ class TTSEngine(TTSBackend):
             time.sleep(0.02)
         while self._usb_audio_proc is not None:
             if time.monotonic() >= deadline:
-                logger.warning("wait_done: timed out after %.1fs waiting for MCP01 USB audio", timeout)
+                logger.warning(
+                    "wait_done: timed out after %.1fs waiting for MCP01 USB audio", timeout
+                )
                 return False
             time.sleep(0.02)
         while self._playback_hold_is_active():
@@ -1522,14 +1531,10 @@ class TTSEngine(TTSBackend):
             raise TypeError("render reference reset callback must be callable or None")
         with self._render_reference_lock:
             if reset_existing:
-                self._queue_render_reference_reset_locked(
-                    self._render_reference_reset_callback
-                )
+                self._queue_render_reference_reset_locked(self._render_reference_reset_callback)
             self._render_reference_epoch += 1
             self._render_reference_next_at = 0.0
-            self._render_reference_stale_items += (
-                self._discard_render_reference_queue_locked()
-            )
+            self._render_reference_stale_items += self._discard_render_reference_queue_locked()
             self._render_reference_callback = callback
             self._render_reference_failure_callback = on_failure
             self._render_reference_reset_callback = on_reset
@@ -1571,9 +1576,7 @@ class TTSEngine(TTSBackend):
                 return
             epoch = self._render_reference_epoch
             start_at = max(now, self._render_reference_next_at)
-            self._render_reference_next_at = start_at + (
-                len(payload) / float(render_sample_rate)
-            )
+            self._render_reference_next_at = start_at + (len(payload) / float(render_sample_rate))
             try:
                 self._render_reference_queue.put_nowait(
                     _RenderReferenceItem(
@@ -1792,12 +1795,8 @@ class TTSEngine(TTSBackend):
             self._render_reference_epoch += 1
             self._render_reference_next_at = 0.0
             self._render_reference_last_reset_reason = reason
-            self._queue_render_reference_reset_locked(
-                self._render_reference_reset_callback
-            )
-            self._render_reference_stale_items += (
-                self._discard_render_reference_queue_locked()
-            )
+            self._queue_render_reference_reset_locked(self._render_reference_reset_callback)
+            self._render_reference_stale_items += self._discard_render_reference_queue_locked()
         self._run_pending_render_reference_resets_if_idle()
 
     def _queue_render_reference_reset_locked(
@@ -1844,9 +1843,7 @@ class TTSEngine(TTSBackend):
         with self._render_reference_lock:
             self._render_reference_epoch += 1
             self._render_reference_next_at = 0.0
-            self._render_reference_stale_items += (
-                self._discard_render_reference_queue_locked()
-            )
+            self._render_reference_stale_items += self._discard_render_reference_queue_locked()
             self._render_reference_callback = None
             self._render_reference_failure_callback = None
             self._render_reference_reset_callback = None
@@ -1949,13 +1946,9 @@ class TTSEngine(TTSBackend):
                 "supported": self._playback_render_mode == "sounddevice_callback",
                 "render_mode": self._playback_render_mode,
                 "active": hold_token is not None,
-                "acknowledged": (
-                    hold_token is not None and self._playback_hold_acknowledged
-                ),
+                "acknowledged": (hold_token is not None and self._playback_hold_acknowledged),
                 "waiting_callers": (
-                    self._playback_hold_waiters.get(hold_token, 0)
-                    if hold_token is not None
-                    else 0
+                    self._playback_hold_waiters.get(hold_token, 0) if hold_token is not None else 0
                 ),
                 "generation": hold_token.generation if hold_token is not None else None,
                 "epoch": hold_token.epoch if hold_token is not None else None,
@@ -1986,14 +1979,10 @@ class TTSEngine(TTSBackend):
                 "last_lag_ms": round(self._render_reference_last_lag_ms, 2),
                 "max_lag_ms": self._render_reference_max_lag_ms,
                 "last_reset_reason": self._render_reference_last_reset_reason,
-                "transport_failure_handler": (
-                    self._render_transport_failure_callback is not None
-                ),
+                "transport_failure_handler": (self._render_transport_failure_callback is not None),
                 "transport_failure_latched": self._render_transport_failure_latched,
             }
-        minimax_disabled_remaining_s = max(
-            0.0, self._minimax_disabled_until - time.monotonic()
-        )
+        minimax_disabled_remaining_s = max(0.0, self._minimax_disabled_until - time.monotonic())
         volcengine_disabled_remaining_s = max(
             0.0, self._volcengine_disabled_until - time.monotonic()
         )
@@ -2167,9 +2156,7 @@ class TTSEngine(TTSBackend):
             "label": profile.label,
             "use_case": profile.use_case,
             "voice_id": (
-                self._volcengine_tts_speaker
-                if self._backend == "volcengine"
-                else profile.voice_id
+                self._volcengine_tts_speaker if self._backend == "volcengine" else profile.voice_id
             ),
             "catalog_voice_id": profile.voice_id,
             "volcengine_voice_id": profile.volcengine_voice_id,
@@ -2297,10 +2284,7 @@ class TTSEngine(TTSBackend):
                 outdata.fill(0)
                 held = True
                 self._playback_hold_silent_callbacks += 1
-                if (
-                    not has_pcm_to_preserve
-                    and self.tts_text_queue.unfinished_tasks <= 0
-                ):
+                if not has_pcm_to_preserve and self.tts_text_queue.unfinished_tasks <= 0:
                     self._invalidate_playback_hold_locked("playback_completed")
                 elif not self._playback_hold_acknowledged:
                     self._playback_hold_acknowledged = True
@@ -2452,12 +2436,9 @@ class TTSEngine(TTSBackend):
                 # MiniMax failed — track and possibly disable temporarily
                 self._minimax_fail_count += 1
                 if self._minimax_fail_count >= self._MINIMAX_FAIL_THRESHOLD:
-                    self._minimax_disabled_until = (
-                        time.monotonic() + self._MINIMAX_BACKOFF_SECONDS
-                    )
+                    self._minimax_disabled_until = time.monotonic() + self._MINIMAX_BACKOFF_SECONDS
                     logger.warning(
-                        "TTS: MiniMax failed %d consecutive times — "
-                        "disabling for %.0f seconds",
+                        "TTS: MiniMax failed %d consecutive times — disabling for %.0f seconds",
                         self._minimax_fail_count,
                         self._MINIMAX_BACKOFF_SECONDS,
                     )
@@ -2496,8 +2477,7 @@ class TTSEngine(TTSBackend):
                         time.monotonic() + self._VOLCENGINE_BACKOFF_SECONDS
                     )
                     logger.warning(
-                        "TTS: Volcengine failed %d consecutive times — "
-                        "disabling for %.0f seconds",
+                        "TTS: Volcengine failed %d consecutive times — disabling for %.0f seconds",
                         self._volcengine_fail_count,
                         self._VOLCENGINE_BACKOFF_SECONDS,
                     )
@@ -2685,7 +2665,9 @@ class TTSEngine(TTSBackend):
         samples = np.frombuffer(audio_bytes, dtype="<i2").astype(np.float32) / 32768.0
         if self._minimax_sample_rate != self._sample_rate:
             samples = self._resample(
-                samples, self._minimax_sample_rate, self._sample_rate,
+                samples,
+                self._minimax_sample_rate,
+                self._sample_rate,
             )
         return samples
 
@@ -2727,9 +2709,7 @@ class TTSEngine(TTSBackend):
 
     def _minimax_stream_chunk_samples(self, *, first: bool) -> int:
         threshold_ms = (
-            self._minimax_stream_first_chunk_ms
-            if first
-            else self._minimax_stream_later_chunk_ms
+            self._minimax_stream_first_chunk_ms if first else self._minimax_stream_later_chunk_ms
         )
         return max(1, round(self._sample_rate * threshold_ms / 1000.0))
 
@@ -2792,8 +2772,7 @@ class TTSEngine(TTSBackend):
             threshold = max(0.0, self._minimax_onset_threshold)
             nonzero = np.where(np.abs(chunk) > threshold)[0]
             preserve = int(
-                self._sample_rate
-                * max(0.0, self._minimax_leading_silence_preserve_seconds)
+                self._sample_rate * max(0.0, self._minimax_leading_silence_preserve_seconds)
             )
             if len(nonzero) > 0 and nonzero[0] > preserve:
                 trim = max(0, nonzero[0] - preserve)
@@ -2976,9 +2955,8 @@ class TTSEngine(TTSBackend):
         if track_as_prewarm:
             with self._minimax_prewarm_candidate_lock:
                 if (
-                    (cancel_event is not None and cancel_event.is_set())
-                    or self._shutdown_requested.is_set()
-                ):
+                    cancel_event is not None and cancel_event.is_set()
+                ) or self._shutdown_requested.is_set():
                     self._close_minimax_ws_connection(ws, graceful=False)
                     return None
                 self._minimax_prewarm_candidate = ws
@@ -2987,26 +2965,26 @@ class TTSEngine(TTSBackend):
                 self._close_minimax_ws_connection(ws, graceful=False)
                 return None
             connected = json.loads(ws.recv())
-            connected_status = int(
-                (connected.get("base_resp") or {}).get("status_code", 0) or 0
-            )
+            connected_status = int((connected.get("base_resp") or {}).get("status_code", 0) or 0)
             if connected.get("event") != "connected_success" or connected_status != 0:
                 raise RuntimeError(f"MiniMax TTS WS connect failed: {connected}")
 
             if cancel_event is not None and cancel_event.is_set():
                 self._close_minimax_ws_connection(ws, graceful=False)
                 return None
-            ws.send(json.dumps({
-                "event": "task_start",
-                "model": self._minimax_tts_model,
-                "language_boost": "auto",
-                "voice_setting": self._minimax_voice_setting(),
-                "audio_setting": self._minimax_audio_setting(),
-            }))
-            started = json.loads(ws.recv())
-            started_status = int(
-                (started.get("base_resp") or {}).get("status_code", 0) or 0
+            ws.send(
+                json.dumps(
+                    {
+                        "event": "task_start",
+                        "model": self._minimax_tts_model,
+                        "language_boost": "auto",
+                        "voice_setting": self._minimax_voice_setting(),
+                        "audio_setting": self._minimax_audio_setting(),
+                    }
+                )
             )
+            started = json.loads(ws.recv())
+            started_status = int((started.get("base_resp") or {}).get("status_code", 0) or 0)
             if started.get("event") != "task_started" or started_status != 0:
                 raise RuntimeError(f"MiniMax TTS WS start failed: {started}")
             if cancel_event is not None and cancel_event.is_set():
@@ -3036,8 +3014,7 @@ class TTSEngine(TTSBackend):
             reusable = (
                 current is not None
                 and self._minimax_ws_signature == signature
-                and now - self._minimax_ws_last_used
-                <= self._minimax_ws_idle_timeout_seconds
+                and now - self._minimax_ws_last_used <= self._minimax_ws_idle_timeout_seconds
                 and getattr(current, "connected", True) is not False
             )
         if reusable:
@@ -3080,6 +3057,7 @@ class TTSEngine(TTSBackend):
         with self._minimax_ws_state_lock:
             if self._minimax_ws_connection is ws:
                 self._minimax_ws_last_used = time.monotonic()
+                self._minimax_ws_use_revision += 1
 
     async def _generate_minimax_websocket(self, text: str, generation: int) -> bool:
         """Stream one fragment through a reusable MiniMax WebSocket task.
@@ -3123,9 +3101,7 @@ class TTSEngine(TTSBackend):
                         if int(base_resp.get("status_code", 0) or 0) != 0:
                             raise RuntimeError(f"MiniMax TTS WS error: {base_resp}")
                         if payload.get("event") == "task_failed":
-                            raise RuntimeError(
-                                f"MiniMax TTS WS task failed: {payload}"
-                            )
+                            raise RuntimeError(f"MiniMax TTS WS task failed: {payload}")
 
                         data = payload.get("data") or {}
                         hex_audio = data.get("audio", "")
@@ -3148,9 +3124,7 @@ class TTSEngine(TTSBackend):
                         return True
                     encoded_samples = None
                     if encoded_audio:
-                        encoded_samples = self._decode_minimax_encoded_audio(
-                            bytes(encoded_audio)
-                        )
+                        encoded_samples = self._decode_minimax_encoded_audio(bytes(encoded_audio))
                     if not self._commit_minimax_samples_for_generation(
                         generation,
                         pending,
@@ -3160,9 +3134,7 @@ class TTSEngine(TTSBackend):
                     ):
                         return True
                     if int(state["queued_samples"]) <= 0:
-                        raise RuntimeError(
-                            "MiniMax TTS WS produced no playable audio"
-                        )
+                        raise RuntimeError("MiniMax TTS WS produced no playable audio")
 
                     self._mark_minimax_websocket_used(ws)
                     self._mark_minimax_generation_complete(generation)
@@ -3200,10 +3172,7 @@ class TTSEngine(TTSBackend):
             bool(self._volcengine_tts_ws_url)
             and bool(
                 self._volcengine_tts_api_key
-                or (
-                    self._volcengine_tts_app_id
-                    and self._volcengine_tts_access_key
-                )
+                or (self._volcengine_tts_app_id and self._volcengine_tts_access_key)
             )
             and bool(self._volcengine_tts_resource_id)
             and bool(self._volcengine_tts_speaker)
@@ -3315,6 +3284,7 @@ class TTSEngine(TTSBackend):
         with self._volcengine_state_lock:
             if self._volcengine_client is client:
                 self._volcengine_client_last_used = time.monotonic()
+                self._volcengine_client_use_revision += 1
 
     def _decode_volcengine_pcm_chunk(self, audio_bytes: bytes) -> np.ndarray:
         if not audio_bytes:
@@ -3353,9 +3323,8 @@ class TTSEngine(TTSBackend):
             client: VolcengineTTSClient | None = None
 
             def should_continue() -> bool:
-                return (
-                    not self._shutdown_requested.is_set()
-                    and self._is_generation_current(generation)
+                return not self._shutdown_requested.is_set() and self._is_generation_current(
+                    generation
                 )
 
             def on_audio(payload: bytes) -> None:
@@ -3426,7 +3395,9 @@ class TTSEngine(TTSBackend):
                     )
                 return False
 
-    def _prewarm_volcengine_provider_session(self) -> dict[str, Any]:
+    def _prewarm_volcengine_provider_session(
+        self, *, force_refresh: bool = False
+    ) -> dict[str, Any]:
         if not self._volcengine_live_session_prewarm_enabled:
             return {"ok": False, "status": "skipped", "reason": "disabled"}
         if not self._is_volcengine_configured():
@@ -3446,6 +3417,7 @@ class TTSEngine(TTSBackend):
                 now = time.monotonic()
                 with self._volcengine_state_lock:
                     current = self._volcengine_client
+                    existing = current
                     reusable = (
                         current is not None
                         and self._volcengine_client_signature == signature
@@ -3453,14 +3425,19 @@ class TTSEngine(TTSBackend):
                         <= self._volcengine_tts_idle_timeout_seconds
                     )
                     last_used = self._volcengine_client_last_used
+                    use_revision = self._volcengine_client_use_revision
                     open_epoch = self._volcengine_client_epoch
-                if reusable:
+                if reusable and not force_refresh:
                     return self._volcengine_prewarm_result(
                         started_at=started_at,
                         status="reused",
                         reused=True,
                         last_used=last_used,
                     )
+                if existing is not None and not force_refresh:
+                    self._invalidate_volcengine_client(expected=existing)
+                    with self._volcengine_state_lock:
+                        open_epoch = self._volcengine_client_epoch
             finally:
                 self._volcengine_use_lock.release()
 
@@ -3491,8 +3468,10 @@ class TTSEngine(TTSBackend):
                     "status": "superseded",
                     "reason": "synthesis_started",
                 }
+            lock_released = False
             try:
                 accepted = False
+                replaced = None
                 with self._volcengine_state_lock:
                     current = self._volcengine_client
                     current_reusable = (
@@ -3506,20 +3485,36 @@ class TTSEngine(TTSBackend):
                         not self._volcengine_prewarm_cancel.is_set()
                         and not self._shutdown_requested.is_set()
                         and self._volcengine_client_epoch == open_epoch
-                        and current is None
+                        and (
+                            current is None
+                            or (
+                                force_refresh
+                                and current is existing
+                                and self._volcengine_client_use_revision == use_revision
+                                and self._volcengine_client_signature == signature
+                            )
+                        )
                     ):
+                        replaced = current
                         self._volcengine_client = candidate
                         self._volcengine_client_signature = signature
                         self._volcengine_client_last_used = time.monotonic()
+                        if replaced is not None:
+                            self._volcengine_client_epoch += 1
                         current_last_used = self._volcengine_client_last_used
                         accepted = True
                 if accepted:
-                    return self._volcengine_prewarm_result(
+                    result = self._volcengine_prewarm_result(
                         started_at=started_at,
-                        status="opened",
+                        status="refreshed" if replaced is not None else "opened",
                         reused=False,
                         last_used=current_last_used,
                     )
+                    self._volcengine_use_lock.release()
+                    lock_released = True
+                    if replaced is not None:
+                        self._close_volcengine_client(replaced)
+                    return result
                 self._close_volcengine_client(candidate)
                 if current_reusable:
                     return self._volcengine_prewarm_result(
@@ -3534,7 +3529,8 @@ class TTSEngine(TTSBackend):
                     "reason": "provider_state_changed",
                 }
             finally:
-                self._volcengine_use_lock.release()
+                if not lock_released:
+                    self._volcengine_use_lock.release()
         except Exception as exc:
             if self._volcengine_prewarm_cancel.is_set() or self._shutdown_requested.is_set():
                 return {"ok": False, "status": "cancelled", "reason": "cancelled"}
@@ -3650,7 +3646,9 @@ class TTSEngine(TTSBackend):
     def _usb_direct_source_path(self) -> Path:
         if self._usb_audio_source:
             return Path(self._usb_audio_source)
-        return Path(__file__).resolve().parents[2] / "scripts" / "bench" / "mcp01_usb_audio_libusb.c"
+        return (
+            Path(__file__).resolve().parents[2] / "scripts" / "bench" / "mcp01_usb_audio_libusb.c"
+        )
 
     def _ensure_usb_audio_binary(self) -> str | None:
         if self._usb_audio_build_failed:
@@ -3758,9 +3756,7 @@ class TTSEngine(TTSBackend):
                     samples = np.concatenate([leadin, samples])
                 cushion = self._usb_direct_speech_onset_cushion_chunk(speech_samples)
                 if len(cushion) > 0:
-                    samples = np.concatenate(
-                        [samples[:leadin_len], cushion, samples[leadin_len:]]
-                    )
+                    samples = np.concatenate([samples[:leadin_len], cushion, samples[leadin_len:]])
             elif preroll_if_cold and not self._is_dac_warm():
                 preroll = self._usb_direct_preroll_chunk()
                 if len(preroll) > 0:
@@ -4016,9 +4012,7 @@ class TTSEngine(TTSBackend):
                 stderr.decode(errors="replace").strip(),
             )
             if not self._stop_requested.is_set():
-                self.report_render_transport_failure(
-                    f"usb_one_shot_exit_{proc.returncode}"
-                )
+                self.report_render_transport_failure(f"usb_one_shot_exit_{proc.returncode}")
             return False
         logger.info("MCP01 USB audio playback ok: %s", stdout.decode(errors="replace").strip())
         self._last_aplay_close = time.monotonic()
@@ -4162,11 +4156,13 @@ class TTSEngine(TTSBackend):
         hold_samples = max(0, total_samples - wake_samples - gap_samples)
 
         parts: list[np.ndarray] = []
-        parts.append(self._usb_direct_tone_chunk(
-            wake_samples,
-            hz=self._usb_direct_speech_wake_signal_hz,
-            gain=self._usb_direct_speech_wake_signal_gain,
-        ))
+        parts.append(
+            self._usb_direct_tone_chunk(
+                wake_samples,
+                hz=self._usb_direct_speech_wake_signal_hz,
+                gain=self._usb_direct_speech_wake_signal_gain,
+            )
+        )
         if gap_samples > 0:
             parts.append(self._usb_direct_noise_chunk(gap_samples, amp=noise_gain, seed=seed + 1))
         if hold_samples > 0:
@@ -4247,10 +4243,7 @@ class TTSEngine(TTSBackend):
             )
 
             _use_usb_direct = self._should_use_usb_direct()
-            if _use_usb_direct or (
-                self._aplay_bin
-                and self._output_transport in {"auto", "aplay"}
-            ):
+            if _use_usb_direct or (self._aplay_bin and self._output_transport in {"auto", "aplay"}):
                 self._set_playback_render_mode("unsupported")
             if _use_usb_direct and self._output_transport == "auto":
                 logger.info("TTS playback: ALSA plughw output unavailable; using MCP01 USB direct")
@@ -4288,9 +4281,12 @@ class TTSEngine(TTSBackend):
             ):
                 _aplay_cmd = [
                     self._aplay_bin,
-                    "-r", str(self._sample_rate),
-                    "-f", "S16_LE",
-                    "-c", "1",
+                    "-r",
+                    str(self._sample_rate),
+                    "-f",
+                    "S16_LE",
+                    "-c",
+                    "1",
                     "-q",
                 ]
                 if self._output_device is not None:
@@ -4302,9 +4298,7 @@ class TTSEngine(TTSBackend):
                 _preroll_n = int(self._sample_rate * 1.5)
                 _rng = np.random.RandomState(42)  # deterministic for consistency
                 _preroll_pcm = (_rng.randn(_preroll_n) * 200).astype(np.int16)
-                _preroll_reference = (
-                    _preroll_pcm.astype(np.float32) / 32768.0
-                )
+                _preroll_reference = _preroll_pcm.astype(np.float32) / 32768.0
 
             if _aplay_cmd is None and not _use_usb_direct:
                 self._play_sounddevice_stream_until_stopped()
@@ -4364,11 +4358,7 @@ class TTSEngine(TTSBackend):
                     logger.info("TTS playback: stop_requested, skipping queued audio")
                     continue
 
-                if (
-                    _aplay_cmd is not None
-                    and _proc is None
-                    and self._aplay_prebuffer_pending()
-                ):
+                if _aplay_cmd is not None and _proc is None and self._aplay_prebuffer_pending():
                     if not _prebuffer_wait_logged:
                         if self._aplay_wait_for_synthesis_complete:
                             logger.info("aplay: buffering complete utterance before playback")
@@ -4420,8 +4410,7 @@ class TTSEngine(TTSBackend):
                             # intentionally selects the safe delete fallback.
                             render_at = max(
                                 usb_started_at,
-                                usb_completed_at
-                                - (len(chunk) / float(self._sample_rate)),
+                                usb_completed_at - (len(chunk) / float(self._sample_rate)),
                             )
                             self._record_streaming_pcm_render(
                                 len(chunk),
@@ -4429,9 +4418,7 @@ class TTSEngine(TTSBackend):
                             )
                     elif _aplay_cmd is not None:
                         dur = len(chunk) / self._sample_rate
-                        logger.info(
-                            "aplay: %d samples = %.3fs", len(chunk), dur
-                        )
+                        logger.info("aplay: %d samples = %.3fs", len(chunk), dur)
                         try:
                             # Start persistent aplay on first chunk (with retry on EBUSY)
                             if _proc is None:
@@ -4441,7 +4428,8 @@ class TTSEngine(TTSBackend):
                                 for _retry in range(4):
                                     try:
                                         _proc = subprocess.Popen(
-                                            _aplay_cmd, stdin=subprocess.PIPE,
+                                            _aplay_cmd,
+                                            stdin=subprocess.PIPE,
                                             stderr=subprocess.DEVNULL,
                                         )
                                         break
@@ -4458,7 +4446,8 @@ class TTSEngine(TTSBackend):
                             if _need_preroll:
                                 _dac_warm = (
                                     self._last_aplay_close > 0
-                                    and (time.monotonic() - self._last_aplay_close) < self._preroll_warm_window
+                                    and (time.monotonic() - self._last_aplay_close)
+                                    < self._preroll_warm_window
                                 )
                                 if not _dac_warm:
                                     if _proc is None:
@@ -4596,9 +4585,7 @@ class TTSEngine(TTSBackend):
                             self._stop_requested.clear()
                             self._clear_audio_buffer()
                             self._playback_busy.clear()
-                            logger.info(
-                                "TTS playback: stop_requested, skipping queued audio"
-                            )
+                            logger.info("TTS playback: stop_requested, skipping queued audio")
                             continue
                         if self._has_buffered_audio():
                             self._playback_busy.set()
@@ -4672,10 +4659,7 @@ class TTSEngine(TTSBackend):
         """Atomically fence and enqueue one terminal-aware PCM stream update."""
 
         with self._generation_lock:
-            if (
-                generation != self._generation
-                or self._streaming_pcm_final_generation == generation
-            ):
+            if generation != self._generation or self._streaming_pcm_final_generation == generation:
                 return False
             with self._streaming_pcm_playback_lock:
                 if self._streaming_pcm_playback_generation == generation:
@@ -4713,8 +4697,7 @@ class TTSEngine(TTSBackend):
             self._streaming_pcm_leading_samples -= leading
             available = max(
                 0,
-                self._streaming_pcm_queued_samples
-                - self._streaming_pcm_claimed_samples,
+                self._streaming_pcm_queued_samples - self._streaming_pcm_claimed_samples,
             )
             provider_samples = min(
                 available,

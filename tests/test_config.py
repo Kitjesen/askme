@@ -24,7 +24,7 @@ class TestGetConfig:
         """Env vars set in conftest should be substituted into config."""
         cfg = get_config(reload=True)
         brain = cfg.get("brain", {})
-        assert brain.get("api_key") == "sk-test-key"
+        assert brain.get("api_key") == "sk-test-litellm-key"
 
     def test_tts_sample_rate(self):
         """TTS sample_rate should be an integer."""
@@ -57,14 +57,9 @@ class TestGetConfig:
         assert cfg["brain"]["persona"]["customer_name"] == "聚龙科创e谷"
         assert cfg["voice"]["address_detection"]["names"] == ["小算"]
         assert cfg["voice"]["interaction_gate"]["wake_terms"] == ["小算", "机器人"]
-        assert cfg["voice"]["kws"]["keywords"] == [
-            "x iǎo s uàn :2.0 #0.20 @小算"
-        ]
+        assert cfg["voice"]["kws"]["keywords"] == ["x iǎo s uàn :2.0 #0.20 @小算"]
         assert Path(cfg["field_operations"]["site_profile_path"]) == (
-            project_root()
-            / "deploy"
-            / "site-profiles"
-            / "julong-tech-e-valley.yaml"
+            project_root() / "deploy" / "site-profiles" / "julong-tech-e-valley.yaml"
         )
         assert cfg["field_operations"]["robot_name"] == "小算"
         assert cfg["space_cognition"]["park_id"] == "julong-tech-e-valley"
@@ -101,7 +96,7 @@ class TestGetConfig:
                     "simulate:",
                     "MiniMax",
                     "Edge backend",
-                    "local\"",
+                    'local"',
                 )
             ):
                 high_touch_lines.append(line)
@@ -131,12 +126,13 @@ class TestGetConfig:
         profiles = cfg["voice"]["tts"]["voice_profiles"]
         assert profiles["patrol_default"]["label"] == "巡检播报"
         assert profiles["visitor_friendly"]["label"] == "游客服务"
-        assert "待现场标定" in cfg["field_operations"]["site_map"]["zones"][
-            "julong-guide-01"
-        ]["name"]
-        assert cfg["field_operations"]["site_map"]["zones"]["julong-patrol-01"][
-            "type"
-        ] == "patrol_checkpoint"
+        assert (
+            "待现场标定" in cfg["field_operations"]["site_map"]["zones"]["julong-guide-01"]["name"]
+        )
+        assert (
+            cfg["field_operations"]["site_map"]["zones"]["julong-patrol-01"]["type"]
+            == "patrol_checkpoint"
+        )
         assert "确认执行" in cfg["tools"]["confirmation_phrases"]
         assert "取消执行" in cfg["tools"]["rejection_phrases"]
 

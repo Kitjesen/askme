@@ -35,9 +35,7 @@ def test_cli_defaults_to_terminal_tui(monkeypatch) -> None:
     monkeypatch.setattr(
         cli,
         "_run_terminal_tui",
-        lambda *, robot_mode: seen.update(
-            {"robot_mode": robot_mode}
-        ),
+        lambda *, robot_mode: seen.update({"robot_mode": robot_mode}),
     )
 
     cli.main([])
@@ -180,15 +178,17 @@ def test_cli_json_escapes_chinese_for_non_utf8_pipe(monkeypatch) -> None:
 def test_cli_runtime_blueprints_delivery_package_writes_json(tmp_path: Path, capsys) -> None:
     output = tmp_path / "blueprint-package.json"
 
-    cli.main([
-        "runtime",
-        "blueprints",
-        "--name",
-        "park",
-        "--delivery-package",
-        "--output",
-        str(output),
-    ])
+    cli.main(
+        [
+            "runtime",
+            "blueprints",
+            "--name",
+            "park",
+            "--delivery-package",
+            "--output",
+            str(output),
+        ]
+    )
 
     console = capsys.readouterr().out
     payload = json.loads(output.read_text(encoding="utf-8"))
@@ -200,14 +200,16 @@ def test_cli_runtime_blueprints_delivery_package_writes_json(tmp_path: Path, cap
 
 
 def test_cli_runtime_blueprints_delivery_package_json_is_direct_package(capsys) -> None:
-    cli.main([
-        "runtime",
-        "blueprints",
-        "--name",
-        "park",
-        "--delivery-package",
-        "--json",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "blueprints",
+            "--name",
+            "park",
+            "--delivery-package",
+            "--json",
+        ]
+    )
 
     payload = json.loads(capsys.readouterr().out)
 
@@ -295,12 +297,14 @@ def test_cli_runtime_field_eval_prints_product_demo(monkeypatch, tmp_path: Path,
 def test_cli_runtime_field_ingest_file_dry_run_normalizes_camera_frame(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     path.write_text(
-        json.dumps({
-            "source": "camera",
-            "timestamp": 1770000000,
-            "detections": [{"class_id": "2", "confidence": 0.91}],
-            "zone": {"id": "main-road-1", "type": "main_channel", "parking_allowed": False},
-        })
+        json.dumps(
+            {
+                "source": "camera",
+                "timestamp": 1770000000,
+                "detections": [{"class_id": "2", "confidence": 0.91}],
+                "zone": {"id": "main-road-1", "type": "main_channel", "parking_allowed": False},
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -345,13 +349,15 @@ def test_cli_runtime_field_ingest_file_can_sign_normalized_events(tmp_path: Path
 
     path = tmp_path / "events.jsonl"
     path.write_text(
-        json.dumps({
-            "source": "sensor",
-            "device_id": "smoke-01",
-            "timestamp": 1770000000,
-            "sensor": {"temperature_c": 72, "smoke_level": 0.9},
-            "location": "Power Room",
-        })
+        json.dumps(
+            {
+                "source": "sensor",
+                "device_id": "smoke-01",
+                "timestamp": 1770000000,
+                "sensor": {"temperature_c": 72, "smoke_level": 0.9},
+                "location": "Power Room",
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -383,7 +389,9 @@ def test_cli_runtime_field_ingest_file_forwards_device_secret_args(
 ) -> None:
     seen: dict[str, object] = {}
     path = tmp_path / "events.jsonl"
-    path.write_text(json.dumps({"source": "sensor", "device_id": "smoke-01"}) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps({"source": "sensor", "device_id": "smoke-01"}) + "\n", encoding="utf-8"
+    )
 
     def fake_ingest(**kwargs: object) -> dict[str, object]:
         seen.update(kwargs)
@@ -394,19 +402,23 @@ def test_cli_runtime_field_ingest_file_forwards_device_secret_args(
             "failed": 0,
             "signed": 1,
             "dry_run": True,
-            "results": [{"index": 1, "status": "dry_run", "normalized": {"scenario_id": "fire_or_smoke"}}],
+            "results": [
+                {"index": 1, "status": "dry_run", "normalized": {"scenario_id": "fire_or_smoke"}}
+            ],
         }
 
     monkeypatch.setattr(cli, "_run_field_ingest_file", fake_ingest)
 
-    cli.main([
-        "runtime",
-        "field-ingest-file",
-        str(path),
-        "--dry-run",
-        "--device-secret",
-        "smoke-01=device-secret",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-ingest-file",
+            str(path),
+            "--dry-run",
+            "--device-secret",
+            "smoke-01=device-secret",
+        ]
+    )
 
     output = capsys.readouterr().out
     assert seen["device_secrets"] == {"smoke-01": "device-secret"}
@@ -471,7 +483,9 @@ devices:
         encoding="utf-8",
     )
     source = tmp_path / "events.jsonl"
-    source.write_text(json.dumps({"source": "sensor", "device_id": "smoke-01"}) + "\n", encoding="utf-8")
+    source.write_text(
+        json.dumps({"source": "sensor", "device_id": "smoke-01"}) + "\n", encoding="utf-8"
+    )
 
     def fake_bridge(**kwargs: object) -> dict[str, object]:
         seen.update(kwargs)
@@ -488,16 +502,18 @@ devices:
 
     monkeypatch.setattr(cli, "_run_field_ingest_bridge", fake_bridge)
 
-    cli.main([
-        "runtime",
-        "field-ingest-bridge",
-        str(source),
-        "--site-profile",
-        str(profile),
-        "--device-secret",
-        "smoke-01=override-secret",
-        "--dry-run",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-ingest-bridge",
+            str(source),
+            "--site-profile",
+            str(profile),
+            "--device-secret",
+            "smoke-01=override-secret",
+            "--dry-run",
+        ]
+    )
 
     _ = capsys.readouterr()
     assert seen["device_secrets"] == {"smoke-01": "override-secret"}
@@ -526,25 +542,29 @@ def test_cli_runtime_field_ingest_bridge_forwards_args(monkeypatch, tmp_path: Pa
                 "source_counts": {"camera": 1},
                 "device_counts": {"camera-main-road-1": 1},
             },
-            "results": [{"index": 1, "status": "dry_run", "normalized": {"scenario_id": "illegal_parking"}}],
+            "results": [
+                {"index": 1, "status": "dry_run", "normalized": {"scenario_id": "illegal_parking"}}
+            ],
         }
 
     monkeypatch.setattr(cli, "_run_field_ingest_bridge", fake_bridge)
 
-    cli.main([
-        "runtime",
-        "field-ingest-bridge",
-        str(source),
-        "--server",
-        "http://runtime.local:8765",
-        "--state-path",
-        str(tmp_path / "state.json"),
-        "--dry-run",
-        "--limit",
-        "3",
-        "--timeout",
-        "2",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-ingest-bridge",
+            str(source),
+            "--server",
+            "http://runtime.local:8765",
+            "--state-path",
+            str(tmp_path / "state.json"),
+            "--dry-run",
+            "--limit",
+            "3",
+            "--timeout",
+            "2",
+        ]
+    )
 
     output = capsys.readouterr().out
 
@@ -571,11 +591,13 @@ def test_cli_runtime_field_sign_device_payload_writes_signed_json(
     source = tmp_path / "event.json"
     output = tmp_path / "signed.json"
     source.write_text(
-        json.dumps({
-            "source": "sensor",
-            "device_id": "smoke-01",
-            "temperature_c": 72,
-        }),
+        json.dumps(
+            {
+                "source": "sensor",
+                "device_id": "smoke-01",
+                "temperature_c": 72,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -608,19 +630,21 @@ def test_cli_runtime_field_sign_device_payload_can_override_device_id(tmp_path: 
         encoding="utf-8",
     )
 
-    cli.main([
-        "runtime",
-        "field-sign-device-payload",
-        str(source),
-        "--output",
-        str(output),
-        "--device-id",
-        "camera-main-road-1",
-        "--secret",
-        "camera-secret",
-        "--timestamp",
-        "1770000001",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-sign-device-payload",
+            str(source),
+            "--output",
+            str(output),
+            "--device-id",
+            "camera-main-road-1",
+            "--secret",
+            "camera-secret",
+            "--timestamp",
+            "1770000001",
+        ]
+    )
 
     signed = json.loads(output.read_text(encoding="utf-8").strip())
     assert signed["device_id"] == "camera-main-road-1"
@@ -634,7 +658,9 @@ def test_cli_runtime_field_sign_device_payload_exits_when_secret_missing(
     source.write_text(json.dumps({"source": "sensor", "device_id": "smoke-01"}), encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["runtime", "field-sign-device-payload", str(source), "--secret-env", "MISSING_SECRET"])
+        cli.main(
+            ["runtime", "field-sign-device-payload", str(source), "--secret-env", "MISSING_SECRET"]
+        )
 
     assert exc.value.code == 2
 
@@ -781,14 +807,16 @@ thresholds:
         encoding="utf-8",
     )
 
-    cli.main([
-        "runtime",
-        "field-site-env-template",
-        "--site-profile",
-        str(profile),
-        "--output",
-        str(output_path),
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-site-env-template",
+            "--site-profile",
+            str(profile),
+            "--output",
+            str(output_path),
+        ]
+    )
 
     console = capsys.readouterr().out
     generated = output_path.read_text(encoding="utf-8")
@@ -807,6 +835,210 @@ def test_cli_runtime_field_site_env_template_json_keeps_template_when_no_output(
     assert payload["output"] == ""
     assert "ASKME_DINGTALK_SECURITY_WEBHOOK=" in payload["template"]
     assert "ASKME_FIELD_ROBOT_THUNDER_SECRET=" in payload["template"]
+
+
+def test_cli_field_smoke_server_bypasses_proxy_environment(monkeypatch) -> None:
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "example.com")
+
+    local_server = cli._start_field_smoke_server(
+        archive_path=Path("unused-field-smoke.jsonl"),
+    )
+    try:
+        health = cli._get_json(f"{local_server['base_url']}/health")
+    finally:
+        local_server["server"].should_exit = True
+        local_server["thread"].join(timeout=5)
+
+    assert health["status"] in {"ok", "degraded"}
+    assert local_server["thread"].is_alive() is False
+
+
+def test_cli_field_smoke_notification_collector_bypasses_proxy_environment(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "example.com")
+
+    collector = cli._start_local_webhook_collector()
+    local_server = None
+    try:
+        local_server = cli._start_field_smoke_server(
+            archive_path=tmp_path / "field-events.jsonl",
+            field_config={
+                "dingtalk_webhooks": {"security": collector["url"]},
+            },
+        )
+        with cli._loopback_proxy_environment():
+            response = cli._post_json(
+                f"{local_server['base_url']}/api/field/notification-test",
+                {
+                    "notification_group": "security",
+                    "operator_id": "supervisor-1",
+                    "message": "proxy-safe notification probe",
+                },
+            )
+    finally:
+        if local_server is not None:
+            local_server["server"].should_exit = True
+            local_server["thread"].join(timeout=5)
+        collector["server"].shutdown()
+        collector["thread"].join(timeout=5)
+
+    assert response["sent"] is True
+    assert len(collector["requests"]) == 1
+
+
+def test_cli_runtime_field_ingest_bridge_bypasses_loopback_proxy(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+
+    captured: dict[str, object] = {}
+
+    class Response:
+        def raise_for_status(self) -> None:
+            captured["raised"] = False
+
+        def json(self) -> dict[str, object]:
+            return {"status": "triggered", "accepted": True}
+
+    class Requests:
+        @staticmethod
+        def post(url: str, **kwargs: object) -> Response:
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return Response()
+
+    def fake_bridge_once(**kwargs: object) -> dict[str, object]:
+        post_func = kwargs["post_func"]
+        response = post_func("http://127.0.0.1:8765/api/field/ingest", {"ok": True}, 3.0)
+        return {"status": response["status"], "response": response}
+
+    monkeypatch.setattr(cli, "requests", Requests)
+    from askme.pipeline.field import field_ingest_bridge
+
+    monkeypatch.setattr(field_ingest_bridge, "run_field_ingest_bridge_once", fake_bridge_once)
+
+    payload = cli._run_field_ingest_bridge(
+        source=str(tmp_path / "events.jsonl"),
+        server="http://127.0.0.1:8765",
+        state_path=None,
+        dry_run=False,
+        limit=0,
+        timeout_s=3.0,
+    )
+
+    assert payload["status"] == "triggered"
+    assert captured["kwargs"]["proxies"] == {"http": None, "https": None, "all": None}
+
+
+def test_cli_runtime_field_ingest_bridge_authenticates_external_server_without_proxy_bypass(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("ASKME_CONTROL_API_KEY", "field-control-secret")
+    captured: dict[str, object] = {}
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"status": "triggered", "accepted": True}
+
+    class Requests:
+        @staticmethod
+        def post(url: str, **kwargs: object) -> Response:
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return Response()
+
+    def fake_bridge_once(**kwargs: object) -> dict[str, object]:
+        post_func = kwargs["post_func"]
+        response = post_func("https://field.example/api/field/ingest", {"ok": True}, 3.0)
+        return {"status": response["status"], "response": response}
+
+    monkeypatch.setattr(cli, "requests", Requests)
+    from askme.pipeline.field import field_ingest_bridge
+
+    monkeypatch.setattr(field_ingest_bridge, "run_field_ingest_bridge_once", fake_bridge_once)
+
+    payload = cli._run_field_ingest_bridge(
+        source=str(tmp_path / "events.jsonl"),
+        server="https://field.example",
+        state_path=None,
+        dry_run=False,
+        limit=0,
+        timeout_s=3.0,
+    )
+
+    assert payload["status"] == "triggered"
+    assert captured["kwargs"]["headers"] == {"Authorization": "Bearer field-control-secret"}
+    assert "proxies" not in captured["kwargs"]
+
+
+def test_cli_runtime_field_ingest_bridge_watch_authenticates_loopback_and_bypasses_proxy(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("ASKME_CONTROL_API_KEY", "field-control-secret")
+    captured: dict[str, object] = {}
+    source = tmp_path / "events.jsonl"
+    source.write_text(
+        json.dumps(
+            {
+                "source": "sensor",
+                "device_id": "smoke-01",
+                "sensor": {"temperature_c": 72, "smoke_level": 0.9},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"status": "triggered", "accepted": True}
+
+    class Requests:
+        @staticmethod
+        def post(url: str, **kwargs: object) -> Response:
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return Response()
+
+    monkeypatch.setattr(cli, "requests", Requests)
+    from askme.pipeline.field import field_ingest_bridge
+
+    def stop_after_first_iteration(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(field_ingest_bridge.time, "sleep", stop_after_first_iteration)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli._watch_field_ingest_bridge(
+            source=str(source),
+            server="http://127.0.0.1:8765",
+            state_path=str(tmp_path / "state.json"),
+            interval_s=0.1,
+            dry_run=False,
+            limit=0,
+            timeout_s=3.0,
+        )
+
+    assert captured["kwargs"]["headers"] == {"Authorization": "Bearer field-control-secret"}
+    assert captured["kwargs"]["proxies"] == {"http": None, "https": None, "all": None}
 
 
 def test_cli_runtime_field_ingest_smoke_runs_local_http(tmp_path: Path) -> None:
@@ -828,7 +1060,9 @@ def test_cli_runtime_field_ingest_smoke_runs_local_http(tmp_path: Path) -> None:
     assert Path(payload["archive_path"]).exists()
     assert payload["operator_action"]["acknowledged"] is True
     assert payload["operator_action"]["event"]["action_audit"][-1]["action"] == "acknowledge"
-    assert json.loads(Path(payload["report_path"]).read_text(encoding="utf-8"))["status"] == "passed"
+    assert (
+        json.loads(Path(payload["report_path"]).read_text(encoding="utf-8"))["status"] == "passed"
+    )
 
 
 def test_cli_runtime_field_ingest_smoke_can_require_device_signatures(tmp_path: Path) -> None:
@@ -869,7 +1103,10 @@ def test_cli_runtime_field_ingest_smoke_produces_strict_audit_anchor(tmp_path: P
     assert anchor["checkpoint"]["signature_alg"] == "hmac-sha256"
     assert anchor["checkpoint"]["checked_count"] == 1
     assert anchor["checkpoint"]["expected_count"] == 1
-    assert json.loads((output / "audit-checkpoint.json").read_text(encoding="utf-8"))["status"] == "anchored"
+    assert (
+        json.loads((output / "audit-checkpoint.json").read_text(encoding="utf-8"))["status"]
+        == "anchored"
+    )
 
 
 def test_cli_runtime_field_disposition_smoke_closes_p0_with_report(tmp_path: Path) -> None:
@@ -889,7 +1126,9 @@ def test_cli_runtime_field_disposition_smoke_closes_p0_with_report(tmp_path: Pat
     assert payload["timeline_count"] >= 3
     assert payload["action_audit_integrity"]["valid"] is True
     assert payload["action_audit_integrity"]["signed"] is True
-    assert json.loads(Path(payload["report_path"]).read_text(encoding="utf-8"))["status"] == "passed"
+    assert (
+        json.loads(Path(payload["report_path"]).read_text(encoding="utf-8"))["status"] == "passed"
+    )
 
 
 def test_cli_runtime_field_voice_smoke_queues_recorded_voice(tmp_path: Path) -> None:
@@ -934,15 +1173,17 @@ def test_cli_runtime_field_voice_smoke_command_forwards_args(monkeypatch, tmp_pa
 
     monkeypatch.setattr(cli, "_run_field_voice_smoke", fake_voice_smoke)
 
-    cli.main([
-        "runtime",
-        "field-voice-smoke",
-        "--output-dir",
-        str(tmp_path / "voice-smoke"),
-        "--scenario",
-        "joint_fault",
-        "--live-tts",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-voice-smoke",
+            "--output-dir",
+            str(tmp_path / "voice-smoke"),
+            "--scenario",
+            "joint_fault",
+            "--live-tts",
+        ]
+    )
 
     assert seen == {
         "output_dir": str(tmp_path / "voice-smoke"),
@@ -966,7 +1207,9 @@ def test_cli_runtime_field_notification_smoke_uses_local_collector(tmp_path: Pat
     assert Path(payload["report_path"]).exists()
 
 
-def test_cli_runtime_field_notification_smoke_command_forwards_args(monkeypatch, tmp_path: Path) -> None:
+def test_cli_runtime_field_notification_smoke_command_forwards_args(
+    monkeypatch, tmp_path: Path
+) -> None:
     seen: dict[str, object] = {}
 
     def fake_notification_smoke(**kwargs: object) -> dict[str, object]:
@@ -979,14 +1222,16 @@ def test_cli_runtime_field_notification_smoke_command_forwards_args(monkeypatch,
 
     monkeypatch.setattr(cli, "_run_field_notification_smoke", fake_notification_smoke)
 
-    cli.main([
-        "runtime",
-        "field-notification-smoke",
-        "--output-dir",
-        str(tmp_path / "notification-smoke"),
-        "--groups",
-        "security",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-notification-smoke",
+            "--output-dir",
+            str(tmp_path / "notification-smoke"),
+            "--groups",
+            "security",
+        ]
+    )
 
     assert seen == {
         "output_dir": str(tmp_path / "notification-smoke"),
@@ -1004,13 +1249,15 @@ def test_cli_runtime_field_notification_preflight_reads_local_config(monkeypatch
 
     monkeypatch.setattr(cli, "_run_field_notification_preflight", fake_preflight)
 
-    cli.main([
-        "runtime",
-        "field-notification-preflight",
-        "--groups",
-        "security,operations",
-        "--allow-unsigned",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-notification-preflight",
+            "--groups",
+            "security,operations",
+            "--allow-unsigned",
+        ]
+    )
 
     assert seen == {
         "server": "",
@@ -1056,10 +1303,16 @@ def test_cli_runtime_field_smoke_suite_aggregates_reports(monkeypatch, tmp_path:
 
     def fake_ingest(**kwargs: object) -> dict[str, object]:
         output_dir = str(kwargs["output_dir"])
-        return {"status": "passed", "report_path": str(Path(output_dir) / "field-ingest-smoke.json")}
+        return {
+            "status": "passed",
+            "report_path": str(Path(output_dir) / "field-ingest-smoke.json"),
+        }
 
     def fake_voice(**kwargs: object) -> dict[str, object]:
-        return {"status": "passed", "report_path": str(Path(str(kwargs["output_dir"])) / "field-voice-smoke.json")}
+        return {
+            "status": "passed",
+            "report_path": str(Path(str(kwargs["output_dir"])) / "field-voice-smoke.json"),
+        }
 
     def fake_notification(**kwargs: object) -> dict[str, object]:
         return {
@@ -1121,7 +1374,9 @@ def test_cli_runtime_field_smoke_suite_aggregates_reports(monkeypatch, tmp_path:
     assert "部署门禁" in html
 
 
-def test_cli_runtime_field_smoke_suite_uses_env_audit_hmac_secret(monkeypatch, tmp_path: Path) -> None:
+def test_cli_runtime_field_smoke_suite_uses_env_audit_hmac_secret(
+    monkeypatch, tmp_path: Path
+) -> None:
     seen: dict[str, object] = {}
 
     def fake_eval(*, output: str) -> dict[str, object]:
@@ -1179,23 +1434,25 @@ def test_cli_runtime_field_smoke_suite_command_forwards_args(monkeypatch, tmp_pa
 
     monkeypatch.setattr(cli, "_run_field_smoke_suite", fake_suite)
 
-    cli.main([
-        "runtime",
-        "field-smoke-suite",
-        "--output-dir",
-        str(tmp_path / "suite"),
-        "--voice-scenario",
-        "illegal_parking",
-        "--groups",
-        "security",
-        "--live-tts",
-        "--audit-hmac-secret",
-        "secret",
-        "--audit-webhook-url",
-        "http://siem.local/audit",
-        "--audit-webhook-retries",
-        "2",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-smoke-suite",
+            "--output-dir",
+            str(tmp_path / "suite"),
+            "--voice-scenario",
+            "illegal_parking",
+            "--groups",
+            "security",
+            "--live-tts",
+            "--audit-hmac-secret",
+            "secret",
+            "--audit-webhook-url",
+            "http://siem.local/audit",
+            "--audit-webhook-retries",
+            "2",
+        ]
+    )
 
     assert seen == {
         "output_dir": str(tmp_path / "suite"),
@@ -1209,7 +1466,9 @@ def test_cli_runtime_field_smoke_suite_command_forwards_args(monkeypatch, tmp_pa
     }
 
 
-def test_cli_runtime_field_deployed_smoke_runs_against_existing_server(monkeypatch, tmp_path: Path) -> None:
+def test_cli_runtime_field_deployed_smoke_runs_against_existing_server(
+    monkeypatch, tmp_path: Path
+) -> None:
     calls: list[str] = []
 
     def fake_get_json(url: str) -> dict[str, object]:
@@ -1234,7 +1493,9 @@ def test_cli_runtime_field_deployed_smoke_runs_against_existing_server(monkeypat
 
     monkeypatch.setattr(cli, "_run_field_ingest_smoke", fake_ingest)
     monkeypatch.setattr(cli, "_run_field_voice_smoke", lambda **_kwargs: {"status": "passed"})
-    monkeypatch.setattr(cli, "_run_field_notification_smoke", lambda **_kwargs: {"status": "passed"})
+    monkeypatch.setattr(
+        cli, "_run_field_notification_smoke", lambda **_kwargs: {"status": "passed"}
+    )
 
     payload = cli._run_field_deployed_smoke(
         server="http://runtime.local:8765",
@@ -1256,7 +1517,9 @@ def test_cli_runtime_field_deployed_smoke_runs_against_existing_server(monkeypat
     ]
 
 
-def test_cli_runtime_field_deployed_smoke_blocks_when_notification_preflight_fails(monkeypatch, tmp_path: Path) -> None:
+def test_cli_runtime_field_deployed_smoke_blocks_when_notification_preflight_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(
         cli,
         "_get_json",
@@ -1286,7 +1549,9 @@ def test_cli_runtime_field_deployed_smoke_blocks_when_notification_preflight_fai
     assert payload["checks"]["notification_preflight_ready"] is False
 
 
-def test_cli_runtime_field_deployed_smoke_command_forwards_args(monkeypatch, tmp_path: Path) -> None:
+def test_cli_runtime_field_deployed_smoke_command_forwards_args(
+    monkeypatch, tmp_path: Path
+) -> None:
     seen: dict[str, object] = {}
 
     def fake_deployed(**kwargs: object) -> dict[str, object]:
@@ -1295,20 +1560,22 @@ def test_cli_runtime_field_deployed_smoke_command_forwards_args(monkeypatch, tmp
 
     monkeypatch.setattr(cli, "_run_field_deployed_smoke", fake_deployed)
 
-    cli.main([
-        "runtime",
-        "field-deployed-smoke",
-        "--server",
-        "http://runtime.local:8765",
-        "--output-dir",
-        str(tmp_path / "deployed"),
-        "--voice-scenario",
-        "illegal_parking",
-        "--groups",
-        "security",
-        "--allow-notification-not-ready",
-        "--require-device-signatures",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-deployed-smoke",
+            "--server",
+            "http://runtime.local:8765",
+            "--output-dir",
+            str(tmp_path / "deployed"),
+            "--voice-scenario",
+            "illegal_parking",
+            "--groups",
+            "security",
+            "--allow-notification-not-ready",
+            "--require-device-signatures",
+        ]
+    )
 
     assert seen == {
         "server": "http://runtime.local:8765",
@@ -1352,27 +1619,29 @@ def test_cli_runtime_field_readiness_reads_local_files(monkeypatch, tmp_path: Pa
 
     monkeypatch.setattr(cli, "_run_field_readiness", fake_readiness)
 
-    cli.main([
-        "runtime",
-        "field-readiness",
-        "--archive-path",
-        str(tmp_path / "events.jsonl"),
-        "--scenario-report",
-        str(tmp_path / "scenario.json"),
-        "--smoke-report",
-        str(tmp_path / "smoke.json"),
-        "--voice-smoke-report",
-        str(tmp_path / "voice-smoke.json"),
-        "--notification-smoke-report",
-        str(tmp_path / "notification-smoke.json"),
-        "--site-profile",
-        "deploy/site-profiles/park-demo.yaml",
-        "--check-site-env",
-        "--audit-hmac-secret",
-        "readiness-secret",
-        "--review-path",
-        str(tmp_path / "reviews.jsonl"),
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-readiness",
+            "--archive-path",
+            str(tmp_path / "events.jsonl"),
+            "--scenario-report",
+            str(tmp_path / "scenario.json"),
+            "--smoke-report",
+            str(tmp_path / "smoke.json"),
+            "--voice-smoke-report",
+            str(tmp_path / "voice-smoke.json"),
+            "--notification-smoke-report",
+            str(tmp_path / "notification-smoke.json"),
+            "--site-profile",
+            "deploy/site-profiles/park-demo.yaml",
+            "--check-site-env",
+            "--audit-hmac-secret",
+            "readiness-secret",
+            "--review-path",
+            str(tmp_path / "reviews.jsonl"),
+        ]
+    )
     output = capsys.readouterr().out
 
     assert seen == {
@@ -1390,7 +1659,10 @@ def test_cli_runtime_field_readiness_reads_local_files(monkeypatch, tmp_path: Pa
     assert "product-stage: pilot_ready_pending_site_launch" in output
     assert "release-scope: pilot_demo_and_site_integration" in output
     assert "site-profile: configured=True valid=True site=demo zones=6 devices=4" in output
-    assert "device-trust: registered=4 signed=3 unsigned=1 all_ready=False unsigned_ids=legacy-smoke-1" in output
+    assert (
+        "device-trust: registered=4 signed=3 unsigned=1 all_ready=False unsigned_ids=legacy-smoke-1"
+        in output
+    )
 
 
 def test_cli_runtime_field_readiness_exits_nonzero_when_blocked(monkeypatch) -> None:
@@ -1439,15 +1711,17 @@ def test_cli_runtime_audit_events_prints_review_queue(monkeypatch, capsys) -> No
 
     monkeypatch.setattr(cli, "_run_unified_audit_events", fake_audit_events)
 
-    cli.main([
-        "runtime",
-        "audit-events",
-        "--review-queue-only",
-        "--limit",
-        "10",
-        "--source",
-        "field",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "audit-events",
+            "--review-queue-only",
+            "--limit",
+            "10",
+            "--source",
+            "field",
+        ]
+    )
     output = capsys.readouterr().out
 
     assert seen["limit"] == 10
@@ -1472,14 +1746,16 @@ def test_cli_runtime_audit_events_forwards_source_paths(monkeypatch, tmp_path: P
 
     monkeypatch.setattr(cli, "_run_unified_audit_events", fake_audit_events)
 
-    cli.main([
-        "runtime",
-        "audit-events",
-        "--field-action-audit",
-        str(tmp_path / "field-action-audit.jsonl"),
-        "--review-path",
-        str(tmp_path / "reviews.jsonl"),
-    ])
+    cli.main(
+        [
+            "runtime",
+            "audit-events",
+            "--field-action-audit",
+            str(tmp_path / "field-action-audit.jsonl"),
+            "--review-path",
+            str(tmp_path / "reviews.jsonl"),
+        ]
+    )
 
     assert seen["field_action_audit"] == str(tmp_path / "field-action-audit.jsonl")
     assert seen["review_path"] == str(tmp_path / "reviews.jsonl")
@@ -1507,16 +1783,18 @@ def test_cli_runtime_audit_review_submits_decision(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(cli, "_run_unified_audit_review", fake_review)
 
-    cli.main([
-        "runtime",
-        "audit-review",
-        "field:2",
-        "waived",
-        "--reviewer-id",
-        "supervisor-1",
-        "--note",
-        "duplicate smoke evidence",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "audit-review",
+            "field:2",
+            "waived",
+            "--reviewer-id",
+            "supervisor-1",
+            "--note",
+            "duplicate smoke evidence",
+        ]
+    )
     output = capsys.readouterr().out
 
     assert seen == {
@@ -1573,21 +1851,23 @@ def test_cli_runtime_field_live_demo_forwards_args(monkeypatch, tmp_path: Path, 
 
     monkeypatch.setattr(cli, "_run_field_live_demo", fake_live_demo)
 
-    cli.main([
-        "runtime",
-        "field-live-demo",
-        "--output-dir",
-        str(tmp_path / "live-demo"),
-        "--site-profile",
-        "deploy/site-profiles/park-demo.yaml",
-        "--server",
-        "http://runtime.local:8765",
-        "--scenario-file",
-        str(tmp_path / "customer-scenarios.json"),
-        "--refresh-scenario-timestamps",
-        "--timeout",
-        "3.5",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-live-demo",
+            "--output-dir",
+            str(tmp_path / "live-demo"),
+            "--site-profile",
+            "deploy/site-profiles/park-demo.yaml",
+            "--server",
+            "http://runtime.local:8765",
+            "--scenario-file",
+            str(tmp_path / "customer-scenarios.json"),
+            "--refresh-scenario-timestamps",
+            "--timeout",
+            "3.5",
+        ]
+    )
     output = capsys.readouterr().out
 
     assert seen == {
@@ -1639,7 +1919,9 @@ def test_cli_runtime_field_audit_integrity_reads_server(monkeypatch, capsys) -> 
 
     monkeypatch.setattr(cli, "_get_json", fake_get_json)
 
-    cli.main(["runtime", "field-audit-integrity", "--server", "http://runtime.local:8765", "--json"])
+    cli.main(
+        ["runtime", "field-audit-integrity", "--server", "http://runtime.local:8765", "--json"]
+    )
 
     payload = json.loads(capsys.readouterr().out)
     assert seen["url"] == "http://runtime.local:8765/api/field/audit/integrity"
@@ -1775,14 +2057,16 @@ def test_cli_runtime_field_audit_anchor_posts_webhook(monkeypatch, tmp_path: Pat
         lambda url, payload: seen.update({"url": url, "payload": payload}) or {"ok": True},
     )
 
-    cli.main([
-        "runtime",
-        "field-audit-anchor",
-        "--output",
-        str(output),
-        "--webhook-url",
-        "http://siem.local/audit",
-    ])
+    cli.main(
+        [
+            "runtime",
+            "field-audit-anchor",
+            "--output",
+            str(output),
+            "--webhook-url",
+            "http://siem.local/audit",
+        ]
+    )
 
     written = json.loads(output.read_text(encoding="utf-8"))
     assert seen["url"] == "http://siem.local/audit"
@@ -1794,7 +2078,9 @@ def test_cli_runtime_field_audit_anchor_posts_webhook(monkeypatch, tmp_path: Pat
     }
 
 
-def test_cli_runtime_field_audit_anchor_reports_webhook_failure(monkeypatch, tmp_path: Path) -> None:
+def test_cli_runtime_field_audit_anchor_reports_webhook_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
     output = tmp_path / "audit-checkpoint.json"
 
     monkeypatch.setattr(
@@ -1820,18 +2106,20 @@ def test_cli_runtime_field_audit_anchor_reports_webhook_failure(monkeypatch, tmp
     )
 
     with pytest.raises(SystemExit) as exc:
-        cli.main([
-            "runtime",
-            "field-audit-anchor",
-            "--output",
-            str(output),
-            "--webhook-url",
-            "http://siem.local/audit",
-            "--webhook-retries",
-            "2",
-            "--retry-queue",
-            str(tmp_path / "retry.jsonl"),
-        ])
+        cli.main(
+            [
+                "runtime",
+                "field-audit-anchor",
+                "--output",
+                str(output),
+                "--webhook-url",
+                "http://siem.local/audit",
+                "--webhook-retries",
+                "2",
+                "--retry-queue",
+                str(tmp_path / "retry.jsonl"),
+            ]
+        )
 
     written = json.loads(output.read_text(encoding="utf-8"))
     queue = tmp_path / "retry.jsonl"
@@ -1845,11 +2133,16 @@ def test_cli_runtime_field_audit_anchor_reports_webhook_failure(monkeypatch, tmp
 def test_cli_runtime_field_audit_retry_delivery_replays_queue(monkeypatch, tmp_path: Path) -> None:
     queue = tmp_path / "retry.jsonl"
     queue.write_text(
-        json.dumps({
-            "queued_at": 123,
-            "webhook_url": "http://siem.local/audit",
-            "payload": {"target": "field-audit-anchor", "checkpoint": {"latest_hash": "hash-abc"}},
-        })
+        json.dumps(
+            {
+                "queued_at": 123,
+                "webhook_url": "http://siem.local/audit",
+                "payload": {
+                    "target": "field-audit-anchor",
+                    "checkpoint": {"latest_hash": "hash-abc"},
+                },
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -1871,20 +2164,29 @@ def test_cli_runtime_field_audit_retry_delivery_replays_queue(monkeypatch, tmp_p
     assert seen["url"] == "http://siem.local/audit"
 
 
-def test_cli_runtime_field_audit_retry_delivery_exits_when_locked(monkeypatch, tmp_path: Path) -> None:
+def test_cli_runtime_field_audit_retry_delivery_exits_when_locked(
+    monkeypatch, tmp_path: Path
+) -> None:
     queue = tmp_path / "retry.jsonl"
     queue.write_text(
-        json.dumps({
-            "queued_at": 123,
-            "webhook_url": "http://siem.local/audit",
-            "payload": {"target": "field-audit-anchor", "checkpoint": {"latest_hash": "hash-abc"}},
-        })
+        json.dumps(
+            {
+                "queued_at": 123,
+                "webhook_url": "http://siem.local/audit",
+                "payload": {
+                    "target": "field-audit-anchor",
+                    "checkpoint": {"latest_hash": "hash-abc"},
+                },
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
     lock = tmp_path / "retry.jsonl.lock"
     lock.write_text(
-        json.dumps({"pid": 9999, "queue": str(queue), "acquired_at": 123, "expires_at": 9999999999}),
+        json.dumps(
+            {"pid": 9999, "queue": str(queue), "acquired_at": 123, "expires_at": 9999999999}
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -1901,14 +2203,21 @@ def test_cli_runtime_field_audit_retry_delivery_exits_when_locked(monkeypatch, t
     assert lock.exists()
 
 
-def test_cli_runtime_field_audit_retry_delivery_takes_stale_lock(monkeypatch, tmp_path: Path) -> None:
+def test_cli_runtime_field_audit_retry_delivery_takes_stale_lock(
+    monkeypatch, tmp_path: Path
+) -> None:
     queue = tmp_path / "retry.jsonl"
     queue.write_text(
-        json.dumps({
-            "queued_at": 123,
-            "webhook_url": "http://siem.local/audit",
-            "payload": {"target": "field-audit-anchor", "checkpoint": {"latest_hash": "hash-abc"}},
-        })
+        json.dumps(
+            {
+                "queued_at": 123,
+                "webhook_url": "http://siem.local/audit",
+                "payload": {
+                    "target": "field-audit-anchor",
+                    "checkpoint": {"latest_hash": "hash-abc"},
+                },
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -1924,7 +2233,9 @@ def test_cli_runtime_field_audit_retry_delivery_takes_stale_lock(monkeypatch, tm
         lambda url, payload: seen.update({"url": url, "payload": payload}) or {"ok": True},
     )
 
-    payload = cli._run_field_audit_delivery_retry(queue=str(queue), webhook_retries=1, lock_timeout_s=60)
+    payload = cli._run_field_audit_delivery_retry(
+        queue=str(queue), webhook_retries=1, lock_timeout_s=60
+    )
 
     assert payload["status"] == "sent"
     assert payload["lock"]["acquired"] is True
@@ -1933,14 +2244,21 @@ def test_cli_runtime_field_audit_retry_delivery_takes_stale_lock(monkeypatch, tm
     assert not lock.exists()
 
 
-def test_cli_runtime_field_audit_retry_delivery_keeps_failed_items(monkeypatch, tmp_path: Path) -> None:
+def test_cli_runtime_field_audit_retry_delivery_keeps_failed_items(
+    monkeypatch, tmp_path: Path
+) -> None:
     queue = tmp_path / "retry.jsonl"
     queue.write_text(
-        json.dumps({
-            "queued_at": 123,
-            "webhook_url": "http://siem.local/audit",
-            "payload": {"target": "field-audit-anchor", "checkpoint": {"latest_hash": "hash-abc"}},
-        })
+        json.dumps(
+            {
+                "queued_at": 123,
+                "webhook_url": "http://siem.local/audit",
+                "payload": {
+                    "target": "field-audit-anchor",
+                    "checkpoint": {"latest_hash": "hash-abc"},
+                },
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -1951,14 +2269,16 @@ def test_cli_runtime_field_audit_retry_delivery_keeps_failed_items(monkeypatch, 
     )
 
     with pytest.raises(SystemExit) as exc:
-        cli.main([
-            "runtime",
-            "field-audit-retry-delivery",
-            "--queue",
-            str(queue),
-            "--webhook-retries",
-            "2",
-        ])
+        cli.main(
+            [
+                "runtime",
+                "field-audit-retry-delivery",
+                "--queue",
+                str(queue),
+                "--webhook-retries",
+                "2",
+            ]
+        )
 
     assert exc.value.code == 3
     assert queue.exists()
@@ -1974,17 +2294,21 @@ def test_cli_runtime_field_audit_retry_status_reports_empty_missing_queue(tmp_pa
     assert payload["items"] == []
 
 
-def test_cli_runtime_field_audit_retry_status_reports_pending_and_invalid_queue(tmp_path: Path) -> None:
+def test_cli_runtime_field_audit_retry_status_reports_pending_and_invalid_queue(
+    tmp_path: Path,
+) -> None:
     queue = tmp_path / "retry.jsonl"
     queue.write_text(
-        json.dumps({
-            "queued_at": 123,
-            "webhook_url": "http://siem.local/audit",
-            "payload": {
-                "target": "field-audit-anchor",
-                "checkpoint": {"latest_hash": "hash-abc", "checked_count": 2},
-            },
-        })
+        json.dumps(
+            {
+                "queued_at": 123,
+                "webhook_url": "http://siem.local/audit",
+                "payload": {
+                    "target": "field-audit-anchor",
+                    "checkpoint": {"latest_hash": "hash-abc", "checked_count": 2},
+                },
+            }
+        )
         + "\n"
         + "{bad-json\n",
         encoding="utf-8",
@@ -2004,23 +2328,30 @@ def test_cli_runtime_field_audit_retry_status_reports_pending_and_invalid_queue(
 def test_cli_runtime_field_audit_retry_status_fail_on_pending_exits_nonzero(tmp_path: Path) -> None:
     queue = tmp_path / "retry.jsonl"
     queue.write_text(
-        json.dumps({
-            "queued_at": 123,
-            "webhook_url": "http://siem.local/audit",
-            "payload": {"target": "field-audit-anchor", "checkpoint": {"latest_hash": "hash-abc"}},
-        })
+        json.dumps(
+            {
+                "queued_at": 123,
+                "webhook_url": "http://siem.local/audit",
+                "payload": {
+                    "target": "field-audit-anchor",
+                    "checkpoint": {"latest_hash": "hash-abc"},
+                },
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
 
     with pytest.raises(SystemExit) as exc:
-        cli.main([
-            "runtime",
-            "field-audit-retry-status",
-            "--queue",
-            str(queue),
-            "--fail-on-pending",
-        ])
+        cli.main(
+            [
+                "runtime",
+                "field-audit-retry-status",
+                "--queue",
+                str(queue),
+                "--fail-on-pending",
+            ]
+        )
 
     assert exc.value.code == 3
 
@@ -2260,15 +2591,17 @@ def test_cli_mission_draft_routes_to_local_adapter(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(cli, "_draft_mission_sync", _fake_draft)
 
-    cli.main([
-        "mission",
-        "draft",
-        "inspect",
-        "area-a",
-        "--operator-id",
-        "operator-1",
-        "--json",
-    ])
+    cli.main(
+        [
+            "mission",
+            "draft",
+            "inspect",
+            "area-a",
+            "--operator-id",
+            "operator-1",
+            "--json",
+        ]
+    )
 
     data = json.loads(capsys.readouterr().out)
     assert data["drafted"] is True
@@ -2307,14 +2640,16 @@ def test_cli_mission_report_uses_server_when_requested(monkeypatch, capsys) -> N
 
     monkeypatch.setattr(cli, "_mission_report_sync", _fake_report)
 
-    cli.main([
-        "mission",
-        "report",
-        "mission-1",
-        "--server",
-        "http://runtime",
-        "--json",
-    ])
+    cli.main(
+        [
+            "mission",
+            "report",
+            "mission-1",
+            "--server",
+            "http://runtime",
+            "--json",
+        ]
+    )
 
     data = json.loads(capsys.readouterr().out)
     assert data["report"]["mission_id"] == "mission-1"
