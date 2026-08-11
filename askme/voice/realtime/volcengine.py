@@ -449,6 +449,7 @@ class VolcengineRealtimeDialogue:
             "active": self._active,
             "session_id": self._session_id,
             "dialog_id": self._dialog_id,
+            "provider_session_id": self._dialog_id,
             "log_id": self._log_id,
             "generation": self._generation,
             "active_response_generation": self._active_response_generation,

@@ -84,6 +84,17 @@ class _ExplodingSession(_FakeSession):
         raise RuntimeError("event consumer failed")
 
 
+class _QwenSession(_FakeSession):
+    def status_snapshot(self) -> dict[str, object]:
+        return {
+            **super().status_snapshot(),
+            "provider": "qwen3_5_omni",
+            "model": "qwen3.5-omni-flash-realtime",
+            "provider_session_id": "qwen-session-1",
+            "api_key": "must-not-leak",
+        }
+
+
 class _FailsFirstStartSession(_FakeSession):
     def start(self, context: RealtimeVoiceSessionContext) -> bool:
         self.start_contexts.append(context)
@@ -167,6 +178,23 @@ def _wait_until(predicate, timeout: float = 1.0) -> None:
             return
         time.sleep(0.005)
     raise AssertionError("condition was not met before timeout")
+
+
+def test_status_snapshot_exposes_safe_provider_identity_only() -> None:
+    session = _QwenSession()
+    coordinator = RealtimeDialogueCoordinator(
+        session,
+        RealtimeVoiceSessionContext(session_id="session-1"),
+        mode="general_chat",
+    )
+
+    assert coordinator.start() is True
+    snapshot = coordinator.status_snapshot()
+    assert snapshot["provider"] == "qwen3_5_omni"
+    assert snapshot["model"] == "qwen3.5-omni-flash-realtime"
+    assert snapshot["provider_session_id"] == "qwen-session-1"
+    assert "must-not-leak" not in repr(snapshot)
+    coordinator.close()
 
 
 def test_coordinator_streams_clean_audio_without_blocking_capture() -> None:

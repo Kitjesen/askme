@@ -614,9 +614,23 @@ class RealtimeDialogueCoordinator:
         return False
 
     def status_snapshot(self) -> dict[str, Any]:
+        provider_identity: dict[str, Any] = {}
+        try:
+            session_status = self._session.status_snapshot()
+        except Exception:
+            session_status = {}
+        if isinstance(session_status, dict):
+            for key in ("provider", "model", "provider_session_id"):
+                value = session_status.get(key)
+                if value not in (None, ""):
+                    provider_identity[key] = value
+            provider_dialog_id = session_status.get("dialog_id")
+            if provider_dialog_id not in (None, ""):
+                provider_identity["provider_dialog_id"] = provider_dialog_id
         with self._condition:
             turn = self._turn
             return {
+                **provider_identity,
                 "mode": self._mode,
                 "active": self._active and not self._stop.is_set(),
                 "generation": turn.generation if turn else 0,

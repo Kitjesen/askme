@@ -53,6 +53,7 @@ from askme.robot_interaction.interaction_gate import (
 )
 from askme.robot_interaction.perception_context import InteractionPerceptionSnapshot
 from askme.voice.diagnostics.status_privacy import sanitize_voice_status
+from askme.voice.realtime.config import SUPPORTED_REALTIME_PROVIDERS
 from askme.voice.realtime.policy import decide_realtime_route
 
 if TYPE_CHECKING:
@@ -751,6 +752,24 @@ class VoiceLoop:
             return "shadow"
         return "split"
 
+    def _realtime_provider(self) -> str:
+        """Return the canonical provider selector without widening the audio port."""
+
+        realtime = self._realtime_audio_port()
+        if realtime is None:
+            return ""
+        context_snapshot = getattr(realtime, "realtime_context_snapshot", None)
+        if callable(context_snapshot):
+            try:
+                snapshot = context_snapshot()
+                if isinstance(snapshot, dict):
+                    provider = str(snapshot.get("provider") or "").strip().lower()
+                    if provider in SUPPORTED_REALTIME_PROVIDERS:
+                        return provider
+            except Exception as exc:
+                logger.debug("Realtime provider snapshot unavailable: %s", exc)
+        return ""
+
     def _abort_realtime_playback(
         self,
         reason: str,
@@ -793,6 +812,10 @@ class VoiceLoop:
 
         realtime = self._realtime_audio_port()
         if realtime is None:
+            return False
+        provider_selector = self._realtime_provider()
+        if provider_selector not in SUPPORTED_REALTIME_PROVIDERS:
+            self._discard_realtime_turn("unsupported_realtime_provider")
             return False
         if turn_cancel_token is not None and turn_cancel_token.is_set():
             self._discard_realtime_turn("cancelled_before_realtime_approval")
@@ -841,24 +864,45 @@ class VoiceLoop:
                 return {}
 
         provider_context = _provider_context()
-        provider_session_id = str(provider_context.get("session_id") or "").strip() or None
-        provider_dialog_id = str(provider_context.get("dialog_id") or "").strip() or None
+        observed_provider = str(provider_context.get("provider") or "").strip().lower()
+        if observed_provider != provider_selector:
+            self._discard_realtime_turn("realtime_provider_identity_changed")
+            return False
+        ledger_provider = (
+            "qwen" if provider_selector == "qwen3_5_omni" else "volcengine"
+        )
+        realtime_source = f"{ledger_provider}_realtime"
+        provider_session_id = str(
+            provider_context.get("provider_session_id")
+            or ""
+        ).strip() or None
+        provider_dialog_id = str(
+            provider_context.get("provider_dialog_id")
+            or provider_context.get("dialog_id")
+            or ""
+        ).strip() or None
         turn_metadata: dict[str, Any] = {
             "realtime_generation": int(expected_generation or 0),
+            "realtime_provider": provider_selector,
         }
+        provider_model = str(provider_context.get("model") or "").strip()
+        if provider_model:
+            turn_metadata["provider_model"] = provider_model
         if provider_dialog_id:
             turn_metadata["provider_dialog_id"] = provider_dialog_id
         generation_id = (
-            f"{voice_turn_id}:volcengine:{int(expected_generation or 0)}" if voice_turn_id else None
+            f"{voice_turn_id}:{ledger_provider}:{int(expected_generation or 0)}"
+            if voice_turn_id
+            else None
         )
         try:
             external_turn = begin_external_turn(
                 self._pipeline,
                 user_text,
-                source="volcengine_realtime",
+                source=realtime_source,
                 conversation_session_id=conversation_session_id,
                 turn_id=voice_turn_id,
-                provider="volcengine",
+                provider=ledger_provider,
                 provider_session_id=provider_session_id,
                 provider_generation_id=str(expected_generation or "") or None,
                 generation_id=generation_id,
@@ -955,7 +999,7 @@ class VoiceLoop:
                 self._pipeline,
                 external_turn,
                 user_text=user_text,
-                source="volcengine_realtime",
+                source=realtime_source,
                 reason=reason,
                 played_ms=played_ms,
                 heard_text="",
@@ -1028,7 +1072,7 @@ class VoiceLoop:
                 external_turn,
                 user_text=user_text,
                 assistant_text=final_text,
-                source="volcengine_realtime",
+                source=realtime_source,
                 conversation_session_id=conversation_session_id,
                 metadata=turn_metadata,
             )
@@ -1713,6 +1757,7 @@ class VoiceLoop:
                 realtime_capture_active = self._realtime_capture_active()
                 realtime_general_ready = self._realtime_general_chat_ready()
                 realtime_mode = self._realtime_mode()
+                realtime_provider = self._realtime_provider()
                 realtime_robot_task = bool(
                     contains_robot_task_intent(user_text)
                     or str(gate_decision.reason or "").startswith("robot_task")
@@ -1732,6 +1777,7 @@ class VoiceLoop:
                     interaction_admitted=(gate_decision.action is InteractionAction.RESPOND),
                     intent_type=intent.type.value,
                     provider_ready=realtime_capture_active,
+                    provider=realtime_provider,
                     emergency=realtime_emergency,
                     pending_approval=pending_approval,
                     robot_task=realtime_robot_task,
@@ -1739,6 +1785,7 @@ class VoiceLoop:
                 )
                 _trace.metadata["realtime_route"] = {
                     "mode": realtime_mode,
+                    "provider": realtime_provider,
                     "route": realtime_route.route,
                     "allow_provider_audio": realtime_route.allow_provider_audio,
                     "interrupt_provider": realtime_route.interrupt_provider,

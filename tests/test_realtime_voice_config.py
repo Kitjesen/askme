@@ -55,6 +55,138 @@ def test_enabled_volcengine_realtime_config_uses_dedicated_credentials() -> None
     assert "app-1" not in repr(snapshot)
 
 
+def test_qwen35_realtime_resolves_official_defaults_and_api_key() -> None:
+    config = resolve_realtime_voice_config(
+        {
+            "voice": {
+                "realtime": {
+                    "enabled": True,
+                    "mode": "general_chat",
+                    "provider": "qwen3_5_omni",
+                    "api_key": "dashscope-secret",
+                    "workspace_id": "workspace-123",
+                }
+            }
+        }
+    )
+
+    assert config.provider == "qwen3_5_omni"
+    assert config.endpoint == (
+        "wss://workspace-123.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"
+    )
+    assert config.model == "qwen3.5-omni-flash-realtime"
+    assert config.speaker == "Tina"
+    assert config.credentials_configured is True
+    assert config.available is True
+    assert config.validation_errors() == []
+    assert "dashscope-secret" not in repr(config.status_snapshot())
+    assert "dashscope-secret" not in repr(config)
+
+
+def test_qwen35_enabled_config_requires_workspace_id() -> None:
+    config = resolve_realtime_voice_config(
+        {
+            "voice": {
+                "realtime": {
+                    "enabled": True,
+                    "mode": "shadow",
+                    "provider": "qwen3_5_omni",
+                    "api_key": "dashscope-secret",
+                }
+            }
+        }
+    )
+
+    assert config.available is False
+    assert config.validation_errors() == [
+        "voice.realtime.workspace_id is required for qwen3_5_omni"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("region", "expected_host"),
+    [
+        ("cn-beijing", "ws-123.cn-beijing.maas.aliyuncs.com"),
+        ("ap-southeast-1", "ws-123.ap-southeast-1.maas.aliyuncs.com"),
+    ],
+)
+def test_qwen35_workspace_endpoint_is_derived_from_region(
+    region: str,
+    expected_host: str,
+) -> None:
+    config = resolve_realtime_voice_config(
+        {
+            "voice": {
+                "realtime": {
+                    "enabled": True,
+                    "mode": "shadow",
+                    "provider": "qwen3_5_omni",
+                    "api_key": "dashscope-secret",
+                    "workspace_id": "ws-123",
+                    "region": region,
+                }
+            }
+        }
+    )
+
+    assert config.endpoint == f"wss://{expected_host}/api-ws/v1/realtime"
+    assert config.available is True
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "wss://attacker.example/api-ws/v1/realtime",
+        "wss://workspace.cn-beijing.maas.aliyuncs.com.attacker.example/api-ws/v1/realtime",
+        "wss://user@workspace.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime",
+        "wss://workspace.cn-beijing.maas.aliyuncs.com:bad/api-ws/v1/realtime",
+    ],
+)
+def test_qwen35_never_sends_api_key_to_untrusted_endpoint(endpoint: str) -> None:
+    config = resolve_realtime_voice_config(
+        {
+            "voice": {
+                "realtime": {
+                    "enabled": True,
+                    "mode": "shadow",
+                    "provider": "qwen3_5_omni",
+                    "api_key": "dashscope-secret",
+                    "endpoint": endpoint,
+                }
+            }
+        }
+    )
+
+    assert config.available is False
+    assert any("official WSS endpoint" in error for error in config.validation_errors())
+
+
+def test_doubao_30_resolves_duplex_endpoint_model_and_api_key() -> None:
+    config = resolve_realtime_voice_config(
+        {
+            "voice": {
+                "realtime": {
+                    "enabled": True,
+                    "mode": "shadow",
+                    "provider": "doubao_3_0",
+                    "api_key": "volcengine-secret",
+                }
+            }
+        }
+    )
+
+    assert config.provider == "volcengine_duplex"
+    assert config.endpoint == (
+        "wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue"
+    )
+    assert config.model == "1.2.6.1"
+    assert config.credentials_configured is True
+    assert config.available is True
+    assert config.validation_errors() == []
+    assert "volcengine-secret" not in repr(config.status_snapshot())
+    assert "volcengine-secret" not in repr(config)
+
+
 def test_enabled_realtime_config_fails_closed_without_credentials() -> None:
     config = resolve_realtime_voice_config(
         {"voice": {"realtime": {"enabled": True, "mode": "general_chat"}}}

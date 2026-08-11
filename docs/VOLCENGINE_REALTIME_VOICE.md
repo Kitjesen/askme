@@ -1,18 +1,17 @@
-# 火山端到端实时语音接入与上线边界
+# 火山端到端实时语音接入与上线边界（O2.0 / Seeduplex 3.0）
 
 本文描述 AskMe 机器人如何在普通“音响 + 麦克风”一体设备上接入火山引擎豆包端到端实时语音。该方案不依赖 ROS2：本机负责声卡、AEC、VAD、打断、播放代际和安全路由，云端负责端到端语音理解与语音生成。
 
-实现依据是火山引擎[端到端实时语音大模型 WebSocket API 文档](https://www.volcengine.com/docs/6561/1594356)，该页面于 **2026-07-10** 更新。产品能力边界可同时参考[端到端实时语音大模型产品介绍](https://www.volcengine.com/docs/6561/1594360)。
+旧 O2.0 实现依据是火山引擎[RealtimeAPI WebSocket 文档](https://www.volcengine.com/docs/6561/1594356)；新版实现依据是[豆包 Seeduplex 3.0 API](https://www.volcengine.com/docs/6561/2549778?lang=zh)及[全双工接入必读](https://www.volcengine.com/docs/6561/2549732?lang=zh)。
 
 ## 当前接入边界
 
-- WebSocket：`wss://openspeech.bytedance.com/api/v3/realtime/dialogue`
-- 资源 ID：`volc.speech.dialog`
-- 当前唯一允许的模型：O2.0 `1.2.1.1`
+- `volcengine_s2s`：旧 O2.0 `1.2.1.1`，`/api/v3/realtime/dialogue`，使用 App ID + Access Token + `volc.speech.dialog`
+- `volcengine_duplex`：Seeduplex 3.0 `1.2.6.1`，`/api/v3/duplex/realtime/dialogue`，仅使用新版控制台 API Key
 - 输入：16 kHz、单声道、PCM S16LE，每 20 ms 一帧（640 字节）
 - 输出：24 kHz、单声道、PCM S16LE
 - `end_smooth_window_ms`：只允许官方范围 500–50000 ms
-- SC2.0 `2.2.0.0` 暂时失败关闭；完成独立协议、事件语义、截断和真机回归后才能开放
+- SC2.0 `2.2.0.0` 仍失败关闭；它不能借用 O2.0 或 3.0 的协议路径
 - 本地级联链路始终保留，火山链路不可用或被隔离时自动回到级联路径
 
 火山端到端语音只处理已经通过本地交互门控的普通对话。机器人动作、工具调用、审批、急停、固定命令和不确定意图继续走本地安全路由及原有级联链路。端到端会话没有机器人硬件执行接口，也不被授权声称动作已经执行。
@@ -37,14 +36,40 @@
 
 ## 凭据与配置
 
-从火山控制台取得应用 ID 和 Access Key。凭据只放入运行环境，不写入 YAML、日志、健康接口或提交记录：
+Seeduplex 3.0 需在豆包语音新版控制台开通模型并创建 API Key。旧 ASR 或 O2.0 凭据不能代替该 Key：
+
+```powershell
+$env:VOLCENGINE_S2S_API_KEY = "<API Key>"
+```
+
+3.0 第一阶段配置：
+
+```yaml
+voice:
+  realtime:
+    enabled: true
+    mode: shadow
+    provider: volcengine_duplex
+    fallback: cascade
+    endpoint: wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue
+    api_key: ${VOLCENGINE_S2S_API_KEY}
+    model: 1.2.6.1
+    speaker: zh_male_xiaotian_jupiter_bigtts
+    input_mode: audio
+    input_sample_rate: 16000
+    output_sample_rate: 24000
+    output_format: pcm_s16le
+    chunk_ms: 20
+```
+
+旧 O2.0 从旧控制台取得应用 ID 和 Access Token。凭据只放入运行环境，不写入 YAML、日志、健康接口或提交记录：
 
 ```powershell
 $env:VOLCENGINE_S2S_APP_ID = "<应用 ID>"
 $env:VOLCENGINE_S2S_ACCESS_TOKEN = "<Access Key>"
 ```
 
-第一阶段使用影子模式：
+旧 O2.0 第一阶段配置：
 
 ```yaml
 voice:
@@ -86,7 +111,7 @@ voice:
 端到端服务可能在本地意图判定完成前生成回复并写入云端会话。provider 音频此时只允许停留在候选缓冲区，不得先播后补账。若本地随后判定该轮是机器人任务、命令、视觉查询、待审批工具、未被寻址的环境语音或其他不允许走端到端的内容，运行时会：
 
 1. 阻止该代际的云端音频进入播放器；
-2. 使用官方 `ConversationDelete`（事件 514，确认事件 571）删除对应的完整问答对；
+2. O2.0 使用 `ConversationDelete`（事件 514，确认事件 571）；3.0 使用 `conversation.item.delete` 及相关确认删除对应问答；
 3. 在删除确认前隔离该实时会话；
 4. 删除失败或连接异常时关闭实时通道，并回退到本地级联链路。
 
@@ -131,4 +156,4 @@ python scripts/eval/evaluate_full_duplex_hardware.py `
 - 无法证明拒绝回合已从云端历史删除时，旧实时 session 会 fail-closed 关闭，后续仅允许 fresh-session 恢复，避免迟到 provider turn 污染上下文；
 - 真实线上异常下 `ConversationDelete` 的确认时延与隔离回退。
 
-中央路由、两阶段 release、Conversation Ledger 和旧一步入口 fail-closed 已完成离线回归，因此软件安全闸门可进入下一步 shadow；这不等于已经具备 `general_chat` 生产条件。当前状态应定义为“具备受控 shadow 试运行条件”，不能定义为“所有专业语音差距已经归零”。完成线上凭据联调与隐私确认、20 + 20 + 20 真机验收、长时稳定性与故障注入后，才能形成生产上线结论。
+中央路由、两阶段 release、Conversation Ledger 和旧一步入口 fail-closed 已完成离线回归，因此软件安全闸门可进入下一步 shadow；这不等于已经具备 `general_chat` 生产条件。当前仓库没有可用的 Seeduplex 3.0 API Key，所以 3.0 尚未验证公网握手、真实事件顺序和首音。当前状态应定义为“具备受控 shadow 试运行条件”，不能定义为“所有专业语音差距已经归零”。完成线上凭据联调与隐私确认、20 + 20 + 20 真机验收、长时稳定性与故障注入后，才能形成生产上线结论。

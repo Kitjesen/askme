@@ -195,6 +195,7 @@ def test_session_authenticates_and_performs_official_two_stage_handshake() -> No
 
     snapshot = session.status_snapshot()
     assert snapshot["active"] is True
+    assert snapshot["provider_session_id"] == "dialog-1"
     assert snapshot["log_id"] == "provider-log-1"
     assert "app-secret" not in repr(snapshot)
     assert "access-secret" not in repr(snapshot)

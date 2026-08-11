@@ -100,7 +100,9 @@ class _RealtimeAudio:
 
     def realtime_context_snapshot(self) -> dict[str, object]:
         return {
-            "session_id": "provider-session-1",
+            "session_id": "local-runtime-session",
+            "provider_session_id": "provider-session-1",
+            "provider": "volcengine_s2s",
             "dialog_id": "provider-dialog-1",
             "physical_played_ms": 780,
         }
@@ -471,6 +473,93 @@ async def test_realtime_success_commits_provider_generation(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_qwen_realtime_success_uses_qwen_ledger_identity(tmp_path) -> None:
+    class _QwenRealtimeAudio(_RealtimeAudio):
+        def realtime_context_snapshot(self) -> dict[str, object]:
+            return {
+                **super().realtime_context_snapshot(),
+                "provider": "qwen3_5_omni",
+                "model": "qwen3.5-omni-flash-realtime",
+            }
+
+    audio = _QwenRealtimeAudio()
+    pipeline = _Pipeline()
+    pipeline._turn_ledger = VoiceTurnLedger(tmp_path / "qwen-realtime-success.jsonl")
+    loop = VoiceLoop(router=_Router(), pipeline=pipeline, audio=audio)
+
+    handled = await loop._try_handle_realtime_general_chat(
+        "你好",
+        expected_generation=4,
+        conversation_session_id="thread-qwen",
+        voice_turn_id="turn-qwen",
+        turn_cancel_token=None,
+    )
+
+    assert handled is True
+    generation = pipeline._turn_ledger.list_generations(turn_id="turn-qwen")[0]
+    assert generation.provider == "qwen"
+    assert generation.generation_id == "turn-qwen:qwen:4"
+
+
+@pytest.mark.asyncio
+async def test_realtime_never_records_local_session_as_provider_session(tmp_path) -> None:
+    class _NoProviderSessionAudio(_RealtimeAudio):
+        def realtime_context_snapshot(self) -> dict[str, object]:
+            snapshot = super().realtime_context_snapshot()
+            snapshot.pop("provider_session_id")
+            return snapshot
+
+    audio = _NoProviderSessionAudio()
+    pipeline = _Pipeline()
+    pipeline._turn_ledger = VoiceTurnLedger(tmp_path / "no-provider-session.jsonl")
+    loop = VoiceLoop(router=_Router(), pipeline=pipeline, audio=audio)
+
+    assert await loop._try_handle_realtime_general_chat(
+        "你好",
+        expected_generation=4,
+        conversation_session_id="thread-no-provider-session",
+        voice_turn_id="turn-no-provider-session",
+        turn_cancel_token=None,
+    )
+
+    generation = pipeline._turn_ledger.list_generations(
+        turn_id="turn-no-provider-session"
+    )[0]
+    assert generation.provider_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_realtime_missing_provider_identity_fails_closed_before_release(
+    tmp_path,
+) -> None:
+    class _MissingProviderAudio(_RealtimeAudio):
+        def realtime_context_snapshot(self) -> dict[str, object]:
+            snapshot = super().realtime_context_snapshot()
+            snapshot.pop("provider")
+            return snapshot
+
+    audio = _MissingProviderAudio()
+    pipeline = _Pipeline()
+    pipeline._turn_ledger = VoiceTurnLedger(tmp_path / "missing-provider.jsonl")
+    loop = VoiceLoop(router=_Router(), pipeline=pipeline, audio=audio)
+    loop._active_realtime_generation = 4
+    loop._active_realtime_baseline_generation = 3
+
+    handled = await loop._try_handle_realtime_general_chat(
+        "你好",
+        expected_generation=4,
+        conversation_session_id="thread-missing-provider",
+        voice_turn_id="turn-missing-provider",
+        turn_cancel_token=None,
+    )
+
+    assert handled is False
+    assert audio.approved == []
+    assert ("unsupported_realtime_provider", 4, 3) in audio.discarded
+    assert pipeline._turn_ledger.get_turn("turn-missing-provider") is None
+
+
+@pytest.mark.asyncio
 async def test_two_phase_release_observes_durable_turn_and_generation(tmp_path) -> None:
     ledger = VoiceTurnLedger(tmp_path / "realtime-two-phase-success.jsonl")
 
@@ -576,7 +665,9 @@ async def test_realtime_cancel_uses_playhead_frozen_by_physical_stop(tmp_path) -
 
         def realtime_context_snapshot(self) -> dict[str, object]:
             return {
-                "session_id": "provider-session-stop",
+                "session_id": "local-runtime-session",
+                "provider_session_id": "provider-session-stop",
+                "provider": "volcengine_s2s",
                 "physical_played_ms": self.played_ms,
             }
 

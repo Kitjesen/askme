@@ -319,13 +319,15 @@ voice:
     # after VAD detects speech to avoid provider error 45000081.
     preconnect: false
 
-  # Optional true speech-to-speech lane (Doubao RealtimeAPI, not ASR V3).
+  # Optional provider-neutral speech-to-speech lane (not ASR V3).
+  # Selectors: volcengine_s2s (legacy O2.0), volcengine_duplex (Seeduplex 3.0),
+  # qwen3_5_omni (Qwen3.5-Omni Realtime). See docs/REALTIME_VOICE_PROVIDERS.md.
   # Keep split until the target speaker/mic passes the acoustic acceptance set.
   # Robot tasks, tools, approvals and E-STOP always stay on the cascade path.
   realtime:
     enabled: false
     mode: split                 # split | shadow | general_chat
-    provider: volcengine_s2s
+    provider: volcengine_s2s       # keep legacy default; choose explicitly per rollout
     fallback: cascade
     endpoint: wss://openspeech.bytedance.com/api/v3/realtime/dialogue
     app_id: ${VOLCENGINE_S2S_APP_ID}
