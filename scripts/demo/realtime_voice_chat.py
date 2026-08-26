@@ -282,6 +282,8 @@ class EventConsumer:
         self._output_parts: list[str] = []
         self._usage: Mapping[str, Any] | None = None
         self._played_audio_this_turn = False
+        self._sent_audio_start = 0
+        self._dropped_input_start = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.response_done = threading.Event()
@@ -316,6 +318,9 @@ class EventConsumer:
         return True
 
     def begin_turn(self) -> None:
+        snapshot = self._status_snapshot()
+        self._sent_audio_start = self._counter(snapshot, "sent_audio_frames")
+        self._dropped_input_start = self._counter(snapshot, "dropped_input_frames")
         self._commit_at = None
         self._latency_reported = False
         self._input_partial = ""
@@ -326,6 +331,13 @@ class EventConsumer:
         self.failure_error = ""
         self.response_done.clear()
         self.turn_done.clear()
+
+    def abandon_turn(self) -> None:
+        """Return an empty local capture to the ready state without provider commit."""
+
+        self._commit_at = None
+        self.response_done.set()
+        self.turn_done.set()
 
     def mark_commit(self, *, now: float | None = None) -> None:
         self._commit_at = time.perf_counter() if now is None else now
@@ -382,6 +394,7 @@ class EventConsumer:
         if event_type is RealtimeVoiceEventType.ERROR:
             error = " ".join((event.error or "provider_error").splitlines()).strip()
             self._emit(f"[error] {error or 'provider_error'}")
+            self._emit_provider_diagnostic(event.metadata)
             self.failure_error = error or "provider_error"
             self.failed.set()
             self.response_done.set()
@@ -424,6 +437,52 @@ class EventConsumer:
             elapsed_ms = max(0.0, (observed_at - self._commit_at) * 1000.0)
             self._emit(f"[latency] commit-to-first-PCM: {elapsed_ms:.1f} ms")
             self._latency_reported = True
+
+    def _status_snapshot(self) -> Mapping[str, Any]:
+        try:
+            snapshot = self._session.status_snapshot()
+        except Exception:
+            return {}
+        return snapshot if isinstance(snapshot, Mapping) else {}
+
+    @staticmethod
+    def _counter(snapshot: Mapping[str, Any], key: str) -> int:
+        try:
+            return max(0, int(snapshot.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _emit_provider_diagnostic(self, metadata: Mapping[str, Any]) -> None:
+        snapshot = self._status_snapshot()
+        log_id = str(snapshot.get("log_id") or "").strip()
+        safe_log_id = "".join(
+            char for char in log_id if char.isalnum() or char in "_.-"
+        )[:96]
+        sent_audio = max(
+            0,
+            self._counter(snapshot, "sent_audio_frames") - self._sent_audio_start,
+        )
+        dropped_input = max(
+            0,
+            self._counter(snapshot, "dropped_input_frames")
+            - self._dropped_input_start,
+        )
+        provider_message = str(metadata.get("provider_message") or "").strip()
+        provider_message = " ".join(provider_message.splitlines()).strip()[:240]
+        if not safe_log_id and not sent_audio and not dropped_input and not provider_message:
+            return
+        diagnostic = (
+            "[diagnostic] "
+            f"provider_log_id={safe_log_id or '-'} "
+            f"turn_audio_frames={sent_audio} "
+            f"dropped_input_frames={dropped_input}"
+        )
+        if provider_message:
+            diagnostic += " provider_message=" + json.dumps(
+                provider_message,
+                ensure_ascii=False,
+            )
+        self._emit(diagnostic)
 
     def finish_turn_playback(self) -> bool:
         """Drain physical playback on the interaction thread before reopening input."""
@@ -480,6 +539,8 @@ class AudioSender:
         self._accepting = True
         self.dropped_frames = 0
         self.callback_status_events = 0
+        self.accepted_frames = 0
+        self.accepted_bytes = 0
 
     @property
     def failure(self) -> str:
@@ -570,6 +631,9 @@ class AudioSender:
                     if not accepted:
                         self._failure = "offer_audio_rejected"
                         self._failed.set()
+                    else:
+                        self.accepted_frames += 1
+                        self.accepted_bytes += len(item)
             finally:
                 self._queue.task_done()
 
@@ -662,6 +726,7 @@ def run_push_to_talk(
         consumer.begin_turn()
         dropped_before = sender.dropped_frames
         status_before = sender.callback_status_events
+        accepted_before = sender.accepted_frames
         quit_after_turn = False
         try:
             with sounddevice_module.RawInputStream(
@@ -695,6 +760,19 @@ def run_push_to_talk(
             error = sender.failure or "audio_sender_flush_timeout"
             emit(f"[error] microphone upload failed: {error}")
             return 1
+        if consumer.failed.is_set():
+            return _consumer_failure_exit(consumer)
+
+        accepted = sender.accepted_frames - accepted_before
+        if accepted <= 0:
+            consumer.abandon_turn()
+            emit(
+                "[warning] no microphone audio captured; turn was not sent. "
+                "Speak for a moment before pressing Enter, or verify the input device."
+            )
+            if quit_after_turn:
+                return 0
+            continue
 
         consumer.mark_commit()
         try:

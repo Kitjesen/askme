@@ -48,6 +48,8 @@ def test_sender_worker_forwards_pcm_and_flushes_before_commit() -> None:
     assert session.offered[0].pcm == pcm
     assert session.offered[0].sample_rate == 16_000
     assert session.offered[0].channels == 1
+    assert sender.accepted_frames == 1
+    assert sender.accepted_bytes == len(pcm)
 
 
 def test_cli_defaults_to_qwen_and_uses_the_dashscope_key() -> None:

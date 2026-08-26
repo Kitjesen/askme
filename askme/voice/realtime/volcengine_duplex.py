@@ -804,7 +804,18 @@ class VolcengineDuplexDialogue:
             self._transition_degraded("unexpected_tool_call")
             return
         if event_type == "error":
-            self._transition_degraded(self._safe_provider_error(event))
+            error_metadata = dict(metadata)
+            detail = event.get("error")
+            if isinstance(detail, dict):
+                message = detail.get("message")
+                if isinstance(message, str):
+                    safe_message = " ".join(message.splitlines()).strip()[:240]
+                    if safe_message:
+                        error_metadata["provider_message"] = safe_message
+            self._transition_degraded(
+                self._safe_provider_error(event),
+                metadata=error_metadata,
+            )
 
     def _handle_audio_delta(self, event: dict[str, Any], *, metadata: dict[str, str]) -> None:
         generation = self._generation_for(event) or self._active_response_generation or 1
@@ -926,7 +937,12 @@ class VolcengineDuplexDialogue:
             )
         )
 
-    def _transition_degraded(self, error: str) -> None:
+    def _transition_degraded(
+        self,
+        error: str,
+        *,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
         already_reported = self._state == "degraded" and self._last_error == error
         self._state = "degraded"
         self._last_error = error
@@ -943,7 +959,7 @@ class VolcengineDuplexDialogue:
             self._outbound_condition.notify_all()
         self._close_socket_only()
         if not already_reported and not self._closing:
-            self._emit_error(error)
+            self._emit_error(error, metadata=metadata)
 
     @staticmethod
     def _public_metadata(event: dict[str, Any]) -> dict[str, str]:
