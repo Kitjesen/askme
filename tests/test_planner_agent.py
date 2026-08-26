@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from askme.pipeline.planner_agent import PlannerAgent
 
+from askme.llm.core.contracts import LLMCallContext
+
 
 def _make_skill(name: str, description: str = "") -> MagicMock:
     s = MagicMock()
@@ -31,7 +33,9 @@ def _make_llm(response: str) -> MagicMock:
 
 class TestPlannerAgentMultiStep:
     async def test_two_step_plan_returned(self):
-        llm = _make_llm('{"plan": [{"skill": "navigate", "intent": "前往仓库"}, {"skill": "robot_grab", "intent": "抓取货物"}]}')
+        llm = _make_llm(
+            '{"plan": [{"skill": "navigate", "intent": "前往仓库"}, {"skill": "robot_grab", "intent": "抓取货物"}]}'
+        )
         sm = _make_skill_manager("navigate", "robot_grab")
         agent = PlannerAgent(llm_client=llm, skill_manager=sm)
 
@@ -44,7 +48,9 @@ class TestPlannerAgentMultiStep:
         assert steps[1].skill_name == "robot_grab"
 
     async def test_three_step_plan(self):
-        llm = _make_llm('{"plan": [{"skill": "navigate", "intent": "去A"}, {"skill": "robot_grab", "intent": "抓取"}, {"skill": "navigate", "intent": "去B"}]}')
+        llm = _make_llm(
+            '{"plan": [{"skill": "navigate", "intent": "去A"}, {"skill": "robot_grab", "intent": "抓取"}, {"skill": "navigate", "intent": "去B"}]}'
+        )
         sm = _make_skill_manager("navigate", "robot_grab")
         agent = PlannerAgent(llm_client=llm, skill_manager=sm)
 
@@ -57,6 +63,7 @@ class TestPlannerAgentMultiStep:
 
     async def test_max_5_steps_enforced(self):
         import json as _json
+
         many = [{"skill": "navigate", "intent": f"步骤{i}"} for i in range(8)]
         llm = _make_llm(_json.dumps({"plan": many}))
         sm = _make_skill_manager("navigate")
@@ -101,9 +108,37 @@ class TestPlannerAgentSingleStep:
         llm.chat.assert_not_called()  # should short-circuit before calling LLM
 
 
+async def test_each_planner_call_has_independent_correlation_identity():
+    llm = _make_llm(
+        '{"plan": [{"skill": "navigate", "intent": "去A"}, '
+        '{"skill": "robot_grab", "intent": "抓取"}]}'
+    )
+    sm = _make_skill_manager("navigate", "robot_grab")
+    agent = PlannerAgent(llm_client=llm, skill_manager=sm)
+    parent_context = LLMCallContext(
+        session_id="session-1",
+        turn_id="turn-1",
+        call_id="parent-call",
+        channel="voice",
+        request_class="robot_action",
+    )
+
+    await agent.plan("去A抓取", llm_call_context=parent_context)
+    await agent.plan("再做一次", llm_call_context=parent_context)
+
+    contexts = [call.kwargs["context"] for call in llm.chat.await_args_list]
+    assert all(context.session_id == "session-1" for context in contexts)
+    assert all(context.turn_id == "turn-1" for context in contexts)
+    assert all(context.purpose == "general" for context in contexts)
+    assert contexts[0].call_id != contexts[1].call_id
+    assert all(context.call_id != "parent-call" for context in contexts)
+
+
 class TestPlannerAgentRobustness:
     async def test_unknown_skill_in_plan_skipped(self):
-        llm = _make_llm('{"plan": [{"skill": "navigate", "intent": "去仓库"}, {"skill": "unknown_skill", "intent": "做某事"}, {"skill": "robot_grab", "intent": "抓取"}]}')
+        llm = _make_llm(
+            '{"plan": [{"skill": "navigate", "intent": "去仓库"}, {"skill": "unknown_skill", "intent": "做某事"}, {"skill": "robot_grab", "intent": "抓取"}]}'
+        )
         sm = _make_skill_manager("navigate", "robot_grab")
         agent = PlannerAgent(llm_client=llm, skill_manager=sm)
 
@@ -134,7 +169,9 @@ class TestPlannerAgentRobustness:
         assert result is None
 
     async def test_markdown_fences_stripped(self):
-        llm = _make_llm('```json\n{"plan": [{"skill": "navigate", "intent": "去A"}, {"skill": "robot_grab", "intent": "抓取"}]}\n```')
+        llm = _make_llm(
+            '```json\n{"plan": [{"skill": "navigate", "intent": "去A"}, {"skill": "robot_grab", "intent": "抓取"}]}\n```'
+        )
         sm = _make_skill_manager("navigate", "robot_grab")
         agent = PlannerAgent(llm_client=llm, skill_manager=sm)
 

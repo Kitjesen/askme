@@ -144,11 +144,18 @@ class MemoryBridge:
         self._robot_behavior_memory_enabled: bool = bool(
             self._mem_cfg.get("robot_behavior_memory_enabled", False)
         )
+        self._customer_id = str(self._mem_cfg.get("customer_id") or "").strip()
+        self._project_id = str(self._mem_cfg.get("project_id") or "").strip()
+        self._user_id = str(self._mem_cfg.get("user_id") or "").strip()
+        self._user_memory_backend = str(
+            self._mem_cfg.get("user_long_term_memory_backend", "mempalace")
+        ).strip().lower()
         self._auto_backend_order = self._normalize_auto_backend_order(
             self._mem_cfg.get("auto_backend_order")
         )
         self._backend_selection_reason = ""
         self._backend: str = self._select_backend(self._configured_backend)
+        self._backend_dependencies = self._backend_dependency_snapshot()
         self._retrieve_cache_ttl_s: float = max(
             0.0,
             float(self._mem_cfg.get("retrieve_cache_ttl_s", 1.0)),
@@ -178,6 +185,12 @@ class MemoryBridge:
         # MemPalace backend - lazy init via _ensure_mempalace()
         self._mempalace: Any = None
         self._mempalace_failed: bool = False
+        # User long-term memory is a distinct MemPalace room.
+        self._user_mempalace: Any = None
+        self._user_mempalace_failed: bool = False
+        self._user_memory_room = str(
+            self._mem_cfg.get("mempalace_user_room", "user_long_term")
+        ).strip()
 
         # Fallback: local VectorStore (lazy — only init when actually needed)
         if data_dir is not None:
@@ -216,10 +229,31 @@ class MemoryBridge:
             str(status).strip().lower()
             for status in self._mem_cfg.get(
                 "rag_allowed_approval_statuses",
-                ["", "published", "approved", "active"],
+                ["published"],
             )
+            if str(status).strip()
         }
+        # Empty configuration must not reopen the customer RAG lane.
+        if not self._rag_allowed_statuses:
+            self._rag_allowed_statuses = {"published"}
+        self._rag_allowed_statuses.intersection_update({"published"})
+        if not self._rag_allowed_statuses:
+            self._rag_allowed_statuses = {"published"}
+
         self._rag_enforce_expiry = bool(self._mem_cfg.get("rag_enforce_expiry", True))
+        self._late_result_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._late_result_cache_hits = 0
+        self._late_result_cache_writes = 0
+
+        from askme.memory.core.turn_admission import TurnMemoryAdmission
+
+        self._turn_admission = TurnMemoryAdmission(
+            min_asr_confidence=float(self._mem_cfg.get("admission_min_asr_confidence", 0.75)),
+            user_memory_ttl_days=int(self._mem_cfg.get("user_memory_ttl_days", 365)),
+            knowledge_review_ttl_days=int(
+                self._mem_cfg.get("knowledge_review_ttl_days", 30)
+            ),
+        )
 
         if not self._enabled:
             logger.info("[Memory] Memory disabled in config.")
@@ -276,7 +310,12 @@ class MemoryBridge:
 
     def _backend_selection_snapshot(self) -> dict[str, Any]:
         candidates = [
-            {"backend": backend, "available": self._candidate_backend_available(backend)}
+            {
+                "backend": backend,
+                "available": bool(
+                    self._backend_dependencies.get(backend, {}).get("installed")
+                ),
+            }
             for backend in self._auto_backend_order
         ]
         return {
@@ -436,7 +475,11 @@ class MemoryBridge:
         try:
             from askme.memory.backends.mempalace_backend import MemPalaceBackend
 
-            self._mempalace = MemPalaceBackend(self._mem_cfg, self._brain_cfg)
+            customer_cfg = dict(self._mem_cfg)
+            customer_cfg["mempalace_room"] = str(
+                self._mem_cfg.get("mempalace_customer_knowledge_room", "customer_knowledge")
+            ).strip()
+            self._mempalace = MemPalaceBackend(customer_cfg, self._brain_cfg)
             inited = self._mempalace._ensure_mempalace()
             if not inited:
                 self._mempalace_failed = True
@@ -447,6 +490,32 @@ class MemoryBridge:
         except Exception as e:
             logger.warning("[Memory] MemPalace init failed, falling back: %s", e)
             self._mempalace_failed = True
+            return False
+
+    def _ensure_user_mempalace(self) -> bool:
+        """Initialise the isolated user-memory MemPalace room."""
+        if self._user_memory_backend != "mempalace":
+            return False
+        if self._user_mempalace is not None and self._user_mempalace.available:
+            return True
+        if not self._enabled or self._user_mempalace_failed:
+            return False
+        try:
+            from askme.memory.backends.mempalace_backend import MemPalaceBackend
+
+            user_cfg = dict(self._mem_cfg)
+            user_cfg["mempalace_room"] = self._user_memory_room
+            self._user_mempalace = MemPalaceBackend(user_cfg, self._brain_cfg)
+            if not self._user_mempalace._ensure_mempalace():
+                self._user_mempalace = None
+                self._user_mempalace_failed = True
+                return False
+            logger.info("[Memory] isolated user MemPalace backend ready.")
+            return True
+        except Exception as exc:
+            logger.warning("[Memory] user MemPalace init failed: %s", exc)
+            self._user_mempalace = None
+            self._user_mempalace_failed = True
             return False
 
     # ------------------------------------------------------------------
@@ -467,6 +536,14 @@ class MemoryBridge:
         """Pre-load the embedding model in a background thread."""
         if not self._enabled:
             return
+        if self._user_memory_backend == "mempalace":
+            try:
+                user_ready = await asyncio.to_thread(self._ensure_user_mempalace)
+                if user_ready:
+                    await self._user_mempalace.warmup()
+            except Exception as exc:
+                logger.debug("[Memory] user MemPalace warmup failed: %s", exc)
+
 
         # Warm up the configured backend
         if self._backend == "robotmem":
@@ -592,7 +669,7 @@ class MemoryBridge:
                 coalesced=coalesced,
             )
             return result
-        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+        except TimeoutError:
             logger.warning("[Memory] retrieval timed out (%.1fs).", self._retrieve_timeout)
             self._retrieve_error_count += 1
             self._record_retrieve_result(
@@ -620,7 +697,110 @@ class MemoryBridge:
                     if self._retrieve_inflight.get(cache_key) is task:
                         self._retrieve_inflight.pop(cache_key, None)
 
-    async def retrieve_with_context(self, text: str) -> MemoryRetrievalResult:
+    def cache_late_retrieval(self, text: str, retrieval: Any) -> None:
+        """Keep a completed late result in a bounded in-memory exact-query cache."""
+        if not isinstance(retrieval, MemoryRetrievalResult):
+            return
+        if retrieval.rag.get("user_scope_bound"):
+            return
+        key = self._retrieve_cache_key(text)
+        if not key or self._retrieve_cache_ttl_s <= 0:
+            return
+        self._late_result_cache[key] = {
+            "result": retrieval,
+            "expires_at": time.monotonic() + self._retrieve_cache_ttl_s,
+        }
+        self._late_result_cache.move_to_end(key)
+        self._late_result_cache_writes += 1
+        while len(self._late_result_cache) > self._retrieve_cache_max_entries:
+            self._late_result_cache.popitem(last=False)
+
+    def _cached_late_retrieval(self, text: str) -> MemoryRetrievalResult | None:
+        key = self._retrieve_cache_key(text)
+        entry = self._late_result_cache.get(key) if key else None
+        if not entry:
+            return None
+        if float(entry.get("expires_at") or 0.0) <= time.monotonic():
+            self._late_result_cache.pop(key, None)
+            return None
+        result = entry.get("result")
+        if not isinstance(result, MemoryRetrievalResult):
+            self._late_result_cache.pop(key, None)
+            return None
+        self._late_result_cache.move_to_end(key)
+        self._late_result_cache_hits += 1
+        return MemoryRetrievalResult(
+            context=result.context,
+            evidence=[dict(item) for item in result.evidence],
+            rag={**result.rag, "late_cache_hit": True},
+        )
+
+    async def _retrieve_user_context(
+        self,
+        text: str,
+        *,
+        customer_id: str = "",
+        project_id: str = "",
+        user_id: str = "",
+    ) -> str:
+        """Retrieve governed user memory from the isolated MemPalace room."""
+        scoped_user_id = str(user_id or "").strip() or self._user_id
+        scoped_customer_id = str(customer_id or "").strip() or self._customer_id
+        scoped_project_id = str(project_id or "").strip() or self._project_id
+        if self._user_memory_backend != "mempalace" or not scoped_user_id:
+            return ""
+        try:
+            ready = await asyncio.wait_for(
+                asyncio.to_thread(self._ensure_user_mempalace),
+                timeout=self._backend_init_timeout,
+            )
+            if not ready:
+                return ""
+            metadata_filter = {
+                "type": "user_memory",
+                "user_id": scoped_user_id,
+                "approval_status": "active",
+            }
+            if scoped_customer_id:
+                metadata_filter["customer_id"] = scoped_customer_id
+            if scoped_project_id:
+                metadata_filter["project_id"] = scoped_project_id
+            items = await self._user_mempalace.retrieve_items(
+                text,
+                metadata_filter=metadata_filter,
+            )
+        except TimeoutError:
+            return ""
+        except Exception as exc:
+            logger.debug("[Memory] isolated user-memory retrieve failed: %s", exc)
+            return ""
+
+        now = datetime.now(_UTC)
+        accepted: list[str] = []
+        for item in items:
+            metadata = item.get("metadata") if isinstance(item, dict) else {}
+            if not isinstance(metadata, dict):
+                continue
+            expires_at = self._parse_evidence_time(metadata.get("expires_at"))
+            if expires_at is not None and expires_at <= now:
+                continue
+            value = str(item.get("text") or "").strip()
+            if value:
+                accepted.append(value)
+            if len(accepted) >= 5:
+                break
+        if not accepted:
+            return ""
+        return "[用户长期记忆]\n" + "\n".join(f"- {value}" for value in accepted)
+
+    async def retrieve_with_context(
+        self,
+        text: str,
+        *,
+        customer_id: str = "",
+        project_id: str = "",
+        user_id: str = "",
+    ) -> MemoryRetrievalResult:
         """Return context and evidence captured atomically for one dialogue turn."""
 
         if not self._enabled:
@@ -645,6 +825,21 @@ class MemoryBridge:
                 },
             )
 
+        request_scoped = any(
+            str(value or "").strip() for value in (customer_id, project_id, user_id)
+        )
+        cached_late = None if request_scoped else self._cached_late_retrieval(text)
+        if cached_late is not None:
+            return cached_late
+        user_task = asyncio.create_task(
+            self._retrieve_user_context(
+                text,
+                customer_id=customer_id,
+                project_id=project_id,
+                user_id=user_id,
+            )
+        )
+
         started = time.perf_counter()
         async with self._retrieve_state_lock:
             try:
@@ -657,7 +852,7 @@ class MemoryBridge:
                     backend=self._last_backend or self._backend,
                     elapsed_ms=(time.perf_counter() - started) * 1000.0,
                 )
-            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+            except TimeoutError:
                 context = ""
                 self._retrieve_error_count += 1
                 self._record_retrieve_result(
@@ -678,6 +873,14 @@ class MemoryBridge:
                 logger.warning("[Memory] turn retrieval failed: %s", exc)
 
             evidence = [dict(item) for item in self._last_evidence]
+            try:
+                user_context = await user_task
+            except Exception as exc:
+                logger.debug("[Memory] user-memory turn retrieval failed: %s", exc)
+                user_context = ""
+            if user_context:
+                context = f"{user_context}\n{context}" if context else user_context
+
             dropped = [dict(item) for item in self._last_dropped_evidence]
             return MemoryRetrievalResult(
                 context=context,
@@ -692,6 +895,8 @@ class MemoryBridge:
                     "dropped_evidence": dropped,
                     "answer_policy": self._answer_policy_snapshot(),
                     "used_in_answer": bool(evidence),
+                    "user_memory_used": bool(user_context),
+                    "user_scope_bound": request_scoped,
                 },
             )
 
@@ -725,7 +930,7 @@ class MemoryBridge:
                     asyncio.to_thread(self._ensure_robotmem),
                     timeout=self._backend_init_timeout,
                 )
-            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+            except TimeoutError:
                 logger.warning(
                     "[Memory] RobotMem init timed out (%.1fs).",
                     self._backend_init_timeout,
@@ -771,7 +976,7 @@ class MemoryBridge:
                     asyncio.to_thread(self._ensure_mempalace),
                     timeout=self._backend_init_timeout,
                 )
-            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+            except TimeoutError:
                 logger.warning(
                     "[Memory] MemPalace init timed out (%.1fs).",
                     self._backend_init_timeout,
@@ -786,8 +991,19 @@ class MemoryBridge:
                 self._last_fallback_reason = "mempalace_init_failed"
             if mempalace_ready:
                 self._last_backend = "mempalace"
+                metadata_filter = {
+                    "type": "knowledge",
+                    "approval_status": "published",
+                }
+                if self._customer_id:
+                    metadata_filter["customer_id"] = self._customer_id
+                if self._project_id:
+                    metadata_filter["project_id"] = self._project_id
                 try:
-                    raw_items = await self._mempalace.retrieve_items(text)
+                    raw_items = await self._mempalace.retrieve_items(
+                        text,
+                        metadata_filter=metadata_filter,
+                    )
                 except Exception as exc:
                     logger.warning("[Memory] MemPalace retrieval failed, falling back: %s", exc)
                     raw_items = []
@@ -821,10 +1037,123 @@ class MemoryBridge:
         self._last_backend = "vector"
         return await self._retrieve_vector_store(text)
 
-    async def save(self, user_text: str, assistant_text: str) -> None:
-        """Persist a conversation exchange to L4 memory.
+    async def admit_turn(
+        self,
+        user_text: str,
+        *,
+        source_turn_id: str = "",
+        source_event_id: str = "",
+        source_sequence: int | None = None,
+        source_thread_id: str = "",
+        idempotency_key: str = "",
+        occurred_at: datetime | str | None = None,
+        source: str = "dialogue",
+        confidence: float = 1.0,
+        customer_id: str = "",
+        project_id: str = "",
+        user_id: str = "",
+    ) -> Any:
+        """Classify and persist only governed durable memory from user input.
 
-        Silently no-ops when the backend is unavailable.
+        Customer/site statements are written only to the review catalog as
+        ``pending_review``. Personal preferences and corrections use the
+        isolated user MemPalace room. Assistant output is never admitted.
+        """
+        from askme.memory.core.turn_admission import TurnAdmissionResult
+
+        result = self._turn_admission.classify(
+            user_text,
+            source_turn_id=source_turn_id,
+            source_event_id=source_event_id,
+            source_sequence=source_sequence,
+            source_thread_id=source_thread_id,
+            idempotency_key=idempotency_key,
+            observed_at=occurred_at,
+            source=source,
+            confidence=confidence,
+            customer_id=str(customer_id or "").strip() or self._customer_id,
+            project_id=str(project_id or "").strip() or self._project_id,
+            user_id=str(user_id or "").strip() or self._user_id,
+        )
+        if not result.admitted:
+            return result
+
+        persisted = 0
+        errors: list[str] = []
+        for candidate in result.candidates:
+            metadata = candidate.to_metadata()
+            try:
+                if candidate.memory_type == "knowledge_candidate":
+                    payload = {
+                        "record_id": candidate.record_id,
+                        "text": candidate.text,
+                        "memory_text": candidate.text,
+                        "category": metadata.get("category") or "general",
+                        "source": candidate.source,
+                        "owner": candidate.user_id or "dialogue_admission",
+                        "updated_at": candidate.last_confirmed_at,
+                        "expires_at": candidate.expires_at,
+                        "confidence": candidate.confidence,
+                        "approval_status": "pending_review",
+                        "quality_status": "pending_review",
+                        "visibility": "internal",
+                        "customer_id": candidate.customer_id,
+                        "project_id": candidate.project_id,
+                        "entity_key": candidate.subject,
+                        "fact_key": candidate.predicate,
+                        "value": candidate.value,
+                        "metadata": {
+                            **metadata,
+                            "type": "knowledge",
+                            "approval_status": "pending_review",
+                        },
+                    }
+                    await asyncio.to_thread(
+                        self._knowledge_catalog.upsert_payloads,
+                        [payload],
+                    )
+                    persisted += 1
+                    continue
+
+                if not candidate.user_id:
+                    errors.append(f"{candidate.record_id}:missing_user_scope")
+                    continue
+                ready = await asyncio.to_thread(self._ensure_user_mempalace)
+                if not ready:
+                    errors.append(f"{candidate.record_id}:user_mempalace_unavailable")
+                    continue
+                stored = await self._user_mempalace.save_fact(
+                    candidate.text,
+                    {
+                        **metadata,
+                        "type": "user_memory",
+                        "approval_status": "active",
+                    },
+                )
+                if stored is True:
+                    persisted += 1
+                else:
+                    errors.append(f"{candidate.record_id}:write_not_confirmed")
+            except Exception as exc:
+                errors.append(f"{candidate.record_id}:{type(exc).__name__}")
+                logger.warning("[Memory] turn admission persistence failed: %s", exc)
+
+        if persisted:
+            await self._clear_retrieve_cache()
+            self._late_result_cache.clear()
+        return TurnAdmissionResult(
+            admitted=result.admitted,
+            candidates=result.candidates,
+            rejected_reason=result.rejected_reason,
+            persisted_count=persisted,
+            persistence_errors=tuple(errors),
+        )
+
+    async def save(self, user_text: str, assistant_text: str) -> None:
+        """Deprecated compatibility path for legacy callers.
+
+        New dialogue code must call :meth:`admit_turn`; this method remains for
+        non-dialogue migrations and is intentionally not used by TurnExecutor.
         """
         if not self._enabled:
             return
@@ -852,7 +1181,8 @@ class MemoryBridge:
         await self._save_vector_store(user_text, assistant_text)
 
     async def save_fact(self, text: str, metadata: dict[str, Any] | None = None) -> bool:
-        """Persist a curated knowledge fact with optional metadata."""
+        """Persist a curated, published customer-knowledge fact."""
+        metadata = {**(metadata or {}), "type": "knowledge"}
         if not self._enabled:
             return False
         clean = str(text or "").strip()
@@ -878,13 +1208,11 @@ class MemoryBridge:
         store = self._ensure_store()
         if not store or not store.available:
             return False
-        previous_size = int(getattr(store, "size", 0) or 0)
-        result = await asyncio.to_thread(
-            store.add, clean, {"type": "knowledge", **(metadata or {})}
-        )
+        indexed = await asyncio.to_thread(store.add, clean, metadata)
+        if not indexed:
+            return False
         await asyncio.to_thread(store.save)
-        current_size = int(getattr(store, "size", 0) or 0)
-        return bool(result) or current_size > previous_size
+        return True
 
     async def list_knowledge(self, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         """List locally indexed knowledge records for admin UI.
@@ -916,6 +1244,18 @@ class MemoryBridge:
         await self._clear_retrieve_cache()
         allowed = {
             "approval_status",
+            "quality_status",
+            "visibility",
+            "customer_id",
+            "project_id",
+            "product_area",
+            "workstream",
+            "linked_object_type",
+            "linked_object_id",
+            "document_type",
+            "source_version",
+            "evidence_version",
+            "conflict_set_id",
             "category",
             "source",
             "owner",
@@ -1143,6 +1483,19 @@ class MemoryBridge:
                         {},
                     ),
                 },
+                "user_long_term": {
+                    "purpose": "governed user preferences and corrections",
+                    "configured_backend": self._user_memory_backend,
+                    "room": self._user_memory_room,
+                    "scope_ready": bool(self._user_id),
+                    "request_scope_supported": True,
+                    "ready": bool(
+                        self._user_mempalace is not None
+                        and self._user_mempalace.available
+                        and self._user_id
+                    ),
+                    "logically_isolated": True,
+                },
             },
             "available": available,
             "robotmem_ready": robotmem_available,
@@ -1181,6 +1534,11 @@ class MemoryBridge:
                 "inflight": len(self._retrieve_inflight),
                 "last_hit": self._last_retrieve_cache_hit,
                 "last_coalesced": self._last_retrieve_coalesced,
+            },
+            "late_result_cache": {
+                "size": len(self._late_result_cache),
+                "hits": self._late_result_cache_hits,
+                "writes": self._late_result_cache_writes,
             },
             "last_evidence": self._last_evidence,
             "last_dropped_evidence": self._last_dropped_evidence,
@@ -1303,7 +1661,8 @@ class MemoryBridge:
 
     @staticmethod
     def _knowledge_catalog_record(record: dict[str, Any]) -> dict[str, Any]:
-        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        raw_metadata = record.get("metadata")
+        metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
         return {
             "index": record.get("index"),
             "record_id": metadata.get("record_id") or "",
@@ -1395,9 +1754,32 @@ class MemoryBridge:
         *,
         now: datetime,
     ) -> str:
-        status = str(metadata.get("approval_status", "")).strip().lower()
-        if status and status not in self._rag_allowed_statuses:
+        memory_type = str(metadata.get("type") or "").strip().lower()
+        # Legacy approved catalog/vector records may predate the explicit
+        # memory_type field. Normalize those records to knowledge at the
+        # boundary while still rejecting untyped records with no approval.
+        if not memory_type:
+            if str(metadata.get("approval_status") or "").strip():
+                memory_type = "knowledge"
+            else:
+                return "memory_type:missing"
+        if memory_type != "knowledge":
+            return f"memory_type:{memory_type}"
+        status = str(metadata.get("approval_status") or "").strip().lower()
+        if not status:
+            return "approval_status:missing"
+        if status not in self._rag_allowed_statuses:
             return f"approval_status:{status}"
+        record_customer = str(metadata.get("customer_id") or "").strip()
+        if self._customer_id and record_customer != self._customer_id:
+            return "customer_scope:mismatch_or_missing"
+        if not self._customer_id and record_customer:
+            return "customer_scope:unbound"
+        record_project = str(metadata.get("project_id") or "").strip()
+        if self._project_id and record_project != self._project_id:
+            return "project_scope:mismatch_or_missing"
+        if not self._project_id and record_project:
+            return "project_scope:unbound"
         if str(metadata.get("conflict_set_id") or "").strip():
             return f"conflict:{metadata.get('conflict_set_id')}"
         catalog_reason = self._knowledge_catalog.evidence_drop_reason(metadata)
@@ -1553,11 +1935,14 @@ class MemoryBridge:
             ]
             if items:
                 logger.info("[Memory] Mem0 found %d items.", len(items))
-                items = self._filter_evidence_items(items, backend="mem0")
+                # Mem0 is a legacy user-memory fallback, not customer RAG.
+                # Do not apply the customer knowledge approval/type filter here;
+                # the governed MemPalace user room is the preferred path.
+                self._last_dropped_evidence = []
                 self._set_evidence(items, backend="mem0")
                 return self._format_evidence(items)
             return ""
-        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+        except TimeoutError:
             logger.warning("[Memory] Mem0 retrieval timed out (%.1fs).", self._retrieve_timeout)
             return ""
         except Exception as exc:
@@ -1586,8 +1971,16 @@ class MemoryBridge:
             return ""
         try:
             logger.debug("[Memory] VectorStore searching for: %s", text[:60])
+            metadata_filter = {
+                "type": "knowledge",
+                "approval_status": "published",
+            }
+            if self._customer_id:
+                metadata_filter["customer_id"] = self._customer_id
+            if self._project_id:
+                metadata_filter["project_id"] = self._project_id
             results = await asyncio.wait_for(
-                asyncio.to_thread(store.search, text, 5),
+                asyncio.to_thread(store.search, text, 5, metadata_filter=metadata_filter),
                 timeout=self._retrieve_timeout,
             )
             if results:
@@ -1613,7 +2006,7 @@ class MemoryBridge:
                 return self._format_evidence(items)
             logger.debug("[Memory] VectorStore no relevant memories found.")
             return ""
-        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+        except TimeoutError:
             logger.warning("[Memory] VectorStore retrieval timed out (%.1fs).", self._retrieve_timeout)
             return ""
         except Exception as exc:

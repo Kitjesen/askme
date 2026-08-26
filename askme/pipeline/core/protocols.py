@@ -10,7 +10,7 @@ Public surface:
 
 Inspired by Claude Code's patterns:
   - Context objects propagated immutably through the pipeline.
-  - AbortSignal equivalent (cancel_token asyncio.Event).
+  - AbortSignal equivalent (thread-safe cancel token).
   - Hook system (PipelineHooks) for lifecycle callbacks.
   - Structured tool results (ToolCallRecord).
 """
@@ -19,10 +19,21 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
+
+from askme.llm.core.contracts import LLMCallContext
 
 # Re-export hook types for one-stop import convenience
 from askme.pipeline.core.hooks import PipelineHooks, ToolCallRecord  # noqa: F401
+
+
+@runtime_checkable
+class CancellationToken(Protocol):
+    """Minimal cancellation signal shared across event-loop and audio threads."""
+
+    def is_set(self) -> bool: ...
+
+    def set(self) -> None: ...
 
 
 @runtime_checkable
@@ -36,6 +47,8 @@ class StreamProcessorProtocol(Protocol):
         model: str | None = None,
         source: str = "voice",
         conversation_session_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
+        llm_call_context: LLMCallContext | None = None,
     ) -> str:
         """Stream LLM response, speak sentences via TTS, handle tool calls."""
         ...
@@ -45,6 +58,8 @@ class StreamProcessorProtocol(Protocol):
         messages: list[dict[str, Any]],
         model: str | None = None,
         source: str = "voice",
+        turn_cancel_token: CancellationToken | None = None,
+        llm_call_context: LLMCallContext | None = None,
     ) -> str:
         """Stream a follow-up LLM response and pipe to TTS."""
         ...
@@ -53,6 +68,7 @@ class StreamProcessorProtocol(Protocol):
         self,
         stream: Any,
         source: str = "voice",
+        turn_cancel_token: CancellationToken | None = None,
     ) -> tuple[str, dict[int, dict[str, str]]]:
         """Consume raw LLM stream: think filter, TTS, truncation.
 
@@ -66,6 +82,34 @@ class StreamProcessorProtocol(Protocol):
 
     def set_audio(self, audio: Any) -> None:
         """Late-bind the AudioAgent (set post-build by VoiceModule/TextModule)."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class SkillExecutionDisposition:
+    """Canonical Turn settlement decision returned by an injected skill gate."""
+
+    status: Literal["succeeded", "failed", "cancelled"]
+    code: str
+
+    def __post_init__(self) -> None:
+        if self.status not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError(f"invalid skill execution disposition status: {self.status}")
+        if not str(self.code or "").strip():
+            raise ValueError("skill execution disposition code must not be empty")
+
+
+@runtime_checkable
+class SkillResultClassifierProtocol(Protocol):
+    """Optional extension for gates that classify their legacy string result."""
+
+    def classify_execution_result(
+        self,
+        result: str,
+        *,
+        skill_name: str = "",
+    ) -> SkillExecutionDisposition:
+        """Classify the legacy result for canonical Turn settlement."""
         ...
 
 
@@ -84,6 +128,9 @@ class SkillGateProtocol(Protocol):
         user_text: str,
         extra_context: str = "",
         source: str = "voice",
+        conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
     ) -> str:
         """Execute a named skill and speak the result."""
         ...
@@ -117,13 +164,14 @@ class TurnExecutorProtocol(Protocol):
         memory_task: asyncio.Task[str] | None = None,
         source: str = "voice",
         conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_epoch: int | None = None,
+        turn_cancel_token: CancellationToken | None = None,
     ) -> str:
         """Run the full pipeline for *user_text*. Returns assistant reply."""
         ...
 
-    def start_idle_reflection(
-        self, idle_seconds: float = 300.0
-    ) -> asyncio.Task[None] | None:
+    def start_idle_reflection(self, idle_seconds: float = 300.0) -> asyncio.Task[None] | None:
         """Start a background dream-consolidation task."""
         ...
 
@@ -145,7 +193,7 @@ class TurnContext:
     """Immutable snapshot of per-turn context.
 
     Passed through the pipeline so sub-components share state without coupling.
-    ``cancel_token`` is an asyncio.Event set by BrainPipeline.handle_estop().
+    ``cancel_token`` is a thread-safe signal set by cancellation or E-STOP.
     Each sub-component checks it independently — no manual coordination needed.
 
     Example::
@@ -159,6 +207,8 @@ class TurnContext:
 
     user_text: str
     source: str
-    cancel_token: asyncio.Event
+    cancel_token: CancellationToken
     voice_model: str | None = None
     conversation_session_id: str | None = None
+    voice_turn_id: str | None = None
+    turn_epoch: int | None = None

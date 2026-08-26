@@ -18,23 +18,35 @@ class LLMConfig:
 
     provider: str = ""
     api_key: str = ""
-    base_url: str = "https://api.minimax.chat/v1"
-    model: str = "MiniMax-M2.7-highspeed"
+    base_url: str = ""
+    model: str = ""
+    health_model: str = ""
     max_tokens: int = 0
     temperature: float = 0.7
     timeout: float = 30.0
-    max_retries: int = 2
+    max_retries: int = 0
     fallback_models: list[str] = field(default_factory=list)
 
     # Optional secondary MiniMax client for mixed relay + direct MiniMax setup.
     minimax_api_key: str = ""
-    minimax_base_url: str = "https://api.minimax.chat/v1"
+    minimax_base_url: str = "https://api.minimaxi.com/v1"
     provider_options: dict = field(default_factory=dict)
+
+    @staticmethod
+    def _first(cfg: dict, *keys: str, default: str = "") -> str:
+        for key in keys:
+            value = cfg.get(key, "")
+            if str(value).strip():
+                return str(value)
+        return default
 
     def validate(self) -> list[str]:
         """Return validation errors. Empty list means valid enough to start."""
 
         errors: list[str] = []
+        normalized_provider = str(self.provider or "").strip().lower().replace("_", "-")
+        if not normalized_provider:
+            errors.append("LLMConfig.provider is empty")
         if not self.api_key:
             errors.append("LLMConfig.api_key is empty; LLM calls will fail")
         if not self.model:
@@ -45,6 +57,15 @@ class LLMConfig:
             errors.append(f"LLMConfig.timeout={self.timeout} must be positive")
         if self.max_retries < 0:
             errors.append(f"LLMConfig.max_retries={self.max_retries} must be >= 0")
+        if normalized_provider in {"litellm", "litellm-proxy", "llm-gateway"}:
+            if self.health_model != "health-probe":
+                errors.append("LLMConfig.health_model must be 'health-probe' when provider=litellm")
+            if self.max_retries != 0:
+                errors.append("LLMConfig.max_retries must be 0 when provider=litellm")
+            if self.fallback_models:
+                errors.append("LLMConfig.fallback_models must be empty when provider=litellm")
+            if self.minimax_api_key:
+                errors.append("LLMConfig.minimax_api_key must be empty when provider=litellm")
         if not self.base_url:
             errors.append("LLMConfig.base_url is empty")
         return errors
@@ -61,17 +82,31 @@ class LLMConfig:
     def from_cfg(cls, brain_cfg: dict) -> LLMConfig:
         """Construct from the ``brain`` sub-dict of config.yaml."""
 
+        provider = str(brain_cfg.get("provider", brain_cfg.get("backend", ""))).strip()
         return cls(
-            provider=brain_cfg.get("provider", brain_cfg.get("backend", "")),
-            api_key=brain_cfg.get("api_key", ""),
-            base_url=brain_cfg.get("base_url", "https://api.minimax.chat/v1"),
-            model=brain_cfg.get("model", "MiniMax-M2.7-highspeed"),
+            provider=provider,
+            api_key=cls._first(
+                brain_cfg,
+                "api_key",
+                "llm_api_key",
+                "LLM_API_KEY",
+                default="",
+            ),
+            base_url=cls._first(
+                brain_cfg,
+                "base_url",
+                "llm_base_url",
+                "LLM_BASE_URL",
+                default="",
+            ),
+            model=str(brain_cfg.get("model") or "").strip(),
+            health_model=str(brain_cfg.get("health_model") or "").strip(),
             max_tokens=brain_cfg.get("max_tokens", 0),
             temperature=brain_cfg.get("temperature", 0.7),
             timeout=brain_cfg.get("timeout", 30.0),
-            max_retries=brain_cfg.get("max_retries", 2),
+            max_retries=brain_cfg.get("max_retries", 0),
             fallback_models=brain_cfg.get("fallback_models", []),
             minimax_api_key=brain_cfg.get("minimax_api_key", ""),
-            minimax_base_url=brain_cfg.get("minimax_base_url", "https://api.minimax.chat/v1"),
+            minimax_base_url=brain_cfg.get("minimax_base_url", "https://api.minimaxi.com/v1"),
             provider_options=brain_cfg.get("provider_options", {}),
         )

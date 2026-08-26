@@ -26,11 +26,7 @@ _CHUNK = np.zeros(160, dtype=np.float32)
 _CHUNK_I16 = np.zeros(160, dtype=np.int16)
 
 
-def _make_agent(
-    voice_config: dict | None = None,
-    *,
-    aec_ready: bool = True,
-) -> AudioAgent:
+def _make_agent() -> AudioAgent:
     """Create an AudioAgent with all heavy engines mocked out.
 
     Patches ASREngine, VADEngine, KWSEngine, PunctuationRestorer,
@@ -49,11 +45,9 @@ def _make_agent(
 
     started = {k: p.start() for k, p in patches.items()}
 
-    started["audio_proc_cls"].return_value.echo_reference = (
-        object() if aec_ready else None
-    )
-
-    # KWS: not available so listen_loop skips wake-word phase
+    # These tests exercise the generic listen/VAD/ASR interface. Keep KWS
+    # unavailable and explicitly opt this fixture out of the product
+    # fail-closed wake-word policy; wake-word behaviour is covered separately.
     mock_kws_inst = started["kws_engine"].return_value
     mock_kws_inst.available = False
 
@@ -71,7 +65,9 @@ def _make_agent(
     mock_metrics = MagicMock()
 
     agent = AudioAgent(
-        {"voice": voice_config or {}}, voice_mode=True, metrics=mock_metrics
+        {"voice": {"product_readiness": {"require_wake_word": False}}},
+        voice_mode=True,
+        metrics=mock_metrics,
     )
 
     # Replace the modular components with fresh mocks we control
@@ -98,13 +94,9 @@ def _teardown(agent: AudioAgent) -> None:
 
 
 @contextmanager
-def _agent_ctx(
-    voice_config: dict | None = None,
-    *,
-    aec_ready: bool = True,
-) -> Generator[AudioAgent, None, None]:
+def _agent_ctx() -> Generator[AudioAgent, None, None]:
     """Context manager that creates and tears down a test agent."""
-    agent = _make_agent(voice_config, aec_ready=aec_ready)
+    agent = _make_agent()
     try:
         yield agent
     finally:
@@ -246,8 +238,8 @@ class TestListenLoopIntegration:
             assert not raw_aplay_called.wait(timeout=0.1)
             agent._play_chime.assert_called_once_with("wake")
 
-    def test_barge_in_requires_wake_keyword_before_stopping_tts(self):
-        """A keyword-authorized barge-in stops TTS and captures the new command."""
+    def test_barge_in_cancels_only_after_asr_accepts_the_interruption(self):
+        """Detection holds playback; accepted ASR then cancels and drains it."""
         with _agent_ctx() as agent:
             mic = _setup_mic_open(agent)
             proc = agent._audio_proc
@@ -260,10 +252,29 @@ class TestListenLoopIntegration:
 
             # Simulate TTS active
             agent.tts.is_active.return_value = True
+            hold_token = object()
+            lifecycle: list[str] = []
+            agent.tts.pause_playback.side_effect = (
+                lambda **_kwargs: lifecycle.append("pause") or hold_token
+            )
+            agent.tts.abort_playback_hold.side_effect = (
+                lambda token: lifecycle.append("abort") or token is hold_token
+            )
+            agent.tts.stop_immediately.side_effect = lambda: lifecycle.append("stop")
+            agent.tts.drain_buffers.side_effect = lambda: lifecycle.append("drain")
+            agent.set_barge_in_callback(lambda: lifecycle.append("callback"))
+            output_turn = agent._turn_traces.start(
+                source="test_output",
+                media_transport="sounddevice",
+            )
+            agent._turn_traces.finish("accepted")
+            playback_token = agent.start_playback(
+                voice_turn_id=output_turn.voice_turn_id,
+            )
+            assert playback_token is not None
 
-            agent.kws.available = True
-            agent.kws_stream = object()
-            agent._wait_for_wake_word_mic = MagicMock(return_value=True)
+            barge_buf_chunk = np.ones(160, dtype=np.float32)
+            vad.barge_in_buffer = [barge_buf_chunk]
 
             call_count = 0
 
@@ -271,9 +282,11 @@ class TestListenLoopIntegration:
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:
-                    vad.speech_active = True
-                    return VADEvent.SPEECH_START
+                    return VADEvent.BARGE_IN_START
                 if call_count == 2:
+                    vad.speech_active = True
+                    return VADEvent.BARGE_IN_CONFIRMED
+                if call_count == 3:
                     vad.speech_active = False
                     return VADEvent.SPEECH_END
                 return VADEvent.SILENCE
@@ -285,202 +298,88 @@ class TestListenLoopIntegration:
                 text="停下来", source="local", is_noise=False,
             )
 
-            result = agent.listen_loop(_barge_mode=True)
+            result = agent.listen_loop()
 
             assert result == "停下来"
             voice_turn = agent.status_snapshot()["voice_turn"]
             latest = voice_turn["latest"]
             stages = {stage["name"]: stage for stage in latest["stages"]}
+            # Output facts stay on the frozen speaker owner and never attach
+            # to the concurrently captured user turn.
             assert voice_turn["counters"]["barge_in_count"] == 1
-            assert stages["barge_in_confirmed"]["metadata"]["keyword"] == "小算"
-            agent._wait_for_wake_word_mic.assert_called_once_with(
-                mic, barge_only=True
-            )
+            assert voice_turn["counters"]["orphan_output_event_count"] == 0
+            assert "barge_in_confirmed" not in stages
+            assert lifecycle == ["pause", "callback", "abort", "stop", "drain"]
             agent.tts.stop_immediately.assert_called_once()
             agent.tts.drain_buffers.assert_called_once()
+            # Buffer was fed to ASR
             assert asr.feed_audio.call_count >= 1
 
-    def test_confirmed_barge_in_cancels_turn_before_stopping_audio_once(self):
-        """A confirmed keyword cancels generation before the speaker is stopped."""
+    def test_false_barge_in_resumes_playback_without_pipeline_cancellation(self):
+        """Noise ASR after a confirmed candidate resumes the exact held output."""
         with _agent_ctx() as agent:
             mic = _setup_mic_open(agent)
             proc = agent._audio_proc
             vad = agent._vad_ctrl
             asr = agent._asr_mgr
-            operations: list[str] = []
 
             mic.read_chunk.return_value = _CHUNK
             mic.flush_pre_roll.return_value = []
             proc.process.return_value = (_CHUNK, _CHUNK_I16, 3000, False)
             agent.tts.is_active.return_value = True
-            agent.tts.drain_buffers.side_effect = lambda: operations.append("drain")
-            agent.tts.stop_immediately.side_effect = lambda: operations.append("stop")
+            hold_token = object()
+            lifecycle: list[str] = []
+            agent.tts.pause_playback.side_effect = (
+                lambda **_kwargs: lifecycle.append("pause") or hold_token
+            )
+            agent.tts.resume_playback.side_effect = (
+                lambda token: lifecycle.append("resume") or token is hold_token
+            )
+            agent.tts.abort_playback_hold.side_effect = (
+                lambda _token: lifecycle.append("abort") or True
+            )
+            agent.tts.stop_immediately.side_effect = lambda: lifecycle.append("stop")
+            agent.tts.drain_buffers.side_effect = lambda: lifecycle.append("drain")
+            agent.set_barge_in_callback(lambda: lifecycle.append("callback"))
+            output_turn = agent._turn_traces.start(
+                source="test_output",
+                media_transport="sounddevice",
+            )
+            agent._turn_traces.finish("accepted")
+            playback_token = agent.start_playback(
+                voice_turn_id=output_turn.voice_turn_id,
+            )
+            assert playback_token is not None
+            vad.barge_in_buffer = [np.ones(160, dtype=np.float32)]
 
-            agent.kws.available = True
-            agent.kws_stream = object()
-            agent._wait_for_wake_word_mic = MagicMock(return_value=True)
-            agent.set_barge_in_callback(lambda: operations.append("cancel_turn"))
-
+            events = [
+                VADEvent.BARGE_IN_START,
+                VADEvent.BARGE_IN_CONFIRMED,
+                VADEvent.SPEECH_END,
+                VADEvent.SPEECH_START,
+                VADEvent.SPEECH_END,
+            ]
             call_count = 0
 
-            def vad_feed(*args, **kwargs):
+            def vad_feed(*_args, **_kwargs):
                 nonlocal call_count
+                event = events[min(call_count, len(events) - 1)]
                 call_count += 1
-                if call_count % 2 == 1:
-                    vad.speech_active = True
-                    return VADEvent.SPEECH_START
-                vad.speech_active = False
-                return VADEvent.SPEECH_END
+                vad.speech_active = event in {
+                    VADEvent.BARGE_IN_CONFIRMED,
+                    VADEvent.SPEECH_START,
+                }
+                return event
 
             vad.feed.side_effect = vad_feed
             asr.check_endpoint.return_value = None
-            asr.finish_and_get_result.return_value = ASRResult(
-                text="停下来", source="local", is_noise=False,
-            )
+            asr.finish_and_get_result.side_effect = [
+                ASRResult(text="嗯", source="local", is_noise=True),
+                ASRResult(text="继续巡检", source="local", is_noise=False),
+            ]
 
-            assert agent.listen_loop(_barge_mode=True) == "停下来"
-            # A duplicate confirmation from the same playback generation must
-            # not cancel or stop the turn a second time.
-            assert agent.listen_loop(_barge_mode=True) == "停下来"
-
-            assert operations == ["cancel_turn", "drain", "stop"]
-
-    @pytest.mark.parametrize(
-        ("missing_gate", "aec_ready", "expected_reason"),
-        [
-            (
-                "full_duplex",
-                True,
-                "speech_gate_blocked:full_duplex_not_verified",
-            ),
-            (
-                "aec_enabled",
-                True,
-                "speech_gate_blocked:aec_not_enabled,aec_not_ready",
-            ),
-            ("aec_ready", False, "speech_gate_blocked:aec_not_ready"),
-            (
-                "field_acceptance",
-                True,
-                "speech_gate_blocked:field_acceptance_not_verified",
-            ),
-        ],
-    )
-    def test_speech_mode_downgrades_when_safety_gate_is_missing(
-        self,
-        caplog,
-        missing_gate,
-        aec_ready,
-        expected_reason,
-    ):
-        """Speech mode stays locked until every hardware acceptance gate passes."""
-        config = {
-            "barge_in_mode": "speech",
-            "barge_in_field_acceptance_verified": True,
-            "echo_cancellation": {"enabled": True},
-            "tts": {"resident_output_full_duplex_verified": True},
-        }
-        if missing_gate == "full_duplex":
-            config["tts"]["resident_output_full_duplex_verified"] = False
-        elif missing_gate == "aec_enabled":
-            config["echo_cancellation"]["enabled"] = False
-        elif missing_gate == "field_acceptance":
-            config["barge_in_field_acceptance_verified"] = False
-
-        with caplog.at_level("WARNING"):
-            with _agent_ctx(config, aec_ready=aec_ready) as agent:
-                first = agent.status_snapshot()["barge_in"]
-                second = agent.status_snapshot()["barge_in"]
-
-        assert agent._barge_in_mode == "keyword"
-        assert first == second
-        assert first["requested_mode"] == "speech"
-        assert first["effective_mode"] == "keyword"
-        assert first["speech_gate_ready"] is False
-        assert first["reason"] == expected_reason
-        warnings = [
-            record
-            for record in caplog.records
-            if "Speech barge-in disabled" in record.getMessage()
-        ]
-        assert len(warnings) == 1
-
-    def test_speech_mode_barge_in_keeps_first_audio_without_keyword(self):
-        """Explicit speech mode interrupts after VAD hold and preserves its pre-roll."""
-        config = {
-            "barge_in_mode": "speech",
-            "barge_in_field_acceptance_verified": True,
-            "echo_cancellation": {"enabled": True},
-            "tts": {"resident_output_full_duplex_verified": True},
-        }
-        with _agent_ctx(config, aec_ready=True) as agent:
-            mic = _setup_mic_open(agent)
-            proc = agent._audio_proc
-            vad = agent._vad_ctrl
-            asr = agent._asr_mgr
-            operations: list[str] = []
-            buffered = np.full(160, 321, dtype=np.int16)
-
-            agent._wait_for_wake_word_mic = MagicMock(return_value=False)
-            agent.set_barge_in_callback(lambda: operations.append("cancel_turn"))
-            agent.tts.is_active.return_value = True
-            agent.tts.drain_buffers.side_effect = lambda: operations.append("drain")
-            agent.tts.stop_immediately.side_effect = lambda: operations.append("stop")
-
-            mic.read_chunk.return_value = _CHUNK
-            proc.process.return_value = (_CHUNK, _CHUNK_I16, 3000, False)
-            vad.barge_in_buffer = [buffered]
-
-            call_count = 0
-
-            def vad_feed(*args, **kwargs):
-                nonlocal call_count
-                call_count += 1
-                if call_count == 1:
-                    vad.speech_active = True
-                    return VADEvent.BARGE_IN_CONFIRMED
-                vad.speech_active = False
-                return VADEvent.SPEECH_END
-
-            vad.feed.side_effect = vad_feed
-            asr.check_endpoint.return_value = None
-            asr.finish_and_get_result.return_value = ASRResult(
-                text="请停一下", source="local", is_noise=False,
-            )
-
-            assert agent.listen_loop(_barge_mode=True) == "请停一下"
-
-            policy = agent.status_snapshot()["barge_in"]
-            assert policy["effective_mode"] == "speech"
-            assert policy["speech_gate_ready"] is True
-            assert policy["reason"] == "speech_gate_passed"
-            assert operations == ["cancel_turn", "drain", "stop"]
-            agent._wait_for_wake_word_mic.assert_not_called()
-            asr.start_session.assert_called_once_with()
-            first_audio = asr.feed_audio.call_args_list[0].args
-            np.testing.assert_array_equal(first_audio[1], buffered)
-            assert agent.last_turn_wake_source == "barge_in_speech"
-
-    def test_vad_only_barge_in_does_not_stop_tts(self):
-        """Ambient speech cannot interrupt playback without the wake keyword."""
-        with _agent_ctx() as agent:
-            mic = _setup_mic_open(agent)
-            proc = agent._audio_proc
-            vad = agent._vad_ctrl
-            asr = agent._asr_mgr
-
-            mic.read_chunk.return_value = _CHUNK
-            proc.process.return_value = (_CHUNK, _CHUNK_I16, 3000, False)
-            agent.tts.is_active.return_value = True
-
-            def vad_feed(*args, **kwargs):
-                agent.stop_event.set()
-                return VADEvent.BARGE_IN_CONFIRMED
-
-            vad.feed.side_effect = vad_feed
-            asr.check_endpoint.return_value = None
-
-            assert agent.listen_loop() is None
+            assert agent.listen_loop() == "继续巡检"
+            assert lifecycle == ["pause", "resume"]
             agent.tts.stop_immediately.assert_not_called()
             agent.tts.drain_buffers.assert_not_called()
 
@@ -601,7 +500,13 @@ class TestListenLoopIntegration:
             with pytest.raises(RuntimeError, match="device not found"):
                 agent.listen_loop()
 
-            agent._test_metrics.mark_voice_error.assert_called_once()
+            agent._test_metrics.mark_voice_error.assert_called_once_with(
+                "RuntimeError"
+            )
+            assert (
+                agent.status_snapshot()["input"]["last_failure_reason"]
+                == "asr_error"
+            )
 
     def test_echo_gated_frame_skipped(self):
         """When AudioProcessor returns echo_gated=True, frame is skipped (no VAD feed)."""
@@ -645,9 +550,12 @@ class TestListenLoopIntegration:
         """Normal playback stop resets listen state and starts the post-TTS cooldown."""
         with _agent_ctx() as agent:
             agent._post_tts_input_cooldown_s = 1.0
+            agent.tts.start_playback = MagicMock()
+            token = agent.start_playback()
+            assert token is not None
 
             before = time.monotonic()
-            agent.stop_playback()
+            agent.stop_playback(token)
 
             assert agent._input_cooldown_until >= before + 0.9
             agent._vad_ctrl.reset.assert_called_once()

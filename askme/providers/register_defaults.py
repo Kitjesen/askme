@@ -29,6 +29,7 @@ def _register_llm_backends() -> None:
     for name in (
         "openai_compatible",
         "openai",
+        "litellm",
         "minimax",
         "doubao",
         "dashscope",
@@ -46,7 +47,11 @@ def _register_voice_backends() -> None:
     from askme.voice.output.tts import TTSEngine
 
     asr_registry.register("sherpa")(ASREngine)
-    tts_registry.register("minimax")(TTSEngine)
+    # TTSEngine is the provider-dispatching implementation for every supported
+    # backend.  Register each public selector so registry-based construction
+    # has the same capabilities as the VoiceModule/AudioAgent path.
+    for name in ("minimax", "volcengine", "volc", "edge", "local"):
+        tts_registry.register(name)(TTSEngine)
 
     try:
         from askme.voice.input.cloud_asr import CloudASR

@@ -31,6 +31,7 @@ _LAZY_EXPORTS = {
     "SafetyModule": "askme.runtime.modules.safety_module",
     "SkillModule": "askme.runtime.modules.skill_module",
     "TelegramModule": "askme.runtime.modules.telegram_module",
+    "WarmSessionModule": "askme.runtime.modules.warm_session_module",
     "TextModule": "askme.runtime.modules.text_module",
     "ToolsModule": "askme.runtime.modules.tools_module",
     "VoiceModule": "askme.runtime.modules.voice_module",
@@ -57,6 +58,7 @@ __all__ = [
     "RuntimeHandoffModule",
     "HealthModule",
     "TelegramModule",
+    "WarmSessionModule",
 ]
 
 

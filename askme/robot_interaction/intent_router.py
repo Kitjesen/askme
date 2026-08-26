@@ -17,9 +17,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from askme.robot_interaction.fast_path import (
+from askme.robot_interaction.routing.fast_voice_intents import (
     FastVoiceIntentKind,
     match_fast_voice_intent,
+    normalize_fast_voice_text,
 )
 from askme.robot_interaction.routing_policy import DEFAULT_ROUTING_POLICY, RoutingPolicy
 from askme.robot_interaction.scenario_intents import classify_scenario_intent
@@ -30,9 +31,10 @@ logger = logging.getLogger(__name__)
 class IntentType(Enum):
     ESTOP = "estop"
     VOICE_TRIGGER = "voice_trigger"
-    COMMAND = "command"          # /clear, /quit, /history etc.
+    COMMAND = "command"  # /clear, /quit, /history etc.
     QUICK_REPLY = "quick_reply"  # simple greetings — skip LLM, instant response
-    GENERAL = "general"         # fallback → LLM
+    GENERAL = "general"  # fallback → LLM
+
 
 # Backward-compatible aliases for legacy imports/tests that reached into this
 # module. New code should prefer RoutingPolicy.
@@ -61,14 +63,149 @@ class Intent:
 class IntentRouter:
     """Route user input to the correct handler with safety-first priority."""
 
+    _TASK_CONTROLS = {
+        "任务进度": "task_status",
+        "任务状态": "task_status",
+        "任务怎么样": "task_status",
+        "任务怎么样了": "task_status",
+        "现在任务到哪了": "task_status",
+        "处理到哪了": "task_status",
+        "照片呢": "task_evidence",
+        "任务照片": "task_evidence",
+        "巡检照片": "task_evidence",
+        "任务证据": "task_evidence",
+        "查看任务证据": "task_evidence",
+        "取消任务": "task_cancel",
+        "取消当前任务": "task_cancel",
+        "别做这个任务了": "task_cancel",
+        "确认执行": "task_confirm",
+        "确认任务": "task_confirm",
+        "确认提交": "task_confirm",
+    }
+
+    # Robot-runtime work has a different execution authority from the generic
+    # ``agent_task`` skill.  Keep these phrases deterministic so natural robot
+    # commands reach the persistent TaskRun lifecycle even when no skill
+    # trigger happens to contain the requested destination or patrol area.
+    _RUNTIME_TASK_MARKERS = (
+        "生成状态报告",
+        "输出状态报告",
+        "创建状态报告",
+        "生成巡检报告",
+        "输出巡检报告",
+        "汇报运行状态",
+        "汇报当前状态",
+        "导航到",
+        "导航去",
+        "请帮我去",
+        "带我去",
+        "请前往",
+        "前往",
+        "巡检",
+        "巡查",
+        "巡视",
+    )
+    _RUNTIME_TASK_IMPERATIVE_PREFIXES = (
+        "去",
+        "请去",
+        "麻烦去",
+        "帮我去",
+    )
+    _RUNTIME_TASK_QUESTION_MARKERS = (
+        "请问",
+        "如何",
+        "怎么",
+        "怎样",
+        "为什么",
+        "为何",
+        "多久",
+        "多长时间",
+        "什么时候",
+        "何时",
+        "怎么样",
+        "多少",
+        "哪里",
+        "哪儿",
+        "是什么",
+        "能否",
+        "是否",
+        "要不要",
+        "有没有",
+        "可不可以",
+        "可以不可以",
+        "你会",
+        "你能",
+        "支持不支持",
+    )
+    _RUNTIME_TASK_AUTHORING_MARKERS = (
+        "写代码",
+        "写脚本",
+        "写一份",
+        "整理一份",
+        "撰写",
+        "报告模板",
+        "巡检系统",
+        "巡检代码",
+        "巡检方案",
+        "分析巡检",
+        "设计一个",
+    )
+    _RUNTIME_TASK_COMMAND_LEADS = tuple(
+        sorted(
+            (
+                "请",
+                "请你",
+                "请帮我",
+                "帮我",
+                "帮忙",
+                "麻烦",
+                "麻烦你",
+                "劳驾",
+                "机器人",
+                "机器狗",
+                "让机器人",
+                "让机器狗",
+                "请让机器人",
+                "请让机器狗",
+                "我想让你",
+                "我想让机器人",
+                "我想让机器狗",
+                "现在开始",
+                "马上",
+                "立即",
+                "开始",
+                "执行",
+                "重新",
+            ),
+            key=len,
+            reverse=True,
+        )
+    )
+    _RUNTIME_TASK_DECLARATIVE_TAIL_PREFIXES = ("了",)
+    _RUNTIME_TASK_DECLARATIVE_ENDINGS = (
+        "结束",
+        "结束了",
+        "完成",
+        "完成了",
+        "失败",
+        "失败了",
+        "成功",
+        "成功了",
+        "取消了",
+        "暂停了",
+        "执行过",
+        "做完了",
+    )
+
     # Camera questions must reach TurnExecutor so it can capture the current
     # LingTu frame and ask the configured vision model.  Keep this check ahead
     # of legacy voice skills such as environment_report.
     _VISUAL_QUERY_MARKERS = (
         "看见",
         "看到",
-        "看一下",
-        "看看",
+        "看看周围",
+        "看一下环境",
+        "描述环境",
         "前面有什么",
         "周围有什么",
         "周围看到",
@@ -126,8 +263,10 @@ class IntentRouter:
           1. Emergency stop keywords → IntentType.ESTOP
           2. Quick replies → IntentType.QUICK_REPLY
           3. Built-in commands (/quit, /clear, etc.) → IntentType.COMMAND
-          4. Voice trigger match → IntentType.VOICE_TRIGGER
-          5. Everything else → IntentType.GENERAL (sent downstream)
+          4. Task controls → IntentType.VOICE_TRIGGER
+          5. Explicit voice triggers and product scenarios → IntentType.VOICE_TRIGGER
+          6. Generic robot-runtime task fallback → IntentType.VOICE_TRIGGER
+          7. Everything else → IntentType.GENERAL (sent downstream)
         """
         stripped = text.strip()
 
@@ -144,11 +283,9 @@ class IntentRouter:
         fast_intent = match_fast_voice_intent(
             stripped,
             quick_replies=self._policy.quick_replies,
+            estop_keywords=self._policy.estop_keywords,
         )
-        if (
-            fast_intent is not None
-            and fast_intent.kind is FastVoiceIntentKind.READ_ONLY_SKILL
-        ):
+        if fast_intent is not None and fast_intent.kind is FastVoiceIntentKind.READ_ONLY_SKILL:
             logger.info(
                 "Read-only fast voice intent: '%s' -> skill '%s'",
                 stripped,
@@ -181,9 +318,7 @@ class IntentRouter:
                 # Compatibility: older loops read the quick reply from skill_name.
                 skill_name=quick,
                 reason="quick_reply",
-                cached_audio_key=(
-                    fast_intent.cache_key if fast_intent is not None else None
-                ),
+                cached_audio_key=(fast_intent.cache_key if fast_intent is not None else None),
                 fast_path=fast_intent is not None,
             )
 
@@ -195,6 +330,17 @@ class IntentRouter:
                 command=command,
                 raw_text=stripped,
                 reason="builtin_command",
+            )
+
+        task_control = self._TASK_CONTROLS.get(normalize_fast_voice_text(stripped))
+        if task_control:
+            return Intent(
+                type=IntentType.VOICE_TRIGGER,
+                skill_name=task_control,
+                raw_text=stripped,
+                trigger_phrase=stripped,
+                reason="task_control",
+                fast_path=True,
             )
 
         # A complete trigger is stronger evidence than a generic visual marker
@@ -268,6 +414,20 @@ class IntentRouter:
                 },
             )
 
+        # Generic robot work is a fallback behind explicit configured skills
+        # and product-scenario routes. This preserves operator configuration
+        # (including longest-match semantics) while still giving unconfigured
+        # natural commands a persistent TaskRun lifecycle.
+        runtime_task_phrase = self._match_runtime_task_request(stripped)
+        if runtime_task_phrase:
+            return Intent(
+                type=IntentType.VOICE_TRIGGER,
+                skill_name="runtime_task",
+                raw_text=stripped,
+                trigger_phrase=runtime_task_phrase,
+                reason="runtime_task_request",
+            )
+
         return Intent(
             type=IntentType.GENERAL,
             raw_text=stripped,
@@ -276,7 +436,11 @@ class IntentRouter:
 
     def _estop_reason(self, text: str) -> str | None:
         """Return the ESTOP source when text is a hard-stop command."""
-        if text.lower() in self._policy.estop_keywords:
+        normalized = normalize_fast_voice_text(text)
+        if normalized and any(
+            normalize_fast_voice_text(keyword) == normalized
+            for keyword in self._policy.estop_keywords
+        ):
             return "estop_keyword"
 
         checker = self._safety
@@ -298,12 +462,66 @@ class IntentRouter:
         )
         if decision is None:
             return None
-        if (
-            decision.risk_level != "visitor_service"
-            and self._question_context_blocks_skill(text, decision.skill_name)
+        if decision.risk_level != "visitor_service" and self._question_context_blocks_skill(
+            text, decision.skill_name
         ):
             return None
         return decision
+
+    def _match_runtime_task_request(self, text: str) -> str | None:
+        """Return the command phrase for supported robot-runtime work.
+
+        Runtime work is intentionally not inferred from the generic
+        ``agent_task`` skill.  Questions about robot capabilities and negated
+        commands stay on the conversational path instead of creating a task.
+        """
+
+        normalized = normalize_fast_voice_text(text)
+        if not normalized:
+            return None
+        configured_trigger = self._match_voice_trigger(text)
+        if configured_trigger is not None and configured_trigger[0] == "agent_task":
+            return None
+        if self._is_question_context(text) or any(
+            marker in normalized for marker in self._RUNTIME_TASK_QUESTION_MARKERS
+        ):
+            return None
+        if any(marker in normalized for marker in self._RUNTIME_TASK_AUTHORING_MARKERS):
+            return None
+
+        command_body = normalized
+        for lead in self._RUNTIME_TASK_COMMAND_LEADS:
+            if command_body.startswith(lead):
+                command_body = command_body[len(lead) :]
+                break
+
+        for marker in self._RUNTIME_TASK_MARKERS:
+            if command_body.startswith(marker):
+                tail = command_body[len(marker) :]
+                if self._runtime_task_tail_is_declarative(tail):
+                    return None
+                return marker
+
+        for prefix in self._RUNTIME_TASK_IMPERATIVE_PREFIXES:
+            if command_body.startswith(prefix):
+                tail = command_body[len(prefix) :]
+                if prefix == "去" and command_body.startswith("去年"):
+                    return None
+                if self._runtime_task_tail_is_declarative(tail):
+                    return None
+                return prefix
+        return None
+
+    def _runtime_task_tail_is_declarative(self, tail: str) -> bool:
+        """Reject past/result statements at the execution-authority boundary."""
+
+        if not tail:
+            return False
+        if tail.startswith(self._RUNTIME_TASK_DECLARATIVE_TAIL_PREFIXES):
+            return True
+        if tail == "过" or tail.startswith("过了"):
+            return True
+        return tail.endswith(self._RUNTIME_TASK_DECLARATIVE_ENDINGS)
 
     def _is_negated(self, text: str, trigger_pos: int) -> bool:
         """Return True if the trigger at trigger_pos is preceded by a negation word."""
@@ -332,8 +550,7 @@ class IntentRouter:
     def _question_context_blocks_skill(self, text: str, skill_name: str) -> bool:
         """Return whether question punctuation should suppress this skill."""
         return (
-            self._is_question_context(text)
-            and skill_name not in self._policy.question_safe_skills
+            self._is_question_context(text) and skill_name not in self._policy.question_safe_skills
         )
 
     def _match_exact_voice_trigger(self, text: str) -> tuple[str, str] | None:

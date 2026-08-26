@@ -138,7 +138,12 @@ def test_prune_keeps_other_sessions_and_their_focus(monkeypatch) -> None:
     assert snapshot["session_focus"]["session-b"]["route"] == "B"
 
 
-def test_record_respects_max_items_without_leaking_evicted_session_context() -> None:
+def test_record_respects_max_items_without_leaking_evicted_session_context(monkeypatch) -> None:
+    monkeypatch.setattr(
+        working_memory_module.time,
+        "time",
+        lambda: 1000.0,
+    )
     memory = WorkingMemory(max_items=2, retention_seconds=60)
 
     memory.record("note", "old session item", conversation_session_id="session-old")

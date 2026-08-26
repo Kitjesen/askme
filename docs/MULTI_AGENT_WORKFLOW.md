@@ -26,6 +26,7 @@ slice.
 | Lane | Typical write scope | Required verification |
 | --- | --- | --- |
 | Runtime / blueprints | `askme/runtime`, `askme/blueprints` | `pytest tests/test_runtime_modules.py tests/test_all_modules.py tests/test_blueprints_catalog.py tests/test_blueprint_api_payloads.py -q` |
+| Conversation Core | `askme/conversation`, turn-ledger integration tests | `pytest tests/test_voice_turn_ledger.py tests/test_conversation_core_integration.py tests/test_voice_gateway_session.py -q` |
 | Voice gateway / interaction | `askme/voice_gateway`, `askme/robot_interaction` | `pytest tests/test_voice_loop.py tests/test_text_loop.py tests/test_voice_runtime_bridge.py tests/test_interaction_gate.py tests/test_contract_voice_gate.py -q` |
 | API / MCP / tools | `askme/api`, `askme/mcp`, `askme/tools` | `pytest tests/test_api_route_dependency_injection.py tests/test_mcp_tools.py tests/test_mcp_memory_tools.py tests/test_mcp_misc_resources.py tests/test_builtin_tools.py tests/test_tool_registry.py -q` |
 | CLI surface | `askme/cli`, compatibility facade `askme/cli.py` | `pytest tests/test_cli.py tests/test_cli_helpers.py tests/test_cli_agent_speak.py -q` |

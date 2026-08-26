@@ -11,6 +11,7 @@ If any agent returns proceed=False, the chain short-circuits.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from .base import ProactiveAgent, ProactiveContext, ProactiveResult
@@ -61,6 +62,7 @@ class ProactiveOrchestrator:
         audio: Any,
         *,
         source: str = "voice",
+        listen_once: Callable[[], Awaitable[str | None]] | None = None,
     ) -> ProactiveResult:
         """Run the proactive chain and return the final enriched result.
 
@@ -80,6 +82,7 @@ class ProactiveOrchestrator:
             dispatcher=self._dispatcher,
             source=source,
             session=session,
+            listen_once=listen_once,
         )
         current_text = user_text
 

@@ -57,6 +57,7 @@ def _ctx(
     defaults.update(kwargs)
     return SceneContext(**defaults)
 
+
 # -- SceneContext tests --------------------------------------------------------
 
 
@@ -166,6 +167,7 @@ class TestRuleMatrix:
         decision = evaluate_rules(ctx)
         assert decision.rule_name == "person_appeared_default"
         assert decision.reaction_type == ReactionType.OBSERVE
+
     def test_person_lingering_assists(self):
         ctx = _ctx(
             event_type=ChangeEventType.COUNT_CHANGED,
@@ -260,6 +262,7 @@ class TestRuleBasedReaction:
         await engine.execute(decision, "")
         episodic.log.assert_called_once()
 
+
 # -- HybridReaction tests ------------------------------------------------------
 
 
@@ -294,6 +297,13 @@ class TestHybridReaction:
         mock_llm.chat.assert_called_once()
         prompt = mock_llm.chat.call_args.args[0][0]["content"]
         assert "聚龙科创e谷的导览与巡检机器人小算" in prompt
+        call_context = mock_llm.chat.call_args.kwargs["context"]
+        assert len(call_context.call_id) == 32
+        assert call_context.purpose == "assistant_response"
+        assert call_context.channel == "background"
+        assert call_context.request_class == "robot_action"
+        assert call_context.privacy_class == "restricted"
+        assert call_context.allow_cache is False
 
     async def test_generate_content_falls_back_on_llm_timeout(self):
         mock_llm = AsyncMock()
@@ -357,6 +367,13 @@ class TestLLMReaction:
         ctx = _ctx()
         content = await engine.generate_content(decision, ctx)
         assert content == "LLM says hello"
+        call_context = mock_llm.chat.call_args.kwargs["context"]
+        assert len(call_context.call_id) == 32
+        assert call_context.purpose == "assistant_response"
+        assert call_context.channel == "background"
+        assert call_context.request_class == "robot_action"
+        assert call_context.privacy_class == "restricted"
+        assert call_context.allow_cache is False
 
     async def test_generate_content_falls_back_without_llm(self):
         engine = LLMReaction()
@@ -414,4 +431,3 @@ class TestReactionModule:
         assert ReactionModule.name == "reaction"
         assert "llm" in ReactionModule.depends_on
         assert "memory" in ReactionModule.depends_on
-

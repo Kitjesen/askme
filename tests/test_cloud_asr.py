@@ -234,6 +234,14 @@ class TestCancelSession:
         asr.cancel_session()
         mock_ws.close.assert_called_once()
 
+    def test_cancel_releases_concurrent_finish_wait(self):
+        asr = _make_asr()
+        asr._result_ready.clear()
+
+        asr.cancel_session()
+
+        assert asr._result_ready.is_set()
+
 
 # ── _receive_loop (unit test message parsing) ─────────────────────────────────
 

@@ -16,6 +16,10 @@ from askme.providers.perception import (
 )
 from askme.providers.register_defaults import register_default_provider_backends
 from askme.providers.robot_control import build_robot_control
+from askme.providers.runtime_executor import (
+    HttpRuntimeExecutorTransport,
+    build_runtime_executor_transport,
+)
 from askme.providers.safety import build_safety
 from askme.providers.spatial import build_navigation, build_temporal_memory
 from askme.providers.telemetry import build_bus
@@ -47,6 +51,7 @@ __all__ = [
     "build_led_controller",
     "build_perception",
     "build_robot_control",
+    "build_runtime_executor_transport",
     "build_safety",
     "build_status_led",
     "build_temporal_memory",
@@ -54,6 +59,7 @@ __all__ = [
     "resolve_voice_profile_id",
     "read_depth_info",
     "register_default_provider_backends",
+    "HttpRuntimeExecutorTransport",
 ]
 
 

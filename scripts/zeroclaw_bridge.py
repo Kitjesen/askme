@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-"""ZeroClaw <-> Askme MCP bridge.
+"""ZeroClaw AskMe MCP policy audit.
 
-Orchestrates the ZeroClaw gateway alongside the Askme MCP server,
-monitors health on both sides, and handles graceful shutdown.
+ZeroClaw v0.1.7 does not expose a verified native MCP connector for AskMe. This
+module therefore audits the LiteLLM-only launch policy and refuses all runtime
+launch attempts before spawning any process.
 
 Usage::
 
-    # Start bridge (ZeroClaw gateway + Askme MCP together)
-    python scripts/zeroclaw_bridge.py
-
-    # Start with a specific ZeroClaw config
-    python scripts/zeroclaw_bridge.py --config .zeroclaw/config.toml
-
-    # Health check mode (query both processes)
+    # Audit the selected ZeroClaw config and LiteLLM policy
     python scripts/zeroclaw_bridge.py --check
+
+    # Non-check launch is intentionally blocked until native MCP is verified
+    python scripts/zeroclaw_bridge.py
 """
 
 from __future__ import annotations
@@ -22,282 +20,167 @@ import argparse
 import asyncio
 import logging
 import os
-import signal
-import sys
-import time
-from dataclasses import dataclass, field
+import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
-logger = logging.getLogger("zeroclaw-bridge")
+logger = logging.getLogger("zeroclaw-policy-audit")
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = ROOT / ".zeroclaw" / "config.toml"
+ZEROCLAW_MODEL_ALIAS = "robot-action"
 
 
-# ---------------------------------------------------------------------------
-# Health state
-# ---------------------------------------------------------------------------
-
-@dataclass
-class BridgeState:
-    """Track liveness of both processes."""
-
-    zeroclaw_alive: bool = False
-    mcp_alive: bool = False
-    zeroclaw_pid: int | None = None
-    mcp_pid: int | None = None
-    started_at: float = field(default_factory=time.time)
-    last_zeroclaw_heartbeat: float = 0.0
-    last_mcp_heartbeat: float = 0.0
+class PolicyError(RuntimeError):
+    """Raised when ZeroClaw could bypass the AskMe LiteLLM control plane."""
 
 
-# ---------------------------------------------------------------------------
-# Process management
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class LaunchPolicy:
+    """Audited process-launch values derived from AskMe configuration."""
 
-async def _start_process(
-    name: str,
-    cmd: list[str],
-    *,
-    cwd: str | None = None,
-    env: dict[str, str] | None = None,
-) -> asyncio.subprocess.Process:
-    """Launch a subprocess and return the handle."""
-    logger.info("Starting %s: %s", name, " ".join(cmd))
-    merged_env = dict(os.environ)
-    if env:
-        merged_env.update(env)
+    base_url: str
+    provider: str
+    model: str
+    api_key: str
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=cwd or str(ROOT),
-        env=merged_env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    logger.info("%s started (pid=%d)", name, proc.pid)
-    return proc
+    def environment(self) -> dict[str, str]:
+        return {
+            "ZEROCLAW_API_KEY": self.api_key,
+            "ZEROCLAW_PROVIDER": self.provider,
+            "ZEROCLAW_MODEL": self.model,
+        }
 
 
-async def _read_stream(
-    stream: asyncio.StreamReader,
-    name: str,
-    callback: callable,
-) -> None:
-    """Read lines from *stream* and pipe to logging callback."""
-    while True:
-        line = await stream.readline()
-        if not line:
-            break
-        callback(f"[{name}] {line.decode(errors='replace').rstrip()}")
+def _normalise_url(value: object) -> str:
+    return str(value or "").strip().rstrip("/")
 
 
-# ---------------------------------------------------------------------------
-# Health monitoring
-# ---------------------------------------------------------------------------
+def _load_askme_policy(environ: Mapping[str, str]) -> LaunchPolicy:
+    from askme.config import get_config
 
-async def _health_check(state: BridgeState, interval: float = 5.0) -> None:
-    """Periodically log bridge health."""
-    while True:
-        await asyncio.sleep(interval)
-        elapsed = time.time() - state.started_at
-        logger.info(
-            "Health — zeroclaw=%s mcp=%s elapsed=%.0fs",
-            "alive" if state.zeroclaw_alive else "dead",
-            "alive" if state.mcp_alive else "dead",
-            elapsed,
+    config = get_config(reload=True)
+    brain = config.get("brain", {}) if isinstance(config, dict) else {}
+    provider = str(brain.get("provider") or "").strip().lower()
+    if provider != "litellm":
+        raise PolicyError("AskMe brain.provider must be exactly 'litellm'")
+
+    expected_base_url = _normalise_url(environ.get("LITELLM_BASE_URL"))
+    configured_base_url = _normalise_url(brain.get("base_url"))
+    if not expected_base_url:
+        raise PolicyError("LITELLM_BASE_URL is required")
+    if configured_base_url != expected_base_url:
+        raise PolicyError(
+            "AskMe brain.base_url does not match LITELLM_BASE_URL "
+            f"({configured_base_url!r} != {expected_base_url!r})"
         )
 
+    api_key = str(environ.get("ZEROCLAW_LITELLM_VIRTUAL_KEY") or "").strip()
+    if len(api_key) < 10:
+        raise PolicyError(
+            "ZEROCLAW_LITELLM_VIRTUAL_KEY is required and must be a scoped virtual key"
+        )
+    askme_key = str(environ.get("LITELLM_VIRTUAL_KEY") or "").strip()
+    if askme_key and api_key == askme_key:
+        raise PolicyError("ZEROCLAW_LITELLM_VIRTUAL_KEY must be dedicated to ZeroClaw")
 
-# ---------------------------------------------------------------------------
-# Main orchestration
-# ---------------------------------------------------------------------------
+    return LaunchPolicy(
+        base_url=expected_base_url,
+        provider=f"custom:{expected_base_url}",
+        model=ZEROCLAW_MODEL_ALIAS,
+        api_key=api_key,
+    )
+
+
+def _validate_config(config_path: Path, policy: LaunchPolicy) -> None:
+    try:
+        with config_path.open("rb") as config_file:
+            config = tomllib.load(config_file)
+    except FileNotFoundError as exc:
+        raise PolicyError(f"ZeroClaw config not found: {config_path}") from exc
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise PolicyError(f"ZeroClaw config cannot be audited: {exc}") from exc
+
+    _validate_config_values(config, policy)
+
+
+def _validate_config_values(config: Mapping[str, object], policy: LaunchPolicy) -> None:
+    """Validate parsed ZeroClaw values against the only allowed launch policy."""
+
+    violations: list[str] = []
+    expected_top_level: dict[str, object] = {
+        "default_provider": policy.provider,
+        "default_model": policy.model,
+        "model_routes": [],
+    }
+    for key, expected in expected_top_level.items():
+        if config.get(key) != expected:
+            violations.append(f"{key} must be {expected!r}")
+    if config.get("api_key") not in (None, ""):
+        violations.append("api_key must not be persisted")
+
+    reliability = config.get("reliability")
+    if not isinstance(reliability, dict):
+        violations.append("[reliability] must be present")
+    else:
+        if (
+            type(reliability.get("provider_retries")) is not int
+            or reliability.get("provider_retries") != 0
+        ):
+            violations.append("reliability.provider_retries must be 0")
+        for key, expected_value in (
+            ("fallback_providers", []),
+            ("api_keys", []),
+            ("model_fallbacks", {}),
+        ):
+            if reliability.get(key) != expected_value:
+                violations.append(f"reliability.{key} must be {expected_value!r}")
+
+    if violations:
+        raise PolicyError("unsafe ZeroClaw config: " + "; ".join(violations))
+
+
+def _audit_launch_policy(
+    config_path: Path, environ: Mapping[str, str] | None = None
+) -> LaunchPolicy:
+    policy = _load_askme_policy(environ if environ is not None else os.environ)
+    _validate_config(config_path, policy)
+    return policy
+
+
+def _require_verified_native_mcp_connector(_config_path: Path) -> None:
+    """Fail closed until ZeroClaw exposes a verified native MCP connector."""
+
+    raise PolicyError(
+        "ZeroClaw v0.1.7 has no verified native MCP connector; MCP integration is BLOCKED"
+    )
+
 
 async def _run_bridge(
     zeroclaw_config: Path,
     *,
     zeroclaw_bin: str = "zeroclaw",
 ) -> int:
-    """Launch ZeroClaw gateway and Askme MCP server, then monitor both."""
-    state = BridgeState()
-    tasks: list[asyncio.Task] = []
-    zeroclaw_proc: asyncio.subprocess.Process | None = None
-    mcp_proc: asyncio.subprocess.Process | None = None
-
-    # Resolve config path
-    if not zeroclaw_config.exists():
-        logger.error("ZeroClaw config not found: %s", zeroclaw_config)
-        return 1
-
-    def _log_info(text: str) -> None:
-        logger.info(text)
-
-    def _log_warn(text: str) -> None:
-        logger.warning(text)
-
-    def _log_error(text: str) -> None:
-        logger.error(text)
-
+    """Audit policy, then refuse runtime launch before spawning any process."""
+    _ = zeroclaw_bin
     try:
-        # 1. Start Askme MCP server (stdio mode)
-        logger.info("Starting Askme MCP server...")
-        mcp_proc = await _start_process(
-            "askme-mcp",
-            [sys.executable, "-m", "askme.mcp.server"],
-        )
-        state.mcp_pid = mcp_proc.pid
-
-        tasks.append(
-            asyncio.create_task(
-                _read_stream(mcp_proc.stdout, "askme-mcp", _log_info),
-                name="mcp-stdout",
-            )
-        )
-        tasks.append(
-            asyncio.create_task(
-                _read_stream(mcp_proc.stderr, "askme-mcp", _log_warn),
-                name="mcp-stderr",
-            )
-        )
-        # Give MCP server a moment to initialise
-        await asyncio.sleep(1.5)
-        state.mcp_alive = mcp_proc.returncode is None
-        state.last_mcp_heartbeat = time.time()
-
-        if not state.mcp_alive:
-            logger.error("Askme MCP server failed to start")
-            return 1
-
-        # 2. Start ZeroClaw gateway
-        logger.info("Starting ZeroClaw gateway...")
-        zeroclaw_proc = await _start_process(
-            "zeroclaw",
-            [zeroclaw_bin, "gateway", "--config", str(zeroclaw_config)],
-            cwd=str(ROOT),
-        )
-        state.zeroclaw_pid = zeroclaw_proc.pid
-
-        tasks.append(
-            asyncio.create_task(
-                _read_stream(zeroclaw_proc.stdout, "zeroclaw", _log_info),
-                name="zeroclaw-stdout",
-            )
-        )
-        tasks.append(
-            asyncio.create_task(
-                _read_stream(zeroclaw_proc.stderr, "zeroclaw", _log_warn),
-                name="zeroclaw-stderr",
-            )
-        )
-        # Give ZeroClaw time to connect to MCP
-        await asyncio.sleep(2.0)
-        state.zeroclaw_alive = zeroclaw_proc.returncode is None
-        state.last_zeroclaw_heartbeat = time.time()
-
-        if not state.zeroclaw_alive:
-            logger.error("ZeroClaw gateway failed to start")
-            return 1
-
-        # 3. Health monitor
-        health_task = asyncio.create_task(
-            _health_check(state),
-            name="health-check",
-        )
-        tasks.append(health_task)
-
-        logger.info(
-            "Bridge ready — zeroclaw(gateway pid=%d) askme-mcp(pid=%d)",
-            state.zeroclaw_pid,
-            state.mcp_pid,
-        )
-
-        # 4. Wait for either process to exit
-        done, pending = await asyncio.wait(
-            [
-                asyncio.create_task(
-                    _wait_proc(zeroclaw_proc, "zeroclaw", state, is_zeroclaw=True),
-                    name="wait-zeroclaw",
-                ),
-                asyncio.create_task(
-                    _wait_proc(mcp_proc, "askme-mcp", state, is_zeroclaw=False),
-                    name="wait-mcp",
-                ),
-            ],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-
-        # Cancel remaining tasks
-        for task in done:
-            task.result()
-
-    except asyncio.CancelledError:
-        logger.info("Bridge cancelled")
-    except Exception:
-        logger.exception("Bridge error")
+        _audit_launch_policy(zeroclaw_config)
+        _require_verified_native_mcp_connector(zeroclaw_config)
+    except PolicyError as exc:
+        logger.error("MCP integration blocked: %s", exc)
         return 1
-    finally:
-        await _shutdown(zeroclaw_proc, mcp_proc, tasks)
-
-    return 0
-
-
-async def _wait_proc(
-    proc: asyncio.subprocess.Process,
-    name: str,
-    state: BridgeState,
-    *,
-    is_zeroclaw: bool,
-) -> None:
-    """Wait for a subprocess to finish and update health state."""
-    code = await proc.wait()
-    if is_zeroclaw:
-        state.zeroclaw_alive = False
-    else:
-        state.mcp_alive = False
-    logger.warning("%s exited (code=%d)", name, code)
-
-
-async def _shutdown(
-    zeroclaw_proc: asyncio.subprocess.Process | None,
-    mcp_proc: asyncio.subprocess.Process | None,
-    tasks: list[asyncio.Task],
-) -> None:
-    """Gracefully tear down both processes and background tasks."""
-    logger.info("Shutting down bridge...")
-
-    # Cancel all background readers
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    # Graceful: SIGTERM first, wait, then SIGKILL
-    for proc, name in [(zeroclaw_proc, "zeroclaw"), (mcp_proc, "askme-mcp")]:
-        if proc is None or proc.returncode is not None:
-            continue
-        logger.info("Sending SIGTERM to %s (pid=%d)...", name, proc.pid)
-        try:
-            proc.send_signal(signal.SIGTERM)
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
-            logger.info("%s stopped gracefully", name)
-        except TimeoutError:
-            logger.warning("%s did not respond to SIGTERM; sending SIGKILL", name)
-            try:
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
-                pass
-
-    logger.info("Bridge shutdown complete.")
+    return 1
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="ZeroClaw <-> Askme MCP bridge",
+        description="ZeroClaw AskMe MCP policy audit",
     )
     parser.add_argument(
         "--config",
@@ -307,12 +190,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--zeroclaw-bin",
         default="zeroclaw",
-        help="ZeroClaw binary name or path (default: zeroclaw)",
+        help="Reserved for future native MCP launch; currently blocked",
     )
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Print bridge health summary and exit",
+        help="Audit policy and exit without launching processes",
     )
     parser.add_argument(
         "--verbose",
@@ -323,15 +206,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _check_health() -> int:
-    """Quick health summary without running the bridge."""
-    config_path = Path(DEFAULT_CONFIG)
-    config_ok = config_path.exists()
-    print("ZeroClaw <-> Askme Bridge Health Check")
-    print(f"  Config file:        {config_path}  {'OK' if config_ok else 'MISSING'}")
+def _check_health(config_path: Path) -> int:
+    """Audit the selected config without starting either process."""
+    try:
+        _audit_launch_policy(config_path)
+    except PolicyError as exc:
+        config_status = "INVALID"
+        detail = str(exc)
+        result = 1
+    else:
+        config_status = "OK"
+        detail = "LiteLLM-only launch policy verified"
+        result = 0
+
+    print("ZeroClaw AskMe MCP Policy Audit")
+    print(f"  Config file:        {config_path}  {config_status}")
+    print(f"  Policy:             {detail}")
+    print("  MCP integration:    BLOCKED until verified native MCP connector exists")
     print(f"  Working directory:  {ROOT}")
-    print("  To start bridge:    python scripts/zeroclaw_bridge.py")
-    return 0 if config_ok else 1
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -344,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.check:
-        return _check_health()
+        return _check_health(Path(args.config))
 
     return asyncio.run(
         _run_bridge(

@@ -28,16 +28,24 @@ These decide what product is being assembled and how it runs.
 | `blueprints/` | active | Product presets, catalog metadata, readiness, delivery packages. |
 | `runtime/` | active | Module graph, lifecycle wiring, task runtime, handoff. |
 
+## Conversation Core
+
+This is the channel-independent product record for conversation continuity.
+
+| Folder | Status | Owns |
+| --- | --- | --- |
+| `conversation/` | active domain core (Phase 1) | Canonical Conversation Thread, Turn, Generation lifecycle and compatibility ID normalization. Summary/event-consumer projections are not implemented here yet. It does not own provider sessions, long-term memory, visual observations, or task execution. |
+
 ## Voice And Interaction
 
 These map to the voice gateway and robot interaction layers.
 
 | Folder | Status | Owns |
 | --- | --- | --- |
-| `voice_gateway/` | active | Unified voice middle-layer facade and runtime bridge contract. |
+| `voice_gateway/` | active | Unified voice middle-layer facade and runtime bridge contract; it references Conversation Core IDs but does not own canonical history. |
 | `robot_interaction/` | active | Address detection, interaction gate, intent routing, observability. |
 | `voice/` | active | Audio input/output, ASR/TTS helpers, diagnostics, voice orchestration. |
-| `pipeline/` | active | Turn orchestration, skill routing, field workflows, reactions. |
+| `pipeline/` | active | Turn execution orchestration, skill routing, field workflows, reactions; committed conversation facts belong to `conversation/`. |
 | `cognition/` | active | World state, planning, perception sync, task context. |
 
 ## Field Delivery Domain

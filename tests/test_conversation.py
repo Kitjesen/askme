@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+from copy import deepcopy
 from unittest.mock import AsyncMock
 
 
@@ -37,6 +40,47 @@ def test_basic_add_and_get(tmp_path, monkeypatch):
     assert msgs[2]["role"] == "assistant"
 
 
+async def test_deferred_save_flushes_updates_arriving_while_write_is_in_flight(
+    tmp_path,
+    monkeypatch,
+):
+    conv = _make_conv(tmp_path, monkeypatch)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    snapshots: list[object] = []
+
+    def controlled_save() -> None:
+        snapshot = deepcopy(conv._dump_state())
+        snapshots.append(snapshot)
+        if len(snapshots) == 1:
+            first_started.set()
+            assert release_first.wait(timeout=2.0)
+        conv._history_file.parent.mkdir(parents=True, exist_ok=True)
+        conv._history_file.write_text(
+            json.dumps(snapshot, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(conv, "_save_sync", controlled_save)
+    conv.add_user_message("question")
+    assert await asyncio.to_thread(first_started.wait, 1.0)
+
+    conv.add_assistant_message("answer")
+    release_first.set()
+
+    for _ in range(100):
+        if len(snapshots) >= 2 and not conv._save_scheduled:
+            break
+        await asyncio.sleep(0.01)
+
+    assert len(snapshots) == 2
+    persisted = json.loads(conv._history_file.read_text(encoding="utf-8"))
+    assert persisted == [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+    ]
+
+
 def test_clear(tmp_path, monkeypatch):
     """clear() removes all history."""
     conv = _make_conv(tmp_path, monkeypatch)
@@ -44,6 +88,30 @@ def test_clear(tmp_path, monkeypatch):
     conv.clear()
     msgs = conv.get_messages("sys")
     assert len(msgs) == 1  # only system prompt
+
+
+def test_remove_latest_assistant_message_is_scoped_and_persisted(tmp_path, monkeypatch):
+    conv = _make_conv(tmp_path, monkeypatch)
+    conv.add_assistant_message("default")
+    conv.add_assistant_message("same", conversation_session_id="a")
+    conv.add_assistant_message("keep", conversation_session_id="a")
+    conv.add_assistant_message("same", conversation_session_id="a")
+
+    assert conv.remove_latest_assistant_message(
+        "same", conversation_session_id="a"
+    ) is True
+    assert [
+        message["content"]
+        for message in conv.get_messages("sys", conversation_session_id="a")[1:]
+    ] == ["same", "keep"]
+    assert conv.history == [{"role": "assistant", "content": "default"}]
+    assert conv.remove_latest_assistant_message("missing") is False
+
+    reloaded = _make_conv(tmp_path, monkeypatch)
+    assert [
+        message["content"]
+        for message in reloaded.get_messages("sys", conversation_session_id="a")[1:]
+    ] == ["same", "keep"]
 
 
 def test_conversation_session_messages_are_isolated(tmp_path, monkeypatch):

@@ -1,4 +1,9 @@
-"""Voice synthesis and cached audio output package."""
+"""Voice output package.
+
+Public imports include synthesis, routing, profiles, and cached phrase audio.
+
+    from askme.voice.output import TTSEngine, AudioRouter
+"""
 
 from __future__ import annotations
 
@@ -11,7 +16,12 @@ _LAZY_EXPORTS = {
         "askme.voice.output.phrase_cache",
         "PhraseAudioCache",
     ),
+    "AudioErrorKind": ("askme.voice.output.audio_router", "AudioErrorKind"),
+    "AudioRouter": ("askme.voice.output.audio_router", "AudioRouter"),
     "TTSEngine": ("askme.voice.output.tts", "TTSEngine"),
+    "VoiceProfile": ("askme.voice.output.voice_profiles", "VoiceProfile"),
+    "build_voice_profiles": ("askme.voice.output.voice_profiles", "build_voice_profiles"),
+    "resolve_voice_profile_id": ("askme.voice.output.voice_profiles", "resolve_voice_profile_id"),
 }
 
 __all__ = sorted(_LAZY_EXPORTS)

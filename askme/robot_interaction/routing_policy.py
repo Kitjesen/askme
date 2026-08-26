@@ -18,12 +18,44 @@ DEFAULT_BUILTIN_COMMANDS: frozenset[str] = frozenset({
 })
 
 DEFAULT_ESTOP_KEYWORDS: frozenset[str] = frozenset({
+    "停",
+    "停下",
+    "停下来",
+    "别动",
+    "不要动",
+    "立即停止",
+    "马上停止",
+    "危险",
     "紧急停止",
     "急停",
     "emergency stop",
     "estop",
     "e-stop",
+    "halt",
+    "freeze",
 })
+
+_LOCAL_SAFETY_CONTROL_UTTERANCES: frozenset[str] = frozenset({
+    "静音",
+    "别说了",
+    "不说了",
+    "停止说话",
+    "停止播放",
+    "不要说了",
+    "够了",
+    "闭麦",
+    "关闭麦克风",
+    "关麦",
+    "闭嘴停止",
+    "进入静默",
+    "开麦",
+    "打开麦克风",
+    "开启麦克风",
+    "重新开启",
+    "恢复监听",
+})
+
+_LOCAL_SAFETY_EDGE_PUNCTUATION = "。！？!?，,；;：:、…"
 
 DEFAULT_QUICK_REPLIES: Mapping[str, str] = MappingProxyType({
     "你好": "你好，有什么需要帮忙的？",
@@ -85,6 +117,30 @@ DEFAULT_QUESTION_SAFE_SKILLS: frozenset[str] = frozenset({
 
 def _normalize_ascii(text: str) -> str:
     return str(text).strip().lower()
+
+
+def _normalize_local_safety_text(text: str) -> str:
+    """Normalize an utterance for narrow, exact local-safety matching."""
+
+    normalized = " ".join(str(text).strip().lower().split())
+    return normalized.strip(_LOCAL_SAFETY_EDGE_PUNCTUATION)
+
+
+def is_local_safety_utterance(text: str) -> bool:
+    """Return whether *text* is an exact locally actionable safety command.
+
+    This deliberately does not use substring or fuzzy matching: in wake-word
+    failure mode the classifier is the last barrier preventing bystander speech
+    from reaching skills, memory, or a model.
+    """
+
+    normalized = _normalize_local_safety_text(text)
+    if not normalized:
+        return False
+    return normalized in {
+        *DEFAULT_ESTOP_KEYWORDS,
+        *_LOCAL_SAFETY_CONTROL_UTTERANCES,
+    }
 
 
 @dataclass(frozen=True)

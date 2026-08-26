@@ -446,7 +446,7 @@ class TestRetrieve:
         bridge._mem0_failed = True
         vs.available = True
         vs.search = MagicMock(return_value=[
-            {"text": "fallback result", "score": 0.8, "metadata": {}},
+            {"text": "fallback result", "score": 0.8, "metadata": {"type": "knowledge", "approval_status": "published"}},
         ])
 
         result = await bridge.retrieve("test")

@@ -1,11 +1,14 @@
-"""RuntimeHandoffModule - fake arbiter bridge for confirmed cognition plans."""
+"""Runtime handoff and external task supervision module."""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
+from askme.ports.runtime_executor import RuntimeExecutorTransport
 from askme.runtime.core.module import Module, ModuleRegistry, Out
+from askme.runtime.task.executor_supervisor import ExternalTaskSupervisor
 from askme.runtime.task.handoff import RuntimeHandoffService
 
 logger = logging.getLogger(__name__)
@@ -20,6 +23,16 @@ class RuntimeHandoffModule(Module):
 
     runtime_handoff_service: Out[RuntimeHandoffService]
 
+    def __init__(
+        self,
+        *,
+        executor_transport_factory: Callable[
+            [str, dict[str, Any]], RuntimeExecutorTransport | None
+        ]
+        | None = None,
+    ) -> None:
+        self._executor_transport_factory = executor_transport_factory
+
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         handoff_cfg = cfg.get("runtime_handoff", {}) if isinstance(cfg, dict) else {}
         runtime_cfg = cfg.get("runtime", {}) if isinstance(cfg, dict) else {}
@@ -30,6 +43,20 @@ class RuntimeHandoffModule(Module):
         dog_safety_client = _dog_safety_client_from(safety_mod)
         self.enabled = bool(handoff_cfg.get("enabled", True))
         profile = str(handoff_cfg.get("profile", "fake")).strip().lower()
+        external_runtime_config = _external_runtime_config_from(handoff_cfg)
+        if (
+            profile in {"external", "lab"}
+            and external_runtime_config.get("enable_external_runtime") is True
+            and self._executor_transport_factory is None
+        ):
+            raise ValueError(
+                "external runtime transport factory must be injected by the composition root"
+            )
+        self._executor_transport = (
+            self._executor_transport_factory(profile, external_runtime_config)
+            if self._executor_transport_factory is not None
+            else None
+        )
         auto_complete = bool(
             handoff_cfg.get(
                 f"{profile}_auto_complete",
@@ -52,7 +79,20 @@ class RuntimeHandoffModule(Module):
             store_config=_store_config_from(handoff_cfg),
             dog_safety_client=dog_safety_client,
             require_dog_safety=bool(handoff_cfg.get("require_dog_safety", False)),
-            external_runtime_config=_external_runtime_config_from(handoff_cfg),
+            external_runtime_config=external_runtime_config,
+            executor_transport=self._executor_transport,
+        )
+        self._external_task_supervisor = (
+            ExternalTaskSupervisor(
+                handoff_service=self._service,
+                transport=self._executor_transport,
+                poll_initial_s=float(external_runtime_config.get("poll_initial_seconds", 0.25)),
+                poll_max_s=float(external_runtime_config.get("poll_max_seconds", 4.0)),
+                poll_deadline_s=float(external_runtime_config.get("poll_deadline_seconds", 300.0)),
+                poll_jitter_ratio=float(external_runtime_config.get("poll_jitter_ratio", 0.1)),
+            )
+            if self._executor_transport is not None
+            else None
         )
         logger.info(
             (
@@ -65,9 +105,17 @@ class RuntimeHandoffModule(Module):
             dog_safety_client is not None,
         )
 
-    @property
-    def runtime_handoff_service(self) -> RuntimeHandoffService:  # type: ignore[override]
+    @property  # type: ignore[no-redef]
+    def runtime_handoff_service(self) -> RuntimeHandoffService:
         return self._service
+
+    @property
+    def external_task_supervisor(self) -> ExternalTaskSupervisor | None:
+        return self._external_task_supervisor
+
+    async def start(self) -> None:
+        if self._external_task_supervisor is not None:
+            await self._external_task_supervisor.start()
 
     def submit_plan_payload(self, plan: dict[str, Any]) -> dict[str, Any]:
         if not self.enabled:
@@ -104,12 +152,14 @@ class RuntimeHandoffModule(Module):
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._service.pause_payload(
             run_id,
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
     def resume_payload(
@@ -119,27 +169,50 @@ class RuntimeHandoffModule(Module):
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._service.resume_payload(
             run_id,
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
-    def cancel_payload(
+    async def cancel_payload(
         self,
         run_id: str,
         *,
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        run = self._service.run_service.get(run_id)
+        if run is not None and run.profile in {"external", "lab"}:
+            supervisor = self._external_task_supervisor
+            if supervisor is None:
+                return {
+                    "handled": False,
+                    "remote_acknowledged": False,
+                    "state": run.current_state,
+                    "error_code": "external_supervisor_unavailable",
+                    "run": run.to_dict(),
+                }
+            outcome = await supervisor.request_cancel(
+                run_id,
+                operator_id=operator_id,
+                reason=reason,
+                operator_context=operator_context,
+                risk_acknowledgement=risk_acknowledgement,
+            )
+            return outcome.to_dict()
         return self._service.cancel_payload(
             run_id,
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
     def advance_payload(
@@ -149,12 +222,14 @@ class RuntimeHandoffModule(Module):
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._service.advance_payload(
             run_id,
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
     def handle_chat_control(self, text: str) -> dict[str, Any] | None:
@@ -173,6 +248,13 @@ class RuntimeHandoffModule(Module):
         speak: bool = False,
         conversation_session_id: str | None = None,
         planning_session_id: str | None = None,
+        operator_id: str | None = None,
+        operator_roles: list[str] | tuple[str, ...] | None = None,
+        operator_authenticated: bool | None = None,
+        operator_source: str = "",
+        runtime_permission: str = "",
+        reason: str = "",
+        risk_acknowledgement: bool = False,
     ) -> dict[str, Any]:
         if not self.enabled:
             voice_turn: dict[str, Any] = {
@@ -201,6 +283,13 @@ class RuntimeHandoffModule(Module):
             speak=speak,
             conversation_session_id=conversation_session_id,
             planning_session_id=planning_session_id,
+            operator_id=operator_id,
+            operator_roles=operator_roles,
+            operator_authenticated=operator_authenticated,
+            operator_source=operator_source,
+            runtime_permission=runtime_permission,
+            reason=reason,
+            risk_acknowledgement=risk_acknowledgement,
         )
 
     def health(self) -> dict[str, Any]:
@@ -212,6 +301,15 @@ class RuntimeHandoffModule(Module):
         payload = self._service.capabilities()
         payload["enabled"] = self.enabled
         return payload
+
+    async def stop(self) -> None:
+        supervisor = getattr(self, "_external_task_supervisor", None)
+        if supervisor is not None:
+            await supervisor.close()
+        transport = getattr(self, "_executor_transport", None)
+        close = getattr(transport, "close", None)
+        if callable(close):
+            close()
 
 
 def _dog_safety_client_from(module: Any | None) -> Any | None:
@@ -229,9 +327,7 @@ def _audit_config_from(handoff_cfg: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(audit_cfg, dict):
         audit_cfg = {}
     return {
-        "enabled": bool(
-            audit_cfg.get("enabled", handoff_cfg.get("audit_log_enabled", False))
-        ),
+        "enabled": bool(audit_cfg.get("enabled", handoff_cfg.get("audit_log_enabled", False))),
         "path": (
             audit_cfg.get("path")
             or audit_cfg.get("jsonl_path")
@@ -248,9 +344,7 @@ def _store_config_from(handoff_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         "enabled": bool(store_cfg.get("enabled", handoff_cfg.get("store_enabled", False))),
         "path": (
-            store_cfg.get("path")
-            or store_cfg.get("json_path")
-            or handoff_cfg.get("store_path")
+            store_cfg.get("path") or store_cfg.get("json_path") or handoff_cfg.get("store_path")
         ),
         "swallow_errors": bool(store_cfg.get("swallow_errors", True)),
     }
@@ -272,6 +366,12 @@ def _external_runtime_config_from(handoff_cfg: dict[str, Any]) -> dict[str, Any]
                 "enable_external_runtime",
                 handoff_cfg.get("enable_external_runtime", False),
             )
+        ),
+        "credential_env_var": (
+            external_cfg.get("credential_env_var")
+            or external_cfg.get("auth_token_env")
+            or handoff_cfg.get("credential_env_var")
+            or handoff_cfg.get("auth_token_env")
         ),
         "timeout_seconds": external_cfg.get(
             "timeout_seconds",

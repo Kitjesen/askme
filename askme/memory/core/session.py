@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from askme.config import get_config, project_root
+from askme.llm.core.contracts import LLMCallContext
 
 if TYPE_CHECKING:
     from askme.llm.core.client import LLMClient
@@ -95,12 +97,24 @@ class SessionMemory:
 
         try:
             summary = await asyncio.wait_for(
-                self._llm.chat([
-                    {"role": "system", "content": "你是一个对话摘要助手。"},
-                    {"role": "user", "content": SUMMARIZE_PROMPT.format(
-                        conversation=conversation_text
-                    )},
-                ]),
+                self._llm.chat(
+                    [
+                        {"role": "system", "content": "你是一个对话摘要助手。"},
+                        {
+                            "role": "user",
+                            "content": SUMMARIZE_PROMPT.format(conversation=conversation_text),
+                        },
+                    ],
+                    model="memory-compact",
+                    context=LLMCallContext(
+                        call_id=uuid.uuid4().hex,
+                        purpose="memory_compact",
+                        channel="background",
+                        request_class="memory",
+                        privacy_class="sensitive",
+                        allow_cache=False,
+                    ),
+                ),
                 timeout=10.0,
             )
             summary = summary.strip()
@@ -116,6 +130,7 @@ class SessionMemory:
         Returns a formatted string of recent session summaries, or empty string.
         """
         import time as _time
+
         now = _time.monotonic()
         if (now - self._summary_cache_time) < 5.0:
             return self._summary_cache

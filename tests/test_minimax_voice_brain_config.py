@@ -178,7 +178,7 @@ def _minimax_hybrid_config() -> dict:
         },
         "brain": {
             "api_key": "mm-key",
-            "base_url": "https://api.minimax.chat/v1",
+            "base_url": "https://api.minimaxi.com/v1",
             "model": "MiniMax-M2.7-highspeed",
         },
         "voice": {

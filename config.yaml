@@ -15,21 +15,29 @@ app:
 # Brain: LLM / Reasoning
 # ----------------------------------------------------------
 brain:
-  # Provider names: minimax, doubao, dashscope, deepseek, zhipu,
+  # Provider names: litellm, minimax, doubao, dashscope, deepseek, zhipu,
   # openai_compatible, openai, fake.  Endpoint/key remain config-owned.
   #
-  # DeepSeek V4 Flash is the verified low-latency primary for text and voice.
-  # Keep provider credentials in .env; never commit them here.
-  provider: deepseek
-  api_key: ${DEEPSEEK_API_KEY}
-  base_url: ${DEEPSEEK_BASE_URL}
-  model: deepseek-v4-flash
-  # For testing other providers (OpenAI-compatible), just change the three above.
-  # Doubao/Volcengine:  base_url = https://ark.cn-beijing.volces.com/api/v3
-  # DeepSeek:           base_url = https://api.deepseek.com/v1
-  # DashScope:          base_url = https://dashscope.aliyuncs.com/compatible-mode/v1
+  # LiteLLM is the single model-routing owner. AskMe keeps conversation,
+  # cancellation, tools and safety; provider credentials stay in the sidecar.
+  # Direct providers are an explicit manual rollback only, never an auto fallback.
+  provider: litellm
+  api_key: ${LITELLM_VIRTUAL_KEY}
+  base_url: ${LITELLM_BASE_URL}
+  model: voice-fast
   # Voice turns run with thinking disabled by the model policy for lower TTFT.
-  voice_model: deepseek-v4-flash
+  # 2026-07-19: ~155-190ms was the first raw stream chunk and may be empty.
+  # With the full runtime persona, first non-empty text measured p50/p95
+  # 961.8/1140.7ms (n=20); do not treat raw-chunk timing as semantic TTFT.
+  # MiniMax-M2.7 reasoning consumes the 50-token voice cap and delays content.
+  voice_model: voice-fast
+  # WarmSession probes use a separately authorized/cost-attributed alias.
+  health_model: health-probe
+  # Voice path waits this long for memory before starting LLM without memory.
+  voice_memory_retrieval_deadline_s: 0.25
+  # First semantic LLM payload safety budget. This is a starting policy value,
+  # not a measured result; release A/B evidence must tune it per deployment.
+  voice_llm_latency_budget_ms: 1500
   persona:
     robot_name: 小算
     product_name: 聚龙科创e谷智能服务系统
@@ -45,16 +53,29 @@ brain:
   # Voice turns need short replies — cap tokens tightly to keep TTFT low.
   voice_max_tokens: 50
   temperature: 0.7
-  # Resilience: timeout, retry, model fallback.
-  # Voice turns need fast-fail; keep timeout tight and retries low.
+  # LiteLLM owns upstream retry and model fallback. Keep the AskMe layer at
+  # exactly one attempt/model to avoid multiplicative tail latency.
   timeout: 10.0
-  max_retries: 1
-  fallback_models:
-    - deepseek-v4-pro
-  # MiniMax LLM (OpenAI-compatible, 100 tps)
-  minimax_api_key: ${MINIMAX_API_KEY}
-  minimax_base_url: https://api.minimax.chat/v1
-  minimax_model: MiniMax-M2.5-highspeed
+  max_retries: 0
+  fallback_models: []
+  # Default LiteLLM control-plane preset. The application receives a scoped
+  # virtual key; provider credentials stay in the sidecar. A direct provider
+  # can exist only as an explicit, operator-selected rollback preset.
+  provider_presets:
+    litellm:
+      api_key: ${LITELLM_VIRTUAL_KEY}
+      base_url: ${LITELLM_BASE_URL}
+      model: voice-fast
+      voice_model: voice-fast
+      health_model: health-probe
+      max_retries: 0
+      fallback_models: []
+      minimax_api_key: ""
+
+  # LLM calls must never bypass LiteLLM. MiniMax TTS uses voice.tts credentials.
+  minimax_api_key: ""
+  minimax_base_url: https://api.minimaxi.com/v1
+  minimax_model: MiniMax-M2.7-highspeed
   # Optional character file. Leave blank to generate prompt seed from persona.
   soul_file: ""
   # Optional full override. Leave blank to generate system prompt from persona.
@@ -84,13 +105,14 @@ brain:
 # Memory: MemU / Embedding
 # ----------------------------------------------------------
 memory:
-  # MemPalace is the persistent store for both product roles. The rooms stay
-  # separate so behavior preferences can never become customer RAG evidence.
+  # Product default keeps customer evidence on the locally inspectable vector
+  # backend. Robot behavior memory is a separate lane and remains disabled
+  # until a deployment explicitly configures its trusted store.
   enabled: true
-  backend: mempalace
-  customer_knowledge_backend: mempalace
-  robot_behavior_memory_backend: mempalace
-  robot_behavior_memory_enabled: true
+  backend: vector
+  customer_knowledge_backend: vector
+  robot_behavior_memory_backend: robotmem
+  robot_behavior_memory_enabled: false
   auto_backend_order: [mempalace, vector, robotmem, mem0]
   robotmem_fallback_backend: vector
   mempalace_fallback_backend: vector
@@ -111,7 +133,9 @@ memory:
   retrieve_cache_max_entries: 128
   retrieve_cache_empty_results: true
   retrieve_method: rag
-  user_id: user_1
+  # Never share a synthetic user across requests. Runtime/MCP callers must
+  # provide the authenticated user id; an explicit deployment binding is optional.
+  user_id: ""
   # RobotMem settings (used when backend: robotmem)
   robotmem_collection: askme
   # robotmem_db_path: null  # default: ~/.robotmem/memory.db
@@ -243,8 +267,24 @@ voice:
 
   fast_path:
     enabled: true
+    # Only exact deterministic E-STOP phrases use this shorter threshold.
+    # The stable-partial and two-observation guards still apply.
+    estop_candidate_silence_ms: 150
     candidate_silence_ms: 300
     stable_partial_ms: 160
+    quiet_peak_threshold: 500
+
+  # Local media concurrency for an ordinary combined speaker/microphone.
+  # No ROS2 is required. Cloud ASR/LLM/TTS stays unchanged; this block only
+  # controls local capture, AEC and barge-in. "auto" requires the native AEC
+  # adapter and fails closed to half-duplex when it is unavailable.
+  # Use "hardware" only after the device's own AEC has been verified.
+  full_duplex:
+    enabled: true
+    echo_control: auto
+    echo_control_verified: false
+    aec_sample_rate_hz: 16000
+    aec_delay_ms: 40
 
   # Noise gate: skip VAD when mic peak is below threshold (not in active speech).
   # Prevents USB mic noise floor from triggering Silero VAD continuously.
@@ -296,6 +336,36 @@ voice:
     # after VAD detects speech to avoid provider error 45000081.
     preconnect: false
 
+  # Optional provider-neutral speech-to-speech lane (not ASR V3).
+  # Selectors: volcengine_s2s (legacy O2.0), volcengine_duplex (Seeduplex 3.0),
+  # qwen3_5_omni (Qwen3.5-Omni Realtime). See docs/REALTIME_VOICE_PROVIDERS.md.
+  # Roll out as shadow first, then general_chat after acoustic acceptance.
+  # Robot tasks, tools, approvals and E-STOP always stay on the cascade path.
+  realtime:
+    enabled: false
+    mode: split                 # split | shadow | general_chat
+    provider: volcengine_s2s       # keep legacy default; choose explicitly per rollout
+    fallback: cascade
+    endpoint: wss://openspeech.bytedance.com/api/v3/realtime/dialogue
+    app_id: ${VOLCENGINE_S2S_APP_ID}
+    access_token: ${VOLCENGINE_S2S_ACCESS_TOKEN}
+    resource_id: volc.speech.dialog
+    model: 1.2.1.1              # O2.0; SC2 stays disabled until its manifest path is implemented
+    speaker: zh_male_yunzhou_jupiter_bigtts
+    bot_name: 小算
+    input_mode: audio
+    input_sample_rate: 16000
+    output_sample_rate: 24000
+    output_format: pcm_s16le
+    chunk_ms: 20
+    end_smooth_window_ms: 800
+    connect_timeout_s: 4.0
+    audio_queue_ms: 400
+    pending_output_ms: 2000
+    max_reconnect_attempts: 1
+    circuit_failure_threshold: 3
+    circuit_reset_seconds: 15.0
+
   # Address detection: filter out bystander chat (not talking to robot).
   # When enabled, casual speech like "走走，去吃饭" is silently ignored.
   # Public-site policy: uncertain speech stays silent until the user says 小算.
@@ -311,6 +381,9 @@ voice:
   # interaction before ASR transcripts enter LLM/task planning.
   interaction_gate:
     enabled: true
+    # Anonymous public voice history rotates after this idle window; provider
+    # warm sessions remain independent and may stay warm for the Runtime lifetime.
+    anonymous_encounter_idle_seconds: 25.0
     wake_terms: [小算]
     allow_unaddressed_public_help: false
     allow_unaddressed_robot_tasks: false
@@ -375,16 +448,35 @@ voice:
       # with positive and ambient-negative samples at the deployment site.
       - "x iǎo s uàn :2.0 #0.20 @小算"
 
+  feedback:
+    spoken_wait_prompt_enabled: true
+    text: "收到，我来看看。"
+    cache_key: feedback-waiting
+    delay_s: 0.65
+    min_interval_s: 8.0
+
   tts:
-    # Backend: "local" | "edge" | "minimax"
+    # Backend: "local" | "edge" | "minimax" | "volcengine"
     # "local"   = sherpa-onnx, low latency, offline, fixed voice.
     # "edge"    = Microsoft Edge TTS, requires network, richer voices.
     # "minimax" = MiniMax streaming TTS, low latency, supports voice clones and emotion tuning.
+    # "volcengine" = Volcengine Seed TTS V3 bidirectional WebSocket; account speaker required.
     # MiniMax is the cloud-primary product path; local remains the offline
     # fallback when the provider is unavailable or out of balance.
     backend: minimax
     phrase_cache_enabled: true
-    phrase_cache_dir: ~/.cache/askme/voice_phrases
+    phrase_cache_dir: data/voice/phrase_cache
+    # Startup priming accepts only phrases already consumed through a stable
+    # QUICK_REPLY/location key or the one canonical feedback key. Arbitrary
+    # navigation promises and free-form feedback text are ignored.
+    phrase_prime_enabled: true
+    phrase_prime_list:
+      - "好的。"
+      - "不客气。"
+      - "在的，有什么事？"
+      - "正在读取当前位置，请稍候。"
+      - cache_key: feedback-waiting
+        text: "收到，我来看看。"
     # Keep speech available when a cloud provider is out of balance or offline.
     fallback_backend: local
     # Local backend settings (MeloTTS: 44100Hz, natural Chinese)
@@ -403,10 +495,17 @@ voice:
     # MiniMax streaming transport: "sse" | "websocket".
     # WebSocket uses the Speech 2.8 T2A task_start/task_continue/task_finish flow.
     minimax_api_key: ${MINIMAX_API_KEY}
-    minimax_tts_url: https://api.minimax.chat/v1
+    minimax_tts_url: https://api.minimaxi.com/v1
     minimax_tts_transport: websocket
     # China account/key uses minimaxi.com; global accounts can use api.minimax.io.
     minimax_tts_ws_url: wss://api.minimaxi.com/ws/v1/t2a_v2
+    # Non-blocking startup preconnect for the live MiniMax WebSocket task.
+    # Opens the provider session without sending text; measured benefit must
+    # still be proven by latency reports on the target device/network.
+    minimax_live_session_prewarm_enabled: true
+    # Reuse one provider task across short conversational clauses/turns.
+    # Kept well below MiniMax's 120-second idle close.
+    minimax_ws_idle_timeout_seconds: 90
     minimax_tts_model: speech-2.8-turbo
     minimax_voice_id: male-qn-qingse
     minimax_sample_rate: 32000
@@ -419,9 +518,29 @@ voice:
     minimax_pitch: 0
     # emotion: "" (auto), happy, sad, angry, fearful, disgusted, surprised, calm
     minimax_emotion: ""
-    # Selectable customer-facing voice styles. By default they reuse
-    # minimax_voice_id and vary speed/volume/pitch/emotion; set different
-    # voice_id values here for cloned or provider-specific timbres.
+    # Volcengine/Doubao TTS V3 settings, active only when backend: volcengine.
+    # Credentials/resources are independent from ASR and end-to-end S2S.
+    volcengine_tts_ws_url: wss://openspeech.bytedance.com/api/v3/tts/bidirection
+    volcengine_tts_api_key: ${VOLCENGINE_TTS_API_KEY}
+    volcengine_tts_app_id: ${VOLCENGINE_TTS_APP_ID}
+    volcengine_tts_access_key: ${VOLCENGINE_TTS_ACCESS_KEY}
+    volcengine_tts_resource_id: ${VOLCENGINE_TTS_RESOURCE_ID}
+    volcengine_tts_speaker: ${VOLCENGINE_TTS_SPEAKER}
+    # Display/cache label mirrors the resource ID; V3 routing is selected by
+    # X-Api-Resource-Id rather than an undocumented request-body model field.
+    volcengine_tts_model: ${VOLCENGINE_TTS_RESOURCE_ID}
+    volcengine_tts_sample_rate: 24000
+    volcengine_tts_audio_format: pcm
+    volcengine_tts_connect_timeout_seconds: 10
+    volcengine_tts_session_timeout_seconds: 30
+    volcengine_tts_idle_timeout_seconds: 90
+    # When Volcengine is the selected backend, open the exact reusable V3
+    # connection in the background so the first user turn does not pay the
+    # connect/handshake tail. Missing credentials still fail closed locally.
+    volcengine_tts_live_session_prewarm_enabled: true
+    # Selectable customer-facing voice styles. `voice_id` is the MiniMax ID.
+    # Add `volcengine_voice_id` to a profile only when that account-specific
+    # speaker is valid; otherwise profile changes preserve the active Volc speaker.
     voice_profile: patrol_default
     voice_profile_state_path: data/voice/active_voice_profile.json
     voice_profiles:
@@ -464,6 +583,10 @@ voice:
     # thinned out before the USB speaker wake-up protection runs.
     minimax_leading_silence_preserve_seconds: 0.16
     minimax_onset_threshold: 0.0005
+    # Experimental playback-rate thresholds. The first flush waits for audible
+    # onset; remove these two overrides to retain the legacy 2400-sample threshold.
+    minimax_stream_first_chunk_ms: 36
+    minimax_stream_later_chunk_ms: 54
     # Voice cloning: run `python scripts/demo/clone_voice.py <audio> --voice-id <id>`
     # then set minimax_voice_id to the cloned voice_id above.
     # Cloned voice expires in 7 days if not used in any T2A call.
@@ -478,6 +601,10 @@ voice:
     # direct USB playback if Sunrise exposes no ALSA card; "usb_direct" forces
     # the fallback path for the Lenovo MCP01 USB Audio speaker.
     output_transport: auto
+    # AEC render-reference health: PCM is paced in 10 ms frames. Falling more
+    # than this far behind, or overflowing the bounded queue, disables duplex.
+    render_reference_queue_size: 8
+    render_reference_max_lag_ms: 120
     # MCP01 wakes slowly when opened through direct USB. Keep one userland USB
     # playback helper alive for the response so the first word does not sit on a
     # fresh stream boundary.
@@ -530,10 +657,14 @@ vision:
   confidence_threshold: 0.40
   device: ""
   camera_index: 0
-  # VLM fallback (Claude Sonnet for scene understanding)
+  # Cloud VLM stays fail-closed until LiteLLM has a validated vision-scene
+  # alias and a dedicated virtual key. Local detection remains available.
   vlm_enabled: false
-  vlm_api_key: ${LLM_API_KEY}
-  vlm_model: claude-haiku-4-5-20251001
+  vlm_backend: openai
+  vlm_api_key: ${VISION_LITELLM_VIRTUAL_KEY}
+  vlm_base_url: ${LITELLM_BASE_URL}
+  vlm_model: vision-scene
+  vlm_timeout: 20.0
 
 # ----------------------------------------------------------
 # Robot: Mechanical arm control
@@ -944,13 +1075,42 @@ perception:
       multi_person_arbitration: artifacts/perception/multi_person_arbitration.json
 
 # ----------------------------------------------------------
+# Warm provider sessions: boot-to-shutdown connection maintenance
+# ----------------------------------------------------------
+warm_sessions:
+  enabled: true
+  shutdown_timeout_seconds: 0.5
+  llm:
+    enabled: true
+    startup_delay_seconds: 0
+    refresh_interval_seconds: 45
+    # Startup handshakes can exceed the normal warm-path latency; this is a
+    # probe budget, not the business-response SLA.
+    timeout_seconds: 20
+    initial_backoff_seconds: 2
+    max_backoff_seconds: 120
+    busy_retry_seconds: 2
+    jitter_ratio: 0.1
+    max_attempts_per_hour: 80
+  tts:
+    enabled: true
+    startup_delay_seconds: 0.5
+    refresh_interval_seconds: 75
+    timeout_seconds: 10
+    initial_backoff_seconds: 2
+    max_backoff_seconds: 60
+    busy_retry_seconds: 1
+    jitter_ratio: 0.1
+    max_attempts_per_hour: 60
+
+# ----------------------------------------------------------
 # Health server: HTTP probes for OTA and local diagnostics
 # ----------------------------------------------------------
 health_server:
   enabled: true
-  # Default to loopback. Binding to 0.0.0.0 requires a control_api_key or an
-  # explicit allow_unsafe_remote=true override.
-  host: 127.0.0.1
+  # Empty/unset resolves to loopback in AskmeHealthServer. Containers set
+  # ASKME_HEALTH_HOST=0.0.0.0 together with a mandatory control_api_key.
+  host: ${ASKME_HEALTH_HOST}
   port: 8765
   control_api_key: ${ASKME_CONTROL_API_KEY}
   allow_unsafe_remote: false

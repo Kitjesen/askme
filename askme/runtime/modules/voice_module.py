@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import logging
+import threading
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from askme.agent_shell import AgentShell
 from askme.llm.core.client import LLMClient
@@ -35,17 +38,56 @@ from askme.ports import (
 from askme.providers import build_speech_playback
 from askme.runtime.core.module import In, Module, ModuleRegistry, Out
 from askme.runtime.modules.voice_stack import build_runtime_voice_stack
+from askme.runtime.task.voice_lifecycle import (
+    VoiceTaskLifecycleService,
+    VoiceTaskOperatorContext,
+)
 from askme.runtime.voice_control import VoiceControlStateStore, deep_merge
 from askme.tools.core.tool_registry import ToolRegistry
+from askme.voice.output.phrase_prime import (
+    PhrasePrimeEntry,
+    configured_feedback_phrases,
+    prime_phrase_cache,
+    resolve_phrase_prime_entries,
+)
 
 logger = logging.getLogger(__name__)
+
+_BACKGROUND_TASK_STOP_TIMEOUT_SECONDS = 1.0
+
+
+class _LLMControlModule(Protocol):
+    """Control-plane contract required for runtime LLM switching."""
+
+    client: LLMClient
+    llm_client: Any
+
+    def replace_config(self, brain_cfg: dict[str, Any]) -> LLMClient: ...
+
+    def prepare_client(self, brain_cfg: dict[str, Any]) -> LLMClient: ...
+
+    async def validate_client(
+        self,
+        client: LLMClient,
+        *,
+        timeout_s: float = 10.0,
+        model: str | None = None,
+        purpose: str = "assistant_response",
+    ) -> None: ...
+
+    def commit_client(
+        self,
+        next_client: LLMClient,
+        *,
+        warmup_model: str | None = None,
+    ) -> None: ...
 
 
 class VoiceModule(Module):
     """Provides audio frontend, voice gateway, router, loop, and gates."""
 
     name = "voice"
-    depends_on = ("llm", "tools", "skill", "pipeline")
+    depends_on = ("llm", "tools", "skill", "mission", "pipeline", "runtime_handoff")
     provides = ("voice", "tts", "asr")
 
     # In ports (auto-wired from provider modules)
@@ -56,7 +98,7 @@ class VoiceModule(Module):
     executor_in: In[AgentShell]
 
     # Out port
-    audio_out: Out[AudioFrontendPort]
+    audio_out: Out[AudioFrontendPort]  # type: ignore[no-redef]
 
     def build(self, cfg: dict[str, Any], registry: ModuleRegistry) -> None:
         from askme.pipeline.channels.voice_loop import VoiceLoop
@@ -71,6 +113,8 @@ class VoiceModule(Module):
         self._base_cfg = deepcopy(cfg)
         self._state_store = VoiceControlStateStore(cfg)
         self._control_state = self._state_store.load()
+        self._component_switch_lock = asyncio.Lock()
+        self._runtime_switch_state_lock = threading.RLock()
         effective_cfg = self._effective_startup_config(cfg)
 
         llm_mod = self.llm_in
@@ -79,6 +123,7 @@ class VoiceModule(Module):
             0.1,
             float(self._voice_cfg.get("input_retry_seconds", 5.0)),
         )
+        self._ensure_runtime_switch_state()
         ota_metrics = getattr(llm_mod, "ota_metrics", None) if llm_mod else OTABridgeMetrics()
 
         tools_mod = self.tool_registry_in
@@ -89,7 +134,10 @@ class VoiceModule(Module):
         dispatcher = getattr(skill_mod, "skill_dispatcher", None) if skill_mod else None
 
         pipeline_mod = self.pipeline_in
-        pipeline = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
+        pipeline_candidate = getattr(pipeline_mod, "brain_pipeline", None) if pipeline_mod else None
+        if pipeline_candidate is None:
+            raise RuntimeError("VoiceModule requires an available brain pipeline")
+        pipeline = cast(BrainPipeline, pipeline_candidate)
 
         executor_mod = self.executor_in
         agent_shell = getattr(executor_mod, "shell", None) if executor_mod else None
@@ -111,6 +159,9 @@ class VoiceModule(Module):
             effective_cfg,
             audio=self._audio,
         )
+        runtime_switch_setter = getattr(self._audio, "set_runtime_switch_callback", None)
+        if callable(runtime_switch_setter):
+            runtime_switch_setter(self._handle_runtime_switch_outcome)
 
         # Register voice tools
         if tools is not None:
@@ -136,7 +187,19 @@ class VoiceModule(Module):
         if dispatcher is not None:
             dispatcher.set_audio(self._audio)
 
+        interaction_gate_cfg = self._voice_cfg.get("interaction_gate", {})
+        if not isinstance(interaction_gate_cfg, dict):
+            raise ValueError("voice.interaction_gate must be a mapping")
+        anonymous_encounter_idle_seconds = interaction_gate_cfg.get(
+            "anonymous_encounter_idle_seconds", 25.0
+        )
         self._interaction_service = RobotInteractionService(self._router)
+        self._voice_task_lifecycle = _build_voice_task_lifecycle(effective_cfg, registry)
+        voice_task_operator_provider = _build_voice_task_operator_provider(
+            effective_cfg,
+            self._audio,
+            self._voice_task_lifecycle,
+        )
 
         # VoiceLoop
         self._voice_loop = VoiceLoop(
@@ -146,6 +209,9 @@ class VoiceModule(Module):
             voice_runtime_bridge=self._voice_gateway,
             dispatcher=dispatcher,
             audio_router=self._audio_router,
+            voice_task_lifecycle=self._voice_task_lifecycle,
+            voice_task_operator_provider=voice_task_operator_provider,
+            anonymous_encounter_idle_seconds=anonymous_encounter_idle_seconds,
         )
 
         # Runtime voice stack owns gate construction; VoiceModule injects into VoiceLoop.
@@ -153,16 +219,14 @@ class VoiceModule(Module):
         self._voice_loop.set_address_detector(self._address_detector)
         self._interaction_gate = voice_stack.interaction_gate
         self._voice_loop.set_interaction_gate(self._interaction_gate)
-        self._interaction_perception_provider = _build_interaction_perception_provider(
-            registry
-        )
-        self._voice_loop.set_interaction_perception_provider(
-            self._interaction_perception_provider
-        )
+        self._interaction_perception_provider = _build_interaction_perception_provider(registry)
+        self._voice_loop.set_interaction_perception_provider(self._interaction_perception_provider)
         self._mission_context_provider = _build_mission_context_provider(effective_cfg, registry)
         self._voice_loop.set_mission_context_provider(self._mission_context_provider)
 
         self._task: asyncio.Task[None] | None = None
+        self._phrase_prime_task: asyncio.Task[None] | None = None
+        self._phrase_prime_stop = threading.Event()
         self._apply_persisted_llm_and_prompt()
         logger.info("VoiceModule: built")
 
@@ -182,9 +246,12 @@ class VoiceModule(Module):
         if isinstance(llm_state, dict) and llm_state:
             try:
                 brain_cfg = self._resolve_llm_config(llm_state)
-                llm_mod = self._registry.get("llm")
-                client = llm_mod.replace_config(brain_cfg)
-                self._publish_llm(client, brain_cfg)
+                llm_mod = self._require_llm_control_module(
+                    required_methods=("replace_config",),
+                    required_attributes=("llm_client",),
+                )
+                llm_mod.replace_config(brain_cfg)
+                self._publish_llm(llm_mod.llm_client, brain_cfg)
             except Exception as exc:
                 logger.warning("VoiceModule: persisted LLM selection ignored: %s", exc)
         prompt_state = self._control_state.get("prompt", {})
@@ -203,6 +270,7 @@ class VoiceModule(Module):
             self._run_with_input_recovery(),
             name="voice-loop",
         )
+        self._start_phrase_prime_task()
         logger.info("VoiceModule: voice task started")
 
     async def _run_with_input_recovery(self) -> None:
@@ -242,12 +310,92 @@ class VoiceModule(Module):
         speech_playback = getattr(self, "_speech_playback", None)
         if speech_playback is not None:
             await speech_playback.shutdown()
+        phrase_prime_stop = getattr(self, "_phrase_prime_stop", None)
+        if phrase_prime_stop is not None:
+            phrase_prime_stop.set()
+        phrase_prime_task = getattr(self, "_phrase_prime_task", None)
+        await self._harvest_background_task(phrase_prime_task, "phrase cache prime")
         self._audio.stop_input()
         self._audio.shutdown()
         logger.info("VoiceModule: stopped")
 
+    async def _harvest_background_task(
+        self,
+        task: asyncio.Task[None] | None,
+        label: str,
+    ) -> None:
+        if task is None:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=_BACKGROUND_TASK_STOP_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "VoiceModule: %s did not stop within %.1fs; detaching",
+                label,
+                _BACKGROUND_TASK_STOP_TIMEOUT_SECONDS,
+            )
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        except asyncio.CancelledError:
+            pass
+
+    def _start_phrase_prime_task(self) -> None:
+        current_task = getattr(self, "_phrase_prime_task", None)
+        if current_task is not None and not current_task.done():
+            return
+        voice_cfg = getattr(self, "_voice_cfg", {})
+        tts_cfg = dict(voice_cfg.get("tts", {}) or {})
+        if not bool(tts_cfg.get("phrase_cache_enabled", True)):
+            return
+        if not bool(tts_cfg.get("phrase_prime_enabled", True)):
+            return
+        configured = tts_cfg.get("phrase_prime_list", ())
+        policy = getattr(getattr(self, "_router", None), "_policy", None)
+        quick_replies = getattr(policy, "quick_replies", {})
+        entries = resolve_phrase_prime_entries(
+            configured,
+            quick_replies=quick_replies,
+            feedback_phrases=configured_feedback_phrases(voice_cfg),
+        )
+        if not entries:
+            return
+        self._phrase_prime_stop = threading.Event()
+        self._phrase_prime_task = asyncio.create_task(
+            self._prime_phrase_cache_background(tts_cfg, entries),
+            name="voice-phrase-cache-prime",
+        )
+
+    async def _prime_phrase_cache_background(
+        self,
+        tts_cfg: dict[str, Any],
+        entries: list[PhrasePrimeEntry],
+    ) -> None:
+        try:
+            results = await asyncio.to_thread(
+                prime_phrase_cache,
+                tts_cfg,
+                entries,
+                stop_event=self._phrase_prime_stop,
+            )
+        except Exception as exc:
+            logger.warning("VoiceModule: phrase cache prime failed: %s", exc)
+            return
+        created = sum(bool(result.get("created")) for result in results)
+        cached = sum(bool(result.get("cached")) for result in results)
+        logger.info(
+            "VoiceModule: phrase cache prime finished (%d cached, %d created)",
+            cached,
+            created,
+        )
+
     # -- typed accessors ------------------------------------------------
-    @property
+    @property  # type: ignore[no-redef]
     def audio_out(self) -> AudioFrontendPort:
         """The audio frontend instance (Out port)."""
         return self._audio
@@ -278,6 +426,11 @@ class VoiceModule(Module):
         return self._voice_gateway
 
     @property
+    def voice_task_lifecycle(self) -> VoiceTaskLifecycleService | None:
+        """External task lifecycle used by the voice session, when configured."""
+        return self._voice_task_lifecycle
+
+    @property
     def interaction_service(self) -> Any:
         """The RobotInteractionService instance."""
         return self._interaction_service
@@ -295,6 +448,9 @@ class VoiceModule(Module):
     @property
     def audio_router(self) -> AudioRouterPort:
         """The audio router instance."""
+
+        if self._audio_router is None:
+            raise RuntimeError("VoiceModule audio router is not available")
         return self._audio_router
 
     @property
@@ -408,6 +564,13 @@ class VoiceModule(Module):
             surface=str(payload.get("surface") or "fastapi"),
         )
 
+    def set_tts_activation_callback(self, callback: Any | None) -> None:
+        """Connect the runtime warm-session owner to TTS activation events."""
+
+        setter = getattr(self._audio, "set_tts_activation_callback", None)
+        if callable(setter):
+            setter(callback)
+
     def voice_profiles_payload(self) -> dict[str, Any]:
         return self.tts_provider.voice_profiles_payload()
 
@@ -437,7 +600,8 @@ class VoiceModule(Module):
         gate_status = self._voice_loop.interaction_status_snapshot()
         interaction_policy = {
             "enabled": bool(getattr(self._interaction_gate, "enabled", False)),
-            "mode": "strict_public_site" if (
+            "mode": "strict_public_site"
+            if (
                 bool(getattr(self._interaction_gate, "silent_on_ambiguous", False))
                 and not bool(
                     getattr(
@@ -453,7 +617,8 @@ class VoiceModule(Module):
                         True,
                     )
                 )
-            ) else "permissive",
+            )
+            else "permissive",
             "silent_on_ambiguous": bool(
                 getattr(self._interaction_gate, "silent_on_ambiguous", False)
             ),
@@ -496,6 +661,7 @@ class VoiceModule(Module):
                 "asr": audio_status.get("asr", {}),
                 "tts": audio_status.get("tts", {}),
                 "playback": self._speech_playback.snapshot(),
+                "switches": self._runtime_switches_snapshot(),
                 "kws": {
                     "enabled": audio_status.get("wake_word_enabled", False),
                     "keyword": "小算",
@@ -558,18 +724,26 @@ class VoiceModule(Module):
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        component = str(payload.get("component") or "").strip().lower()
-        if component == "llm":
-            result = await self._switch_llm(payload)
-        elif component == "asr":
-            result = await self._switch_asr(payload)
-        elif component == "tts":
-            result = await self._switch_tts(payload)
-        else:
-            raise ValueError("component must be one of: llm, asr, tts")
-        if result.get("updated"):
-            self._persist_control_state()
-        return result
+        switch_lock = getattr(self, "_component_switch_lock", None)
+        if switch_lock is None:
+            switch_lock = asyncio.Lock()
+            self._component_switch_lock = switch_lock
+
+        async with switch_lock:
+            component = str(payload.get("component") or "").strip().lower()
+            if component == "llm":
+                result = await self._switch_llm(payload)
+            elif component == "asr":
+                result = await self._switch_asr(payload)
+            elif component == "tts":
+                result = await self._switch_tts(payload)
+            else:
+                raise ValueError("component must be one of: llm, asr, tts")
+            if result.get("updated") and (
+                component not in {"asr", "tts"} or result.get("state") == "active"
+            ):
+                self._persist_control_state()
+            return result
 
     def update_prompt_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         settings = self._apply_prompt_settings(payload)
@@ -592,21 +766,74 @@ class VoiceModule(Module):
 
     async def _switch_llm(self, payload: dict[str, Any]) -> dict[str, Any]:
         brain_cfg = self._resolve_llm_config(payload)
-        llm_mod = self._registry.get("llm")
-        if llm_mod is None:
-            raise RuntimeError("LLM module is not available")
-        candidate = llm_mod.prepare_client(brain_cfg)
+        required_methods = ["prepare_client", "commit_client"]
         if bool(payload.get("validate", True)):
-            await llm_mod.validate_client(
-                candidate,
-                timeout_s=min(15.0, float(brain_cfg.get("timeout", 10.0))),
-            )
-        llm_mod.commit_client(candidate)
-        self._publish_llm(candidate, brain_cfg)
+            required_methods.append("validate_client")
+        llm_mod = self._require_llm_control_module(
+            required_methods=tuple(required_methods),
+            required_attributes=("client", "llm_client"),
+        )
+
+        previous_client = llm_mod.client
+        previous_payload = dict(self._control_state.get("llm", {}) or {})
+        previous_brain_cfg = self._resolve_llm_config(previous_payload)
+        previous_warmup_model = str(
+            previous_brain_cfg.get("health_model")
+            or previous_brain_cfg.get("voice_model")
+            or previous_client.model
+        ).strip()
+        candidate = llm_mod.prepare_client(brain_cfg)
+        candidate_warmup_model = str(
+            brain_cfg.get("health_model") or brain_cfg.get("voice_model") or candidate.model
+        ).strip()
+        try:
+            if candidate.provider_name == "litellm" and candidate_warmup_model != "health-probe":
+                raise ValueError("LiteLLM switch requires health_model='health-probe'")
+            if bool(payload.get("validate", True)):
+                validation_timeout = min(15.0, float(brain_cfg.get("timeout", 10.0)))
+                await llm_mod.validate_client(
+                    candidate,
+                    timeout_s=validation_timeout,
+                )
+                if candidate.provider_name == "litellm":
+                    await llm_mod.validate_client(
+                        candidate,
+                        timeout_s=validation_timeout,
+                        model=candidate_warmup_model,
+                        purpose="health_probe",
+                    )
+        except Exception:
+            await self._retire_llm_client(candidate, label="failed validation")
+            raise
+
+        llm_mod.commit_client(
+            candidate,
+            warmup_model=candidate_warmup_model,
+        )
+        try:
+            self._publish_llm(llm_mod.llm_client, brain_cfg)
+        except Exception:
+            logger.exception("LLM consumer publication failed; rolling back provider switch")
+            try:
+                llm_mod.commit_client(
+                    previous_client,
+                    warmup_model=previous_warmup_model,
+                )
+            except Exception:
+                logger.exception("LLM module rollback failed")
+            try:
+                self._publish_llm(llm_mod.llm_client, previous_brain_cfg)
+            except Exception:
+                logger.exception("LLM consumer rollback failed")
+            await self._defer_llm_client_retirement(llm_mod, candidate, label="failed candidate")
+            raise
+
+        await self._defer_llm_client_retirement(llm_mod, previous_client, label="previous provider")
         self._control_state["llm"] = {
             "provider": candidate.provider_name,
             "model": candidate.model,
             "voice_model": str(brain_cfg.get("voice_model") or candidate.model),
+            "health_model": candidate_warmup_model,
             "fallback_models": list(brain_cfg.get("fallback_models", [])),
         }
         return {
@@ -616,41 +843,349 @@ class VoiceModule(Module):
             "runtime": candidate.provider_status(),
         }
 
+    def _require_llm_control_module(
+        self,
+        *,
+        required_methods: tuple[str, ...],
+        required_attributes: tuple[str, ...] = (),
+    ) -> _LLMControlModule:
+        module = self._registry.get("llm")
+        if module is None:
+            raise RuntimeError("LLM module is not available")
+
+        missing_methods: list[str] = []
+        for name in required_methods:
+            try:
+                method = getattr(module, name)
+            except Exception:
+                method = None
+            if not callable(method):
+                missing_methods.append(name)
+
+        missing_attributes: list[str] = []
+        for name in required_attributes:
+            try:
+                value = getattr(module, name)
+            except Exception:
+                value = None
+            if value is None:
+                missing_attributes.append(name)
+
+        if missing_methods or missing_attributes:
+            missing = ", ".join((*missing_methods, *missing_attributes))
+            raise RuntimeError(f"LLM module control contract is unavailable: {missing}")
+        return cast(_LLMControlModule, module)
+
     async def _switch_asr(self, payload: dict[str, Any]) -> dict[str, Any]:
         voice_cfg = self._resolve_asr_voice_config(payload)
+        desired = self._asr_selection(voice_cfg)
+        effective = self._current_asr_selection()
         reconfigure = getattr(self._audio, "reconfigure_asr", None)
         if not callable(reconfigure):
             raise RuntimeError("audio frontend does not support ASR hot switching")
-        result = await asyncio.to_thread(reconfigure, voice_cfg)
-        cloud_cfg = voice_cfg.get("cloud_asr", {})
-        provider = "local" if not cloud_cfg.get("enabled") else str(cloud_cfg.get("provider") or "")
+        try:
+            result = await asyncio.to_thread(reconfigure, voice_cfg)
+        except Exception as exc:
+            self._record_runtime_switch_failure("asr", desired, str(exc))
+            raise
+        if str(result.get("state") or "active") == "pending":
+            self._record_runtime_switch_pending("asr", desired)
+            return self._runtime_switch_result(
+                result,
+                desired=desired,
+                effective=effective,
+                pending=desired,
+            )
+
         self._voice_cfg = voice_cfg
-        self._control_state["asr"] = {
-            "provider": provider,
-            "model": str(cloud_cfg.get("model") or "local"),
-        }
-        return dict(result)
+        self._control_state["asr"] = desired
+        self._record_runtime_switch_active("asr", desired)
+        return self._runtime_switch_result(
+            result,
+            desired=desired,
+            effective=desired,
+        )
 
     async def _switch_tts(self, payload: dict[str, Any]) -> dict[str, Any]:
         tts_cfg = self._resolve_tts_config(payload)
+        desired = self._tts_selection(tts_cfg)
+        effective = self._current_tts_selection()
         reconfigure = getattr(self._audio, "reconfigure_tts", None)
         if not callable(reconfigure):
             raise RuntimeError("audio frontend does not support TTS hot switching")
-        result = await asyncio.to_thread(reconfigure, tts_cfg)
+        try:
+            result = await asyncio.to_thread(reconfigure, tts_cfg)
+        except Exception as exc:
+            self._record_runtime_switch_failure("tts", desired, str(exc))
+            raise
+        if str(result.get("state") or "active") == "pending":
+            self._record_runtime_switch_pending("tts", desired)
+            return self._runtime_switch_result(
+                result,
+                desired=desired,
+                effective=effective,
+                pending=desired,
+            )
+
         self._voice_cfg["tts"] = tts_cfg
-        self._control_state["tts"] = {
-            "backend": str(tts_cfg.get("backend") or ""),
-            "model": str(tts_cfg.get("minimax_tts_model") or ""),
-            "voice_id": str(tts_cfg.get("minimax_voice_id") or ""),
+        self._control_state["tts"] = desired
+        self._record_runtime_switch_active("tts", desired)
+        return self._runtime_switch_result(
+            result,
+            desired=desired,
+            effective=desired,
+        )
+
+    def _current_asr_selection(self) -> dict[str, str]:
+        persisted = self._control_state.get("asr", {})
+        if isinstance(persisted, dict) and persisted.get("provider"):
+            provider = str(persisted.get("provider") or "local")
+            return {
+                "provider": provider,
+                "model": str(persisted.get("model") or ("local" if provider == "local" else "")),
+            }
+        return self._asr_selection(self._voice_cfg)
+
+    @staticmethod
+    def _asr_selection(voice_cfg: dict[str, Any]) -> dict[str, str]:
+        cloud_cfg = voice_cfg.get("cloud_asr", {})
+        if not isinstance(cloud_cfg, dict) or not cloud_cfg.get("enabled"):
+            return {"provider": "local", "model": "local"}
+        return {
+            "provider": str(cloud_cfg.get("provider") or ""),
+            "model": str(cloud_cfg.get("model") or ""),
         }
-        return dict(result)
+
+    def _current_tts_selection(self) -> dict[str, str]:
+        persisted = self._control_state.get("tts", {})
+        if isinstance(persisted, dict) and persisted.get("backend"):
+            return {
+                "backend": str(persisted.get("backend") or ""),
+                "model": str(persisted.get("model") or ""),
+                "voice_id": str(persisted.get("voice_id") or ""),
+            }
+        return self._tts_selection(self._voice_cfg.get("tts", {}))
+
+    @staticmethod
+    def _tts_selection(tts_cfg: dict[str, Any]) -> dict[str, str]:
+        backend = str(tts_cfg.get("backend") or "")
+        if backend == "volcengine":
+            model = str(tts_cfg.get("volcengine_tts_resource_id") or "")
+            voice_id = str(tts_cfg.get("volcengine_tts_speaker") or "")
+        elif backend == "edge":
+            model = str(tts_cfg.get("voice") or "")
+            voice_id = model
+        elif backend == "local":
+            model = Path(str(tts_cfg.get("model_dir") or "")).name
+            voice_id = str(tts_cfg.get("sid") or "")
+        else:
+            model = str(tts_cfg.get("minimax_tts_model") or "")
+            voice_id = str(tts_cfg.get("minimax_voice_id") or "")
+        return {
+            "backend": backend,
+            "model": model,
+            "voice_id": voice_id,
+        }
+
+    def _runtime_switch_lock(self) -> Any:
+        lock = getattr(self, "_runtime_switch_state_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._runtime_switch_state_lock = lock
+        return lock
+
+    def _ensure_runtime_switch_state(self) -> dict[str, dict[str, Any]]:
+        lock = self._runtime_switch_lock()
+        with lock:
+            current = getattr(self, "_runtime_switch_state", None)
+            if isinstance(current, dict) and {"asr", "tts"} <= current.keys():
+                return current
+            asr = self._current_asr_selection()
+            tts = self._current_tts_selection()
+            current = {
+                "asr": {
+                    "state": "active",
+                    "desired": dict(asr),
+                    "effective": dict(asr),
+                    "pending": None,
+                    "failed": None,
+                },
+                "tts": {
+                    "state": "active",
+                    "desired": dict(tts),
+                    "effective": dict(tts),
+                    "pending": None,
+                    "failed": None,
+                },
+            }
+            self._runtime_switch_state = current
+            return current
+
+    def _record_runtime_switch_pending(
+        self,
+        component: str,
+        desired: dict[str, str],
+    ) -> None:
+        with self._runtime_switch_lock():
+            state = self._ensure_runtime_switch_state()[component]
+            state.update(
+                {
+                    "state": "pending",
+                    "desired": dict(desired),
+                    "pending": dict(desired),
+                    "failed": None,
+                }
+            )
+
+    def _record_runtime_switch_active(
+        self,
+        component: str,
+        effective: dict[str, str],
+    ) -> None:
+        with self._runtime_switch_lock():
+            state = self._ensure_runtime_switch_state()[component]
+            state.update(
+                {
+                    "state": "active",
+                    "desired": dict(effective),
+                    "effective": dict(effective),
+                    "pending": None,
+                    "failed": None,
+                }
+            )
+
+    def _record_runtime_switch_failure(
+        self,
+        component: str,
+        desired: dict[str, str],
+        reason: str,
+    ) -> None:
+        failure = {"reason": str(reason or "runtime activation failed")}
+        with self._runtime_switch_lock():
+            state = self._ensure_runtime_switch_state()[component]
+            state.update(
+                {
+                    "state": "failed",
+                    "desired": dict(desired),
+                    "pending": None,
+                    "failed": failure,
+                }
+            )
+
+    def _runtime_switches_snapshot(self) -> dict[str, dict[str, Any]]:
+        with self._runtime_switch_lock():
+            return deepcopy(self._ensure_runtime_switch_state())
+
+    def _handle_runtime_switch_outcome(self, outcome: dict[str, Any]) -> None:
+        component = str(outcome.get("component") or "").strip().lower()
+        if component not in {"asr", "tts"}:
+            logger.warning("Ignoring runtime switch outcome for unknown component: %s", component)
+            return
+        config = outcome.get("config")
+        if not isinstance(config, dict):
+            logger.warning("Ignoring %s runtime switch outcome without config", component)
+            return
+        desired = self._asr_selection(config) if component == "asr" else self._tts_selection(config)
+        outcome_state = str(outcome.get("state") or "").strip().lower()
+
+        if outcome_state == "failed":
+            with self._runtime_switch_lock():
+                pending = self._ensure_runtime_switch_state()[component].get("pending")
+                if pending is not None and pending != desired:
+                    logger.info("Ignoring stale %s runtime switch failure", component)
+                    return
+                self._record_runtime_switch_failure(
+                    component,
+                    desired,
+                    str(outcome.get("reason") or "runtime activation failed"),
+                )
+            return
+        if outcome_state != "active":
+            logger.warning(
+                "Ignoring %s runtime switch outcome with state %r",
+                component,
+                outcome_state,
+            )
+            return
+
+        with self._runtime_switch_lock():
+            current = self._ensure_runtime_switch_state()[component]
+            pending = current.get("pending")
+            if component == "asr":
+                self._voice_cfg = dict(config)
+            else:
+                self._voice_cfg["tts"] = dict(config)
+            self._control_state[component] = dict(desired)
+            if pending is not None and pending != desired:
+                current["effective"] = dict(desired)
+                current["failed"] = None
+            else:
+                self._record_runtime_switch_active(component, desired)
+            self._persist_control_state()
+
+    @staticmethod
+    def _runtime_switch_result(
+        result: dict[str, Any],
+        *,
+        desired: dict[str, str],
+        effective: dict[str, str],
+        pending: dict[str, str] | None = None,
+        failed: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(result)
+        activation = payload.get("effective")
+        if activation is not None and not isinstance(activation, dict):
+            payload["activation"] = activation
+        payload.update(
+            {
+                "desired": dict(desired),
+                "effective": dict(effective),
+                "pending": dict(pending) if pending is not None else None,
+                "failed": dict(failed) if failed is not None else None,
+            }
+        )
+        return payload
+
+    async def _defer_llm_client_retirement(
+        self,
+        llm_module: Any,
+        client: Any,
+        *,
+        label: str,
+    ) -> None:
+        retire = getattr(llm_module, "retire_client", None)
+        if callable(retire):
+            try:
+                result = retire(client)
+                if inspect.isawaitable(result):
+                    await result
+                return
+            except Exception:
+                logger.warning(
+                    "VoiceModule: failed to defer %s LLM retirement",
+                    label,
+                    exc_info=True,
+                )
+                return
+        await self._retire_llm_client(client, label=label)
+
+    async def _retire_llm_client(self, client: Any, *, label: str) -> None:
+        close = getattr(client, "aclose", None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=2.0)
+        except Exception:
+            logger.warning("VoiceModule: failed to retire %s LLM client", label, exc_info=True)
 
     def _publish_llm(self, client: Any, brain_cfg: dict[str, Any]) -> None:
         pipeline = self._pipeline()
         if pipeline is not None:
             pipeline.replace_llm(
                 client,
-                voice_model=str(brain_cfg.get("voice_model") or client.model),
+                voice_model=str(brain_cfg.get("voice_model") or getattr(client, "model", "")),
             )
         memory_mod = self._registry.get("memory")
         replace_llm = getattr(memory_mod, "replace_llm", None)
@@ -663,22 +1198,26 @@ class VoiceModule(Module):
 
     def _resolve_llm_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         base = deepcopy(self._base_cfg.get("brain", {}))
-        provider = str(
-            payload.get("provider")
-            or self._control_state.get("llm", {}).get("provider")
-            or base.get("provider")
-            or ""
-        ).strip().lower()
+        provider = (
+            str(
+                payload.get("provider")
+                or self._control_state.get("llm", {}).get("provider")
+                or base.get("provider")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         presets = self._llm_presets()
         preset = presets.get(provider)
         if preset is None:
             raise ValueError(f"LLM provider is not configured: {provider}")
         resolved = deep_merge(base, preset)
         resolved["provider"] = provider
-        resolved["model"] = str(payload.get("model") or preset.get("model") or base.get("model") or "")
-        resolved["voice_model"] = str(
-            payload.get("voice_model") or resolved["model"]
+        resolved["model"] = str(
+            payload.get("model") or preset.get("model") or base.get("model") or ""
         )
+        resolved["voice_model"] = str(payload.get("voice_model") or resolved["model"])
         if isinstance(payload.get("fallback_models"), list):
             resolved["fallback_models"] = [
                 str(item).strip() for item in payload["fallback_models"] if str(item).strip()
@@ -696,13 +1235,6 @@ class VoiceModule(Module):
                 "fallback_models": brain.get("fallback_models", []),
             }
         }
-        if brain.get("minimax_api_key"):
-            presets["minimax"] = {
-                "api_key": brain.get("minimax_api_key", ""),
-                "base_url": brain.get("minimax_base_url", "https://api.minimax.chat/v1"),
-                "model": brain.get("minimax_model", "MiniMax-M2.5-highspeed"),
-                "fallback_models": [],
-            }
         configured = brain.get("provider_presets", {})
         if isinstance(configured, dict):
             for name, preset in configured.items():
@@ -718,7 +1250,13 @@ class VoiceModule(Module):
     ) -> dict[str, Any]:
         root = source or self._base_cfg
         voice_cfg = deepcopy(root.get("voice", {}))
-        provider = str(payload.get("provider") or voice_cfg.get("cloud_asr", {}).get("provider") or "local").strip().lower()
+        provider = (
+            str(
+                payload.get("provider") or voice_cfg.get("cloud_asr", {}).get("provider") or "local"
+            )
+            .strip()
+            .lower()
+        )
         cloud_cfg = deepcopy(voice_cfg.get("cloud_asr", {}))
         if provider == "local":
             cloud_cfg["enabled"] = False
@@ -749,13 +1287,26 @@ class VoiceModule(Module):
         voice_cfg = root.get("voice", {})
         tts_cfg = deepcopy(voice_cfg.get("tts", {}))
         backend = str(payload.get("backend") or tts_cfg.get("backend") or "local").strip().lower()
-        if backend not in {"local", "edge", "minimax"}:
-            raise ValueError("TTS backend must be one of: local, edge, minimax")
+        if backend == "volc":
+            backend = "volcengine"
+        if backend not in {"local", "edge", "minimax", "volcengine"}:
+            raise ValueError("TTS backend must be one of: local, edge, minimax, volcengine")
         tts_cfg["backend"] = backend
         if payload.get("model"):
-            tts_cfg["minimax_tts_model"] = str(payload["model"])
+            model = str(payload["model"])
+            if backend == "volcengine":
+                # Volcengine's V3 route selects the TTS product/model through
+                # X-Api-Resource-Id, not an undocumented req_params.model.
+                tts_cfg["volcengine_tts_resource_id"] = model
+                tts_cfg["volcengine_tts_model"] = model
+            else:
+                tts_cfg["minimax_tts_model"] = model
         if payload.get("voice_id"):
-            tts_cfg["minimax_voice_id"] = str(payload["voice_id"])
+            voice_key = {
+                "edge": "voice",
+                "volcengine": "volcengine_tts_speaker",
+            }.get(backend, "minimax_voice_id")
+            tts_cfg[voice_key] = str(payload["voice_id"])
         return tts_cfg
 
     def _apply_prompt_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -783,9 +1334,7 @@ class VoiceModule(Module):
             if regenerate
             else str(payload.get("user_prefix", current.get("user_prefix", "")))
         )
-        relay_mode = bool(
-            payload.get("relay_compat_mode", current.get("relay_compat_mode", False))
-        )
+        relay_mode = bool(payload.get("relay_compat_mode", current.get("relay_compat_mode", False)))
         return pipeline.update_prompt(
             base_prompt=base_prompt,
             prompt_seed=prompt_seed,
@@ -822,9 +1371,36 @@ class VoiceModule(Module):
                 },
             ],
             "tts": [
-                {"backend": "minimax", "models": [str(base_tts.get("minimax_tts_model") or "")], "credential_ready": bool(base_tts.get("minimax_api_key"))},
-                {"backend": "edge", "models": [str(base_tts.get("voice") or "")], "credential_ready": importlib.util.find_spec("edge_tts") is not None},
-                {"backend": "local", "models": [local_model.name], "credential_ready": local_model.is_dir()},
+                {
+                    "backend": "minimax",
+                    "models": [str(base_tts.get("minimax_tts_model") or "")],
+                    "credential_ready": bool(base_tts.get("minimax_api_key")),
+                },
+                {
+                    "backend": "volcengine",
+                    "models": [str(base_tts.get("volcengine_tts_resource_id") or "")],
+                    "credential_ready": bool(
+                        (
+                            base_tts.get("volcengine_tts_api_key")
+                            or (
+                                base_tts.get("volcengine_tts_app_id")
+                                and base_tts.get("volcengine_tts_access_key")
+                            )
+                        )
+                        and base_tts.get("volcengine_tts_resource_id")
+                        and base_tts.get("volcengine_tts_speaker")
+                    ),
+                },
+                {
+                    "backend": "edge",
+                    "models": [str(base_tts.get("voice") or "")],
+                    "credential_ready": importlib.util.find_spec("edge_tts") is not None,
+                },
+                {
+                    "backend": "local",
+                    "models": [local_model.name],
+                    "credential_ready": local_model.is_dir(),
+                },
             ],
             "memory": memory.get("backend_dependencies", {}),
         }
@@ -838,28 +1414,50 @@ class VoiceModule(Module):
     ) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
         if not audio.get("input_ready"):
-            issues.append({"id": "audio_input", "severity": "critical", "label": "麦克风输入未就绪"})
+            issues.append(
+                {"id": "audio_input", "severity": "critical", "label": "麦克风输入未就绪"}
+            )
         if not audio.get("output_ready"):
             issues.append({"id": "audio_output", "severity": "critical", "label": "语音输出未就绪"})
         if memory and not memory.get("ready"):
-            issues.append({"id": "memory_not_ready", "severity": "high", "label": "记忆检索尚未就绪"})
+            issues.append(
+                {"id": "memory_not_ready", "severity": "high", "label": "记忆检索尚未就绪"}
+            )
         elif memory.get("status") == "degraded":
-            issues.append({"id": "memory_degraded", "severity": "medium", "label": "记忆正在使用降级后端"})
+            issues.append(
+                {"id": "memory_degraded", "severity": "medium", "label": "记忆正在使用降级后端"}
+            )
         asr_error = str(audio.get("asr", {}).get("cloud", {}).get("last_error") or "")
         if asr_error and "45000081" not in asr_error:
-            issues.append({"id": "asr_provider_error", "severity": "medium", "label": asr_error[:120]})
+            issues.append(
+                {"id": "asr_provider_error", "severity": "medium", "label": asr_error[:120]}
+            )
         pending = audio.get("pending_runtime_updates", {})
         if any(bool(value) for value in pending.values()):
-            issues.append({"id": "runtime_switch_pending", "severity": "info", "label": "模型切换将在当前语音轮次结束后生效"})
+            issues.append(
+                {
+                    "id": "runtime_switch_pending",
+                    "severity": "info",
+                    "label": "模型切换将在当前语音轮次结束后生效",
+                }
+            )
         if prompt.get("relay_compat_mode"):
-            issues.append({"id": "relay_compat_prompt", "severity": "info", "label": "Prompt 正在使用旧中继兼容模式"})
+            issues.append(
+                {
+                    "id": "relay_compat_prompt",
+                    "severity": "info",
+                    "label": "Prompt 正在使用旧中继兼容模式",
+                }
+            )
         policy = (interaction or {}).get("policy", {})
         if policy and policy.get("mode") != "strict_public_site":
-            issues.append({
-                "id": "ambient_admission_permissive",
-                "severity": "medium",
-                "label": "对话准入仍允许未称呼小算的模糊现场语音",
-            })
+            issues.append(
+                {
+                    "id": "ambient_admission_permissive",
+                    "severity": "medium",
+                    "label": "对话准入仍允许未称呼小算的模糊现场语音",
+                }
+            )
         return issues
 
     def _persist_control_state(self) -> None:
@@ -934,7 +1532,7 @@ def _build_interaction_perception_provider(registry: ModuleRegistry) -> Any:
         world_state = getattr(cognition_mod, "world_state", None)
         scene_fact = (
             world_state.get_fact("scene.objects", include_stale=True)
-            if hasattr(world_state, "get_fact")
+            if world_state is not None and hasattr(world_state, "get_fact")
             else None
         )
         if scene_fact is not None:
@@ -962,6 +1560,119 @@ def _build_interaction_perception_provider(registry: ModuleRegistry) -> Any:
                     "objects": scene.get("objects", []) if isinstance(scene, dict) else [],
                 }
 
+        return None
+
+    return _provider
+
+
+def _build_voice_task_lifecycle(
+    cfg: dict[str, Any],
+    registry: ModuleRegistry,
+) -> VoiceTaskLifecycleService | None:
+    runtime_module = registry.get("runtime_handoff")
+    if runtime_module is None or not bool(getattr(runtime_module, "enabled", True)):
+        return None
+    handoff_service = getattr(runtime_module, "runtime_handoff_service", None)
+    supervisor = getattr(runtime_module, "external_task_supervisor", None)
+    if handoff_service is None or supervisor is None:
+        return None
+
+    handoff_cfg = cfg.get("runtime_handoff", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(handoff_cfg, dict):
+        handoff_cfg = {}
+    lifecycle_cfg = handoff_cfg.get("voice_task", {})
+    if not isinstance(lifecycle_cfg, dict):
+        lifecycle_cfg = {}
+    if not bool(lifecycle_cfg.get("enabled", True)):
+        return None
+    run_service = getattr(handoff_service, "run_service", None)
+    if not bool(getattr(run_service, "durable_store_ready", False)):
+        raise ValueError(
+            "runtime_handoff.voice_task requires a durable TaskRun store with "
+            "swallow_errors=false"
+        )
+    operator_cfg = lifecycle_cfg.get("operator", {})
+    if not isinstance(operator_cfg, dict):
+        operator_cfg = {}
+    roles_cfg = operator_cfg.get("roles", [])
+    if isinstance(roles_cfg, str):
+        roles_cfg = [roles_cfg]
+    if not isinstance(roles_cfg, (list, tuple, set)):
+        roles_cfg = []
+    roles = tuple(
+        dict.fromkeys(str(role).strip().lower() for role in roles_cfg if str(role).strip())
+    )
+    permissions_cfg = operator_cfg.get("permissions", [])
+    if isinstance(permissions_cfg, str):
+        permissions_cfg = [permissions_cfg]
+    if not isinstance(permissions_cfg, (list, tuple, set)):
+        permissions_cfg = []
+    permissions = tuple(
+        dict.fromkeys(
+            str(permission).strip().lower()
+            for permission in permissions_cfg
+            if str(permission).strip()
+        )
+    )
+    operator_context = None
+    session_scope = str(operator_cfg.get("session_scope") or "per_turn").strip().lower()
+    if operator_cfg and session_scope == "single_operator":
+        operator_context = VoiceTaskOperatorContext(
+            operator_id=str(operator_cfg.get("operator_id") or "").strip(),
+            roles=roles,
+            authenticated=operator_cfg.get("authenticated") is True,
+            source=str(operator_cfg.get("source") or "").strip(),
+            person_id=str(operator_cfg.get("person_id") or "").strip(),
+            permissions=permissions,
+        )
+    mission_module = registry.get("mission")
+    mission_service = getattr(mission_module, "mission_service", None)
+    return VoiceTaskLifecycleService(
+        handoff_service=handoff_service,
+        supervisor=supervisor,
+        mission_service=mission_service,
+        operator_context=operator_context,
+        approval_ttl_s=float(lifecycle_cfg.get("approval_ttl_seconds", 60.0)),
+        clarification_ttl_s=float(lifecycle_cfg.get("clarification_ttl_seconds", 45.0)),
+        delivery_ttl_s=float(lifecycle_cfg.get("delivery_ttl_seconds", 120.0)),
+        delivery_retry_delay_s=float(lifecycle_cfg.get("delivery_retry_delay_seconds", 0.25)),
+        max_delivery_attempts=int(lifecycle_cfg.get("max_delivery_attempts", 3)),
+    )
+
+
+def _build_voice_task_operator_provider(
+    cfg: dict[str, Any],
+    audio: AudioFrontendPort,
+    lifecycle: VoiceTaskLifecycleService | None,
+) -> Callable[[str, str], VoiceTaskOperatorContext | None] | None:
+    """Resolve identity per captured turn; static identity needs explicit session scope."""
+
+    if lifecycle is None:
+        return None
+    handoff_cfg = cfg.get("runtime_handoff", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(handoff_cfg, dict):
+        handoff_cfg = {}
+    lifecycle_cfg = handoff_cfg.get("voice_task", {})
+    if not isinstance(lifecycle_cfg, dict):
+        lifecycle_cfg = {}
+    operator_cfg = lifecycle_cfg.get("operator", {})
+    if not isinstance(operator_cfg, dict):
+        operator_cfg = {}
+    static_context = lifecycle.default_operator_context
+    single_operator_session = (
+        str(operator_cfg.get("session_scope") or "").strip().lower()
+        == "single_operator"
+    )
+    resolver = getattr(audio, "voice_task_operator_context_for_turn", None)
+
+    def _provider(session_id: str, turn_id: str) -> VoiceTaskOperatorContext | None:
+        if callable(resolver):
+            payload = resolver(session_id, turn_id)
+            context = VoiceTaskOperatorContext.from_mapping(payload)
+            if context is not None:
+                return context
+        if single_operator_session:
+            return static_context
         return None
 
     return _provider
@@ -1048,14 +1759,18 @@ def _voice_product_readiness(
     if require_wake_word and audio_status.get("wake_word_enabled") is not True:
         blockers.append("wake_word_not_ready")
     if require_runtime_bridge and (
-        bridge_status.get("enabled") is not True
-        or bridge_status.get("circuit_open") is True
+        bridge_status.get("enabled") is not True or bridge_status.get("circuit_open") is True
     ):
         blockers.append("runtime_bridge_not_ready")
 
     return {
         "ready": not blockers,
         "blockers": blockers,
+        "degraded_mode": (
+            "kws_unavailable_safety_only"
+            if audio_status.get("kws_unavailable_safety_only") is True
+            else None
+        ),
         "requirements": {
             "wake_word": require_wake_word,
             "runtime_bridge": require_runtime_bridge,

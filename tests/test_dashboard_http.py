@@ -44,8 +44,9 @@ class TestDashboardHttp:
         assert voice_css_response.status_code == 200
         assert product_css_response.status_code == 200
         assert "/dashboard/voice.css?v=20260712-5" in response.text
-        assert "/dashboard/product.css?v=20260712-8" in response.text
-        assert "/dashboard/app.js?v=20260712-2" in response.text
+        assert "/dashboard/product.css?v=20260713-16" in response.text
+        assert "/dashboard/app.js?v=20260728-1" in response.text
+        assert 'class="workspace-bar"' in response.text
         assert 'id="nav-toggle"' in response.text
         assert 'id="nav-drawer"' in response.text
         assert 'id="nav-backdrop"' in response.text
@@ -74,9 +75,11 @@ class TestDashboardHttp:
         assert "/dashboard/voice" in js_response.text
         assert "/dashboard/delivery" in js_response.text
         assert "renderOverview" in js_response.text
-        assert "今天先看状态，再处理任务" in js_response.text
-        assert "dashboard-shortcuts" in js_response.text
-        assert "最近需要处理" in js_response.text
+        assert "需要关注的三件事" in js_response.text
+        assert "dashboard-status-grid" in js_response.text
+        assert "dashboard-event-grid" in js_response.text
+        assert "dashboard-readiness-card" in js_response.text
+        assert "dashboard-shortcuts" not in js_response.text
         assert "服务在线" in js_response.text
         assert "renderConversation" in js_response.text
         assert "现场上下文" in js_response.text
@@ -519,7 +522,7 @@ class TestDashboardHttp:
         assert "onsiteReceiptEvidenceRef" in js_response.text
         assert "acceptance-evidence-picker" in css_response.text
         assert (
-            "evidence_refs: commaList(document.getElementById(\"project-acceptance-evidence-refs\")"
+            'evidence_refs: commaList(document.getElementById("project-acceptance-evidence-refs")'
             in js_response.text
         )
         assert "renderCustomerProjectOnsiteEvidence" in js_response.text
@@ -574,9 +577,9 @@ class TestDashboardHttp:
         assert "交付包冲突项" in js_response.text
         assert 'id="project-tenant-id"' in js_response.text
         assert 'id="project-delivery-namespace"' in js_response.text
-        assert "tenant_id: document.getElementById(\"project-tenant-id\")" in js_response.text
+        assert 'tenant_id: document.getElementById("project-tenant-id")' in js_response.text
         assert (
-            "delivery_namespace: document.getElementById(\"project-delivery-namespace\")"
+            'delivery_namespace: document.getElementById("project-delivery-namespace")'
             in js_response.text
         )
         assert "项目基础信息" in js_response.text
@@ -627,20 +630,25 @@ class TestDashboardHttp:
         assert 'id="object-evidence-required"' in js_response.text
         assert 'id="object-vision-models"' in js_response.text
         assert 'id="object-sensor-protocols"' in js_response.text
-        assert "setObjectEditInput(\"object-vision-models\"" in js_response.text
-        assert "setObjectEditInput(\"object-sensor-protocols\"" in js_response.text
+        assert 'setObjectEditInput("object-vision-models"' in js_response.text
+        assert 'setObjectEditInput("object-sensor-protocols"' in js_response.text
         assert 'id="object-project-ids"' in js_response.text
         assert 'id="object-site-ids"' in js_response.text
         assert "客户范围保护" in js_response.text
         assert "object-project-ids" in js_response.text
-        assert "tenant_ids: commaList(document.getElementById(\"object-tenant-ids\")" in js_response.text
-        assert "project_ids: commaList(document.getElementById(\"object-project-ids\")" in js_response.text
         assert (
-            "vision_models: commaList(document.getElementById(\"object-vision-models\")"
+            'tenant_ids: commaList(document.getElementById("object-tenant-ids")' in js_response.text
+        )
+        assert (
+            'project_ids: commaList(document.getElementById("object-project-ids")'
             in js_response.text
         )
         assert (
-            "sensor_protocols: commaList(document.getElementById(\"object-sensor-protocols\")"
+            'vision_models: commaList(document.getElementById("object-vision-models")'
+            in js_response.text
+        )
+        assert (
+            'sensor_protocols: commaList(document.getElementById("object-sensor-protocols")'
             in js_response.text
         )
         assert "验收证据" in js_response.text
@@ -742,7 +750,6 @@ class TestDashboardHttp:
         assert "playback_start_ms" in js_response.text
         assert "speak: true" in js_response.text
         assert "play_audio: true" in js_response.text
-
 
     def test_dashboard_pages_endpoint_returns_product_page_map(self):
         client = TestClient(create_health_app(lambda: _runtime_snapshot()))

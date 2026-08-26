@@ -11,8 +11,17 @@ from askme.api.schemas.conversation import (
     ConversationDiagnosticsResponse,
     ConversationHistoryResponse,
 )
+from askme.conversation import TurnInProgress
 from askme.health_server import create_health_app
 from tests.support.health_snapshots import minimal_runtime_snapshot as _runtime_snapshot
+
+
+def _assert_and_remove_anonymous_thread_contract(payload: dict[str, object]) -> None:
+    thread_id = payload.pop("conversation_thread_id")
+    session_id = payload.pop("conversation_session_id")
+    assert isinstance(thread_id, str)
+    assert thread_id.startswith("chat-thread-")
+    assert session_id == thread_id
 
 
 def test_chat_endpoint_forwards_speak_request_to_handler():
@@ -37,7 +46,9 @@ def test_chat_endpoint_forwards_speak_request_to_handler():
 
     assert response.status_code == 200
     assert seen == {"text": "hello", "speak": True}
-    assert response.json() == {
+    payload = response.json()
+    _assert_and_remove_anonymous_thread_contract(payload)
+    assert payload == {
         "reply": "reply:hello",
         "spoken": True,
         "text": "hello",
@@ -69,6 +80,30 @@ def test_chat_endpoint_reports_timeout_from_config(monkeypatch):
 
     assert response.status_code == 504
     assert response.json()["error"] == "chat timed out"
+
+
+def test_chat_endpoint_maps_active_thread_conflict_to_409():
+    async def chat_handler(text: str, *, speak: bool = False):
+        raise TurnInProgress("thread-busy", "turn-active")
+
+    client = TestClient(
+        create_health_app(
+            lambda: _runtime_snapshot(),
+            chat_handler=chat_handler,
+        )
+    )
+
+    response = client.post(
+        "/api/chat",
+        json={"text": "下一句", "conversation_thread_id": "thread-busy"},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "conversation turn in progress",
+        "conversation_thread_id": "thread-busy",
+        "blocking_turn_id": "turn-active",
+    }
 
 
 def test_conversation_diagnostics_endpoint_reports_chat_state():
@@ -122,7 +157,9 @@ def test_chat_endpoint_accepts_message_alias():
 
     assert response.status_code == 200
     assert seen == {"text": "hello", "speak": True}
-    assert response.json() == {
+    payload = response.json()
+    _assert_and_remove_anonymous_thread_contract(payload)
+    assert payload == {
         "reply": "reply:hello",
         "spoken": True,
         "text": "hello",
@@ -176,7 +213,9 @@ def test_chat_endpoint_keeps_text_only_handler_compatible():
     )
 
     assert response.status_code == 200
-    assert response.json() == {
+    payload = response.json()
+    _assert_and_remove_anonymous_thread_contract(payload)
+    assert payload == {
         "reply": "reply:hello",
         "text": "hello",
         "spoken": False,

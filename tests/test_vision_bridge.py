@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
+import pytest
+
 from askme.perception.vision_bridge import VisionBridge
 
 
@@ -18,9 +22,7 @@ def test_encode_frame_for_vlm_has_dependency_free_png_fallback(monkeypatch):
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", without_cv2)
-    media_type, encoded = VisionBridge._encode_frame_for_vlm(
-        np.zeros((2, 3, 3), dtype=np.uint8)
-    )
+    media_type, encoded = VisionBridge._encode_frame_for_vlm(np.zeros((2, 3, 3), dtype=np.uint8))
 
     assert media_type == "image/png"
     assert encoded.startswith("iVBORw0KGgo")
@@ -54,9 +56,8 @@ def test_encode_frame_for_vlm_downsamples_large_frame(monkeypatch):
 def test_visual_question_reports_backend_failure(monkeypatch):
     import asyncio
 
-    bridge = VisionBridge()
+    bridge = VisionBridge(config=_product_vlm_config())
     bridge._vlm_client = object()
-    bridge._vlm_backend = "openai"
     monkeypatch.setattr(bridge, "_capture_frame", lambda: object())
     monkeypatch.setattr(
         bridge, "_encode_frame_for_vlm", lambda frame, max_width: ("image/png", "AA==")
@@ -66,7 +67,175 @@ def test_visual_question_reports_backend_failure(monkeypatch):
 
     assert result == "视觉识别服务暂时不可用，无法确认当前摄像头画面。"
 
+
+def _product_vlm_config() -> dict:
+    return {
+        "brain": {
+            "provider": "litellm",
+            "api_key": "sk-scoped-chat",
+            "base_url": "http://127.0.0.1:4000/v1",
+        },
+        "vision": {
+            "vlm_enabled": True,
+            "vlm_backend": "openai",
+            "vlm_api_key": "sk-scoped-vision",
+            "vlm_base_url": "http://127.0.0.1:4000/v1",
+            "vlm_model": "vision-scene",
+            "vlm_timeout": 10.0,
+        },
+    }
+
+
+class _CapturingVlmCompletions:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))]
+        )
+
+
+def _install_capturing_vlm_client(bridge: VisionBridge, content: str) -> _CapturingVlmCompletions:
+    from types import SimpleNamespace
+
+    completions = _CapturingVlmCompletions(content)
+    bridge._vlm_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=completions),
+    )
+    return completions
+
+
+def _assert_vlm_litellm_envelope(request: dict) -> None:
+    import json
+    import re
+
+    metadata = request["metadata"]
+    headers = request["extra_headers"]
+
+    assert request["model"] == "vision-scene"
+    assert metadata["purpose"] == "vision_grounding"
+    assert metadata["channel"] == "vision"
+    assert metadata["request_class"] == "vision"
+    assert metadata["privacy_class"] == "restricted"
+    assert metadata["model_alias"] == "vision-scene"
+    assert metadata["allow_cache"] == "false"
+    assert metadata["latency_budget_ms"] == 10_000
+    assert re.fullmatch(r"00-[0-9a-f]{32}-[0-9a-f]{16}-01", headers["traceparent"])
+    assert headers["x-litellm-call-id"] == metadata["call_id"]
+    assert set(headers) == {"traceparent", "x-litellm-call-id"}
+    assert request["extra_body"]["cache"] == {"no-cache": True, "no-store": True}
+
+    control_plane = json.dumps(
+        {"metadata": metadata, "extra_headers": headers, "extra_body": request["extra_body"]},
+        ensure_ascii=False,
+    )
+    assert "观察这张图片" not in control_plane
+    assert "YOLO object detection" not in control_plane
+    assert "data:image" not in control_plane
+    assert "sk-" not in control_plane
+    assert "Authorization" not in control_plane
+    assert "Cookie" not in control_plane
+
+
+def test_exact_product_vlm_route_constructs_only_openai_compatible_client(monkeypatch):
+    from unittest.mock import MagicMock
+
+    bridge = VisionBridge(config=_product_vlm_config())
+    openai_client = MagicMock()
+    monkeypatch.setattr("openai.OpenAI", openai_client)
+
+    assert bridge._ensure_vlm_client() is True
+
+    openai_client.assert_called_once_with(
+        api_key="sk-scoped-vision",
+        base_url="http://127.0.0.1:4000/v1",
+        timeout=10.0,
+        max_retries=0,
+    )
+    assert bridge._vlm_backend == "openai"
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("brain", "provider", "deepseek"),
+        ("vision", "vlm_backend", "anthropic"),
+        ("vision", "vlm_model", "qwen-vl-max"),
+        ("vision", "vlm_base_url", "https://direct.invalid/v1"),
+        ("vision", "vlm_api_key", "sk-scoped-chat"),
+    ],
+)
+def test_product_vlm_rejects_any_route_outside_scoped_litellm_policy(
+    monkeypatch,
+    section,
+    key,
+    value,
+):
+    from unittest.mock import MagicMock
+
+    config = deepcopy(_product_vlm_config())
+    config[section][key] = value
+    openai_client = MagicMock()
+    monkeypatch.setattr("openai.OpenAI", openai_client)
+
+    bridge = VisionBridge(config=config)
+
+    assert bridge._ensure_vlm_client() is False
+    assert bridge._vlm_client is None
+    openai_client.assert_not_called()
+
+
+def test_vlm_question_uses_shared_litellm_envelope(monkeypatch):
+    import asyncio
+
+    import numpy as np
+
+    bridge = VisionBridge(config=_product_vlm_config())
+    completions = _install_capturing_vlm_client(bridge, "桌上有一个杯子。")
+    monkeypatch.setattr(
+        bridge,
+        "_encode_frame_for_vlm",
+        lambda frame, max_width: ("image/png", "AA=="),
+    )
+
+    result = asyncio.run(
+        bridge.describe_scene_with_question(
+            "桌上有什么？", frame=np.zeros((2, 2, 3), dtype=np.uint8)
+        )
+    )
+
+    assert result == "桌上有一个杯子。"
+    assert len(completions.calls) == 1
+    _assert_vlm_litellm_envelope(completions.calls[0])
+
+
+def test_vlm_scene_description_uses_shared_litellm_envelope(monkeypatch):
+    import asyncio
+
+    import numpy as np
+
+    bridge = VisionBridge(config=_product_vlm_config())
+    completions = _install_capturing_vlm_client(bridge, "描述：杯子，桌子")
+    monkeypatch.setattr(
+        bridge,
+        "_encode_frame_for_vlm",
+        lambda frame, max_width: ("image/jpeg", "BB=="),
+    )
+
+    result = asyncio.run(bridge._describe_scene_vlm(frame=np.zeros((2, 2, 3), dtype=np.uint8)))
+
+    assert result == "杯子，桌子"
+    assert len(completions.calls) == 1
+    _assert_vlm_litellm_envelope(completions.calls[0])
+
+
 # ── _clean_vlm_response ───────────────────────────────────────────────────────
+
 
 class TestCleanVlmResponse:
     def test_empty_string_returns_empty(self):
@@ -121,6 +290,7 @@ class TestCleanVlmResponse:
 
 
 # ── _detections_to_description ────────────────────────────────────────────────
+
 
 class TestDetectionsToDescription:
     def test_empty_detections_returns_empty(self):
@@ -178,9 +348,11 @@ class TestDetectionsToDescription:
 
 # ── _tracks_to_description ────────────────────────────────────────────────────
 
+
 class TestTracksToDescription:
     def _make_track(self, class_id: str):
         from unittest.mock import MagicMock
+
         t = MagicMock()
         t.class_id = class_id
         return t
@@ -207,6 +379,7 @@ class TestTracksToDescription:
 
 
 # ── VisionBridge.available ────────────────────────────────────────────────────
+
 
 class TestVisionBridgeAvailable:
     def test_available_false_without_dependencies(self):

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">AskMe</title>
+  <rect x="1" y="1" width="62" height="62" rx="15" fill="#0d1324" stroke="#202a43" stroke-width="2"/>
+  <rect x="1" y="13" width="4" height="38" rx="2" fill="#6658d3"/>
+  <ellipse cx="32" cy="32" rx="21" ry="10" fill="none" stroke="#d8d5ff" stroke-width="2" transform="rotate(-25 32 32)" opacity=".9"/>
+  <ellipse cx="32" cy="32" rx="21" ry="10" fill="none" stroke="#ffffff" stroke-width="1.6" transform="rotate(31 32 32)" opacity=".38"/>
+  <circle cx="32" cy="32" r="5" fill="#ffffff"/>
+  <circle cx="49" cy="21" r="4" fill="#58d0c1"/>
+  <circle cx="15" cy="43" r="3" fill="#d8a94e"/>
+</svg>

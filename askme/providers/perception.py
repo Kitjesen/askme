@@ -43,7 +43,7 @@ def build_perception(
         else {}
     )
 
-    vision = VisionBridge()
+    vision = VisionBridge(config=cfg)
     interaction_provider = FileInteractionPerceptionProvider(interaction_cfg)
     change_monitor = _build_change_monitor(cfg, pulse=pulse)
 
@@ -150,9 +150,7 @@ def read_depth_info(
                 if len(data) == width * height * 2:
                     depth = np.frombuffer(data, dtype=np.uint16).reshape(height, width)
                     center = depth[height // 2, width // 2]
-                    result["center_depth_m"] = (
-                        round(center / 1000.0, 2) if center > 0 else None
-                    )
+                    result["center_depth_m"] = round(center / 1000.0, 2) if center > 0 else None
                     result["frame_size"] = f"{width}x{height}"
     except Exception:
         pass

@@ -10,6 +10,24 @@ from askme.pipeline.core.turn_control import TurnCancellationController
 
 
 @pytest.mark.asyncio
+async def test_compatibility_task_lease_does_not_advance_media_epoch() -> None:
+    controller = TurnCancellationController(asyncio.Event())
+
+    compatibility_lease = controller.begin_turn(owner="text")
+    try:
+        assert controller.epoch == 0
+
+        canonical_lease = controller.begin("voice-turn")
+        try:
+            assert canonical_lease.epoch == 1
+            assert controller.epoch == 1
+        finally:
+            controller.finish(canonical_lease)
+    finally:
+        controller.end_turn(compatibility_lease)
+
+
+@pytest.mark.asyncio
 async def test_cancel_current_turn_from_thread_cancels_only_active_lease() -> None:
     emergency_token = asyncio.Event()
     controller = TurnCancellationController(emergency_token)

@@ -1,5 +1,6 @@
-# Askme + ZeroClaw 一键部署
-# 启动: docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+# AskMe + LiteLLM 默认产品栈；ZeroClaw 仅供显式 experimental profile
+name: askme-litellm
+# 启动: docker compose --env-file docker/.env --env-file docker/.env.litellm -f docker/docker-compose.yml up -d
 
 x-logging: &default-logging
   driver: json-file
@@ -7,20 +8,83 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
+x-askme-build: &askme-build
+  context: ..
+  dockerfile: docker/Dockerfile.askme
+
+x-key-policy-common: &key-policy-common
+  build: *askme-build
+  restart: "no"
+  network_mode: none
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
 services:
+  # Reuse the pinned, hardened sidecar definitions so the product compose and
+  # standalone LiteLLM operations have one deployment source of truth.
+  litellm-db:
+    extends:
+      file: docker-compose.litellm.yml
+      service: litellm-db
+    networks:
+      - askme-net
+
+  litellm:
+    extends:
+      file: docker-compose.litellm.yml
+      service: litellm
+    networks:
+      - askme-net
+
+  litellm-key-policy:
+    <<: *key-policy-common
+    entrypoint: ["python", "-m", "askme.llm.key_policy"]
+    environment:
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}"
+      LITELLM_VIRTUAL_KEY: "${LITELLM_VIRTUAL_KEY:?set LITELLM_VIRTUAL_KEY}"
+      LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?set LITELLM_SALT_KEY}"
+      LITELLM_DATABASE_PASSWORD: "${LITELLM_DATABASE_PASSWORD:?set LITELLM_DATABASE_PASSWORD}"
+
+  litellm-zeroclaw-key-policy:
+    <<: *key-policy-common
+    profiles: ["experimental-zeroclaw"]
+    entrypoint: ["python", "-m", "askme.llm.key_policy", "--require-zeroclaw"]
+    environment:
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}"
+      LITELLM_VIRTUAL_KEY: "${LITELLM_VIRTUAL_KEY:?set LITELLM_VIRTUAL_KEY}"
+      ZEROCLAW_LITELLM_VIRTUAL_KEY: "${ZEROCLAW_LITELLM_VIRTUAL_KEY:-}"
+      LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?set LITELLM_SALT_KEY}"
+      LITELLM_DATABASE_PASSWORD: "${LITELLM_DATABASE_PASSWORD:?set LITELLM_DATABASE_PASSWORD}"
+
   askme:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.askme
+    build: *askme-build
     container_name: askme
     restart: unless-stopped
     ports:
       - "8765:8765"
     environment:
-      - MINIMAX_API_KEY=${MINIMAX_API_KEY}
-      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
-      - LLM_API_KEY=${LLM_API_KEY:-${MINIMAX_API_KEY}}
-      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.minimax.chat/v1}
+      MINIMAX_API_KEY: "${MINIMAX_API_KEY:-}"
+      DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:-}"
+      LITELLM_BASE_URL: "http://litellm:4000/v1"
+      LITELLM_VIRTUAL_KEY: "${LITELLM_VIRTUAL_KEY:?set LITELLM_VIRTUAL_KEY}"
+      ASKME_HEALTH_HOST: "0.0.0.0"
+      ASKME_CONTROL_API_KEY: "${ASKME_CONTROL_API_KEY:?set ASKME_CONTROL_API_KEY}"
+      NAV_GATEWAY_URL: "${NAV_GATEWAY_URL:-}"
+      DOG_CONTROL_SERVICE_URL: "${DOG_CONTROL_SERVICE_URL:-}"
+      DOG_SAFETY_SERVICE_URL: "${DOG_SAFETY_SERVICE_URL:-}"
+      ASKME_EDGE_SERVICE_URL: "${ASKME_EDGE_SERVICE_URL:-}"
+      NOVA_DOG_RUNTIME_API_KEY: "${NOVA_DOG_RUNTIME_API_KEY:-}"
+      RUNTIME_BEARER_TOKEN: "${RUNTIME_BEARER_TOKEN:-}"
+      RUNTIME_OPERATOR_ID: "${RUNTIME_OPERATOR_ID:-askme}"
+      NO_PROXY: "${NO_PROXY:-127.0.0.1,localhost,litellm}"
+    depends_on:
+      litellm:
+        condition: service_healthy
+      litellm-key-policy:
+        condition: service_completed_successfully
     volumes:
       - ../models:/app/models:ro
       - askme_data:/app/data
@@ -28,27 +92,36 @@ services:
       - askme-net
     logging: *default-logging
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8765/healthz',timeout=5)\""]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8765/ready',timeout=5)\""]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
 
   zeroclaw:
+    profiles: ["experimental-zeroclaw"]
     image: ghcr.io/zeroclaw-labs/zeroclaw:${ZEROCLAW_VERSION:-0.1.7}
     container_name: askme-zeroclaw
     restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
-      - MINIMAX_API_KEY=${MINIMAX_API_KEY}
-      - ZEROCLAW_VERSION=${ZEROCLAW_VERSION:-0.1.7}
-      - ZEROCLAW_PROFILE=${ZEROCLAW_PROFILE:-standard}
+      ZEROCLAW_API_KEY: "${ZEROCLAW_LITELLM_VIRTUAL_KEY:-}"
+      ZEROCLAW_PROVIDER: "custom:http://litellm:4000/v1"
+      ZEROCLAW_MODEL: "robot-action"
+      ZEROCLAW_VERSION: "${ZEROCLAW_VERSION:-0.1.7}"
+      ZEROCLAW_PROFILE: "${ZEROCLAW_PROFILE:-standard}"
+      NO_PROXY: "${NO_PROXY:-127.0.0.1,localhost,litellm,askme}"
     volumes:
       - zeroclaw_workspace:/root/.zeroclaw/workspace
+      - ./zeroclaw/config.toml:/root/.zeroclaw/config.toml:ro
     depends_on:
       askme:
         condition: service_started
+      litellm:
+        condition: service_healthy
+      litellm-zeroclaw-key-policy:
+        condition: service_completed_successfully
     networks:
       - askme-net
     logging: *default-logging
@@ -61,3 +134,4 @@ networks:
 volumes:
   askme_data:
   zeroclaw_workspace:
+  litellm_db:

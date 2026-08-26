@@ -16,11 +16,22 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable
+from inspect import Parameter, getattr_static, signature
 from typing import TYPE_CHECKING, Any
 
+from askme.conversation import (
+    ConversationLedgerError,
+    InteractionInput,
+    InteractionTurnContext,
+    InteractionTurnManager,
+    TurnOutcome,
+    TurnStatus,
+)
 from askme.pipeline.core.hooks import PipelineHooks
 from askme.pipeline.core.prompt_builder import PromptBuilder
 from askme.pipeline.core.protocols import (
+    CancellationToken,
+    SkillExecutionDisposition,
     SkillGateProtocol,
     StreamProcessorProtocol,
     TurnExecutorProtocol,
@@ -36,6 +47,7 @@ from askme.pipeline.core.utils import (
 
 if TYPE_CHECKING:
     from askme.agent_shell import AgentShell
+    from askme.conversation import VoiceTurnLedger
     from askme.llm.core.client import LLMClient
     from askme.memory.core.conversation import ConversationManager
     from askme.memory.core.episodic_memory import EpisodicMemory
@@ -57,6 +69,38 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _legacy_skill_execution_disposition(result: str) -> SkillExecutionDisposition:
+    """Fail-closed settlement adapter for older injected skill gates."""
+
+    text = str(result or "")
+    stripped = text.lstrip()
+    if not text:
+        return SkillExecutionDisposition(
+            status="failed",
+            code="empty_skill_result",
+        )
+    if stripped.startswith(("[Timeout]", "[超时]")):
+        return SkillExecutionDisposition(
+            status="failed",
+            code="execution_timeout",
+        )
+    if stripped.startswith(
+        (
+            "[Skill]",
+            "[Skill Error]",
+            "[AgentShell Error]",
+            "[Error]",
+            "[错误]",
+            "[安全锁定]",
+        )
+    ):
+        return SkillExecutionDisposition(
+            status="failed",
+            code="internal_error_result",
+        )
+    return SkillExecutionDisposition(status="succeeded", code="succeeded")
+
+
 class _UnboundSkillGate:
     """Placeholder used until the runtime injects the concrete SkillGate."""
 
@@ -72,14 +116,33 @@ class _UnboundSkillGate:
     def last_spoken_text(self) -> str:
         return self._last_spoken_text
 
+    def classify_execution_result(
+        self,
+        result: str,
+        *,
+        skill_name: str = "",
+    ) -> SkillExecutionDisposition:
+        del skill_name
+        return _legacy_skill_execution_disposition(result)
+
     async def execute_skill(
         self,
         skill_name: str,
         user_text: str,
         extra_context: str = "",
         source: str = "voice",
+        conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
     ) -> str:
-        _ = user_text, extra_context, source
+        _ = (
+            user_text,
+            extra_context,
+            source,
+            conversation_session_id,
+            voice_turn_id,
+            turn_cancel_token,
+        )
         logger.warning("Skill gate is not bound; cannot execute skill '%s'", skill_name)
         return f"[Skill] Skill gate is not configured: {skill_name}"
 
@@ -94,7 +157,7 @@ class _UnboundSkillGate:
         for prefix in prefixes:
             if not text.startswith(prefix):
                 continue
-            target = text[len(prefix):].strip()
+            target = text[len(prefix) :].strip()
             target = re.split(r"[。！？?!，,；;]", target, maxsplit=1)[0].strip()
             changed = True
             while changed:
@@ -167,6 +230,9 @@ class BrainPipeline:
         "服务对象是现场运营人员、安保和交付工程师。"
         "说话简洁口语化，像对讲机里的值班员。"
         "短句为主，不超过80字。"
+        "需要回复时，首句必须是10字以内的有效结论、动作状态或澄清问题，不含纯寒暄，"
+        "并立即用句号、问号或叹号结束；第二句再展开；"
+        "安全告警、拒绝和澄清不先寒暄。"
         "不用 markdown、emoji、英文。"
         "不确定时说不确定，需要确认，不编造信息。"
         "不要说自己是 AI 助手或语言模型。"
@@ -193,6 +259,8 @@ class BrainPipeline:
         prompt_seed: list[dict[str, str]] | None = None,
         user_prefix: str = "",
         voice_model: str | None = None,
+        voice_memory_retrieval_deadline_s: float | None = None,
+        voice_llm_latency_budget_ms: int | None = None,
         general_tool_max_safety_level: str = "normal",
         max_response_chars: int = 0,
         voice_tts_coalesce: bool = False,
@@ -208,6 +276,14 @@ class BrainPipeline:
         stream_processor: StreamProcessorProtocol | None = None,
         skill_gate: SkillGateProtocol | None = None,
         turn_executor: TurnExecutorProtocol | None = None,
+        # Durable product-level conversation lifecycle.  The legacy
+        # ConversationManager remains the prompt-context projection while this
+        # ledger owns Thread/Turn/Generation identity and settlement.
+        turn_ledger: VoiceTurnLedger | None = None,
+        # Temporary escape hatch for test/development deployments. When a
+        # configured ledger fails, production defaults to fail-closed instead
+        # of silently treating ConversationManager as canonical storage.
+        conversation_core_legacy_fallback: bool = False,
         # Lifecycle hooks (Claude Code-style)
         # PipelineHooks provides pre/post callbacks for turns and tool calls.
         # If None, no hooks are fired. Build a PipelineHooks and register
@@ -215,8 +291,7 @@ class BrainPipeline:
         hooks: PipelineHooks | None = None,
     ) -> None:
         max_chars = (
-            max_response_chars if max_response_chars > 0
-            else self._DEFAULT_MAX_RESPONSE_CHARS
+            max_response_chars if max_response_chars > 0 else self._DEFAULT_MAX_RESPONSE_CHARS
         )
 
         # Apply default system prompt when none provided.
@@ -227,6 +302,15 @@ class BrainPipeline:
         self._tools = tools
         self._audio_ref = audio  # use dunder to avoid shadowing property
         self._conversation = conversation
+        self._turn_ledger = turn_ledger
+        self._interaction_turns = (
+            InteractionTurnManager(turn_ledger) if turn_ledger is not None else None
+        )
+        self._conversation_core_legacy_fallback = bool(conversation_core_legacy_fallback)
+        self._turn_ledger_failure_count = 0
+        self._turn_ledger_last_error = ""
+        self._thread_turn_locks: dict[str, asyncio.Lock] = {}
+        self._thread_turn_lock_users: dict[str, int] = {}
         self._arm = arm_controller
         self._dog_safety = dog_safety_client
 
@@ -235,7 +319,8 @@ class BrainPipeline:
         self._cancel_token: asyncio.Event = (
             cancel_token if cancel_token is not None else asyncio.Event()
         )
-        self._turn_control = TurnCancellationController(self._cancel_token)
+        self._turn_cancellations = TurnCancellationController(self._cancel_token)
+        self._turn_control = self._turn_cancellations
         self._pipeline_cancel_token = self._turn_control.token
         self._hooks = hooks
 
@@ -320,7 +405,9 @@ class BrainPipeline:
                     memory_system=memory_system,
                     qp_memory=qp_memory,
                     voice_model=voice_model,
-                    cancel_token=self._pipeline_cancel_token,
+                    voice_memory_retrieval_deadline_s=voice_memory_retrieval_deadline_s,
+                    voice_llm_latency_budget_ms=voice_llm_latency_budget_ms,
+                    cancel_token=self._cancel_token,
                     hooks=hooks,
                 )
             )
@@ -354,6 +441,95 @@ class BrainPipeline:
     def current_turn_rag(self) -> dict[str, Any] | None:
         return self._turn_executor.current_turn_rag
 
+    @property
+    def turn_ledger(self) -> VoiceTurnLedger | None:
+        """Authoritative Conversation Core ledger, when runtime-wired."""
+
+        return self._turn_ledger
+
+    def conversation_core_health(self) -> dict[str, Any]:
+        """Return non-sensitive audit-writer health for runtime diagnostics."""
+
+        failures = int(self._turn_ledger_failure_count)
+        return {
+            "enabled": self._turn_ledger is not None,
+            "status": "degraded" if failures else "ok",
+            "write_failures": failures,
+            "last_error_type": self._turn_ledger_last_error,
+        }
+
+    def _record_turn_ledger_failure(
+        self,
+        operation: str,
+        exc: BaseException,
+    ) -> None:
+        self._turn_ledger_failure_count += 1
+        self._turn_ledger_last_error = type(exc).__name__
+        logger.exception("Conversation Core could not %s", operation)
+
+    def _clear_legacy_projection_if_erased(
+        self,
+        turn_ledger: VoiceTurnLedger,
+        ledger_turn: Any,
+    ) -> None:
+        """Prevent an in-flight legacy writer from reviving an erased thread."""
+
+        try:
+            thread = turn_ledger.get_thread(ledger_turn.thread_id)
+        except Exception:
+            return
+        raw_status = getattr(thread, "status", None)
+        status = str(getattr(raw_status, "value", raw_status) or "").lower()
+        if status != "erased":
+            return
+        clear = getattr(self._conversation, "clear", None)
+        if not callable(clear):
+            logger.error(
+                "Legacy conversation projection cannot clear erased thread %s",
+                ledger_turn.thread_id,
+            )
+            return
+        try:
+            clear(
+                conversation_session_id=ledger_turn.thread_id,
+                durable=True,
+            )
+        except Exception:
+            logger.exception(
+                "Legacy conversation projection could not clear erased thread %s",
+                ledger_turn.thread_id,
+            )
+
+    def _remove_legacy_turn_projection(
+        self,
+        *,
+        conversation_session_id: str | None,
+        user_text: str,
+        assistant_text: str,
+    ) -> None:
+        """Remove one cancelled result from the legacy prompt cache, if present."""
+
+        session_id = str(conversation_session_id or "").strip() or None
+        remove_assistant = getattr(
+            self._conversation,
+            "remove_latest_assistant_message",
+            None,
+        )
+        remove_user = getattr(self._conversation, "remove_latest_user_message", None)
+        try:
+            if assistant_text and callable(remove_assistant):
+                remove_assistant(
+                    assistant_text,
+                    conversation_session_id=session_id,
+                )
+            if callable(remove_user):
+                remove_user(
+                    user_text,
+                    conversation_session_id=session_id,
+                )
+        except Exception:
+            logger.exception("Could not remove cancelled legacy turn projection")
+
     def clear_turn_context(self) -> None:
         self._turn_executor.clear_turn_context()
 
@@ -383,29 +559,299 @@ class BrainPipeline:
         return self._prompt_builder.runtime_settings()
 
     async def process(
-        self, user_text: str, *, memory_task: asyncio.Task[Any] | None = None,
+        self,
+        user_text: str,
+        *,
+        memory_task: asyncio.Task[Any] | None = None,
         source: str = "voice",
         conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
+        person_id: str | None = None,
+        operator_id: str | None = None,
         turn_owner: str | None = None,
     ) -> str:
+        """Serialize a full local turn per canonical Thread, while other Threads run."""
+
+        control_lease = self._turn_control.begin_turn(owner=turn_owner or source)
+        thread_key = str(conversation_session_id or "").strip() or "__anonymous__"
+        lock = self._thread_turn_locks.get(thread_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._thread_turn_locks[thread_key] = lock
+            self._thread_turn_lock_users[thread_key] = 0
+        self._thread_turn_lock_users[thread_key] += 1
+        try:
+            async with lock:
+                return await self._process_turn_unlocked(
+                    user_text,
+                    memory_task=memory_task,
+                    source=source,
+                    conversation_session_id=conversation_session_id,
+                    voice_turn_id=voice_turn_id,
+                    turn_cancel_token=turn_cancel_token,
+                    person_id=person_id,
+                    operator_id=operator_id,
+                )
+        except asyncio.CancelledError:
+            if not control_lease.cancelled:
+                raise
+            logger.info(
+                "Conversation turn cancelled: %s",
+                control_lease.reason or "barge_in",
+            )
+            return ""
+        finally:
+            remaining = self._thread_turn_lock_users.get(thread_key, 1) - 1
+            if remaining <= 0:
+                self._thread_turn_lock_users.pop(thread_key, None)
+                if self._thread_turn_locks.get(thread_key) is lock:
+                    self._thread_turn_locks.pop(thread_key, None)
+            else:
+                self._thread_turn_lock_users[thread_key] = remaining
+            self._turn_control.end_turn(control_lease)
+
+    async def _process_turn_unlocked(
+        self,
+        user_text: str,
+        *,
+        memory_task: asyncio.Task[Any] | None = None,
+        source: str = "voice",
+        conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
+        person_id: str | None = None,
+        operator_id: str | None = None,
+    ) -> str:
         """Run the full brain pipeline. Returns assistant reply."""
-        if conversation_session_id is None:
-            operation = self._turn_executor.process(
-                user_text,
-                memory_task=memory_task,
-                source=source,
+        if source == "voice" and turn_cancel_token is not None and turn_cancel_token.is_set():
+            logger.info("Voice turn was cancelled before pipeline ownership")
+            return ""
+        lease = (
+            self._turn_cancellations.begin(
+                voice_turn_id,
+                cancel_event=turn_cancel_token,
             )
-        else:
-            operation = self._turn_executor.process(
-                user_text,
-                memory_task=memory_task,
-                source=source,
-                conversation_session_id=conversation_session_id,
-            )
-        return await self._run_controlled_turn(
-            operation,
-            owner=turn_owner or "generic",
+            if source == "voice"
+            else None
         )
+        ledger_turn: Any | None = None
+        turn_ledger = self._turn_ledger
+        if turn_ledger is not None:
+            try:
+                thread = turn_ledger.resolve_thread(
+                    conversation_session_id=conversation_session_id,
+                    # Thread channel is stable across text/cascade/realtime
+                    # paths; the actual path belongs to Turn.source below.
+                    channel="voice",
+                    person_id=person_id,
+                    operator_id=operator_id,
+                )
+                ledger_turn = turn_ledger.start_turn(
+                    thread.thread_id,
+                    turn_id=(lease.turn_id if lease is not None else voice_turn_id),
+                    source=source,
+                    user_text=user_text,
+                )
+                if ledger_turn.status in {
+                    TurnStatus.COMMITTED,
+                    TurnStatus.CANCELLED,
+                    TurnStatus.FAILED,
+                    TurnStatus.SUPPRESSED,
+                }:
+                    if lease is not None:
+                        self._turn_cancellations.finish(lease)
+                    return (
+                        str(ledger_turn.assistant_text or "")
+                        if ledger_turn.status is TurnStatus.COMMITTED
+                        else ""
+                    )
+            except ConversationLedgerError:
+                if lease is not None:
+                    self._turn_cancellations.finish(lease)
+                raise
+            except Exception as exc:
+                self._record_turn_ledger_failure("start the turn", exc)
+                if not self._conversation_core_legacy_fallback:
+                    if lease is not None:
+                        self._turn_cancellations.finish(lease)
+                    raise ConversationLedgerError(
+                        "Conversation Core could not start the turn"
+                    ) from exc
+            if ledger_turn is not None:
+                try:
+                    start_generation = getattr(
+                        turn_ledger,
+                        "start_generation",
+                        None,
+                    )
+                    if callable(start_generation):
+                        start_generation(
+                            ledger_turn.turn_id,
+                            provider="askme_pipeline",
+                            provider_generation_id=(
+                                str(lease.epoch) if lease is not None else None
+                            ),
+                            metadata={"source": source},
+                        )
+                except ConversationLedgerError:
+                    self._clear_legacy_projection_if_erased(turn_ledger, ledger_turn)
+                    try:
+                        turn_ledger.fail_turn(
+                            ledger_turn.turn_id,
+                            reason="generation_start_rejected",
+                        )
+                    except ConversationLedgerError:
+                        pass
+                    if lease is not None:
+                        self._turn_cancellations.finish(lease)
+                    raise
+                except Exception as exc:
+                    self._record_turn_ledger_failure(
+                        "start the local generation",
+                        exc,
+                    )
+                    if not self._conversation_core_legacy_fallback:
+                        try:
+                            turn_ledger.fail_turn(
+                                ledger_turn.turn_id,
+                                reason="generation_start_failed",
+                            )
+                        except ConversationLedgerError:
+                            pass
+                        except Exception as settlement_exc:
+                            self._record_turn_ledger_failure(
+                                "fail the turn after generation start",
+                                settlement_exc,
+                            )
+                        if lease is not None:
+                            self._turn_cancellations.finish(lease)
+                        raise ConversationLedgerError(
+                            "Conversation Core could not start the local generation"
+                        ) from exc
+        kwargs: dict[str, Any] = {
+            "memory_task": memory_task,
+            "source": source,
+        }
+        if conversation_session_id is not None:
+            kwargs["conversation_session_id"] = conversation_session_id
+        if ledger_turn is not None:
+            kwargs["voice_turn_id"] = str(ledger_turn.turn_id)
+        if lease is not None:
+            kwargs.update(
+                voice_turn_id=lease.turn_id,
+                turn_epoch=lease.epoch,
+                turn_cancel_token=lease,
+            )
+        try:
+            result = await self._turn_executor.process(user_text, **kwargs)
+        except asyncio.CancelledError:
+            if ledger_turn is not None and turn_ledger is not None:
+                try:
+                    turn_ledger.cancel_turn(
+                        ledger_turn.turn_id,
+                        reason="task_cancelled",
+                    )
+                except ConversationLedgerError as exc:
+                    self._clear_legacy_projection_if_erased(turn_ledger, ledger_turn)
+                    logger.info("Conversation Core rejected cancellation: %s", exc)
+                except Exception as exc:
+                    self._record_turn_ledger_failure("cancel the turn", exc)
+            self._remove_legacy_turn_projection(
+                conversation_session_id=(
+                    ledger_turn.thread_id if ledger_turn is not None else conversation_session_id
+                ),
+                user_text=user_text,
+                assistant_text="",
+            )
+            raise
+        except Exception as exc:
+            if ledger_turn is not None and turn_ledger is not None:
+                try:
+                    turn_ledger.fail_turn(
+                        ledger_turn.turn_id,
+                        reason=type(exc).__name__,
+                        metadata={"error": str(exc)},
+                    )
+                except ConversationLedgerError as ledger_exc:
+                    self._clear_legacy_projection_if_erased(turn_ledger, ledger_turn)
+                    logger.info("Conversation Core rejected failure settlement: %s", ledger_exc)
+                except Exception as ledger_exc:
+                    self._record_turn_ledger_failure("fail the turn", ledger_exc)
+            self._remove_legacy_turn_projection(
+                conversation_session_id=(
+                    ledger_turn.thread_id if ledger_turn is not None else conversation_session_id
+                ),
+                user_text=user_text,
+                assistant_text="",
+            )
+            raise
+        else:
+            # A non-empty TurnExecutor result means playback and its guarded
+            # legacy settlement already completed.  In that case delivery
+            # wins even if cancellation arrives just before this ledger write.
+            cancellation_won = not result and lease is not None and lease.cancelled
+            if ledger_turn is not None and turn_ledger is not None:
+                try:
+                    if result:
+                        turn_ledger.commit_turn(
+                            ledger_turn.turn_id,
+                            user_text=user_text,
+                            assistant_text=result,
+                            heard_text=result,
+                        )
+                    elif cancellation_won:
+                        turn_ledger.cancel_turn(
+                            ledger_turn.turn_id,
+                            reason=(self._turn_cancellations.last_cancel_reason or "cancelled"),
+                        )
+                    else:
+                        turn_ledger.suppress_turn(
+                            ledger_turn.turn_id,
+                            reason="empty_response",
+                        )
+                except ConversationLedgerError:
+                    self._clear_legacy_projection_if_erased(turn_ledger, ledger_turn)
+                    self._remove_legacy_turn_projection(
+                        conversation_session_id=ledger_turn.thread_id,
+                        user_text=user_text,
+                        assistant_text=str(result or ""),
+                    )
+                    raise
+                except Exception as exc:
+                    self._record_turn_ledger_failure("settle the turn", exc)
+                    if not self._conversation_core_legacy_fallback:
+                        self._remove_legacy_turn_projection(
+                            conversation_session_id=ledger_turn.thread_id,
+                            user_text=user_text,
+                            assistant_text=str(result or ""),
+                        )
+                        raise ConversationLedgerError(
+                            "Conversation Core could not settle the turn"
+                        ) from exc
+            if cancellation_won:
+                self._remove_legacy_turn_projection(
+                    conversation_session_id=(
+                        ledger_turn.thread_id
+                        if ledger_turn is not None
+                        else conversation_session_id
+                    ),
+                    user_text=user_text,
+                    assistant_text=str(result or ""),
+                )
+                return ""
+            return result
+        finally:
+            if lease is not None:
+                self._turn_cancellations.finish(lease)
+
+    def cancel_active_turn(self, *, reason: str = "barge_in") -> bool:
+        """Cancel the active answer without changing sticky safety state."""
+
+        cancelled = self._turn_cancellations.cancel_active(reason=reason)
+        if cancelled:
+            logger.info("Active voice turn cancelled: %s", reason)
+        return cancelled
 
     async def _run_controlled_turn(
         self,
@@ -439,16 +885,279 @@ class BrainPipeline:
         return self._turn_control.cancel_current_turn(reason=reason, owner=owner)
 
     async def execute_skill(
-        self, skill_name: str, user_text: str, extra_context: str = "",
+        self,
+        skill_name: str,
+        user_text: str,
+        extra_context: str = "",
         source: str = "voice",
+        *,
+        conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
+        record_turn: bool = True,
     ) -> str:
-        """Execute a named skill and speak the result."""
-        return await self._run_controlled_turn(
-            self._skill_gate.execute_skill(
-                skill_name, user_text, extra_context, source,
-            ),
-            owner=source or "generic",
+        """Execute one skill while Conversation Core owns the direct Turn."""
+
+        metadata = {"skill_name": skill_name}
+        interaction = (
+            self._open_direct_interaction(
+                user_text=user_text,
+                source=source,
+                conversation_session_id=conversation_session_id,
+                voice_turn_id=voice_turn_id,
+                turn_cancel_token=turn_cancel_token,
+                metadata=metadata,
+            )
+            if record_turn
+            else None
         )
+        if interaction is not None and self._is_cancelled(turn_cancel_token):
+            self._settle_direct_interaction(
+                interaction,
+                TurnOutcome.cancel(reason="cancelled_before_skill_execution"),
+            )
+            return ""
+
+        try:
+            result = await self._call_skill_gate(
+                skill_name,
+                user_text,
+                extra_context=extra_context,
+                source=source,
+                conversation_session_id=conversation_session_id,
+                voice_turn_id=voice_turn_id,
+                turn_cancel_token=turn_cancel_token,
+            )
+        except asyncio.CancelledError:
+            if interaction is not None:
+                self._settle_direct_interaction(
+                    interaction,
+                    TurnOutcome.cancel(reason="skill_task_cancelled"),
+                )
+            raise
+        except Exception as exc:
+            if interaction is not None:
+                self._settle_direct_interaction(
+                    interaction,
+                    TurnOutcome.fail(
+                        reason=type(exc).__name__,
+                        metadata=metadata,
+                    ),
+                )
+            raise
+
+        if interaction is None:
+            return result
+        if self._is_cancelled(turn_cancel_token):
+            self._settle_direct_interaction(
+                interaction,
+                TurnOutcome.cancel(reason="skill_turn_cancelled"),
+            )
+            return ""
+
+        disposition = self._classify_skill_execution_result(result, skill_name)
+        if disposition.status == "succeeded" and result:
+            self._settle_direct_interaction(
+                interaction,
+                TurnOutcome.commit(
+                    assistant_text=result,
+                    heard_text=result,
+                    metadata=metadata,
+                ),
+            )
+        elif disposition.status == "cancelled":
+            self._settle_direct_interaction(
+                interaction,
+                TurnOutcome.cancel(reason=disposition.code),
+            )
+        else:
+            self._settle_direct_interaction(
+                interaction,
+                TurnOutcome.fail(
+                    reason=disposition.code if result else "empty_skill_result",
+                    metadata=metadata,
+                ),
+            )
+        return result
+
+    async def record_direct_reply(
+        self,
+        user_text: str,
+        assistant_text: str,
+        *,
+        source: str = "voice",
+        conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
+        metadata: dict[str, Any] | None = None,
+        person_id: str | None = None,
+        operator_id: str | None = None,
+    ) -> str:
+        """Commit a deterministic direct reply without touching legacy history."""
+
+        interaction = self._open_direct_interaction(
+            user_text=user_text,
+            source=source,
+            conversation_session_id=conversation_session_id,
+            voice_turn_id=voice_turn_id,
+            turn_cancel_token=turn_cancel_token,
+            metadata=metadata,
+            person_id=person_id,
+            operator_id=operator_id,
+        )
+        if interaction is not None:
+            self._settle_direct_interaction(
+                interaction,
+                TurnOutcome.commit(
+                    assistant_text=assistant_text,
+                    heard_text=assistant_text,
+                    metadata=metadata,
+                ),
+            )
+        return assistant_text
+
+    async def _call_skill_gate(
+        self,
+        skill_name: str,
+        user_text: str,
+        *,
+        extra_context: str,
+        source: str,
+        conversation_session_id: str | None,
+        voice_turn_id: str | None,
+        turn_cancel_token: CancellationToken | None,
+    ) -> str:
+        callback = self._skill_gate.execute_skill
+        context = {
+            "conversation_session_id": conversation_session_id,
+            "voice_turn_id": voice_turn_id,
+            "turn_cancel_token": turn_cancel_token,
+        }
+        context = {name: value for name, value in context.items() if value is not None}
+        try:
+            parameters = signature(callback).parameters
+            accepts_kwargs = any(
+                parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values()
+            )
+        except (TypeError, ValueError):
+            context = {}
+        else:
+            if not accepts_kwargs:
+                context = {name: value for name, value in context.items() if name in parameters}
+        return await callback(
+            skill_name,
+            user_text,
+            extra_context,
+            source,
+            **context,
+        )
+
+    def _classify_skill_execution_result(
+        self,
+        result: str,
+        skill_name: str,
+    ) -> SkillExecutionDisposition:
+        try:
+            declared_classifier = getattr_static(
+                self._skill_gate,
+                "classify_execution_result",
+            )
+        except AttributeError:
+            return _legacy_skill_execution_disposition(result)
+
+        if not callable(declared_classifier):
+            return _legacy_skill_execution_disposition(result)
+        classifier = getattr(self._skill_gate, "classify_execution_result")
+        try:
+            disposition = classifier(result, skill_name=skill_name)
+        except Exception:
+            logger.exception(
+                "Injected skill gate could not classify result for %s",
+                skill_name,
+            )
+            return SkillExecutionDisposition(
+                status="failed",
+                code="skill_result_classification_failed",
+            )
+
+        if isinstance(disposition, SkillExecutionDisposition) and disposition.status in {
+            "succeeded",
+            "failed",
+            "cancelled",
+        }:
+            return disposition
+
+        logger.error(
+            "Injected skill gate returned invalid disposition for %s: %s (%r)",
+            skill_name,
+            type(disposition).__name__,
+            getattr(disposition, "status", None),
+        )
+        return SkillExecutionDisposition(
+            status="failed",
+            code="invalid_skill_execution_disposition",
+        )
+
+    def _open_direct_interaction(
+        self,
+        *,
+        user_text: str,
+        source: str,
+        conversation_session_id: str | None,
+        voice_turn_id: str | None,
+        turn_cancel_token: CancellationToken | None,
+        metadata: dict[str, Any] | None,
+        person_id: str | None = None,
+        operator_id: str | None = None,
+    ) -> InteractionTurnContext | None:
+        manager = self._interaction_turns
+        if manager is None:
+            return None
+        try:
+            return manager.open(
+                InteractionInput(
+                    user_text=user_text,
+                    source=source,
+                    thread_id=conversation_session_id,
+                    turn_id=voice_turn_id,
+                    channel=source,
+                    person_id=person_id,
+                    operator_id=operator_id,
+                    metadata=dict(metadata or {}),
+                    cancel_token=turn_cancel_token,
+                )
+            )
+        except ConversationLedgerError:
+            raise
+        except Exception as exc:
+            self._record_turn_ledger_failure("start a direct interaction", exc)
+            if self._conversation_core_legacy_fallback:
+                return None
+            raise ConversationLedgerError(
+                "Conversation Core could not start the direct interaction"
+            ) from exc
+
+    def _settle_direct_interaction(
+        self,
+        interaction: InteractionTurnContext,
+        outcome: TurnOutcome,
+    ) -> None:
+        manager = self._interaction_turns
+        if manager is None:
+            return
+        try:
+            manager.settle(interaction, outcome)
+        except ConversationLedgerError:
+            raise
+        except Exception as exc:
+            self._record_turn_ledger_failure("settle a direct interaction", exc)
+            if not self._conversation_core_legacy_fallback:
+                raise ConversationLedgerError(
+                    "Conversation Core could not settle the direct interaction"
+                ) from exc
+
+    def _is_cancelled(self, token: CancellationToken | None) -> bool:
+        return bool(self._cancel_token.is_set() or (token is not None and token.is_set()))
 
     def start_idle_reflection(self, idle_seconds: float = 300.0) -> asyncio.Task[None] | None:
         return self._turn_executor.start_idle_reflection(idle_seconds)
@@ -469,6 +1178,7 @@ class BrainPipeline:
         logger.warning("E-STOP triggered!")
         # Signal all sub-components to stop -each checks cancel_token independently.
         self._cancel_token.set()
+        self._turn_cancellations.cancel_active(reason="estop")
         if self._arm:
             self._arm.emergency_stop()
         if self._dog_safety and self._dog_safety.is_configured():
@@ -496,19 +1206,178 @@ class BrainPipeline:
         self._cancel_token.clear()
         logger.warning("E-STOP cleared -new turns will be accepted.")
 
-    def has_pending_tool_approval(self) -> bool:
-        return self._tools.has_pending_approval()
+    @staticmethod
+    def _accepts_interaction_context(callback: Any) -> bool:
+        try:
+            parameters = signature(callback).parameters
+        except (TypeError, ValueError):
+            return False
+        interaction_parameter = parameters.get("interaction_context")
+        return (
+            interaction_parameter is not None
+            and interaction_parameter.kind
+            in {Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY}
+        ) or any(parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values())
 
-    async def handle_pending_tool_response(self, user_text: str) -> str | None:
-        return await self._tool_executor.handle_pending_tool_response(
-            user_text, audio=self._audio_ref,
+    @staticmethod
+    def _approval_identity_is_partial(
+        *,
+        conversation_session_id: str | None,
+        voice_turn_id: str | None,
+    ) -> bool:
+        """Return whether a caller supplied only half of canonical Turn identity."""
+
+        has_thread = bool(str(conversation_session_id or "").strip())
+        has_turn = bool(str(voice_turn_id or "").strip())
+        return has_thread != has_turn
+
+    @staticmethod
+    def _approval_interaction_context(
+        user_text: str,
+        *,
+        source: str,
+        conversation_session_id: str | None,
+        voice_turn_id: str | None,
+        turn_cancel_token: CancellationToken | None,
+        operator_id: str | None,
+    ) -> InteractionTurnContext | None:
+        """Build a later-Turn policy context without manufacturing identity."""
+
+        thread_id = str(conversation_session_id or "").strip()
+        turn_id = str(voice_turn_id or "").strip()
+        if not thread_id or not turn_id:
+            return None
+        channel = str(source or "voice").strip() or "voice"
+        normalized_operator_id = str(operator_id or "").strip()
+        return InteractionTurnContext(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            channel=channel,
+            source=channel,
+            user_text=user_text,
+            operator_id=normalized_operator_id or None,
+            cancel_token=turn_cancel_token,
         )
+
+    def has_pending_tool_approval(
+        self,
+        *,
+        conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
+        source: str = "voice",
+        operator_id: str | None = None,
+    ) -> bool:
+        if self._approval_identity_is_partial(
+            conversation_session_id=conversation_session_id,
+            voice_turn_id=voice_turn_id,
+        ):
+            logger.warning(
+                "Scoped tool approval probe rejected: canonical Turn identity is incomplete"
+            )
+            return False
+        interaction_context = self._approval_interaction_context(
+            "",
+            source=source,
+            conversation_session_id=conversation_session_id,
+            voice_turn_id=voice_turn_id,
+            turn_cancel_token=turn_cancel_token,
+            operator_id=operator_id,
+        )
+        callback = self._tools.has_pending_approval
+        if interaction_context is None:
+            return bool(callback())
+        if not self._accepts_interaction_context(callback):
+            logger.warning(
+                "Scoped tool approval probe rejected: registry does not accept interaction_context"
+            )
+            return False
+        return bool(callback(interaction_context=interaction_context))
+
+    async def handle_pending_tool_response(
+        self,
+        user_text: str,
+        *,
+        conversation_session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
+        source: str = "voice",
+        operator_id: str | None = None,
+    ) -> str | None:
+        """Resolve a scoped approval and record only its delivered response."""
+
+        if self._approval_identity_is_partial(
+            conversation_session_id=conversation_session_id,
+            voice_turn_id=voice_turn_id,
+        ):
+            logger.warning(
+                "Scoped tool approval response rejected: canonical Turn identity is incomplete"
+            )
+            return None
+        tool_executor = self._tool_executor
+        if tool_executor is None:
+            raise RuntimeError("tool executor is not available")
+        interaction_context = self._approval_interaction_context(
+            user_text,
+            source=source,
+            conversation_session_id=conversation_session_id,
+            voice_turn_id=voice_turn_id,
+            turn_cancel_token=turn_cancel_token,
+            operator_id=operator_id,
+        )
+        callback = tool_executor.handle_pending_tool_response
+        kwargs: dict[str, Any] = {
+            "audio": self._audio_ref,
+            "source": source,
+        }
+        if interaction_context is not None:
+            if not self._accepts_interaction_context(callback):
+                logger.warning(
+                    "Scoped tool approval response rejected: executor does not accept "
+                    "interaction_context"
+                )
+                return None
+            kwargs["interaction_context"] = interaction_context
+        result = await callback(user_text, **kwargs)
+        if result is None:
+            return None
+        if self._is_cancelled(turn_cancel_token):
+            return ""
+        if interaction_context is None or not result:
+            return result
+
+        metadata = {"interaction": "tool_approval_response"}
+        canonical_interaction = self._open_direct_interaction(
+            user_text=user_text,
+            source=source,
+            conversation_session_id=conversation_session_id,
+            voice_turn_id=voice_turn_id,
+            turn_cancel_token=turn_cancel_token,
+            metadata=metadata,
+            operator_id=operator_id,
+        )
+        if canonical_interaction is not None:
+            self._settle_direct_interaction(
+                canonical_interaction,
+                TurnOutcome.commit(
+                    assistant_text=result,
+                    heard_text=result,
+                    metadata=metadata,
+                ),
+            )
+        return result
 
     async def _respond_without_llm(
         self, user_text: str, assistant_text: str, *, source: str = "voice"
     ) -> str:
-        return await self._tool_executor.respond_without_llm(
-            user_text, assistant_text, audio=self._audio_ref, source=source,
+        tool_executor = self._tool_executor
+        if tool_executor is None:
+            raise RuntimeError("tool executor is not available")
+        return await tool_executor.respond_without_llm(
+            user_text,
+            assistant_text,
+            audio=self._audio_ref,
+            source=source,
         )
 
     # Late-binding setters
@@ -637,11 +1506,23 @@ class BrainPipeline:
             self._turn_executor._llm_semaphore = value
 
     def _build_l0_runtime_block(self) -> str:
-        return self._prompt_builder.build_l0_runtime_block()
+        prompt_builder = self._prompt_builder
+        if prompt_builder is None:
+            raise RuntimeError("prompt builder is not available")
+        return prompt_builder.build_l0_runtime_block()
 
     def _build_system_prompt(
-        self, context_str: str | None, *, scene_desc: str = "", user_text: str = "",
+        self,
+        context_str: str | None,
+        *,
+        scene_desc: str = "",
+        user_text: str = "",
     ) -> str:
-        return self._prompt_builder.build_system_prompt(
-            context_str, scene_desc=scene_desc, user_text=user_text,
+        prompt_builder = self._prompt_builder
+        if prompt_builder is None:
+            raise RuntimeError("prompt builder is not available")
+        return prompt_builder.build_system_prompt(
+            context_str,
+            scene_desc=scene_desc,
+            user_text=user_text,
         )

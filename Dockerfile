@@ -18,9 +18,10 @@ RUN pip install --no-cache-dir .
 
 # Copy application code and default config
 COPY askme/ askme/
-COPY config.yaml .
+COPY config.yaml /app/config.yaml
 
 # Default: voice disabled in containers (no audio hardware)
+ENV ASKME_CONFIG_PATH=/app/config.yaml
 ENV ASKME_FEATURE_VOICE=0
 
 EXPOSE 8080

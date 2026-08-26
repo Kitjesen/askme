@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
@@ -9,6 +10,7 @@ from askme.voice.asr_manager import (
     _SINGLE_CHAR_COMMANDS,
     ASRManager,
     ASRPartial,
+    ASRResult,
 )
 
 # ---------------------------------------------------------------------------
@@ -161,6 +163,20 @@ class TestCloudLocalFallback:
         assert result.source == "cloud"
         assert "\u4e91\u7aef\u7ed3\u679c" in result.text
 
+    def test_cloud_confidence_is_preserved_in_result(self):
+        mgr = _make_manager(cloud_available=True)
+        mocks = mgr._test_mocks  # type: ignore[attr-defined]
+        mocks["cloud"].finish_session.return_value = "\u4e91\u7aef\u7ed3\u679c"
+        mocks["cloud"].status_snapshot.return_value = {
+            "confidence": 0.73,
+        }
+
+        mgr.start_session()
+        result = mgr.finish_and_get_result()
+
+        assert isinstance(result, ASRResult)
+        assert result.confidence == 0.73
+
     def test_local_fallback_when_cloud_empty(self):
         mgr = _make_manager(cloud_available=True)
         mocks = mgr._test_mocks  # type: ignore[attr-defined]
@@ -302,6 +318,117 @@ class TestForceEndpoint:
         result = mgr.force_endpoint()
 
         assert result is None
+
+
+def test_abort_session_cancels_provider_without_resetting_local_stream() -> None:
+    mgr = _make_manager(cloud_available=True)
+    mocks = mgr._test_mocks  # type: ignore[attr-defined]
+    mgr._recognition_active = True
+    # finish_and_get_result hands this flag off before it waits for cloud I/O.
+    mgr._cloud_active = False
+    mocks["asr"].reset.reset_mock()
+    mocks["asr"].create_stream.reset_mock()
+
+    mgr.abort_session()
+
+    assert mgr._recognition_active is False
+    assert mgr._cloud_active is False
+    mocks["cloud"].cancel_session.assert_called_once_with()
+    mocks["asr"].reset.assert_not_called()
+    mocks["asr"].create_stream.assert_not_called()
+
+
+def test_abort_during_cloud_finish_suppresses_local_fallback() -> None:
+    mgr = _make_manager(cloud_available=True)
+    mocks = mgr._test_mocks  # type: ignore[attr-defined]
+    finish_entered = threading.Event()
+    release_finish = threading.Event()
+    result: list[object] = []
+
+    def blocking_finish(*, timeout: float) -> str:
+        del timeout
+        finish_entered.set()
+        release_finish.wait(timeout=1.0)
+        return "stale cloud result"
+
+    mocks["cloud"].finish_session.side_effect = blocking_finish
+    mgr.start_session()
+    worker = threading.Thread(target=lambda: result.append(mgr.finish_and_get_result()))
+    worker.start()
+    assert finish_entered.wait(timeout=1.0)
+
+    mgr.abort_session()
+    release_finish.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert result == [None]
+    mocks["asr"].get_result.assert_not_called()
+
+
+def test_abort_linearizes_against_late_preconnect_success() -> None:
+    mgr = _make_manager(cloud_available=True)
+    mocks = mgr._test_mocks  # type: ignore[attr-defined]
+    start_entered = threading.Event()
+    release_start = threading.Event()
+
+    def blocked_start() -> bool:
+        start_entered.set()
+        release_start.wait(timeout=1.0)
+        return True
+
+    mocks["cloud"].start_session.side_effect = blocked_start
+    worker = threading.Thread(target=mgr.preconnect_cloud)
+    worker.start()
+    assert start_entered.wait(timeout=1.0)
+
+    mgr.abort_session()
+    release_start.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert mgr._recognition_active is False
+    assert mgr._cloud_active is False
+    assert mocks["cloud"].cancel_session.call_count == 2
+
+    mocks["cloud"].start_session.side_effect = None
+    mocks["cloud"].start_session.return_value = True
+    mgr.preconnect_cloud()
+    assert mgr._cloud_active is True
+    assert mocks["cloud"].start_session.call_count == 2
+
+
+def test_abort_linearizes_against_late_start_session_success() -> None:
+    mgr = _make_manager(cloud_available=True)
+    mocks = mgr._test_mocks  # type: ignore[attr-defined]
+    start_entered = threading.Event()
+    release_start = threading.Event()
+
+    def blocked_start() -> bool:
+        start_entered.set()
+        release_start.wait(timeout=1.0)
+        return True
+
+    mocks["cloud"].start_session.side_effect = blocked_start
+    worker = threading.Thread(target=mgr.start_session)
+    worker.start()
+    assert start_entered.wait(timeout=1.0)
+
+    mgr.abort_session()
+    release_start.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert mgr._recognition_active is False
+    assert mgr._cloud_active is False
+    assert mocks["cloud"].cancel_session.call_count == 2
+
+    mocks["cloud"].start_session.side_effect = None
+    mocks["cloud"].start_session.return_value = True
+    mgr.start_session()
+    assert mgr._recognition_active is True
+    assert mgr._cloud_active is True
+    assert mocks["cloud"].start_session.call_count == 2
 
 
 # ---------------------------------------------------------------------------

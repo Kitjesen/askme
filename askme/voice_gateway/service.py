@@ -5,15 +5,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import deepcopy
 from inspect import Parameter, signature
-from typing import Any
+from typing import Any, TypeAlias
 
+from askme.conversation import canonical_thread_id
 from askme.ports import VoiceTurnBridgePort
 from askme.voice_gateway.session import (
     ConversationSessionManager,
     SessionSnapshot,
 )
 
-VoiceTurnBridge = VoiceTurnBridgePort
+VoiceTurnBridge: TypeAlias = VoiceTurnBridgePort
 
 
 class VoiceGatewayService:
@@ -40,7 +41,7 @@ class VoiceGatewayService:
 
     @property
     def session_manager(self) -> ConversationSessionManager:
-        """Conversation session lifecycle owner for voice/text turns."""
+        """Process-local context projection/cache, not a turn lifecycle owner."""
         return self._session_manager
 
     def status_snapshot(self) -> dict[str, Any]:
@@ -57,48 +58,86 @@ class VoiceGatewayService:
         self,
         text: str,
         *,
+        thread_id: str | None = None,
+        conversation_thread_id: str | None = None,
         conversation_session_id: str | None = None,
+        conversation_id: str | None = None,
+        chat_session_id: str | None = None,
         session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: Any | None = None,
+        person_id: str | None = None,
         operator_id: str | None = None,
         robot_id: str | None = None,
         site_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         include_session: bool = False,
+        defer_recording: bool = False,
     ) -> dict[str, Any] | None:
         return self._handle_turn(
             "voice",
             "handle_voice_text",
             text,
-            conversation_session_id=conversation_session_id or session_id,
+            conversation_session_id=canonical_thread_id(
+                thread_id=thread_id,
+                conversation_thread_id=conversation_thread_id,
+                conversation_session_id=conversation_session_id,
+                conversation_id=conversation_id,
+                chat_session_id=chat_session_id,
+                session_id=session_id,
+            ),
+            voice_turn_id=voice_turn_id,
+            turn_cancel_token=turn_cancel_token,
+            person_id=person_id,
             operator_id=operator_id,
             robot_id=robot_id,
             site_id=site_id,
             metadata=metadata,
             include_session=include_session,
+            defer_recording=defer_recording,
         )
 
     def handle_text_input(
         self,
         text: str,
         *,
+        thread_id: str | None = None,
+        conversation_thread_id: str | None = None,
         conversation_session_id: str | None = None,
+        conversation_id: str | None = None,
+        chat_session_id: str | None = None,
         session_id: str | None = None,
+        voice_turn_id: str | None = None,
+        turn_cancel_token: Any | None = None,
+        person_id: str | None = None,
         operator_id: str | None = None,
         robot_id: str | None = None,
         site_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         include_session: bool = False,
+        defer_recording: bool = False,
     ) -> dict[str, Any] | None:
         return self._handle_turn(
             "text",
             "handle_text_input",
             text,
-            conversation_session_id=conversation_session_id or session_id,
+            conversation_session_id=canonical_thread_id(
+                thread_id=thread_id,
+                conversation_thread_id=conversation_thread_id,
+                conversation_session_id=conversation_session_id,
+                conversation_id=conversation_id,
+                chat_session_id=chat_session_id,
+                session_id=session_id,
+            ),
+            voice_turn_id=voice_turn_id,
+            turn_cancel_token=turn_cancel_token,
+            person_id=person_id,
             operator_id=operator_id,
             robot_id=robot_id,
             site_id=site_id,
             metadata=metadata,
             include_session=include_session,
+            defer_recording=defer_recording,
         )
 
     def conversation_snapshot(self, session_id: str) -> SessionSnapshot | None:
@@ -111,13 +150,17 @@ class VoiceGatewayService:
         recent_turn_limit: int = 6,
         max_chars: int | None = None,
     ) -> dict[str, Any]:
-        """Return a compact conversation context for prompt/runtime assembly."""
+        """Return compact projected context for prompt/runtime assembly."""
 
-        return self._session_manager.context_payload(
+        payload = self._session_manager.context_payload(
             session_id,
             recent_turn_limit=recent_turn_limit,
             max_chars=max_chars,
         )
+        if payload:
+            payload.setdefault("thread_id", session_id)
+            payload.setdefault("conversation_thread_id", session_id)
+        return payload
 
     def record_local_turn(
         self,
@@ -133,7 +176,7 @@ class VoiceGatewayService:
         tool_calls: list[dict[str, Any]] | None = None,
         handoff_id: str | None = None,
     ) -> bool:
-        """Record a local fallback turn into the gateway conversation session."""
+        """Project an explicitly settled local turn into the gateway context cache."""
 
         clean_session_id = _clean_optional(session_id)
         if clean_session_id is None:
@@ -156,11 +199,7 @@ class VoiceGatewayService:
                 intent=_clean_optional(intent),
                 gate_decision=_clean_optional(gate_decision),
                 skill_name=_clean_optional(skill_name),
-                tool_calls=[
-                    dict(item)
-                    for item in (tool_calls or [])
-                    if isinstance(item, dict)
-                ],
+                tool_calls=[dict(item) for item in (tool_calls or []) if isinstance(item, dict)],
                 handoff_id=_clean_optional(handoff_id),
                 metadata=turn_metadata,
             )
@@ -175,14 +214,22 @@ class VoiceGatewayService:
         text: str,
         *,
         conversation_session_id: str | None,
+        voice_turn_id: str | None,
+        turn_cancel_token: Any | None,
+        person_id: str | None,
         operator_id: str | None,
         robot_id: str | None,
         site_id: str | None,
         metadata: dict[str, Any] | None,
         include_session: bool,
+        defer_recording: bool,
     ) -> dict[str, Any] | None:
         if self._bridge is None:
-            return None
+            return {
+                "handled": False,
+                "disposition": "declined",
+                "reason": "runtime_bridge_unavailable",
+            }
 
         session = self._session_manager.get_or_create(
             channel=channel,
@@ -194,6 +241,7 @@ class VoiceGatewayService:
         )
         bridge_context = {
             "session_id": session.session_id,
+            "conversation_thread_id": session.session_id,
             "conversation_session_id": session.session_id,
             "conversation_context": self._session_manager.context_payload(
                 session.session_id,
@@ -201,6 +249,9 @@ class VoiceGatewayService:
                 max_chars=3000,
             ),
             "channel": channel,
+            "voice_turn_id": _clean_optional(voice_turn_id),
+            "turn_cancel_token": turn_cancel_token,
+            "person_id": _clean_optional(person_id),
             "operator_id": operator_id,
             "robot_id": robot_id,
             "site_id": site_id,
@@ -211,14 +262,25 @@ class VoiceGatewayService:
             text,
             bridge_context,
         )
+        recording_deferred = bool(defer_recording)
         if isinstance(result, dict) and result.get("handled"):
-            self._record_handled_turn(session.session_id, text, result, metadata=metadata)
-        if include_session and isinstance(result, dict):
+            if not recording_deferred:
+                self._record_handled_turn(
+                    session.session_id,
+                    text,
+                    result,
+                    metadata=metadata,
+                )
+        if (include_session or recording_deferred) and isinstance(result, dict):
             enriched = dict(result)
+            enriched["conversation_thread_id"] = session.session_id
             enriched["conversation_session_id"] = session.session_id
-            enriched["conversation_session"] = _snapshot_payload(
-                self._session_manager.snapshot(session.session_id)
-            )
+            if recording_deferred:
+                enriched["conversation_recording_deferred"] = True
+            if include_session:
+                enriched["conversation_session"] = _snapshot_payload(
+                    self._session_manager.snapshot(session.session_id)
+                )
             return enriched
         return result
 
@@ -233,12 +295,15 @@ class VoiceGatewayService:
         turn = result.get("turn")
         if not isinstance(turn, dict):
             turn = {}
-        assistant_text = _clean_optional(
-            turn.get("spoken_reply")
-            or turn.get("assistant_text")
-            or result.get("assistant_text")
-            or result.get("reply")
-        ) or ""
+        assistant_text = (
+            _clean_optional(
+                turn.get("spoken_reply")
+                or turn.get("assistant_text")
+                or result.get("assistant_text")
+                or result.get("reply")
+            )
+            or ""
+        )
         active_planning_session_id = _clean_optional(
             turn.get("planning_session_id") or result.get("planning_session_id")
         )
@@ -261,13 +326,9 @@ class VoiceGatewayService:
         intent = _clean_optional(
             turn.get("intent") or turn.get("action_type") or result.get("intent")
         )
-        gate_decision = _clean_optional(
-            turn.get("gate_decision") or result.get("gate_decision")
-        )
+        gate_decision = _clean_optional(turn.get("gate_decision") or result.get("gate_decision"))
         skill_name = _clean_optional(turn.get("skill_name") or result.get("skill_name"))
-        handoff_id = _clean_optional(
-            turn.get("handoff_id") or result.get("handoff_id")
-        )
+        handoff_id = _clean_optional(turn.get("handoff_id") or result.get("handoff_id"))
         self._session_manager.append_turn(
             session_id,
             user_text=user_text,
@@ -294,9 +355,7 @@ def _call_with_supported_kwargs(
             return method(text, **cleaned)
         except TypeError:
             return method(text)
-    accepts_kwargs = any(
-        param.kind == Parameter.VAR_KEYWORD for param in params.values()
-    )
+    accepts_kwargs = any(param.kind == Parameter.VAR_KEYWORD for param in params.values())
     accepted = (
         cleaned
         if accepts_kwargs
@@ -309,6 +368,8 @@ def _snapshot_payload(snapshot: SessionSnapshot | None) -> dict[str, Any]:
     if snapshot is None:
         return {}
     return {
+        "thread_id": snapshot.session_id,
+        "conversation_thread_id": snapshot.session_id,
         "session_id": snapshot.session_id,
         "channel": snapshot.channel,
         "operator_id": snapshot.operator_id,

@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>语音对话延迟：论文指标 × Askme 实测</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --color-primary: #4FC3F7;
+            --color-accent: #81C784;
+            --color-warn: #FFB74D;
+            --color-danger: #E57373;
+            --color-background: #0B1020;
+            --color-card: rgba(255,255,255,0.06);
+            --color-text-dim: #9AA3B8;
+            --primitive-gradient-primary: linear-gradient(135deg, #4FC3F7, #7C4DFF);
+            --typography-font-heading: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            --typography-font-body: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: var(--color-background);
+            color: #E8ECF4;
+            font-family: var(--typography-font-body);
+            overflow: hidden;
+        }
+        .slide-deck {
+            position: relative;
+            width: 100vw; height: 100vh; overflow: hidden;
+        }
+        @media (min-width: 769px) {
+            .slide-deck {
+                max-width: calc(100vh * 16 / 9);
+                max-height: calc(100vw * 9 / 16);
+                margin: auto; position: absolute; inset: 0;
+            }
+        }
+        .slide {
+            position: absolute; width: 100%; height: 100%;
+            display: flex; flex-direction: column;
+            justify-content: center; align-items: center;
+            text-align: center; padding: 48px 60px;
+            opacity: 0; visibility: hidden; transition: opacity 0.4s;
+            background: var(--color-background); overflow: hidden;
+        }
+        .slide.active { opacity: 1; visibility: visible; }
+        .slide-content {
+            width: 100%; max-width: 1180px; max-height: 100%;
+            display: flex; flex-direction: column;
+            justify-content: center; align-items: center; gap: 18px;
+        }
+        h1, h2 { font-family: var(--typography-font-heading); }
+        .slide-title {
+            font-size: clamp(30px, 4.6vw, 58px);
+            background: var(--primitive-gradient-primary);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            line-height: 1.15;
+        }
+        .slide-subtitle { font-size: clamp(15px, 1.8vw, 22px); color: var(--color-text-dim); max-width: 900px; }
+        .kicker { font-size: 13px; letter-spacing: 3px; color: var(--color-primary); text-transform: uppercase; }
+
+        .grid { display: grid; gap: 16px; width: 100%; }
+        .grid-2 { grid-template-columns: repeat(2, 1fr); }
+        .grid-3 { grid-template-columns: repeat(3, 1fr); }
+        .grid-4 { grid-template-columns: repeat(4, 1fr); }
+        @media (max-width: 900px) { .grid-3, .grid-4 { grid-template-columns: repeat(2, 1fr); } }
+
+        .card {
+            background: var(--color-card);
+            border: 1px solid rgba(255,255,255,0.09);
+            border-radius: 14px; padding: 18px 20px; text-align: left;
+        }
+        .card h3 { font-size: 16px; margin-bottom: 8px; color: #fff; }
+        .card p, .card li { font-size: 13.5px; color: var(--color-text-dim); line-height: 1.55; }
+        .card .num { font-size: clamp(24px, 3vw, 40px); font-weight: 700; color: var(--color-primary); }
+        .card .num.green { color: var(--color-accent); }
+        .card .num.amber { color: var(--color-warn); }
+        .card .num.red { color: var(--color-danger); }
+        .card-accent-bar { border-left: 4px solid var(--color-primary); }
+        .card-accent-green { border-left: 4px solid var(--color-accent); }
+        .card-accent-amber { border-left: 4px solid var(--color-warn); }
+
+        table.cmp { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+        table.cmp th, table.cmp td { padding: 9px 12px; border-bottom: 1px solid rgba(255,255,255,0.08); text-align: left; }
+        table.cmp th { color: var(--color-primary); font-weight: 600; }
+        table.cmp td { color: #C6CDDC; }
+        .good { color: var(--color-accent); font-weight: 600; }
+        .mid { color: var(--color-warn); font-weight: 600; }
+        .bad { color: var(--color-danger); font-weight: 600; }
+
+        .chart-container { width: min(88%, 760px); height: clamp(220px, 42vh, 360px); }
+
+        .timeline { display: flex; align-items: flex-end; gap: 0; width: 100%; max-width: 1050px; margin-top: 8px; }
+        .tl-seg { height: 54px; display: flex; align-items: center; justify-content: center; font-size: 12.5px; color: #0B1020; font-weight: 600; border-radius: 6px; margin-right: 4px; }
+        .tl-labels { display: flex; width: 100%; max-width: 1050px; font-size: 12px; color: var(--color-text-dim); margin-top: 6px; }
+
+        .quote { font-size: clamp(17px, 2.1vw, 24px); line-height: 1.7; max-width: 960px; color: #DDE4F0; }
+        .quote-src { font-size: 13px; color: var(--color-text-dim); margin-top: 10px; }
+
+        .progress-bar { position: fixed; top: 0; left: 0; height: 3px; background: var(--color-primary); transition: width 0.3s; z-index: 1000; }
+        .nav-controls { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 18px; z-index: 1000; }
+        .nav-btn { background: rgba(255,255,255,0.1); border: none; color: #fff; width: 38px; height: 38px; border-radius: 50%; cursor: pointer; font-size: 16px; }
+        .nav-btn:hover { background: rgba(255,255,255,0.2); }
+        .slide-counter { color: rgba(255,255,255,0.6); font-size: 13px; }
+
+        .animate-fade-up { animation: fadeUp 0.6s ease-out forwards; opacity: 0; }
+        @keyframes fadeUp { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-stagger > * { opacity: 0; animation: fadeUp 0.5s ease-out forwards; }
+        .animate-stagger > *:nth-child(1) { animation-delay: 0.08s; }
+        .animate-stagger > *:nth-child(2) { animation-delay: 0.18s; }
+        .animate-stagger > *:nth-child(3) { animation-delay: 0.28s; }
+        .animate-stagger > *:nth-child(4) { animation-delay: 0.38s; }
+        .animate-stagger > *:nth-child(5) { animation-delay: 0.48s; }
+        .animate-stagger > *:nth-child(6) { animation-delay: 0.58s; }
+    </style>
+</head>
+<body>
+<div class="progress-bar" id="progressBar"></div>
+<div class="slide-deck">
+
+<!-- 1. 封面 -->
+<div class="slide active">
+    <div class="slide-content">
+        <div class="kicker animate-fade-up">Askme 语音延迟专项 · 2026-07-19</div>
+        <h1 class="slide-title animate-fade-up">语音对话速度的论文指标<br>与 Askme 实测位置</h1>
+        <p class="slide-subtitle animate-fade-up">Sacks &amp; Levinson 轮次理论 · ITU-T G.114 · CHI 中间反馈研究 → 可验收的产品指标</p>
+    </div>
+</div>
+
+<!-- 2. 为什么延迟是第一指标 -->
+<div class="slide">
+    <div class="slide-content">
+        <div class="kicker">问题陈述</div>
+        <h2 class="slide-title" style="font-size:clamp(26px,3.4vw,44px)">对话是实时的：慢 500ms，就会被听见</h2>
+        <div class="grid grid-3 animate-stagger">
+            <div class="card card-accent-bar"><h3>人类基准极苛刻</h3><p>自然对话轮次间隔中位数仅 <b style="color:#fff">~200ms</b>；听者在 ~600ms 前就开始预判回复。超过 1 秒的沉默会被解读为"迟疑/不情愿"。</p></div>
+            <div class="card card-accent-amber"><h3>延迟不可被功能补偿</h3><p>再准确的回答，如果开口晚 2 秒，用户已经走神或重复提问。语音 UI 里延迟是<b style="color:#fff">体验的一阶变量</b>，不是工程细节。</p></div>
+            <div class="card card-accent-green"><h3>延迟可被设计掩盖</h3><p>中间反馈（确认音/填充词）不改变真实时长，却显著提升感知速度与信任——这是论文证实的<b style="color:#fff">零成本优化</b>。</p></div>
+        </div>
+    </div>
+</div>
+
+<!-- 3. 论文指标体系 -->
+<div class="slide">
+    <div class="slide-content">
+        <div class="kicker">指标体系</div>
+        <h2 class="slide-title" style="font-size:clamp(26px,3.4vw,44px)">六个论文级指标，按影响力排序</h2>
+        <table class="cmp animate-fade-up">
+            <tr><th>#</th><th>指标</th><th>依据</th><th>优秀</th><th>可接受</th><th>失败</th></tr>
+            <tr><td>1</td><td>轮次间隔（说完→响应开始）</td><td>Sacks 1974（被引 2.7万）；Levinson 2015（被引 912）</td><td class="good">&lt;800ms</td><td class="mid">800ms–1.2s</td><td class="bad">&gt;2s</td></tr>
+            <tr><td>2</td><td>首个语义内容时间</td><td>Levinson 2015：以"听懂第一句有用的话"为准</td><td class="good">&lt;1s</td><td class="mid">1–1.5s</td><td class="bad">&gt;2s</td></tr>
+            <tr><td>3</td><td>中间反馈时间</td><td>Kirmayr et al. 2026（ACM CHI 车载语音）</td><td class="good">&lt;300ms</td><td class="mid">300–500ms</td><td class="bad">无反馈</td></tr>
+            <tr><td>4</td><td>打断停播时间</td><td>ITU-T G.114（150ms 透明 / 400ms 崩坏）</td><td class="good">&le;250ms</td><td class="mid">250–400ms</td><td class="bad">&gt;500ms</td></tr>
+            <tr><td>5</td><td>首字完整性</td><td>Skantze 增量对话系统研究</td><td class="good">零截断</td><td>—</td><td class="bad">任何截断</td></tr>
+            <tr><td>6</td><td>误触发/自激率</td><td>语音 UI 实践共识</td><td class="good">0 次/小时</td><td class="mid">&lt;1 次/天</td><td class="bad">频繁</td></tr>
+        </table>
+    </div>
+</div>
+
+<!-- 4. 人类基准 200ms -->
+<div class="slide">
+    <div class="slide-content">
+        <div class="kicker">人类基准</div>
+        <p class="quote animate-fade-up">"自然对话中，轮次之间的间隔中位数约为 <b style="color:#4FC3F7">200 毫秒</b>——比说出'嗯'这个字所需的时间还短。这意味着听者在对方说完之前就已经在组织回复。"</p>
+        <p class="quote-src">Levinson, S.C. (2015). <i>Timing in turn-taking and its implications for processing models of language</i>. 被引 912 次</p>
+        <div class="grid grid-3 animate-stagger" style="margin-top:14px">
+            <div class="card"><div class="num green">~200ms</div><p>人类轮次间隔中位数<br>（对话的"自然节奏"）</p></div>
+            <div class="card"><div class="num amber">~600ms</div><p>语言产生所需的规划时间<br>（大脑并行预启动）</p></div>
+            <div class="card"><div class="num red">&gt;1s</div><p>无标记沉默的社交上限<br>（超时即被解读为迟疑）</p></div>
+        </div>
+    </div>
+</div>
+
+<!-- 5. 阈值图谱 -->
+<div class="slide">
+    <div class="slide-content">
+        <div class="kicker">阈值图谱</div>
+        <h2 class="slide-title" style="font-size:clamp(26px,3.4vw,44px)">说完 → 首音：每一档都有论文出处</h2>
+        <div class="chart-container">
+            <canvas id="thresholdChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- 6. Askme 当前位置 -->
+<div class="slide">
+    <div class="slide-content">
+        <div class="kicker">Askme 实测 · 2026-07-19（20 样本，热态）</div>
+        <h2 class="slide-title" style="font-size:clamp(26px,3.4vw,44px)">当前位置：企业级合格，距"像人"一倍</h2>
+        <div class="grid grid-4 animate-stagger">
+            <div class="card"><div class="num green">~300ms</div><p>说完 → 确认音<br>（中间反馈，达标）</p></div>
+            <div class="card"><div class="num">718ms</div><p>LLM 首个语义子句 P50<br>（P95 = 912ms）</p></div>
+            <div class="card"><div class="num">271ms</div><p>TTS 首 PCM P50<br>（MiniMax warm，P95 = 376ms）</p></div>
+            <div class="card"><div class="num amber">~1.3s</div><p>说完 → 语义首音 P50<br>（P95 ≈ 1.6s）</p></div>
+        </div>
+        <div class="grid grid-3 animate-stagger">
+            <div class="card card-accent-green"><h3>0%</h3><p>错误静默率（修复前 30%）</p></div>
+            <div class="card card-accent-green"><h3>0%</h3><p>寒暄开头率（首句全为有效语义）</p></div>
+            <div class="card card-accent-green"><h3>85%</h3><p>首句 ≤10 字合规率</p></div>
+        </div>
+    </div>
+</div>
+
+<!-- 7. 延迟构成 -->
+<div class="slide">
+    <div class="slide-content">
+        <div class="kicker">瓶颈分解</div>
+        <h2 class="slide-title" style="font-size:clamp(26px,3.4vw,44px)">1.3 秒花在哪里：级联三段构成</h2>
+        <div class="chart-container">
+            <canvas id="breakdownChart"></canvas>
+        </div>
+        <p class="slide-subtitle" style="font-size:13px">P50 热态实测：ASR 端点 300ms + LLM 语义子句 718ms + TTS 首 PCM 271ms ≈ 1.29s；LLM 出字速度占 56%，是最大单段</p>
+    </div>
+</div>
+
+<!-- 8. 用户感受画像 -->
+<div class="slide">
+    <div class="slide-content">
+        <div class="kicker">体验画像</div>
+        <h2 class="slide-title" style="font-size:clamp(26px,3.4vw,44px)">用户实际听到的时间线</h2>
+        <div class="timeline">
+            <div class="tl-seg" style="flex:0.9;background:#37474F;color:#fff">用户说话</div>
+            <div class="tl-seg" style="flex:0.3;background:#81C784">0.3s</div>
+            <div class="tl-seg" style="flex:0.25;background:#4FC3F7">叮</div>
+            <div class="tl-seg" style="flex:1.0;background:#FFB74D">静默 ~1.0s（LLM 生成中）</div>
+            <div class="tl-seg" style="flex:1.3;background:#7C4DFF;color:#fff">"请跟我走。最近的洗手间在…"</div>
+        </div>
+        <div class="tl-labels"><span style="flex:0.9">0s</span><span style="flex:0.3"></span><span style="flex:0.25">0.3s</span><span style="flex:1.0">0.55→1.3s</span><span style="flex:1.3">1.3s 起</span></div>
+        <div class="grid grid-2 animate-stagger" style="margin-top:16px">
+            <div class="card card-accent-green"><h3>感受：稳重的思考者</h3><p>先确认（叮）、再给一句干脆结论。Jefferson：被标记过的停顿是对话规则允许的——确认音恰好承担了这个"标记"角色。</p></div>
+            <div class="card card-accent-amber"><h3>短板：1 秒无声间隙</h3><p>Kirmayr 2026 证明：间隙中的声音反馈能显著提升感知速度。当前"叮"之后到开口之间仍是体验洼地。</p></div>
+        </div>
+    </div>
+</div>
+
+<!-- 9. 优化路线 -->
+<div class="slide">
+    <div class="slide-content">
+        <div class="kicker">收敛路线</div>
+        <h2 class="slide-title" style="font-size:clamp(26px,3.4vw,44px)">从 1.3s 到 800ms：三级闸门</h2>
+        <div class="grid grid-3 animate-stagger">
+            <div class="card card-accent-green"><h3>Gate A · 已完成</h3><p>语义短首句、LLM 预热、短语缓存、急停动态端点。<br><b style="color:#81C784">成果：静默率 30%→0%，首句 95% 合规</b></p></div>
+            <div class="card card-accent-bar"><h3>Gate B · 进行中</h3><p>火山 TTS vs MiniMax 同语料交替 A/B（20 句中文语料）；首续片阈值按播放域毫秒配置。<br><b style="color:#4FC3F7">预期：首 PCM 271→~150ms</b></p></div>
+            <div class="card card-accent-amber"><h3>Gate C · 待凭据</h3><p>火山 S2S：split → shadow → general_chat；自由对话端到端 &lt;800ms；急停/命令永远本地裁决。<br><b style="color:#FFB74D">跨越"像机器→像人"分界线</b></p></div>
+        </div>
+        <div class="chart-container" style="height:clamp(160px,26vh,240px)">
+            <canvas id="roadmapChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- 10. 结论 -->
+<div class="slide">
+    <div class="slide-content">
+        <div class="kicker">结论</div>
+        <h2 class="slide-title" style="font-size:clamp(26px,3.2vw,42px)">验收标准只认端到端实测</h2>
+        <div class="grid grid-2 animate-stagger">
+            <div class="card"><h3>论文告诉我们的</h3><p>① 轮次间隔对标 200ms 人类基准；② 中间反馈是零成本的感知优化；③ 打断停播 ≤250ms 才算"听话"；④ 首字截断比延迟更伤体验。</p></div>
+            <div class="card"><h3>Askme 执行的</h3><p>物理语义首音 <b style="color:#fff">P95 ≤ 1.2s / P99 ≤ 1.8s</b>；打断停播 P95 ≤ 250ms；误打断率 0；20+20+20 真机声学证据不全则结论永远是 <code style="color:#4FC3F7">insufficient</code>。</p></div>
+        </div>
+        <p class="slide-subtitle animate-fade-up" style="margin-top:10px">参考：Sacks et al. 1974 · Levinson 2015 · ITU-T G.114 (2003) · Kirmayr et al. CHI 2026 · Skantze 增量对话系统 · docs/VOICE_LATENCY_EXECUTION_PLAN_2026-07-19.md</p>
+    </div>
+</div>
+
+</div><!-- /.slide-deck -->
+
+<div class="nav-controls">
+    <button class="nav-btn" onclick="prevSlide()">←</button>
+    <span class="slide-counter"><span id="current">1</span> / <span id="total">10</span></span>
+    <button class="nav-btn" onclick="nextSlide()">→</button>
+</div>
+
+<script>
+    let current = 1;
+    const total = document.querySelectorAll('.slide').length;
+    document.getElementById('total').textContent = total;
+    function showSlide(n) {
+        if (n < 1) n = 1;
+        if (n > total) n = total;
+        current = n;
+        document.querySelectorAll('.slide').forEach((s, i) => s.classList.toggle('active', i === n - 1));
+        document.getElementById('current').textContent = n;
+        document.getElementById('progressBar').style.width = (n / total * 100) + '%';
+    }
+    function nextSlide() { showSlide(current + 1); }
+    function prevSlide() { showSlide(current - 1); }
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); nextSlide(); }
+        if (e.key === 'ArrowLeft') { e.preventDefault(); prevSlide(); }
+    });
+    document.addEventListener('click', (e) => { if (!e.target.closest('.nav-controls')) nextSlide(); });
+
+    // 阈值图谱（横条）
+    new Chart(document.getElementById('thresholdChart'), {
+        type: 'bar',
+        data: {
+            labels: ['ITU-T 透明通话', '打断停播目标', '优秀语音助手', 'Askme 验收目标 P95', '明显迟钝', 'Askme 当前 P50', 'Askme 当前 P95'],
+            datasets: [{
+                data: [150, 250, 800, 1200, 2000, 1290, 1590],
+                backgroundColor: ['#81C784', '#81C784', '#4FC3F7', '#FFB74D', '#E57373', '#7C4DFF', '#7C4DFF'],
+                borderRadius: 6
+            }]
+        },
+        options: {
+            indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: { callbacks: { label: (c) => c.parsed.x + ' ms' } }
+            },
+            scales: {
+                x: { grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#9AA3B8', callback: (v) => v + 'ms' } },
+                y: { grid: { display: false }, ticks: { color: '#E8ECF4', font: { size: 12 } } }
+            }
+        }
+    });
+
+    // 延迟构成（堆叠）
+    new Chart(document.getElementById('breakdownChart'), {
+        type: 'bar',
+        data: {
+            labels: ['P50 热态', 'P95 热态'],
+            datasets: [
+                { label: 'ASR 端点', data: [300, 300], backgroundColor: '#4FC3F7' },
+                { label: 'LLM 语义子句', data: [718, 912], backgroundColor: '#7C4DFF' },
+                { label: 'TTS 首 PCM', data: [271, 376], backgroundColor: '#FFB74D' }
+            ]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#E8ECF4' } }, tooltip: { callbacks: { label: (c) => c.dataset.label + ': ' + c.parsed.y + ' ms' } } },
+            scales: {
+                x: { stacked: true, grid: { display: false }, ticks: { color: '#E8ECF4' } },
+                y: { stacked: true, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#9AA3B8', callback: (v) => v + 'ms' } }
+            }
+        }
+    });
+
+    // 路线图
+    new Chart(document.getElementById('roadmapChart'), {
+        type: 'line',
+        data: {
+            labels: ['修复前基线', 'Gate A（今日）', 'Gate B（TTS A/B）', 'Gate C（S2S）', '人类基准'],
+            datasets: [{
+                label: '说完 → 语义首音 P50 (ms)',
+                data: [2100, 1290, 1150, 750, 200],
+                borderColor: '#4FC3F7', backgroundColor: 'rgba(79,195,247,0.12)',
+                borderWidth: 3, fill: true, tension: 0.35, pointRadius: 5, pointBackgroundColor: '#fff'
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#E8ECF4' } } },
+            scales: {
+                x: { grid: { display: false }, ticks: { color: '#9AA3B8', font: { size: 11 } } },
+                y: { grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#9AA3B8', callback: (v) => v + 'ms' } }
+            }
+        }
+    });
+
+    showSlide(1);
+</script>
+</body>
+</html>

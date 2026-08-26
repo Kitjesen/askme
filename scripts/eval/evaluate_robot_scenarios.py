@@ -146,9 +146,31 @@ def _scenario_voice_runtime_controls_share_state() -> dict[str, Any]:
     run_id = submitted["run"]["run_id"]
     runtime.advance_payload(run_id)
 
-    paused = runtime.voice_turn_payload("先停一下", transcript_id="scenario-voice-pause")
-    status = runtime.voice_turn_payload("现在执行到哪了", transcript_id="scenario-voice-status")
-    resumed = runtime.voice_turn_payload("继续", transcript_id="scenario-voice-resume")
+    trusted_voice_operator = {
+        "conversation_session_id": "scenario-voice-control",
+        "operator_id": "scenario-operator",
+        "operator_roles": ["operator"],
+        "operator_authenticated": True,
+        "operator_source": "scenario_fixture",
+    }
+    paused = runtime.voice_turn_payload(
+        "先停一下",
+        transcript_id="scenario-voice-pause",
+        runtime_permission="runtime:pause",
+        **trusted_voice_operator,
+    )
+    status = runtime.voice_turn_payload(
+        "现在执行到哪了",
+        transcript_id="scenario-voice-status",
+        runtime_permission="runtime:read",
+        **trusted_voice_operator,
+    )
+    resumed = runtime.voice_turn_payload(
+        "继续",
+        transcript_id="scenario-voice-resume",
+        runtime_permission="runtime:resume",
+        **trusted_voice_operator,
+    )
 
     return _verdict(
         "voice_runtime_controls_share_state",

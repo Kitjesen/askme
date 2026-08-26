@@ -10,6 +10,7 @@ from askme.providers import build_scene_intelligence
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def _make_episodic(
     world_knowledge: dict | None = None,
     buffer: list | None = None,
@@ -64,6 +65,7 @@ def test_provider_builds_scene_intelligence_port() -> None:
 
 # ── TestWhoIsAround ───────────────────────────────────────────────────────────
 
+
 class TestWhoIsAround:
     def test_empty_world_knowledge_returns_empty(self):
         scene = _make_scene(world_knowledge={})
@@ -90,6 +92,7 @@ class TestWhoIsAround:
 
 
 # ── TestAnomalies ─────────────────────────────────────────────────────────────
+
 
 class TestAnomalies:
     def test_empty_buffer_returns_empty(self):
@@ -151,6 +154,7 @@ class TestAnomalies:
 
 # ── TestBriefing ──────────────────────────────────────────────────────────────
 
+
 class TestBriefing:
     async def test_empty_everything_returns_no_records(self):
         scene = _make_scene()
@@ -208,6 +212,7 @@ class TestBriefing:
 
 # ── TestTodaySummary ──────────────────────────────────────────────────────────
 
+
 class TestTodaySummary:
     async def test_no_records_returns_no_records_string(self):
         scene = _make_scene()
@@ -223,6 +228,13 @@ class TestTodaySummary:
         result = await scene.today_summary(llm)
         assert result == "LLM summary"
         llm.chat.assert_called_once()
+        call_context = llm.chat.call_args.kwargs["context"]
+        assert len(call_context.call_id) == 32
+        assert call_context.purpose == "memory_compact"
+        assert call_context.channel == "background"
+        assert call_context.request_class == "memory"
+        assert call_context.privacy_class == "sensitive"
+        assert call_context.allow_cache is False
 
     async def test_llm_failure_returns_raw_briefing(self):
         scene = _make_scene(knowledge_context="有内容")
@@ -241,12 +253,17 @@ class TestTodaySummary:
 
 # ── TestStatus ────────────────────────────────────────────────────────────────
 
+
 class TestStatus:
     def test_has_required_keys(self):
         scene = _make_scene()
         status = scene.status()
-        for key in ("known_entities", "anomaly_count", "episode_buffer_size",
-                    "has_world_knowledge"):
+        for key in (
+            "known_entities",
+            "anomaly_count",
+            "episode_buffer_size",
+            "has_world_knowledge",
+        ):
             assert key in status
 
     def test_empty_everything(self):

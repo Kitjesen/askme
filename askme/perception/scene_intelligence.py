@@ -20,7 +20,10 @@ Usage::
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import TYPE_CHECKING, Any
+
+from askme.llm.core.contracts import LLMCallContext
 
 if TYPE_CHECKING:
     from askme.llm.core.client import LLMClient
@@ -67,12 +70,14 @@ class SceneIntelligence:
                 ep.get("event_type") in _ANOMALY_TYPES
                 and ep.get("importance", 0.0) >= _ANOMALY_IMPORTANCE
             ):
-                results.append({
-                    "time": ep.get("timestamp", ""),
-                    "type": ep.get("event_type", ""),
-                    "description": ep.get("content", ""),
-                    "importance": round(ep.get("importance", 0.0), 2),
-                })
+                results.append(
+                    {
+                        "time": ep.get("timestamp", ""),
+                        "type": ep.get("event_type", ""),
+                        "description": ep.get("content", ""),
+                        "importance": round(ep.get("importance", 0.0), 2),
+                    }
+                )
         # Most important first
         results.sort(key=lambda x: x["importance"], reverse=True)
         return results
@@ -133,6 +138,14 @@ class SceneIntelligence:
                     },
                 ],
                 temperature=0.3,
+                context=LLMCallContext(
+                    call_id=uuid.uuid4().hex,
+                    purpose="memory_compact",
+                    channel="background",
+                    request_class="memory",
+                    privacy_class="sensitive",
+                    allow_cache=False,
+                ),
             )
             return result.strip() if result else raw
         except Exception as exc:

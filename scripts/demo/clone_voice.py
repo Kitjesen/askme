@@ -128,7 +128,7 @@ def main() -> None:
     parser.add_argument("--model", default="speech-2.8-turbo", help="TTS model (default: speech-2.8-turbo)")
     parser.add_argument("--noise-reduction", action="store_true", help="Enable noise reduction on source audio")
     parser.add_argument("--volume-norm", action="store_true", help="Enable volume normalization on source audio")
-    parser.add_argument("--base-url", default="https://api.minimax.chat/v1", help="MiniMax API base URL")
+    parser.add_argument("--base-url", default="https://api.minimaxi.com/v1", help="MiniMax API base URL")
     args = parser.parse_args()
 
     # Validate

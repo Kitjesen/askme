@@ -12,15 +12,19 @@ must stay outside this package.
 
 ## Session Management
 
-`voice_gateway` owns conversation/session routing. Use
-`ConversationSessionManager` here when adding or changing session ownership:
+`voice_gateway` owns transport-facing conversation routing. Conversation Core
+owns the durable Thread/Turn/Generation truth; use `ConversationSessionManager`
+as the active gateway projection while that compatibility path is migrated:
 
 - resolve the active conversation session for a voice/text turn;
 - assemble turn-local conversation context before calling the runtime bridge;
 - pass only explicit session/context values across ports.
 
-Use `conversation_session_id` for the outer voice/text dialog session. Use
-`planning_session_id` only for the inner cognition planning loop.
+Use `conversation_thread_id` for new outer voice/text APIs. During migration,
+`conversation_session_id`, `conversation_id`, `chat_session_id`, and
+`session_id` are aliases of that same canonical thread ID. Use
+`planning_session_id` only for the inner cognition planning loop, and never use
+a provider socket/session ID as the conversation thread.
 
 `askme.cognition.memory.WorkingMemory` is not a conversation store. Treat it as
 a per-conversation planning scratchpad that expires with the session or task.
@@ -53,7 +57,7 @@ gateway = VoiceGatewayService(
 )
 result = gateway.handle_text_input(
     "inspect area A",
-    conversation_session_id="conv-1",
+    conversation_thread_id="conv-1",
     include_session=True,
 )
 ```
@@ -85,8 +89,8 @@ from askme.voice_gateway import VoiceGatewayService
 `VoiceGatewayService` owns the stable call shape for:
 
 - `status_snapshot()`;
-- `handle_voice_text(text, conversation_session_id=...)`;
-- `handle_text_input(text, conversation_session_id=...)`;
+- `handle_voice_text(text, conversation_thread_id=...)`;
+- `handle_text_input(text, conversation_thread_id=...)`;
 - `conversation_snapshot(conversation_session_id)`.
 - `conversation_context(conversation_session_id, recent_turn_limit=..., max_chars=...)`.
 

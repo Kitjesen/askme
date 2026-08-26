@@ -12,6 +12,18 @@ from typing import Any
 
 _LAZY_EXPORTS = {
     "AdmissionScore": ("askme.memory.core.admission", "AdmissionScore"),
+    "ConversationMemoryConsumer": (
+        "askme.memory.core.conversation_consumer",
+        "ConversationMemoryConsumer",
+    ),
+    "ConversationMemoryConsumerStatus": (
+        "askme.memory.core.conversation_consumer",
+        "ConversationMemoryConsumerStatus",
+    ),
+    "ConversationMemoryRunResult": (
+        "askme.memory.core.conversation_consumer",
+        "ConversationMemoryRunResult",
+    ),
     "ConversationManager": ("askme.memory.core.conversation", "ConversationManager"),
     "Episode": ("askme.memory.core.episode", "Episode"),
     "EpisodicMemory": ("askme.memory.core.episodic_memory", "EpisodicMemory"),

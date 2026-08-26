@@ -27,6 +27,18 @@ _LAZY_EXPORTS = {
     "RuntimeAuditConfig": ("askme.runtime.task.audit", "RuntimeAuditConfig"),
     "RuntimeAuditLog": ("askme.runtime.task.audit", "RuntimeAuditLog"),
     "RuntimeEvent": ("askme.runtime.task.handoff", "RuntimeEvent"),
+    "ExternalCancelOutcome": (
+        "askme.runtime.task.executor_supervisor",
+        "ExternalCancelOutcome",
+    ),
+    "ExternalTaskSupervisor": (
+        "askme.runtime.task.executor_supervisor",
+        "ExternalTaskSupervisor",
+    ),
+    "RuntimeExecutorTransport": (
+        "askme.ports.runtime_executor",
+        "RuntimeExecutorTransport",
+    ),
     "RuntimeHandoffService": ("askme.runtime.task.handoff", "RuntimeHandoffService"),
     "SafetyAssessment": ("askme.runtime.task.handoff", "SafetyAssessment"),
     "SafetyPreflightService": ("askme.runtime.task.handoff", "SafetyPreflightService"),
@@ -43,6 +55,14 @@ _LAZY_EXPORTS = {
     "TaskRunStore": ("askme.runtime.task.handoff", "TaskRunStore"),
     "TaskRunStoreConfig": ("askme.runtime.task.handoff", "TaskRunStoreConfig"),
     "TaskStep": ("askme.runtime.task.handoff", "TaskStep"),
+    "VoiceTaskLifecycleService": (
+        "askme.runtime.task.voice_lifecycle",
+        "VoiceTaskLifecycleService",
+    ),
+    "VoiceTaskOperatorContext": (
+        "askme.runtime.task.voice_lifecycle",
+        "VoiceTaskOperatorContext",
+    ),
     "build_field_runtime_callback_payload": (
         "askme.runtime.task.field_callbacks",
         "build_field_runtime_callback_payload",

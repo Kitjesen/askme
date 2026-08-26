@@ -11,6 +11,24 @@ from askme.memory.robotmem_backend import RobotMemBackend
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+class _PromptEligibleRobotMemBackend:
+    available = True
+
+    async def retrieve_items(self, text):
+        return [
+            {
+                "text": "test memory",
+                "score": 0.9,
+                "metadata": {
+                    "type": "knowledge",
+                    "approval_status": "published",
+                    "source": "robotmem",
+                },
+            }
+        ]
+
+
 def _make_backend(mem_cfg=None, brain_cfg=None):
     """Create a RobotMemBackend with test config."""
     if mem_cfg is None:
@@ -351,20 +369,13 @@ class TestBridgeRobotmemBackend:
 
     @pytest.mark.asyncio
     async def test_bridge_retrieve_routes_to_robotmem(self):
-        from unittest.mock import AsyncMock
-
         from askme.memory.bridge import MemoryBridge
 
         vs_patch, vs_mock = self._patch_vector_store()
         with self._patch_config(backend="robotmem"), vs_patch:
             bridge = MemoryBridge()
 
-        # Inject a mock robotmem backend
-        mock_rm_backend = MagicMock()
-        mock_rm_backend.available = True
-        mock_rm_backend.retrieve = AsyncMock(return_value="- test memory")
-
-        bridge._robotmem = mock_rm_backend
+        bridge._robotmem = _PromptEligibleRobotMemBackend()
 
         with patch.object(bridge, "_ensure_robotmem", return_value=True):
             result = await bridge.retrieve("test")
@@ -499,7 +510,15 @@ class TestBridgeRobotmemBackend:
         bridge._store = vs_mock
         vs_mock.available = True
         vs_mock.search = MagicMock(return_value=[
-            {"text": "vectorstore fallback", "score": 0.9, "metadata": {}},
+            {
+                "text": "vectorstore fallback",
+                "score": 0.9,
+                "metadata": {
+                    "type": "knowledge",
+                    "approval_status": "published",
+                    "source": "vector",
+                },
+            },
         ])
 
         result = await bridge.retrieve("test")

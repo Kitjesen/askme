@@ -16,7 +16,6 @@ def test_repository_layout_doc_tracks_confusing_roots() -> None:
         "deploy/",
         "docker/",
         "config/",
-        "requirements/",
         "prompts/",
         "data/",
         "models/",

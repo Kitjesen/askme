@@ -146,6 +146,10 @@ class TestHealthServer:
             ("GET", "/dashboard"): "html_dashboard_shell",
             ("GET", "/dashboard/{asset_path}"): "html_or_static_asset",
             ("GET", "/api/runtime/events"): "server_sent_events",
+            (
+                "GET",
+                "/api/voice/playbacks/{playback_id}/audio",
+            ): "audio_artifact_download",
         }
 
         seen_allowed = set()
@@ -157,6 +161,7 @@ class TestHealthServer:
                 ok_response = (
                     operation.get("responses", {}).get("200")
                     or operation.get("responses", {}).get("201")
+                    or operation.get("responses", {}).get("202")
                     or operation.get("responses", {}).get("204")
                     or {}
                 )

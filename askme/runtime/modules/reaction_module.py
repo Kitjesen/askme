@@ -43,7 +43,7 @@ class ReactionModule(Module):
         )
 
         llm_mod = self.llm_in
-        llm = getattr(llm_mod, "client", None) if llm_mod else None
+        llm = getattr(llm_mod, "llm_client", None) if llm_mod else None
 
         mem_mod = self.memory_in
         episodic = getattr(mem_mod, "episodic", None) if mem_mod else None

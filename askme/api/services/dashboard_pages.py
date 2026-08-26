@@ -53,16 +53,16 @@ class DashboardPageSpec:
 
 DASHBOARD_SECTIONS: dict[str, dict[str, str]] = {
     "customer": {
-        "label": "客户可见",
-        "description": "客户、销售和交付能直接解释的业务能力页面。",
+        "label": "业务工作区",
+        "description": "现场业务、场景、空间与知识入口。",
     },
     "operations": {
-        "label": "运行操作",
-        "description": "现场操作员使用的任务、配置和交互页面。",
+        "label": "运行控制",
+        "description": "对话、语音和现场处置入口。",
     },
     "governance": {
-        "label": "治理交付",
-        "description": "审批、验收、证据和上线边界页面。",
+        "label": "交付治理",
+        "description": "验收、证据、权限和审计入口。",
     },
 }
 
@@ -74,11 +74,11 @@ DASHBOARD_PAGE_SPECS: tuple[DashboardPageSpec, ...] = (
         label="总览",
         title="现场运行总览",
         kicker="运行总览",
-        description="集中查看对话链路、现场事件、园区场景和交付门禁。",
+        description="查看当前状态、待办事件和交付阻塞。",
         audience="customer",
         section="customer",
         order=10,
-        hint="功能地图",
+        hint="运行状态",
         primary_endpoint="/api/surfaces",
         evidence_promises=("页面分层", "接口边界", "能力地图"),
     ),

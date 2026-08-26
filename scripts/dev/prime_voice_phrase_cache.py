@@ -14,8 +14,9 @@ import os
 from pathlib import Path
 
 from askme.config import get_config
+from askme.robot_interaction.routing.fast_voice_intents import default_cached_phrases
 from askme.robot_interaction.routing_policy import DEFAULT_QUICK_REPLIES
-from askme.voice.interaction import default_cached_phrases
+from askme.voice.output.phrase_prime import configured_feedback_phrases
 from askme.voice.output.tts import TTSEngine
 
 
@@ -35,10 +36,13 @@ def main() -> int:
     config_path = Path(args.config).resolve()
     os.environ["ASKME_CONFIG_PATH"] = str(config_path)
     config = get_config(reload=True)
-    tts = TTSEngine(config.get("voice", {}).get("tts", {}))
+    voice_config = config.get("voice", {})
+    tts = TTSEngine(voice_config.get("tts", {}))
+    phrases = default_cached_phrases(DEFAULT_QUICK_REPLIES)
+    phrases.update(configured_feedback_phrases(voice_config))
     results: list[dict[str, object]] = []
     try:
-        for cache_key, text in default_cached_phrases(DEFAULT_QUICK_REPLIES).items():
+        for cache_key, text in phrases.items():
             storage_key = tts._phrase_cache_storage_key(text, cache_key)
             if args.force:
                 tts._phrase_cache._memory.pop(storage_key, None)

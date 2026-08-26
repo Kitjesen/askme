@@ -86,7 +86,7 @@ askme 使用 declarative runtime module 组合。主要模块：
 | `PipelineModule` | 文本/语音 turn 执行链路 |
 | `VoiceModule` | ASR、VAD、TTS、VoiceLoop、InteractionGate |
 | `CognitionModule` | WorldState、WorkingMemory、CognitivePlanner、ActivePerceptionResolver |
-| `RuntimeHandoffModule` | TaskHandoff、TaskRun、runtime profile、pause/resume/cancel/advance |
+| `RuntimeHandoffModule` | TaskHandoff、TaskRun、runtime profile、pause/resume/cancel/advance；通过注入的 runtime executor port 对接外部执行器 |
 | `HealthModule` | Dashboard、HTTP API、health snapshot、readiness evidence |
 | `SkillModule` | 工具/技能注册、SkillGate、安全边界 |
 
@@ -283,6 +283,10 @@ WorldState 是 planner 和 safety 的事实来源。感知快照要带 `observed
 | `askme/runtime/modules/memory_module.py` | 知识导入、检索、重建、批量更新 |
 | `askme/cognition/active_perception.py` | 缺事实时主动刷新感知 |
 | `askme/runtime/task/handoff.py` | TaskHandoff、TaskRun、runtime state machine |
+| `askme/runtime/task/executor_supervisor.py` | 外部任务提交、状态同步、取消与重启恢复 |
+| `askme/ports/runtime_executor/` | runtime executor 的 provider-neutral DTO、错误与协议 |
+| `askme/providers/runtime_executor/` | 外部 runtime HTTP provider 与 endpoint 校验 |
+| `askme/blueprints/runtime_composition.py` | 在组合根把 runtime executor provider 注入 RuntimeHandoffModule |
 | `askme/runtime/task/arbiter_client.py` | external/lab contract-only client |
 | `askme/runtime/modules/health_module.py` | HTTP/Dashboard wiring 与 evidence report |
 | `askme/static/dashboard.html` | Voice Mission Center |

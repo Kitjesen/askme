@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
@@ -99,9 +99,16 @@ def create_voice_router(
         "/api/voice/system",
         response_model=VoiceSystemControlResponse,
     )
-    async def voice_system_control() -> JSONResponse:
+    async def voice_system_control(request: Request) -> JSONResponse:
         try:
+            full_access = authorize(request, {}, "voice:system:update") is None
+            if not full_access:
+                failure = authorize(request, {}, "voice:profile:read")
+                if failure is not None:
+                    return failure
             result = await dispatch_voice("system_control_payload")
+            if not full_access:
+                result = _customer_voice_system_payload(result)
             VoiceSystemControlResponse.model_validate(result)
             return mission_json(result)
         except RuntimeError as exc:
@@ -361,3 +368,49 @@ def _required_idempotency_key(request: Request) -> str:
             status_code=422,
         )
     return key
+
+
+def _customer_voice_system_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the customer-safe status view without prompt or memory internals."""
+
+    result = _strip_customer_voice_internals(payload)
+    prompt = payload.get("prompt")
+    memory = payload.get("memory")
+    memory_status = memory.get("status") if isinstance(memory, dict) else None
+    result["prompt"] = {
+        "redacted": True,
+        "configured": bool(prompt),
+    }
+    result["memory"] = {
+        "redacted": True,
+        "available": bool(memory),
+        "status": str(memory_status or "unknown"),
+    }
+    result.pop("persistence", None)
+    return result
+
+
+def _strip_customer_voice_internals(value: Any) -> Any:
+    """Remove sensitive voice-console fields even if a provider nests them."""
+
+    sensitive_keys = {
+        "conversation_history",
+        "digests",
+        "episodes",
+        "memory",
+        "persistence",
+        "persona",
+        "prompt",
+        "records",
+        "system_prompt",
+        "user_prefix",
+    }
+    if isinstance(value, Mapping):
+        return {
+            str(key): _strip_customer_voice_internals(item)
+            for key, item in value.items()
+            if str(key).lower() not in sensitive_keys
+        }
+    if isinstance(value, list):
+        return [_strip_customer_voice_internals(item) for item in value]
+    return value

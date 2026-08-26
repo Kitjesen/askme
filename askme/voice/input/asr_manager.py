@@ -8,6 +8,8 @@ Extracted from audio_agent.py for independent testing.
 from __future__ import annotations
 
 import logging
+import math
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -30,32 +32,98 @@ logger = logging.getLogger(__name__)
 
 # ASR results that are clearly noise or feedback sounds, not commands.
 # When matched, silently discard and re-listen (no TTS response).
-_NOISE_UTTERANCES: frozenset[str] = frozenset([
-    "\u55ef", "\u54e6", "\u554a", "\u5462", "\u54c8", "\u5662", "\u54c7", "\u5440", "\u55e8",
-    "\u55ef\u55ef", "\u54e6\u54e6", "\u554a\u554a", "\u55ef\uff1f", "\u54e6\uff1f", "\u554a\uff1f",
-    "\u7684", "\u4e86", "\u5427", "\u561b", "\u90a3", "\u8fd9", "\u5c31",
-    "\u90a3\u4e2a", "\u8fd9\u4e2a", "\u5c31\u662f", "\u7136\u540e", "\u6240\u4ee5", "\u4f46\u662f",
-])
+_NOISE_UTTERANCES: frozenset[str] = frozenset(
+    [
+        "\u55ef",
+        "\u54e6",
+        "\u554a",
+        "\u5462",
+        "\u54c8",
+        "\u5662",
+        "\u54c7",
+        "\u5440",
+        "\u55e8",
+        "\u55ef\u55ef",
+        "\u54e6\u54e6",
+        "\u554a\u554a",
+        "\u55ef\uff1f",
+        "\u54e6\uff1f",
+        "\u554a\uff1f",
+        "\u7684",
+        "\u4e86",
+        "\u5427",
+        "\u561b",
+        "\u90a3",
+        "\u8fd9",
+        "\u5c31",
+        "\u90a3\u4e2a",
+        "\u8fd9\u4e2a",
+        "\u5c31\u662f",
+        "\u7136\u540e",
+        "\u6240\u4ee5",
+        "\u4f46\u662f",
+    ]
+)
 
 # Words that are normally noise BUT become valid when the system is
 # awaiting user confirmation (e.g. "要执行巡检吗？" -> "好的").
 # These are only passed through when awaiting_confirmation is True.
-_CONFIRMATION_WORDS: frozenset[str] = frozenset([
-    "\u5bf9", "\u597d", "\u884c", "\u662f", "\u4e0d", "\u6ca1", "\u6709",
-    "\u5bf9\u5bf9", "\u597d\u597d", "\u662f\u7684", "\u597d\u7684", "\u6ca1\u6709", "\u4e0d\u662f",
-    "\u786e\u8ba4", "\u53d6\u6d88", "\u53ef\u4ee5", "\u4e0d\u884c", "\u7b97\u4e86", "\u6267\u884c",
-    "\u5bf9\u7684", "\u6ca1\u9519", "\u597d\u5427", "\u4e0d\u8981", "\u522b", "\u62d2\u7edd",
-    "\u540c\u610f", "\u6279\u51c6", "\u7ee7\u7eed", "\u653e\u5f03", "ok", "yes", "no",
-])
+_CONFIRMATION_WORDS: frozenset[str] = frozenset(
+    [
+        "\u5bf9",
+        "\u597d",
+        "\u884c",
+        "\u662f",
+        "\u4e0d",
+        "\u6ca1",
+        "\u6709",
+        "\u5bf9\u5bf9",
+        "\u597d\u597d",
+        "\u662f\u7684",
+        "\u597d\u7684",
+        "\u6ca1\u6709",
+        "\u4e0d\u662f",
+        "\u786e\u8ba4",
+        "\u53d6\u6d88",
+        "\u53ef\u4ee5",
+        "\u4e0d\u884c",
+        "\u7b97\u4e86",
+        "\u6267\u884c",
+        "\u5bf9\u7684",
+        "\u6ca1\u9519",
+        "\u597d\u5427",
+        "\u4e0d\u8981",
+        "\u522b",
+        "\u62d2\u7edd",
+        "\u540c\u610f",
+        "\u6279\u51c6",
+        "\u7ee7\u7eed",
+        "\u653e\u5f03",
+        "ok",
+        "yes",
+        "no",
+    ]
+)
 
 # Minimum text length (in characters) to consider as valid speech.
 # Shorter results are silently discarded unless they match known commands.
 _MIN_VALID_TEXT_LEN = 2
 
 # Single-char words that ARE valid commands (bypass length filter).
-_SINGLE_CHAR_COMMANDS: frozenset[str] = frozenset([
-    "\u505c", "\u8d70", "\u7ad9", "\u6765", "\u53bb", "\u5f00", "\u5173", "\u8d77", "\u5750", "\u9000",
-])
+_SINGLE_CHAR_COMMANDS: frozenset[str] = frozenset(
+    [
+        "\u505c",
+        "\u8d70",
+        "\u7ad9",
+        "\u6765",
+        "\u53bb",
+        "\u5f00",
+        "\u5173",
+        "\u8d77",
+        "\u5750",
+        "\u9000",
+    ]
+)
 
 
 @dataclass
@@ -66,6 +134,19 @@ class ASRResult:
     source: str  # "local" | "cloud"
     is_noise: bool = False
     latency_ms: float = 0.0
+    confidence: float | None = None
+
+
+def _coerce_confidence(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        return None
+    return confidence
 
 
 @dataclass(frozen=True)
@@ -104,7 +185,8 @@ class ASRManager:
         self._cloud_preconnect: bool = bool(
             cloud_config.get(
                 "preconnect",
-                cloud_provider not in {
+                cloud_provider
+                not in {
                     "volcengine",
                     "doubao",
                     "seed_asr",
@@ -113,9 +195,7 @@ class ASRManager:
             )
         )
         self._cloud_active: bool = False
-        self._cloud_finish_timeout: float = float(
-            cloud_config.get("finish_timeout", 8.0)
-        )
+        self._cloud_finish_timeout: float = float(cloud_config.get("finish_timeout", 8.0))
         self._feed_cloud_silence: bool = bool(cloud_config.get("feed_silence", False))
 
         # State
@@ -123,6 +203,11 @@ class ASRManager:
         self._start_time: float = 0.0
         self._last_local_partial: str = ""
         self._last_local_partial_at: float = 0.0
+        # Cloud connection setup is blocking.  An abort advances this epoch so
+        # a late successful start cannot resurrect ownership after the capture
+        # cycle that requested it has already been cancelled.
+        self._session_lock = threading.RLock()
+        self._session_epoch = 0
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -134,23 +219,45 @@ class ASRManager:
         Called at listen-start so the connection is warm when speech arrives.
         Audio fed before start_session() is silently accepted by the cloud.
         """
-        if self._cloud_preconnect and self._cloud.available and not self._cloud_active:
-            self._cloud_active = self._cloud.start_session()
+        with self._session_lock:
+            if not self._cloud_preconnect or not self._cloud.available or self._cloud_active:
+                return
+            session_epoch = self._session_epoch
+
+        started = self._cloud.start_session()
+        with self._session_lock:
+            stale_start = session_epoch != self._session_epoch
+            self._cloud_active = bool(started and not stale_start)
+        if stale_start and started:
+            # The provider socket was created after abort_session() had already
+            # cancelled the old handle.  Close this late handle as well.
+            self._cloud.cancel_session()
 
     def start_session(self) -> None:
         """Start a new recognition session (both local + cloud if available)."""
-        self._recognition_active = True
-        self._start_time = time.monotonic()
-        self._last_local_partial = ""
-        self._last_local_partial_at = 0.0
+        with self._session_lock:
+            self._recognition_active = True
+            self._start_time = time.monotonic()
+            self._last_local_partial = ""
+            self._last_local_partial_at = 0.0
+            session_epoch = self._session_epoch
 
         # Always reset local stream for a clean slate
         self._asr.reset(self._stream)
         self._stream = self._asr.create_stream()
 
         # Start cloud session if not already pre-connected
-        if self._cloud.available and not self._cloud_active:
-            self._cloud_active = self._cloud.start_session()
+        with self._session_lock:
+            if session_epoch != self._session_epoch or not self._recognition_active:
+                return
+            should_start_cloud = self._cloud.available and not self._cloud_active
+        if should_start_cloud:
+            started = self._cloud.start_session()
+            with self._session_lock:
+                stale_start = session_epoch != self._session_epoch or not self._recognition_active
+                self._cloud_active = bool(started and not stale_start)
+            if stale_start and started:
+                self._cloud.cancel_session()
         # If preconnect already opened, just keep it
 
     def feed_cloud_only(self, samples_int16: np.ndarray) -> None:
@@ -212,7 +319,12 @@ class ASRManager:
             return None
 
         latency = (time.monotonic() - self._start_time) * 1000
-        return ASRResult(text=text, source="local", latency_ms=latency)
+        return ASRResult(
+            text=text,
+            source="local",
+            latency_ms=latency,
+            confidence=self._backend_confidence("local"),
+        )
 
     def partial_result(self) -> ASRPartial | None:
         """Return the latest cloud or local partial without ending the session."""
@@ -228,9 +340,7 @@ class ASRManager:
                 cloud_status = {}
             if isinstance(cloud_status, dict):
                 cloud_text = str(
-                    cloud_status.get("partial_text")
-                    or cloud_status.get("final_text")
-                    or ""
+                    cloud_status.get("partial_text") or cloud_status.get("final_text") or ""
                 ).strip()
                 if cloud_text:
                     age = cloud_status.get("partial_age_ms")
@@ -254,9 +364,7 @@ class ASRManager:
             self._last_local_partial = local_text
             self._last_local_partial_at = now
         age_ms = (
-            (now - self._last_local_partial_at) * 1000.0
-            if self._last_local_partial_at > 0
-            else 0.0
+            (now - self._last_local_partial_at) * 1000.0 if self._last_local_partial_at > 0 else 0.0
         )
         return ASRPartial(text=local_text, source="local_partial", age_ms=age_ms)
 
@@ -284,16 +392,16 @@ class ASRManager:
                 source=partial.source,
                 is_noise=True,
                 latency_ms=latency,
+                confidence=self._backend_confidence(partial.source),
             )
         return ASRResult(
             text=self._restore_punctuation(text),
             source=partial.source,
             latency_ms=latency,
+            confidence=self._backend_confidence(partial.source),
         )
 
-    def finish_and_get_result(
-        self, awaiting_confirmation: bool = False
-    ) -> ASRResult | None:
+    def finish_and_get_result(self, awaiting_confirmation: bool = False) -> ASRResult | None:
         """Finish cloud session and return best result (cloud preferred, local fallback).
 
         Called when VAD detects speech end. Cloud ASR is preferred when it
@@ -316,12 +424,16 @@ class ASRManager:
         if self._cloud_active:
             self._cloud_active = False
             try:
-                cloud_text = self._cloud.finish_session(
-                    timeout=self._cloud_finish_timeout
-                ).strip()
+                cloud_text = self._cloud.finish_session(timeout=self._cloud_finish_timeout).strip()
             except Exception as exc:
                 logger.warning("Cloud ASR finish failed, using local: %s", exc)
                 cloud_text = ""
+
+        # A stop request may close the cloud session from another thread to
+        # release the bounded provider wait above.  Do not decode or publish a
+        # local fallback after ownership of this recognition turn was revoked.
+        if not self._recognition_active:
+            return None
 
         # Get local ASR result (fallback)
         while self._asr.is_ready(self._stream):
@@ -346,13 +458,22 @@ class ASRManager:
         if is_noise:
             logger.info("ASR noise filtered: '%s'", text)
             return ASRResult(
-                text=text, source=source, is_noise=True, latency_ms=latency,
+                text=text,
+                source=source,
+                is_noise=True,
+                latency_ms=latency,
+                confidence=self._backend_confidence(source),
             )
 
         # Punctuation restoration
         text = self._restore_punctuation(text)
 
-        return ASRResult(text=text, source=source, latency_ms=latency)
+        return ASRResult(
+            text=text,
+            source=source,
+            latency_ms=latency,
+            confidence=self._backend_confidence(source),
+        )
 
     def force_endpoint(self) -> ASRResult | None:
         """Force an ASR endpoint (for max speech duration guard).
@@ -381,7 +502,12 @@ class ASRManager:
             return None
 
         text = self._restore_punctuation(text)
-        return ASRResult(text=text, source="local", latency_ms=latency)
+        return ASRResult(
+            text=text,
+            source="local",
+            latency_ms=latency,
+            confidence=self._backend_confidence("local"),
+        )
 
     def reset(self) -> None:
         """Reset ASR streams for next utterance."""
@@ -397,6 +523,24 @@ class ASRManager:
         self._last_local_partial_at = 0.0
         self._asr.reset(self._stream)
         self._stream = self._asr.create_stream()
+
+    def abort_session(self) -> None:
+        """Abort provider I/O without mutating a local stream in another thread.
+
+        ``AudioAgent.stop_listening`` may call this while the capture worker is
+        blocked in cloud connection setup or final-result collection.  Closing
+        the provider socket releases that wait; the next listen cycle performs
+        the normal local-stream reset from its owning capture thread.
+        """
+
+        with self._session_lock:
+            self._session_epoch += 1
+            self._recognition_active = False
+            self._cloud_active = False
+            try:
+                self._cloud.cancel_session()
+            except Exception as exc:
+                logger.debug("Cloud ASR cancel during listener abort failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Public API
@@ -446,6 +590,28 @@ class ASRManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _backend_confidence(self, source: str) -> float | None:
+        backend = self._cloud if source.startswith("cloud") else self._asr
+        candidates = [
+            getattr(backend, "last_confidence", None),
+            getattr(backend, "confidence", None),
+        ]
+        snapshot = getattr(backend, "status_snapshot", None)
+        if callable(snapshot):
+            try:
+                payload = snapshot()
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                candidates.extend(
+                    payload.get(key) for key in ("confidence", "asr_confidence", "score")
+                )
+        for candidate in candidates:
+            confidence = _coerce_confidence(candidate)
+            if confidence is not None:
+                return confidence
+        return None
 
     def _filter_noise(self, text: str, awaiting_confirmation: bool) -> bool:
         """Check if text is noise/feedback. Returns True if noise (should discard).

@@ -199,18 +199,21 @@ class WorkingMemory:
         char_limit = None if max_chars is None else max(0, int(max_chars))
         now = time.time()
 
-        ranked = sorted(
-            (
-                item
-                for item in self._items
-                if (not allowed_kinds or item.kind in allowed_kinds)
-                and (not required_tags or required_tags.issubset(set(item.tags)))
-                and (task_filter is None or item.task_id == task_filter)
-                and (session_filter is None or item.session_id == session_filter)
-            ),
-            key=lambda item: (item.salience, item.created_at),
-            reverse=True,
-        )
+        ranked = [
+            item
+            for _, item in sorted(
+                (
+                    (index, item)
+                    for index, item in enumerate(self._items)
+                    if (not allowed_kinds or item.kind in allowed_kinds)
+                    and (not required_tags or required_tags.issubset(set(item.tags)))
+                    and (task_filter is None or item.task_id == task_filter)
+                    and (session_filter is None or item.session_id == session_filter)
+                ),
+                key=lambda entry: (entry[1].salience, entry[1].created_at, entry[0]),
+                reverse=True,
+            )
+        ]
         if item_limit is not None:
             ranked = ranked[:item_limit]
 
@@ -264,16 +267,19 @@ class WorkingMemory:
         session_value = conversation_session_id if conversation_session_id is not None else session_id
         session_filter = None if session_value is None else str(session_value or "")
         threshold = min(max(float(min_salience), 0.0), 1.0)
-        ranked = sorted(
-            (
-                item
-                for item in self._items
-                if item.salience >= threshold
-                and (session_filter is None or item.session_id == session_filter)
-            ),
-            key=lambda item: (item.salience, item.created_at),
-            reverse=True,
-        )
+        ranked = [
+            item
+            for _, item in sorted(
+                (
+                    (index, item)
+                    for index, item in enumerate(self._items)
+                    if item.salience >= threshold
+                    and (session_filter is None or item.session_id == session_filter)
+                ),
+                key=lambda entry: (entry[1].salience, entry[1].created_at, entry[0]),
+                reverse=True,
+            )
+        ]
         now = time.time()
         return [item.to_dict(now=now) for item in ranked[: max(0, int(limit))]]
 

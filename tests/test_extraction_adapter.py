@@ -9,11 +9,13 @@ from askme.memory.extraction_adapter import ExtractionAdapter
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _make_adapter() -> ExtractionAdapter:
     return ExtractionAdapter(llm_client=MagicMock(), model="test-model")
 
 
 # ── Disabled ──────────────────────────────────────────────────────────────────
+
 
 class TestDisabled:
     def test_disabled_returns_empty(self):
@@ -24,6 +26,7 @@ class TestDisabled:
 
 
 # ── Short text filtering ──────────────────────────────────────────────────────
+
 
 class TestShortTextFiltering:
     def test_short_user_text_skipped(self):
@@ -38,6 +41,7 @@ class TestShortTextFiltering:
 
 
 # ── Skip words ────────────────────────────────────────────────────────────────
+
 
 class TestSkipWords:
     def test_greeting_skipped(self):
@@ -63,6 +67,7 @@ class TestSkipWords:
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 
+
 class TestRateLimiting:
     def test_second_call_within_cooldown_returns_empty(self):
         adapter = _make_adapter()
@@ -78,106 +83,139 @@ class TestRateLimiting:
         assert isinstance(result, list)
 
 
-# ── API key check ─────────────────────────────────────────────────────────────
+# ── Central gateway boundary ──────────────────────────────────────────────────
 
-class TestApiKeyCheck:
-    def test_no_api_key_returns_empty(self, monkeypatch):
-        monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
-        adapter = _make_adapter()
-        adapter._last_extract = 0.0  # ensure not rate-limited
-        result = adapter.extract("motor overcurrent error in sector B", "I detected the problem")
+
+class TestCentralGatewayBoundary:
+    def test_missing_injected_llm_returns_empty(self):
+        adapter = ExtractionAdapter(llm_client=None, model="memory-compact")
+        adapter._last_extract = 0.0
+
+        result = adapter.extract(
+            "motor overcurrent error in sector B",
+            "I detected the problem",
+        )
+
         assert result == []
+
+    def test_uses_injected_gateway_alias_and_never_posts_dashscope_directly(self):
+        facts_json = '[{"type": "anomaly", "location": "zone A", "text": "sensor error"}]'
+        llm = MagicMock()
+        llm.chat.return_value = facts_json
+        adapter = ExtractionAdapter(llm_client=llm, model="memory-compact")
+        adapter._last_extract = 0.0
+
+        with patch("httpx.post") as direct_post:
+            result = adapter.extract(
+                "sensor error in zone A",
+                "investigating the anomaly now",
+            )
+
+        assert len(result) == 1
+        direct_post.assert_not_called()
+        call = llm.chat.call_args
+        assert call.kwargs["model"] == "memory-compact"
+        assert call.kwargs["context"].purpose == "memory_compact"
+        assert call.kwargs["context"].call_id
 
 
 # ── JSON response parsing ─────────────────────────────────────────────────────
 
+
 class TestJsonParsing:
     def _mock_http_response(self, content: str):
         resp = MagicMock()
-        resp.json.return_value = {
-            "choices": [{"message": {"content": content}}]
-        }
+        resp.json.return_value = {"choices": [{"message": {"content": content}}]}
         return resp
 
     def test_valid_json_parsed(self, monkeypatch):
-        monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
         adapter = _make_adapter()
         adapter._last_extract = 0.0
 
         facts_json = '[{"type": "anomaly", "location": "zone A", "text": "sensor error"}]'
-        with patch("httpx.post", return_value=self._mock_http_response(facts_json)):
+        with patch.object(adapter, "_complete", return_value=facts_json):
             result = adapter.extract("sensor error in zone A", "investigating the anomaly now")
         assert len(result) == 1
         assert result[0]["type"] == "anomaly"
 
     def test_markdown_fence_stripped(self, monkeypatch):
-        monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
         adapter = _make_adapter()
         adapter._last_extract = 0.0
 
         content = '```json\n[{"type": "observation", "location": "hall", "text": "all clear"}]\n```'
-        with patch("httpx.post", return_value=self._mock_http_response(content)):
-            result = adapter.extract("inspection complete in hallway", "everything looks normal now")
+        with patch.object(adapter, "_complete", return_value=content):
+            result = adapter.extract(
+                "inspection complete in hallway", "everything looks normal now"
+            )
         assert len(result) == 1
 
     def test_empty_array_returns_empty(self, monkeypatch):
-        monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
         adapter = _make_adapter()
         adapter._last_extract = 0.0
 
-        with patch("httpx.post", return_value=self._mock_http_response("[]")):
+        with patch.object(adapter, "_complete", return_value="[]"):
             result = adapter.extract("hello world test response ignored", "nothing to report today")
         assert result == []
 
     def test_caps_at_3_facts(self, monkeypatch):
-        monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
         adapter = _make_adapter()
         adapter._last_extract = 0.0
 
-        facts = [{"type": "anomaly", "location": f"zone{i}", "text": f"error {i}"} for i in range(10)]
+        facts = [
+            {"type": "anomaly", "location": f"zone{i}", "text": f"error {i}"} for i in range(10)
+        ]
         import json
-        with patch("httpx.post", return_value=self._mock_http_response(json.dumps(facts))):
-            result = adapter.extract("multiple errors detected across zones", "I will address them all")
+
+        with patch.object(adapter, "_complete", return_value=json.dumps(facts)):
+            result = adapter.extract(
+                "multiple errors detected across zones", "I will address them all"
+            )
         assert len(result) <= 3
 
     def test_invalid_json_returns_empty(self, monkeypatch):
-        monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
         adapter = _make_adapter()
         adapter._last_extract = 0.0
 
-        with patch("httpx.post", return_value=self._mock_http_response("not valid json")):
-            result = adapter.extract("anomaly detected in sector delta now", "I found a critical issue")
+        with patch.object(adapter, "_complete", return_value="not valid json"):
+            result = adapter.extract(
+                "anomaly detected in sector delta now", "I found a critical issue"
+            )
         assert result == []
 
     def test_non_list_response_returns_empty(self, monkeypatch):
-        monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
         adapter = _make_adapter()
         adapter._last_extract = 0.0
 
-        with patch("httpx.post", return_value=self._mock_http_response('{"fact": "not a list"}')):
-            result = adapter.extract("anomaly occurred in factory sector", "I see the factory issue")
+        with patch.object(adapter, "_complete", return_value='{"fact": "not a list"}'):
+            result = adapter.extract(
+                "anomaly occurred in factory sector", "I see the factory issue"
+            )
         assert result == []
 
     def test_missing_required_fields_filtered(self, monkeypatch):
-        monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
         adapter = _make_adapter()
         adapter._last_extract = 0.0
 
         # Missing "text" field
         import json
+
         facts = [{"type": "anomaly"}]  # no "text" field
-        with patch("httpx.post", return_value=self._mock_http_response(json.dumps(facts))):
-            result = adapter.extract("critical error detected in warehouse now", "I found the warehouse error")
+        with patch.object(adapter, "_complete", return_value=json.dumps(facts)):
+            result = adapter.extract(
+                "critical error detected in warehouse now", "I found the warehouse error"
+            )
         assert result == []
 
     def test_text_truncated_at_100_chars(self, monkeypatch):
-        monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
         adapter = _make_adapter()
         adapter._last_extract = 0.0
 
         import json
+
         facts = [{"type": "anomaly", "location": "zone", "text": "x" * 200}]
-        with patch("httpx.post", return_value=self._mock_http_response(json.dumps(facts))):
-            result = adapter.extract("long text anomaly detected in factory area", "I see the long anomaly text")
+        with patch.object(adapter, "_complete", return_value=json.dumps(facts)):
+            result = adapter.extract(
+                "long text anomaly detected in factory area", "I see the long anomaly text"
+            )
         if result:
             assert len(result[0]["text"]) <= 100

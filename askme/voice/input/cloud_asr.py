@@ -261,6 +261,9 @@ class CloudASR(ASRBackend):
 
     def cancel_session(self) -> None:
         """Cancel the current session without waiting for results."""
+        # Release a concurrent finish_session() immediately even when no
+        # receiver thread was created or the WebSocket close is slow.
+        self._result_ready.set()
         self._cleanup()
 
     def _receive_loop(self) -> None:

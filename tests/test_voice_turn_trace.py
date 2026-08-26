@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from askme.voice.turn_trace import VoiceTurnTraceRecorder, evaluate_voice_turn_slo
+import pytest
+from askme.voice.turn_trace import (
+    VoiceTurnTraceRecorder,
+    evaluate_voice_turn_slo,
+)
 
 from askme.voice import turn_trace
 
@@ -83,13 +87,19 @@ def test_voice_turn_trace_exposes_canonical_latency_bucket_names() -> None:
         "tts_first_audio_ms",
         "playback_start_ms",
         "playback_done_ms",
+        "speech_end_to_endpoint_commit_ms",
+        "speech_end_to_asr_final_ms",
+        "speech_end_to_ack_render_ms",
+        "speech_end_to_ack_physical_ms",
+        "speech_end_to_feedback_render_ms",
+        "speech_end_to_feedback_physical_ms",
+        "speech_end_to_first_llm_payload_ms",
+        "speech_end_to_tts_first_pcm_ms",
+        "speech_end_to_render_first_semantic_ms",
+        "speech_end_to_physical_first_semantic_audio_ms",
+        "barge_in_to_render_stop_ms",
+        "barge_in_to_physical_speaker_stop_ms",
         "barge_in_stop_ms",
-        "llm_first_payload_ms",
-        "llm_first_semantic_text_ms",
-        "tts_first_request_ms",
-        "tts_first_pcm_ms",
-        "render_first_semantic_nonzero_ms",
-        "physical_first_audio_ms",
     }
 
 
@@ -145,11 +155,11 @@ def test_voice_turn_trace_maps_existing_stages_to_latency_buckets(monkeypatch) -
     assert buckets["playback_start_ms"] == 890.0
     assert buckets["playback_done_ms"] == 1000.0
     assert summary["buckets"]["llm_ttft_ms"]["p50_ms"] == 210.0
-    assert summary["buckets"]["playback_done_ms"]["p95_ms"] == 1000.0
+    assert summary["buckets"]["playback_done_ms"]["p95_ms"] is None
+    assert summary["buckets"]["playback_done_ms"]["p95_min_samples"] == 100
     assert summary["slowest_bucket"] == "playback_done_ms"
     assert snapshot["slo"]["status"] == "insufficient_evidence"
     assert snapshot["slo"]["ready_to_converse"] is False
-    assert "physical_first_audio_ms" in snapshot["slo"]["missing_buckets"]
 
 
 def test_voice_turn_trace_reports_missing_latency_buckets(monkeypatch) -> None:
@@ -172,7 +182,7 @@ def test_voice_turn_trace_reports_missing_latency_buckets(monkeypatch) -> None:
     assert summary["buckets"]["asr_final_ms"]["missing_count"] == 1
     assert snapshot["slo"]["status"] == "insufficient_evidence"
     assert snapshot["slo"]["ready_to_converse"] is False
-    assert "asr_final_ms" in snapshot["slo"]["missing_buckets"]
+    assert "speech_end_to_asr_final_ms" in snapshot["slo"]["missing_buckets"]
 
 
 def test_voice_turn_trace_keeps_summary_for_tts_playback_failure(monkeypatch) -> None:
@@ -197,7 +207,7 @@ def test_voice_turn_trace_keeps_summary_for_tts_playback_failure(monkeypatch) ->
     assert summary["playback_done_ms"]["missing_count"] == 1
 
 
-def test_voice_turn_trace_maps_barge_in_to_stop_bucket(monkeypatch) -> None:
+def test_voice_turn_trace_barge_in_confirmed_is_not_a_stop(monkeypatch) -> None:
     clock = iter([0.00, 0.00, 0.12, 0.18])
     monkeypatch.setattr(turn_trace.time, "monotonic", lambda: next(clock))
     recorder = VoiceTurnTraceRecorder()
@@ -208,28 +218,210 @@ def test_voice_turn_trace_maps_barge_in_to_stop_bucket(monkeypatch) -> None:
 
     snapshot = recorder.snapshot()
 
-    assert snapshot["latest"]["latency_buckets"]["barge_in_stop_ms"] == 120.0
-    assert snapshot["latency_summary"]["buckets"]["barge_in_stop_ms"]["p95_ms"] == 120.0
+    assert snapshot["latest"]["latency_buckets"]["barge_in_stop_ms"] is None
+    assert snapshot["latest"]["latency_buckets"]["barge_in_to_render_stop_ms"] is None
+
+
+def test_voice_turn_trace_derives_barge_in_stop_from_render_stop(monkeypatch) -> None:
+    clock = iter([0.00, 0.00, 0.12, 0.18, 0.20])
+    monkeypatch.setattr(turn_trace.time, "monotonic", lambda: next(clock))
+    recorder = VoiceTurnTraceRecorder()
+
+    recorder.start(source="microphone", media_transport="local_sounddevice")
+    recorder.mark_barge_in(peak=2048)
+    recorder.mark("render_speaker_stopped")
+    recorder.finish("interrupted")
+
+    buckets = recorder.snapshot()["latest"]["latency_buckets"]
+
+    assert buckets["barge_in_stop_ms"] == 60.0
+    assert buckets["barge_in_to_render_stop_ms"] == 60.0
+    assert buckets["barge_in_to_physical_speaker_stop_ms"] is None
+
+
+def test_voice_turn_trace_derives_customer_latency_from_speech_end(monkeypatch) -> None:
+    clock = iter(
+        [
+            0.00,
+            0.00,
+            0.50,
+            0.70,
+            0.80,
+            0.85,
+            0.90,
+            0.95,
+            1.10,
+            1.20,
+            1.30,
+            1.40,
+            1.50,
+            1.60,
+            1.70,
+            1.80,
+        ]
+    )
+    monkeypatch.setattr(turn_trace.time, "monotonic", lambda: next(clock))
+    recorder = VoiceTurnTraceRecorder()
+
+    recorder.start(source="microphone", media_transport="local_sounddevice")
+    recorder.mark("speech_last_active_sample")
+    recorder.mark("endpoint_committed")
+    recorder.mark("asr_final")
+    recorder.mark("interaction_admitted")
+    recorder.mark_audio("ack_render_started", audio_class="ack", audio_segment_id="ack-1")
+    recorder.mark_audio(
+        "ack_physical_started",
+        audio_class="ack",
+        audio_segment_id="ack-1",
+        evidence_kind="physical_acoustic",
+        instrumented=True,
+        clock_id="capture-1",
+        provenance_verified=True,
+    )
+    recorder.mark_audio(
+        "feedback_render_started",
+        audio_class="feedback",
+        audio_segment_id="wait-1",
+    )
+    recorder.mark_audio(
+        "feedback_physical_started",
+        audio_class="feedback",
+        audio_segment_id="wait-1",
+        evidence_kind="physical_acoustic",
+        instrumented=True,
+        clock_id="capture-1",
+        provenance_verified=True,
+    )
+    recorder.mark("llm_first_payload")
+    recorder.mark("llm_first_semantic_text")
+    recorder.mark_audio(
+        "tts_first_pcm",
+        audio_class="semantic",
+        audio_segment_id="answer-1",
+    )
+    recorder.mark_audio(
+        "render_first_semantic_nonzero",
+        audio_class="semantic",
+        audio_segment_id="answer-1",
+    )
+    recorder.mark_audio(
+        "physical_first_semantic_audio",
+        audio_class="semantic",
+        audio_segment_id="answer-1",
+        evidence_kind="physical_acoustic",
+        instrumented=True,
+        clock_id="capture-1",
+        provenance_verified=True,
+    )
+    recorder.finish("completed")
+
+    snapshot = recorder.snapshot()
+    buckets = snapshot["latest"]["derived_latency_buckets"]
+
+    assert buckets["speech_end_to_endpoint_commit_ms"] == 200.0
+    assert buckets["speech_end_to_asr_final_ms"] == 300.0
+    assert buckets["speech_end_to_turn_admitted_ms"] == 350.0
+    assert buckets["speech_end_to_ack_render_ms"] == 400.0
+    assert buckets["speech_end_to_ack_physical_ms"] == 450.0
+    assert buckets["speech_end_to_feedback_render_ms"] == 600.0
+    assert buckets["speech_end_to_feedback_physical_ms"] == 700.0
+    assert buckets["speech_end_to_first_llm_payload_ms"] == 800.0
+    assert buckets["speech_end_to_first_llm_semantic_text_ms"] == 900.0
+    assert buckets["speech_end_to_tts_first_pcm_ms"] == 1000.0
+    assert buckets["speech_end_to_render_first_semantic_ms"] == 1100.0
+    assert buckets["speech_end_to_physical_first_semantic_audio_ms"] == 1200.0
+    assert snapshot["slo"]["status"] == "passed"
+    assert snapshot["slo"]["missing_provenance_buckets"] == []
+
+
+def test_ack_cannot_satisfy_physical_semantic_audio(monkeypatch) -> None:
+    clock = iter([0.00, 0.00, 0.50, 0.70, 0.80])
+    monkeypatch.setattr(turn_trace.time, "monotonic", lambda: next(clock))
+    recorder = VoiceTurnTraceRecorder()
+
+    recorder.start(source="microphone", media_transport="local_sounddevice")
+    recorder.mark("speech_end")
+    recorder.mark_audio(
+        "ack_physical_started",
+        audio_class="ack",
+        audio_segment_id="ack-1",
+    )
+    recorder.mark_audio(
+        "physical_first_semantic_audio",
+        audio_class="ack",
+        audio_segment_id="ack-1",
+    )
+
+    snapshot = recorder.snapshot()["current"]
+
+    assert snapshot["derived_latency_buckets"]["speech_end_to_ack_physical_ms"] == 200.0
+    assert (
+        snapshot["derived_latency_buckets"][
+            "speech_end_to_physical_first_semantic_audio_ms"
+        ]
+        is None
+    )
+
+
+def test_physical_semantic_latency_without_provenance_is_insufficient(monkeypatch) -> None:
+    clock = iter([0.00, 0.00, 0.50, 0.70])
+    monkeypatch.setattr(turn_trace.time, "monotonic", lambda: next(clock))
+    recorder = VoiceTurnTraceRecorder()
+
+    recorder.start(source="microphone", media_transport="local_sounddevice")
+    recorder.mark("speech_end")
+    recorder.mark_audio(
+        "physical_first_semantic_audio",
+        audio_class="semantic",
+        audio_segment_id="answer-1",
+    )
+    turn = recorder.snapshot()["current"]
+    result = evaluate_voice_turn_slo(
+        turn,
+        required_buckets=("speech_end_to_physical_first_semantic_audio_ms",),
+    )
+
+    assert result["status"] == "insufficient_evidence"
+    assert result["missing_buckets"] == []
+    assert result["missing_provenance_buckets"] == [
+        "speech_end_to_physical_first_semantic_audio_ms"
+    ]
+
+
+def test_audio_class_is_validated() -> None:
+    recorder = VoiceTurnTraceRecorder()
+    recorder.start(source="microphone", media_transport="local_sounddevice")
+
+    with pytest.raises(ValueError, match="audio_class"):
+        recorder.mark_audio("ack_render_started", audio_class="music")
 
 
 def test_voice_turn_trace_default_slo_thresholds_are_exposed() -> None:
     thresholds = VoiceTurnTraceRecorder.default_slo_ms()
 
-    assert thresholds["asr_final_ms"] == 1200.0
-    assert thresholds["llm_ttft_ms"] == 900.0
-    assert thresholds["tts_first_audio_ms"] == 900.0
-    assert thresholds["playback_start_ms"] == 1200.0
+    assert thresholds["speech_end_to_asr_final_ms"] == 1200.0
+    assert thresholds["speech_end_to_first_llm_payload_ms"] == 1800.0
+    assert thresholds["speech_end_to_tts_first_pcm_ms"] == 1800.0
+    assert thresholds["speech_end_to_physical_first_semantic_audio_ms"] == 1800.0
 
 
 def test_voice_turn_slo_fails_on_slow_required_bucket() -> None:
+    buckets = {
+        "speech_end_to_endpoint_commit_ms": 300.0,
+        "speech_end_to_asr_final_ms": 500.0,
+        "speech_end_to_first_llm_payload_ms": 1900.0,
+        "speech_end_to_tts_first_pcm_ms": 1200.0,
+        "speech_end_to_render_first_semantic_ms": 1400.0,
+        "speech_end_to_physical_first_semantic_audio_ms": 1500.0,
+    }
     result = evaluate_voice_turn_slo(
         {
-            "latency_buckets": {
-                "asr_final_ms": 300.0,
-                "llm_ttft_ms": 1400.0,
-                "tts_first_audio_ms": 500.0,
-                "playback_start_ms": 700.0,
-            }
+            "latency_buckets": buckets,
+            "latency_bucket_provenance": {
+                "speech_end_to_physical_first_semantic_audio_ms": {
+                    "physical_provenance_valid": True,
+                }
+            },
         }
     )
 
@@ -237,11 +429,29 @@ def test_voice_turn_slo_fails_on_slow_required_bucket() -> None:
     assert result["ready_to_converse"] is False
     assert result["failed_buckets"] == [
         {
-            "bucket": "llm_ttft_ms",
-            "actual_ms": 1400.0,
-            "threshold_ms": 900.0,
+            "bucket": "speech_end_to_first_llm_payload_ms",
+            "actual_ms": 1900.0,
+            "threshold_ms": 1800.0,
         }
     ]
+
+
+def test_voice_turn_summary_withholds_tail_percentiles_below_sample_floor() -> None:
+    recorder = VoiceTurnTraceRecorder()
+    for _ in range(100):
+        recorder.start(source="microphone", media_transport="local_sounddevice")
+        recorder.mark("speech_end")
+        recorder.mark("endpoint_committed")
+        recorder.finish("completed")
+
+    bucket = recorder.snapshot()["latency_summary"]["buckets"][
+        "speech_end_to_endpoint_commit_ms"
+    ]
+
+    assert bucket["count"] == 100
+    assert bucket["p95_ms"] is not None
+    assert bucket["p99_ms"] is None
+    assert bucket["p99_min_samples"] == 300
 
 
 def test_voice_turn_slo_reports_no_turn_as_not_ready() -> None:
@@ -249,60 +459,4 @@ def test_voice_turn_slo_reports_no_turn_as_not_ready() -> None:
 
     assert result["status"] == "no_turn"
     assert result["ready_to_converse"] is False
-    assert "asr_final_ms" in result["missing_buckets"]
-
-
-def test_voice_turn_slo_requires_external_physical_first_audio_evidence() -> None:
-    result = evaluate_voice_turn_slo(
-        {
-            "latency_buckets": {
-                "asr_final_ms": 300.0,
-                "llm_ttft_ms": 400.0,
-                "tts_first_audio_ms": 500.0,
-                "playback_start_ms": 650.0,
-                "render_first_semantic_nonzero_ms": 700.0,
-                "physical_first_audio_ms": None,
-            }
-        }
-    )
-
-    assert result["status"] == "insufficient_evidence"
-    assert result["ready_to_converse"] is False
-    assert "physical_first_audio_ms" in result["missing_buckets"]
-
-
-def test_voice_turn_trace_rejects_software_physical_audio_marker() -> None:
-    recorder = VoiceTurnTraceRecorder()
-
-    recorder.start(source="microphone", media_transport="local_sounddevice")
-    recorder.mark(
-        "physical_first_audio_observed",
-        evidence_source="playback_thread",
-    )
-    recorder.finish("accepted")
-
-    assert recorder.snapshot()["latest"]["latency_buckets"]["physical_first_audio_ms"] is None
-
-
-def test_voice_turn_trace_accepts_explicit_external_physical_audio_measurement(
-    monkeypatch,
-) -> None:
-    clock = iter([0.0, 0.0, 0.42, 0.5])
-    monkeypatch.setattr(turn_trace.time, "monotonic", lambda: next(clock))
-    recorder = VoiceTurnTraceRecorder()
-
-    recorder.start(source="microphone", media_transport="local_sounddevice")
-    recorder.mark_physical_first_audio(
-        evidence_source="loopback_microphone",
-        detector="energy_threshold",
-    )
-    recorder.finish("accepted")
-
-    latest = recorder.snapshot()["latest"]
-    stage = next(
-        item for item in latest["stages"] if item["name"] == "physical_first_audio_observed"
-    )
-
-    assert latest["latency_buckets"]["physical_first_audio_ms"] == 420.0
-    assert stage["metadata"]["evidence_kind"] == "external_sensor"
-    assert stage["metadata"]["evidence_source"] == "loopback_microphone"
+    assert "speech_end_to_asr_final_ms" in result["missing_buckets"]

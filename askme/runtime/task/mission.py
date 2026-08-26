@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -228,6 +229,17 @@ class MissionService:
 
         mission_type = _infer_mission_type(cleaned)
         target = _infer_target(cleaned)
+        mission_metadata = dict(metadata or {})
+        task_parameters = _infer_task_parameters(cleaned)
+        if task_parameters:
+            configured_parameters = mission_metadata.get("task_parameters")
+            merged_parameters = (
+                dict(configured_parameters)
+                if isinstance(configured_parameters, dict)
+                else {}
+            )
+            merged_parameters.update(task_parameters)
+            mission_metadata["task_parameters"] = merged_parameters
         risk = _infer_risk(cleaned, mission_type)
         required_services = _required_services(mission_type, risk)
         requires_confirmation = _risk_at_least(risk, self.confirmation_threshold)
@@ -265,7 +277,7 @@ class MissionService:
             site_id=site_id if site_id is not None else self.site_id,
             channel=channel or "text",
             safety_notes=_safety_notes(risk, mission_type),
-            metadata=metadata or {},
+            metadata=mission_metadata,
         )
         self._remember(plan)
         return plan
@@ -613,6 +625,37 @@ def _infer_mission_type(text: str) -> str:
     lowered = text.lower()
     if any(token in lowered for token in ("急停", "紧急停止", "停止机器人")):
         return "emergency_stop"
+    inspection_tokens = ("巡检", "巡逻", "检查")
+    inspection_positions = [lowered.find(token) for token in inspection_tokens if token in lowered]
+    if inspection_positions:
+        inspection_position = min(inspection_positions)
+        prefix = lowered[:inspection_position]
+        report_authoring_prefix = any(
+            token in prefix for token in ("生成", "整理", "输出", "查看", "给我", "写一份")
+        )
+        report_only_phrase = "巡检报告" in lowered and not any(
+            token in lowered for token in ("区", "站", "点", "拍照", "拍摄", "抓拍")
+        )
+        if not report_authoring_prefix and not report_only_phrase:
+            return "inspection_patrol"
+    if any(
+        token in lowered
+        for token in (
+            "状态报告",
+            "进度报告",
+            "巡检报告",
+            "生成报告",
+            "整理报告",
+            "输出报告",
+            "汇报状态",
+            "汇报进度",
+            "status report",
+            "progress report",
+            "inspection report",
+            "generate report",
+        )
+    ):
+        return "status_report"
     if any(token in lowered for token in ("巡检", "巡逻", "检查")):
         return "inspection_patrol"
     if any(token in lowered for token in ("带我去", "带路", "请带我", "导航", "前往", "去")):
@@ -679,10 +722,54 @@ def _infer_chinese_target(text: str) -> str | None:
         candidate = cleaned.split(marker, 1)[1].strip()
         if not candidate:
             continue
-        for stop in ("然后", "并且", "顺便", "一下", "看看", "进行"):
+        for stop in (
+            "然后",
+            "并且",
+            "顺便",
+            "并拍",
+            "拍摄",
+            "拍照",
+            "抓拍",
+            "生成报告",
+            "输出报告",
+            "汇报",
+            "随后",
+            "之后",
+            "一下",
+            "看看",
+            "进行",
+            "拍",
+        ):
             candidate = candidate.split(stop, 1)[0].strip()
         return candidate or None
     return None
+
+
+def _infer_task_parameters(text: str) -> dict[str, Any]:
+    parameters: dict[str, Any] = {}
+    if any(token in text for token in ("拍照", "拍摄", "抓拍", "照片", "图片")):
+        parameters["capture_evidence"] = True
+    if any(token in text for token in ("生成报告", "输出报告", "汇报", "报告")):
+        parameters["generate_report"] = True
+    match = re.search(r"([0-9一二两三四五六七八九十]+)\s*张", text)
+    if match is not None:
+        photo_count = _parse_small_count(match.group(1))
+        if 1 <= photo_count <= 20:
+            parameters["photo_count"] = photo_count
+            parameters["capture_evidence"] = True
+    return parameters
+
+
+def _parse_small_count(value: str) -> int:
+    if value.isdigit():
+        return int(value)
+    digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if value == "十":
+        return 10
+    if "十" in value:
+        high, low = value.split("十", 1)
+        return (digits.get(high, 1) * 10) + digits.get(low, 0)
+    return digits.get(value, 0)
 
 
 def _safety_notes(risk: str, mission_type: str) -> list[str]:

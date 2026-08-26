@@ -11,7 +11,7 @@
 git clone https://github.com/inovxio/askme.git
 cd askme
 
-# 创建虚拟环境（推荐 Python 3.10+）
+# 创建虚拟环境（需要 Python 3.11+）
 python -m venv .venv
 source .venv/bin/activate  # Linux/Mac
 # .venv\Scripts\activate   # Windows

@@ -1,7 +1,7 @@
 """Category 3: Fast / Slow Channel Routing Tests
 
-Fast path: VOICE_TRIGGER → skill executes directly, no LLM
-Slow path: GENERAL     → goes through LLM (pipeline.process)
+Fast path: ESTOP or VOICE_TRIGGER → deterministic handling, no LLM
+Slow path: GENERAL                → goes through LLM (pipeline.process)
 
 This matters for:
   - Response latency (fast = <500ms, slow = 3-7s)
@@ -165,7 +165,9 @@ class TestChannelMatrix:
     @pytest.mark.parametrize("utterance,expected_fast,reason", CASES)
     def test_routing_matrix(self, utterance: str, expected_fast: bool, reason: str):
         intent = self.ROUTER.route(utterance)
-        actual_fast = intent.type == IntentType.VOICE_TRIGGER
+        # ESTOP deliberately outranks ordinary voice triggers, but both are
+        # deterministic fast paths that must never wait for the LLM.
+        actual_fast = intent.type in {IntentType.ESTOP, IntentType.VOICE_TRIGGER}
         assert actual_fast == expected_fast, (
             f"Utterance={utterance!r}: expected fast={expected_fast} ({reason}), "
             f"got intent.type={intent.type}"

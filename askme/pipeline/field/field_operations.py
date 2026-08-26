@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from askme.llm.core.contracts import LLMCallContext
 from askme.pipeline.field.alert_dispatcher import AlertDispatcher
 from askme.pipeline.field.customer_projects import build_site_profile_report
 from askme.pipeline.field.field_action_audit import (
@@ -116,14 +117,46 @@ _SCENARIO_DEVICE_ENTRYPOINTS = {
 }
 
 _SCENARIO_ONSITE_DEPENDENCIES = {
-    "robot_abnormal_incident": ("robot diagnostics", "robot runtime callback", "onsite voice playback"),
-    "night_stranger_photo": ("camera/VMS event stream", "sensitive-zone map", "security notification webhook"),
-    "illegal_parking": ("camera/VMS vehicle detection", "parking-zone map", "security notification webhook"),
-    "fire_or_smoke": ("smoke/temperature sensor", "camera evidence", "security notification webhook"),
-    "trash_bin_full": ("trash-bin point catalog", "camera evidence", "cleaning notification webhook"),
-    "urgent_patrol_dispatch": ("enterprise operator identity", "runtime arbiter", "robot navigation gateway"),
-    "crowd_gathering": ("people-count vision model", "dwell-time tracker", "security notification webhook"),
-    "wayfinding_help_point": ("service-point catalog", "approved space knowledge", "interaction gate"),
+    "robot_abnormal_incident": (
+        "robot diagnostics",
+        "robot runtime callback",
+        "onsite voice playback",
+    ),
+    "night_stranger_photo": (
+        "camera/VMS event stream",
+        "sensitive-zone map",
+        "security notification webhook",
+    ),
+    "illegal_parking": (
+        "camera/VMS vehicle detection",
+        "parking-zone map",
+        "security notification webhook",
+    ),
+    "fire_or_smoke": (
+        "smoke/temperature sensor",
+        "camera evidence",
+        "security notification webhook",
+    ),
+    "trash_bin_full": (
+        "trash-bin point catalog",
+        "camera evidence",
+        "cleaning notification webhook",
+    ),
+    "urgent_patrol_dispatch": (
+        "enterprise operator identity",
+        "runtime arbiter",
+        "robot navigation gateway",
+    ),
+    "crowd_gathering": (
+        "people-count vision model",
+        "dwell-time tracker",
+        "security notification webhook",
+    ),
+    "wayfinding_help_point": (
+        "service-point catalog",
+        "approved space knowledge",
+        "interaction gate",
+    ),
     "visitor_escort": ("approved map route", "runtime arbiter", "robot navigation gateway"),
 }
 
@@ -277,7 +310,9 @@ class FieldOperationsService:
             or cfg.get("action_audit_path")
             or self._archive_path.with_name("field-action-audit.jsonl")
         )
-        self._action_audit_enabled = bool(audit_cfg.get("enabled", cfg.get("action_audit_enabled", True)))
+        self._action_audit_enabled = bool(
+            audit_cfg.get("enabled", cfg.get("action_audit_enabled", True))
+        )
         self._action_audit_path = Path(str(audit_path)) if audit_path else None
         self._action_audit_swallow_errors = bool(
             audit_cfg.get("swallow_errors", cfg.get("action_audit_swallow_errors", False))
@@ -294,7 +329,9 @@ class FieldOperationsService:
             or "local-field-action-audit"
         )
         self._robot_id = str(cfg.get("robot_id") or os.getenv("ASKME_ROBOT_ID") or "robot-1")
-        self._robot_name = str(cfg.get("robot_name") or os.getenv("ASKME_ROBOT_NAME") or "现场机器人")
+        self._robot_name = str(
+            cfg.get("robot_name") or os.getenv("ASKME_ROBOT_NAME") or "现场机器人"
+        )
         self._alert_factory = alert_dispatcher_factory or AlertDispatcher
         self._llm = llm_client
         self._llm_narrative_enabled = bool(
@@ -322,13 +359,17 @@ class FieldOperationsService:
         self._device_registry = _resolve_field_device_registry(
             cfg.get("device_registry") or cfg.get("field_devices") or cfg.get("devices")
         )
-        self._require_trusted_devices = bool(cfg.get("require_trusted_devices")) or _is_production_mode(cfg)
+        self._require_trusted_devices = bool(
+            cfg.get("require_trusted_devices")
+        ) or _is_production_mode(cfg)
         self._device_signature_max_age_s = float(cfg.get("device_signature_max_age_s", 300.0))
         self._device_offline_after_s = float(cfg.get("device_offline_after_s", 300.0))
         self._webhooks = self._resolve_group_webhooks(cfg)
         self._webhook_secrets = self._resolve_group_secrets(cfg)
         self._operator_roles = _resolve_operator_roles(cfg.get("operators"))
-        memory_cfg = cfg.get("incident_memory") if isinstance(cfg.get("incident_memory"), dict) else {}
+        memory_cfg = (
+            cfg.get("incident_memory") if isinstance(cfg.get("incident_memory"), dict) else {}
+        )
         self._incident_memory_enabled = bool(
             memory_cfg.get("enabled", cfg.get("incident_memory_enabled", False))
             or os.getenv("ASKME_FIELD_INCIDENT_MEMORY") in {"1", "true", "yes"}
@@ -344,17 +385,13 @@ class FieldOperationsService:
 
     @classmethod
     def from_env(cls) -> FieldOperationsService:
-        """Create a service using environment-level notification settings."""
+        """Create a service using environment-level notification settings.
 
-        llm = None
-        if os.getenv("ASKME_FIELD_LLM_NARRATIVE") in {"1", "true", "yes"}:
-            try:
-                from askme.llm.core.client import LLMClient
+        The field workflow never owns LLM provider construction. Runtime owners
+        that want narrative enrichment must inject their already-managed client.
+        """
 
-                llm = LLMClient()
-            except Exception:
-                llm = None
-        return cls(llm_client=llm)
+        return cls()
 
     def scenarios_payload(self) -> dict[str, Any]:
         return {
@@ -464,8 +501,12 @@ class FieldOperationsService:
         latest: dict[str, dict[str, Any]] = {}
         for event in self._read_events():
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            trust = payload.get("device_trust") if isinstance(payload.get("device_trust"), dict) else {}
-            device_id = str(trust.get("device_id") or _field_device_id(payload, payload) or "").strip()
+            trust = (
+                payload.get("device_trust") if isinstance(payload.get("device_trust"), dict) else {}
+            )
+            device_id = str(
+                trust.get("device_id") or _field_device_id(payload, payload) or ""
+            ).strip()
             if not device_id:
                 continue
             seen_at = (
@@ -501,17 +542,19 @@ class FieldOperationsService:
                 status = "stale"
             else:
                 status = "online"
-            devices.append({
-                "device_id": device_id,
-                "registered": device_id in self._device_registry,
-                "status": status,
-                "age_s": None if age_s is None else round(age_s, 3),
-                "offline_after_s": self._device_offline_after_s,
-                "allowed_sources": list(registry.get("allowed_sources") or []),
-                "signature_required": bool(registry.get("require_signature", False)),
-                "secret_configured": bool(registry.get("hmac_secret")),
-                **last,
-            })
+            devices.append(
+                {
+                    "device_id": device_id,
+                    "registered": device_id in self._device_registry,
+                    "status": status,
+                    "age_s": None if age_s is None else round(age_s, 3),
+                    "offline_after_s": self._device_offline_after_s,
+                    "allowed_sources": list(registry.get("allowed_sources") or []),
+                    "signature_required": bool(registry.get("require_signature", False)),
+                    "secret_configured": bool(registry.get("hmac_secret")),
+                    **last,
+                }
+            )
 
         summary = {
             "registered": len(self._device_registry),
@@ -643,7 +686,7 @@ class FieldOperationsService:
         if project_scope:
             filter_payload["project_scope"] = project_scope
         return {
-            "events": visible_events[-max(1, min(limit, 500)):][::-1],
+            "events": visible_events[-max(1, min(limit, 500)) :][::-1],
             "total": len(events),
             "filtered_total": len(filtered_events),
             "summary": _field_event_summary(events),
@@ -1041,10 +1084,7 @@ class FieldOperationsService:
         webhook = self._webhooks.get(group) or self._webhooks.get("security")
         secret = self._webhook_secrets.get(group) or self._webhook_secrets.get("security")
         severity = str(body.get("severity") or "warning").strip() or "warning"
-        message = str(
-            body.get("message")
-            or f"{self._robot_name} 通知测试：{group} 群配置校验。"
-        )
+        message = str(body.get("message") or f"{self._robot_name} 通知测试：{group} 群配置校验。")
         dispatcher = self._alert_factory(
             robot_id=self._robot_id,
             robot_name=self._robot_name,
@@ -1064,7 +1104,9 @@ class FieldOperationsService:
             severity=severity,
             topic="field.notification_test",
             payload={
-                "event_id": str(body.get("event_id") or f"notification-test-{uuid.uuid4().hex[:8]}"),
+                "event_id": str(
+                    body.get("event_id") or f"notification-test-{uuid.uuid4().hex[:8]}"
+                ),
                 "operator_id": str(body.get("operator_id") or "dashboard.operator"),
                 "notification_group": group,
                 "test": True,
@@ -1474,9 +1516,7 @@ class FieldOperationsService:
             "hash_alg": _FIELD_ACTION_AUDIT_HASH_ALG,
             "signed": bool(self._action_audit_hmac_secret),
             "signature_alg": (
-                _FIELD_ACTION_AUDIT_SIGNATURE_ALG
-                if self._action_audit_hmac_secret
-                else ""
+                _FIELD_ACTION_AUDIT_SIGNATURE_ALG if self._action_audit_hmac_secret else ""
             ),
             "failures": failures,
         }
@@ -1803,7 +1843,9 @@ class FieldOperationsService:
                     audit_record,
                     secret=self._action_audit_hmac_secret,
                 )
-            line = json.dumps(audit_record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            line = json.dumps(
+                audit_record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
             with self._action_audit_path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(line)
                 handle.write("\n")
@@ -1852,16 +1894,25 @@ class FieldOperationsService:
     def _normalize_ingest(self, body: dict[str, Any]) -> dict[str, Any]:
         payload = normalize_field_ingest_payload(body)
         payload = self._enrich_with_zone(payload)
-        detections = payload.get("detections") if isinstance(payload.get("detections"), list) else []
-        labels = {str(item.get("label") or item.get("class") or "").lower() for item in detections if isinstance(item, dict)}
+        detections = (
+            payload.get("detections") if isinstance(payload.get("detections"), list) else []
+        )
+        labels = {
+            str(item.get("label") or item.get("class") or "").lower()
+            for item in detections
+            if isinstance(item, dict)
+        }
         sensor = payload.get("sensor") if isinstance(payload.get("sensor"), dict) else {}
         robot = payload.get("robot") if isinstance(payload.get("robot"), dict) else {}
 
         temperature = _float_or_none(payload.get("temperature_c", sensor.get("temperature_c")))
         smoke = _float_or_none(payload.get("smoke_level", sensor.get("smoke_level")))
-        if "fire" in labels or "smoke" in labels or (
-            temperature is not None and temperature >= self._thresholds["temperature_c"]
-        ) or (smoke is not None and smoke >= self._thresholds["smoke_level"]):
+        if (
+            "fire" in labels
+            or "smoke" in labels
+            or (temperature is not None and temperature >= self._thresholds["temperature_c"])
+            or (smoke is not None and smoke >= self._thresholds["smoke_level"])
+        ):
             payload["scenario_id"] = "fire_or_smoke"
             if temperature is not None:
                 payload["temperature_c"] = temperature
@@ -1883,14 +1934,20 @@ class FieldOperationsService:
                 payload["scenario_id"] = "illegal_parking"
                 return payload
 
-        detected_persons = len([
-            item
-            for item in detections
-            if isinstance(item, dict) and str(item.get("label") or item.get("class") or "").lower() == "person"
-        ])
+        detected_persons = len(
+            [
+                item
+                for item in detections
+                if isinstance(item, dict)
+                and str(item.get("label") or item.get("class") or "").lower() == "person"
+            ]
+        )
         person_count = int(_float_or_none(payload.get("person_count")) or detected_persons)
         duration_min = _float_or_none(payload.get("duration_min")) or 0.0
-        if person_count > self._thresholds["crowd_person_count"] and duration_min >= self._thresholds["crowd_duration_min"]:
+        if (
+            person_count > self._thresholds["crowd_person_count"]
+            and duration_min >= self._thresholds["crowd_duration_min"]
+        ):
             payload["scenario_id"] = "crowd_gathering"
             payload["person_count"] = person_count
             payload["duration_min"] = duration_min
@@ -1913,7 +1970,11 @@ class FieldOperationsService:
         if photo_evidence:
             payload["taking_photo"] = True
 
-        if "person" in labels and payload.get("is_night") and zone_type in {"window", "corner", "restricted", "blind_spot"}:
+        if (
+            "person" in labels
+            and payload.get("is_night")
+            and zone_type in {"window", "corner", "restricted", "blind_spot"}
+        ):
             dwell_s = _float_or_none(payload.get("dwell_s", payload.get("duration_s"))) or 0.0
             known_person = bool(payload.get("known_person") or payload.get("authorized_person"))
             required_dwell_s = (
@@ -1955,48 +2016,109 @@ class FieldOperationsService:
         }
         if not self._device_registry:
             if self._require_trusted_devices:
-                return {**base, "trusted": False, "status": "blocked", "reason": "device_registry_not_configured"}
+                return {
+                    **base,
+                    "trusted": False,
+                    "status": "blocked",
+                    "reason": "device_registry_not_configured",
+                }
             return {**base, "status": "not_configured"}
         if not device_id:
             if self._require_trusted_devices:
-                return {**base, "trusted": False, "status": "blocked", "reason": "missing_device_id"}
+                return {
+                    **base,
+                    "trusted": False,
+                    "status": "blocked",
+                    "reason": "missing_device_id",
+                }
             return {**base, "status": "unidentified"}
         device = self._device_registry.get(device_id)
         if device is None:
             if self._require_trusted_devices:
-                return {**base, "trusted": False, "status": "blocked", "reason": "unregistered_device"}
+                return {
+                    **base,
+                    "trusted": False,
+                    "status": "blocked",
+                    "reason": "unregistered_device",
+                }
             return {**base, "status": "unregistered"}
 
         base["registered"] = True
         allowed_sources = device.get("allowed_sources")
         if isinstance(allowed_sources, list) and allowed_sources and source not in allowed_sources:
-            return {**base, "trusted": False, "status": "blocked", "reason": "device_source_not_allowed"}
+            return {
+                **base,
+                "trusted": False,
+                "status": "blocked",
+                "reason": "device_source_not_allowed",
+            }
 
         secret = _clean_secret(device.get("hmac_secret") or device.get("secret"))
-        require_signature = bool(device.get("require_signature", bool(secret) or self._require_trusted_devices))
+        require_signature = bool(
+            device.get("require_signature", bool(secret) or self._require_trusted_devices)
+        )
         if not require_signature:
             return {**base, "status": "registered_unsigned"}
         if not secret:
-            return {**base, "trusted": False, "status": "blocked", "reason": "device_secret_not_configured"}
+            return {
+                **base,
+                "trusted": False,
+                "status": "blocked",
+                "reason": "device_secret_not_configured",
+            }
 
         signature = _field_device_signature_value(body)
         if not signature:
-            return {**base, "trusted": False, "status": "blocked", "reason": "missing_device_signature"}
-        signature_alg = str(body.get("device_signature_alg") or body.get("signature_alg") or _FIELD_DEVICE_SIGNATURE_ALG)
+            return {
+                **base,
+                "trusted": False,
+                "status": "blocked",
+                "reason": "missing_device_signature",
+            }
+        signature_alg = str(
+            body.get("device_signature_alg")
+            or body.get("signature_alg")
+            or _FIELD_DEVICE_SIGNATURE_ALG
+        )
         if signature_alg != _FIELD_DEVICE_SIGNATURE_ALG:
-            return {**base, "trusted": False, "status": "blocked", "reason": "unsupported_device_signature_alg"}
+            return {
+                **base,
+                "trusted": False,
+                "status": "blocked",
+                "reason": "unsupported_device_signature_alg",
+            }
         expected = sign_field_device_payload(body, secret=secret)
         if not hmac.compare_digest(signature, expected):
-            return {**base, "trusted": False, "status": "blocked", "reason": "device_signature_mismatch"}
+            return {
+                **base,
+                "trusted": False,
+                "status": "blocked",
+                "reason": "device_signature_mismatch",
+            }
 
         signature_timestamp = _field_device_signature_timestamp(body)
         if signature_timestamp is None:
-            return {**base, "trusted": False, "status": "blocked", "reason": "missing_device_signature_timestamp"}
+            return {
+                **base,
+                "trusted": False,
+                "status": "blocked",
+                "reason": "missing_device_signature_timestamp",
+            }
         age_s = max(0.0, received_at - signature_timestamp)
         if signature_timestamp - received_at > 2.0:
-            return {**base, "trusted": False, "status": "blocked", "reason": "device_signature_from_future"}
+            return {
+                **base,
+                "trusted": False,
+                "status": "blocked",
+                "reason": "device_signature_from_future",
+            }
         if age_s > self._device_signature_max_age_s:
-            return {**base, "trusted": False, "status": "blocked", "reason": "device_signature_expired"}
+            return {
+                **base,
+                "trusted": False,
+                "status": "blocked",
+                "reason": "device_signature_expired",
+            }
         return {
             **base,
             "signature_verified": True,
@@ -2034,7 +2156,16 @@ class FieldOperationsService:
                     [
                         {"role": "system", "content": "只输出一句可直接播报的中文。"},
                         {"role": "user", "content": prompt},
-                    ]
+                    ],
+                    model="robot-action",
+                    context=LLMCallContext(
+                        call_id=uuid.uuid4().hex,
+                        purpose="assistant_response",
+                        channel="background",
+                        request_class="robot_action",
+                        privacy_class="restricted",
+                        allow_cache=False,
+                    ),
                 ),
                 timeout=2.5,
             )
@@ -2069,7 +2200,11 @@ class FieldOperationsService:
             return False
         if scenario.priority == "P0" or event.severity == "error":
             return False
-        return scenario.category in {"visitor_service", "facility_service"} or allowed_by_payload or allowed_by_playbook
+        return (
+            scenario.category in {"visitor_service", "facility_service"}
+            or allowed_by_payload
+            or allowed_by_playbook
+        )
 
     def _llm_narrative_skip_reason(self, event: FieldEventRecord, scenario: FieldScenario) -> str:
         if scenario.priority == "P0" or event.severity == "error":
@@ -2221,9 +2356,15 @@ class FieldOperationsService:
             site_name=str(scope.get("site_name") or ""),
             industry=str(scope.get("industry") or ""),
             managed_object_id=str(managed_object.get("object_id") or "") if managed_object else "",
-            managed_object_display=str(managed_object.get("display_name") or "") if managed_object else "",
-            managed_object_category=str(managed_object.get("category") or "") if managed_object else "",
-            managed_object_bindings=dict(managed_object.get("bindings") or {}) if managed_object else {},
+            managed_object_display=str(managed_object.get("display_name") or "")
+            if managed_object
+            else "",
+            managed_object_category=str(managed_object.get("category") or "")
+            if managed_object
+            else "",
+            managed_object_bindings=dict(managed_object.get("bindings") or {})
+            if managed_object
+            else {},
             resource_execution_context=_field_resource_execution_context(
                 scenario,
                 payload,
@@ -2510,7 +2651,9 @@ class FieldOperationsService:
             parsed = _float_or_none(payload.get(key))
             if parsed is not None:
                 candidates.append(parsed / 100.0 if parsed > 1.0 else parsed)
-        detections = payload.get("detections") if isinstance(payload.get("detections"), list) else []
+        detections = (
+            payload.get("detections") if isinstance(payload.get("detections"), list) else []
+        )
         for item in detections:
             if not isinstance(item, dict):
                 continue
@@ -2540,9 +2683,8 @@ class FieldOperationsService:
 
     def _dispatch_incident(self, event: FieldEventRecord) -> list[str]:
         webhook = self._webhooks.get(event.notification_group) or self._webhooks.get("security")
-        secret = (
-            self._webhook_secrets.get(event.notification_group)
-            or self._webhook_secrets.get("security")
+        secret = self._webhook_secrets.get(event.notification_group) or self._webhook_secrets.get(
+            "security"
         )
         dispatcher = self._alert_factory(
             robot_id=self._robot_id,
@@ -2578,8 +2720,7 @@ class FieldOperationsService:
             event.delivery_report = list(dispatcher.last_delivery_report)
         else:
             event.delivery_report = [
-                {"channel": channel, "status": "sent", "reason": ""}
-                for channel in sent
+                {"channel": channel, "status": "sent", "reason": ""} for channel in sent
             ]
         return sent
 
@@ -2690,7 +2831,9 @@ class FieldOperationsService:
             "required_evidence": list(scenario.required_evidence),
             "robot_behavior": list(scenario.robot_behavior),
             "acceptance_criteria": list(scenario.acceptance_criteria),
-            "onsite_dependencies": list(_SCENARIO_ONSITE_DEPENDENCIES.get(scenario.scenario_id, ())),
+            "onsite_dependencies": list(
+                _SCENARIO_ONSITE_DEPENDENCIES.get(scenario.scenario_id, ())
+            ),
             "verification_artifacts": [
                 "scripts/eval/check_dashboard_visual.py::field_scenario_matrix",
                 "tests/scenario_tests/test_field_operations_evaluation.py",
@@ -2711,7 +2854,9 @@ class FieldOperationsService:
 
     @staticmethod
     def _infer_scenario_id(body: dict[str, Any]) -> str:
-        text = " ".join(str(body.get(key) or "") for key in ("type", "event_type", "label", "topic"))
+        text = " ".join(
+            str(body.get(key) or "") for key in ("type", "event_type", "label", "topic")
+        )
         lowered = text.lower()
         if "fire" in lowered or "smoke" in lowered or "火" in text or "烟" in text:
             return "fire_or_smoke"
@@ -2841,7 +2986,9 @@ def _config_with_site_profile(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _field_project_scope_from_config(config: dict[str, Any]) -> dict[str, str]:
-    scope = config.get("customer_project") if isinstance(config.get("customer_project"), dict) else {}
+    scope = (
+        config.get("customer_project") if isinstance(config.get("customer_project"), dict) else {}
+    )
     return {
         "tenant_id": str(scope.get("tenant_id") or config.get("tenant_id") or ""),
         "delivery_namespace": str(
@@ -2871,12 +3018,16 @@ def _site_profile_env_check_requested(config: dict[str, Any]) -> bool:
 
 
 def _is_production_mode(config: dict[str, Any]) -> bool:
-    mode = str(
-        config.get("deployment_mode")
-        or config.get("readiness_mode")
-        or config.get("field_deployment_mode")
-        or ""
-    ).strip().lower()
+    mode = (
+        str(
+            config.get("deployment_mode")
+            or config.get("readiness_mode")
+            or config.get("field_deployment_mode")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
     return mode in {"prod", "production"}
 
 
@@ -2922,7 +3073,9 @@ def _notification_preflight_next_actions(results: dict[str, dict[str, Any]]) -> 
         if missing:
             actions.append(f"Configure {group}: " + " or ".join(str(item) for item in missing))
     if not actions:
-        actions.append("Run: python -m askme runtime field-notification-smoke --server <deployed-url> --json")
+        actions.append(
+            "Run: python -m askme runtime field-notification-smoke --server <deployed-url> --json"
+        )
     return actions
 
 
@@ -2945,9 +3098,7 @@ def _resolve_operator_roles(raw: Any) -> dict[str, tuple[str, ...]]:
         elif isinstance(candidate, (list, tuple, set)):
             parsed = [str(item) for item in candidate]
         clean = tuple(
-            role.strip().lower()
-            for role in parsed
-            if isinstance(role, str) and role.strip()
+            role.strip().lower() for role in parsed if isinstance(role, str) and role.strip()
         )
         if clean:
             roles[key] = clean
@@ -2993,7 +3144,7 @@ def _clean_narrative(text: str) -> str:
     cleaned = text.strip().strip("`").replace("\n", "")
     for prefix in ("播报：", "回答：", "文案："):
         if cleaned.startswith(prefix):
-            cleaned = cleaned[len(prefix):].strip()
+            cleaned = cleaned[len(prefix) :].strip()
     if len(cleaned) > 45:
         cleaned = cleaned[:45].rstrip("，。；、") + "。"
     return cleaned
@@ -3042,13 +3193,25 @@ def _field_resource_execution_context(
             "scenario_id": scenario.scenario_id,
             "ingest_endpoint": "/api/field/ingest",
         }
-    bindings = managed_object.get("bindings") if isinstance(managed_object.get("bindings"), dict) else {}
+    bindings = (
+        managed_object.get("bindings") if isinstance(managed_object.get("bindings"), dict) else {}
+    )
     source = str(payload.get("source") or "").strip()
-    device_sources = [str(item) for item in _as_list(managed_object.get("device_sources")) if str(item).strip()]
-    vision_models = [str(item) for item in _as_list(bindings.get("vision_models")) if str(item).strip()]
-    sensor_protocols = [str(item) for item in _as_list(bindings.get("sensor_protocols")) if str(item).strip()]
-    skill_packages = [str(item) for item in _as_list(bindings.get("skill_packages")) if str(item).strip()]
-    acceptance_tests = [str(item) for item in _as_list(bindings.get("acceptance_tests")) if str(item).strip()]
+    device_sources = [
+        str(item) for item in _as_list(managed_object.get("device_sources")) if str(item).strip()
+    ]
+    vision_models = [
+        str(item) for item in _as_list(bindings.get("vision_models")) if str(item).strip()
+    ]
+    sensor_protocols = [
+        str(item) for item in _as_list(bindings.get("sensor_protocols")) if str(item).strip()
+    ]
+    skill_packages = [
+        str(item) for item in _as_list(bindings.get("skill_packages")) if str(item).strip()
+    ]
+    acceptance_tests = [
+        str(item) for item in _as_list(bindings.get("acceptance_tests")) if str(item).strip()
+    ]
     capability_routes = field_capability_routes(
         skill_packages,
         scenario_id=scenario.scenario_id,
@@ -3066,12 +3229,16 @@ def _field_resource_execution_context(
             blockers.append(f"{key} binding missing")
     if source and device_sources and source not in device_sources:
         blockers.append(f"payload source {source} is outside managed object device_sources")
-    protocol_sources = sorted({
-        protocol_source
-        for protocol in sensor_protocols
-        for protocol_source in _field_sensor_protocol_sources(protocol)
-    })
-    source_covered = not source or source in protocol_sources or (source == "camera" and bool(vision_models))
+    protocol_sources = sorted(
+        {
+            protocol_source
+            for protocol in sensor_protocols
+            for protocol_source in _field_sensor_protocol_sources(protocol)
+        }
+    )
+    source_covered = (
+        not source or source in protocol_sources or (source == "camera" and bool(vision_models))
+    )
     if not source_covered:
         manual_checks.append(f"payload source {source} has no explicit protocol coverage")
     missing_contracts = [
@@ -3120,7 +3287,9 @@ def _field_ingest_scope_contract(
     """Return the customer/project/object binding evidence for one device ingest."""
     event = event if isinstance(event, dict) else {}
     has_event = bool(event)
-    trust = normalized.get("device_trust") if isinstance(normalized.get("device_trust"), dict) else {}
+    trust = (
+        normalized.get("device_trust") if isinstance(normalized.get("device_trust"), dict) else {}
+    )
     resource = (
         event.get("resource_execution_context")
         if isinstance(event.get("resource_execution_context"), dict)
@@ -3200,14 +3369,10 @@ def _field_ingest_scope_contract(
             "selected_capability": str(resource.get("selected_capability") or ""),
             "approval_required": bool(resource.get("approval_required", False)),
             "blockers": [
-                str(item)
-                for item in _as_list(resource.get("blockers"))
-                if str(item).strip()
+                str(item) for item in _as_list(resource.get("blockers")) if str(item).strip()
             ],
             "manual_checks": [
-                str(item)
-                for item in _as_list(resource.get("manual_checks"))
-                if str(item).strip()
+                str(item) for item in _as_list(resource.get("manual_checks")) if str(item).strip()
             ],
         },
         "production_gate": gate,
@@ -3223,7 +3388,9 @@ def _field_ingest_scope_contract(
 
 
 def _field_managed_object_binding_gate(managed_object: dict[str, Any]) -> dict[str, Any]:
-    bindings = managed_object.get("bindings") if isinstance(managed_object.get("bindings"), dict) else {}
+    bindings = (
+        managed_object.get("bindings") if isinstance(managed_object.get("bindings"), dict) else {}
+    )
     blockers: list[str] = []
     manual_checks: list[str] = []
     required = (
@@ -3265,7 +3432,11 @@ def _field_device_onboarding_gate(
         manual_checks.append("device is not linked to a managed object")
     elif not any(candidate.get("binding_status") == "ready" for candidate in candidates):
         manual_checks.append("linked managed object still has binding gaps")
-    if device.get("trust_status") == "blocked" or device.get("trusted") is False and device.get("last_seen_at"):
+    if (
+        device.get("trust_status") == "blocked"
+        or device.get("trusted") is False
+        and device.get("last_seen_at")
+    ):
         blockers.append(str(device.get("trust_reason") or "latest device payload was not trusted"))
     status = "blocked" if blockers else "manual_check" if manual_checks else "ready"
     if status == "ready":
@@ -3291,10 +3462,14 @@ def _field_device_onboarding_next_actions(devices: list[dict[str, Any]]) -> list
     actions: list[str] = []
     if any(not item.get("registered") for item in devices):
         actions.append("Register every observed device in field_operations.device_registry.")
-    if any(item.get("signature_required") and not item.get("secret_configured") for item in devices):
+    if any(
+        item.get("signature_required") and not item.get("secret_configured") for item in devices
+    ):
         actions.append("Configure HMAC secrets for devices that require signed payloads.")
     if any(item.get("status") == "never_seen" for item in devices):
-        actions.append("Send one real or lab-signed payload from each registered device to /api/field/ingest.")
+        actions.append(
+            "Send one real or lab-signed payload from each registered device to /api/field/ingest."
+        )
     if any(not item.get("managed_object_candidates") for item in devices):
         actions.append("Bind device sources or device IDs to customer managed objects.")
     if any(
@@ -3302,7 +3477,9 @@ def _field_device_onboarding_next_actions(devices: list[dict[str, Any]]) -> list
         for item in devices
         for candidate in item.get("managed_object_candidates") or []
     ):
-        actions.append("Complete managed-object bindings: vision model, sensor protocol, skill package, and acceptance test.")
+        actions.append(
+            "Complete managed-object bindings: vision model, sensor protocol, skill package, and acceptance test."
+        )
     return actions or ["Archive the latest signed device payloads as onsite acceptance evidence."]
 
 
@@ -3373,9 +3550,7 @@ def _field_ingest_production_gate(
     resource_reason = str(resource.get("reason") or "")
     blockers = [str(item) for item in _as_list(resource.get("blockers")) if str(item).strip()]
     manual_checks = [
-        str(item)
-        for item in _as_list(resource.get("manual_checks"))
-        if str(item).strip()
+        str(item) for item in _as_list(resource.get("manual_checks")) if str(item).strip()
     ]
     return {
         "ready": False,
@@ -3383,8 +3558,7 @@ def _field_ingest_production_gate(
         "reason": resource_reason or "resource_binding_requires_review",
         "customer_message": "事件已绑定现场对象，但资源绑定仍需交付复核。",
         "required_action": (
-            "补齐阻断项："
-            + "; ".join(blockers or manual_checks or [f"scenario={scenario_id}"])
+            "补齐阻断项：" + "; ".join(blockers or manual_checks or [f"scenario={scenario_id}"])
         ),
     }
 
@@ -3427,11 +3601,11 @@ def _field_admission_decision(event: dict[str, Any]) -> dict[str, Any]:
 
     status = str(event.get("status") or "")
     operator_action = str(event.get("operator_action") or event.get("narrative") or "")
-    missing_evidence = [
-        str(item)
-        for item in event.get("missing_evidence", [])
-        if str(item).strip()
-    ] if isinstance(event.get("missing_evidence"), list) else []
+    missing_evidence = (
+        [str(item) for item in event.get("missing_evidence", []) if str(item).strip()]
+        if isinstance(event.get("missing_evidence"), list)
+        else []
+    )
     freshness = str(event.get("freshness_status") or "")
     freshness_age_s = _float_or_none(event.get("freshness_age_s"))
     confidence = _float_or_none(event.get("confidence"))
@@ -3686,12 +3860,18 @@ def _field_assessment_status(event: dict[str, Any]) -> str:
 def _field_notification_status(event: dict[str, Any]) -> str:
     if not event.get("incident_topic") or event.get("notification_group") == "none":
         return "not_required"
-    delivery = event.get("delivery_report") if isinstance(event.get("delivery_report"), list) else []
-    sent_channels = event.get("sent_channels") if isinstance(event.get("sent_channels"), list) else []
+    delivery = (
+        event.get("delivery_report") if isinstance(event.get("delivery_report"), list) else []
+    )
+    sent_channels = (
+        event.get("sent_channels") if isinstance(event.get("sent_channels"), list) else []
+    )
     if not delivery and not sent_channels:
         return "pending"
     if any(isinstance(item, dict) and item.get("status") == "sent" for item in delivery):
-        if any(isinstance(item, dict) and item.get("status") not in {"sent", ""} for item in delivery):
+        if any(
+            isinstance(item, dict) and item.get("status") not in {"sent", ""} for item in delivery
+        ):
             return "partial"
         return "sent"
     if sent_channels:
@@ -3700,7 +3880,9 @@ def _field_notification_status(event: dict[str, Any]) -> str:
 
 
 def _field_notification_detail(event: dict[str, Any]) -> str:
-    delivery = event.get("delivery_report") if isinstance(event.get("delivery_report"), list) else []
+    delivery = (
+        event.get("delivery_report") if isinstance(event.get("delivery_report"), list) else []
+    )
     if delivery:
         return ",".join(
             f"{item.get('channel')}:{item.get('status')}"
@@ -3711,7 +3893,9 @@ def _field_notification_detail(event: dict[str, Any]) -> str:
 
 
 def _field_voice_status(event: dict[str, Any]) -> str:
-    directive = event.get("voice_directive") if isinstance(event.get("voice_directive"), dict) else {}
+    directive = (
+        event.get("voice_directive") if isinstance(event.get("voice_directive"), dict) else {}
+    )
     if not directive:
         return "not_required"
     delivery = event.get("voice_delivery") if isinstance(event.get("voice_delivery"), dict) else {}
@@ -3721,7 +3905,9 @@ def _field_voice_status(event: dict[str, Any]) -> str:
 
 
 def _field_voice_detail(event: dict[str, Any]) -> str:
-    directive = event.get("voice_directive") if isinstance(event.get("voice_directive"), dict) else {}
+    directive = (
+        event.get("voice_directive") if isinstance(event.get("voice_directive"), dict) else {}
+    )
     delivery = event.get("voice_delivery") if isinstance(event.get("voice_delivery"), dict) else {}
     return str(
         delivery.get("status")
@@ -3736,7 +3922,9 @@ def _field_robot_motion_status(event: dict[str, Any]) -> str:
     policy = str(playbook.get("robot_motion_policy") or "").strip()
     if not policy:
         return "not_required"
-    runtime = event.get("runtime_delivery") if isinstance(event.get("runtime_delivery"), dict) else {}
+    runtime = (
+        event.get("runtime_delivery") if isinstance(event.get("runtime_delivery"), dict) else {}
+    )
     if runtime:
         return str(runtime.get("status") or "submitted")
     return "policy_ready"
@@ -3744,7 +3932,9 @@ def _field_robot_motion_status(event: dict[str, Any]) -> str:
 
 def _field_robot_motion_detail(event: dict[str, Any]) -> str:
     playbook = event.get("playbook") if isinstance(event.get("playbook"), dict) else {}
-    runtime = event.get("runtime_delivery") if isinstance(event.get("runtime_delivery"), dict) else {}
+    runtime = (
+        event.get("runtime_delivery") if isinstance(event.get("runtime_delivery"), dict) else {}
+    )
     return str(runtime.get("status") or playbook.get("robot_motion_policy") or "")
 
 
@@ -4134,7 +4324,9 @@ def _payload_detection_labels(payload: dict[str, Any]) -> set[str]:
 def _field_event_needs_attention(event: dict[str, Any]) -> bool:
     if event.get("status") in {"closed", "duplicate"}:
         return False
-    delivery = event.get("delivery_report") if isinstance(event.get("delivery_report"), list) else []
+    delivery = (
+        event.get("delivery_report") if isinstance(event.get("delivery_report"), list) else []
+    )
     if any(
         item.get("status") and item.get("status") != "sent"
         for item in delivery
@@ -4232,7 +4424,9 @@ def _field_event_timeline(event: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _field_notification_attempts(event: dict[str, Any]) -> list[dict[str, Any]]:
     attempts: list[dict[str, Any]] = []
-    delivery = event.get("delivery_report") if isinstance(event.get("delivery_report"), list) else []
+    delivery = (
+        event.get("delivery_report") if isinstance(event.get("delivery_report"), list) else []
+    )
     if delivery or event.get("sent_channels"):
         attempts.append(
             {
@@ -4279,7 +4473,9 @@ def _field_runtime_delivery_receipt(delivery: dict[str, Any]) -> dict[str, Any]:
 
 
 def _field_event_report(event: dict[str, Any]) -> dict[str, Any]:
-    delivery = event.get("delivery_report") if isinstance(event.get("delivery_report"), list) else []
+    delivery = (
+        event.get("delivery_report") if isinstance(event.get("delivery_report"), list) else []
+    )
     evidence_media = (
         event.get("evidence_media") if isinstance(event.get("evidence_media"), list) else []
     )
@@ -4364,16 +4560,14 @@ def _field_event_report(event: dict[str, Any]) -> dict[str, Any]:
         "close_request_note": event.get("close_request_note") or "",
         "closed_by": event.get("closed_by") or "",
         "close_note": event.get("close_note") or "",
-        "close_approval": event.get("close_approval") if isinstance(event.get("close_approval"), dict) else {},
+        "close_approval": event.get("close_approval")
+        if isinstance(event.get("close_approval"), dict)
+        else {},
         "memory_delivery": (
-            event.get("memory_delivery")
-            if isinstance(event.get("memory_delivery"), dict)
-            else {}
+            event.get("memory_delivery") if isinstance(event.get("memory_delivery"), dict) else {}
         ),
         "runtime_delivery": (
-            event.get("runtime_delivery")
-            if isinstance(event.get("runtime_delivery"), dict)
-            else {}
+            event.get("runtime_delivery") if isinstance(event.get("runtime_delivery"), dict) else {}
         ),
         "runtime_delivery_receipts": (
             event.get("runtime_delivery_receipts")
@@ -4423,8 +4617,7 @@ def _field_event_report_markdown(event: dict[str, Any]) -> str:
     lines.extend(["", "## 处置时间线"])
     for item in report["timeline"] or []:
         lines.append(
-            f"- {item.get('type')}: {item.get('actor')} {item.get('note') or ''} "
-            f"@ {item.get('at')}"
+            f"- {item.get('type')}: {item.get('actor')} {item.get('note') or ''} @ {item.get('at')}"
         )
     lines.extend(["", "## 通知尝试"])
     for item in report["notification_attempts"] or []:

@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="500" viewBox="0 0 1400 500" role="img" aria-labelledby="title desc">
+  <title id="title">AskMe system constellation</title>
+  <desc id="desc">Voice, conversation, knowledge, and cognition flow into AskMe. Tasks pass through safety into runtime, while the full path produces audit evidence.</desc>
+  <defs>
+    <marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0 9 4.5 0 9Z" fill="#58d0c1"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0 9 4.5 0 9Z" fill="#7568ed"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="1398" height="498" rx="18" fill="#0d1324" stroke="#202a43" stroke-width="2"/>
+
+  <g fill="#e8ebf4" opacity=".55">
+    <circle cx="40" cy="68" r="1.6"/><circle cx="183" cy="45" r="1.2"/><circle cx="335" cy="88" r="1.4"/>
+    <circle cx="475" cy="50" r="1.2"/><circle cx="610" cy="92" r="1.5"/><circle cx="783" cy="43" r="1.4"/>
+    <circle cx="931" cy="91" r="1.2"/><circle cx="1082" cy="48" r="1.6"/><circle cx="1255" cy="76" r="1.2"/>
+    <circle cx="1356" cy="43" r="1.4"/><circle cx="31" cy="344" r="1.3"/><circle cx="1368" cy="334" r="1.5"/>
+  </g>
+  <g stroke="#e8ebf4" stroke-width="1.2" opacity=".42">
+    <path d="M126 82v8m-4-4h8"/><path d="M432 355v8m-4-4h8"/>
+    <path d="M885 69v8m-4-4h8"/><path d="M1127 338v8m-4-4h8"/>
+    <path d="M1318 144v8m-4-4h8"/>
+  </g>
+
+  <g font-family="Inter, Segoe UI, Arial, sans-serif">
+    <g fill="#8791a8" font-size="12" font-weight="700" letter-spacing="3">
+      <text x="64" y="70">UNDERSTAND</text>
+      <text x="525" y="70">ORCHESTRATE</text>
+      <text x="825" y="70">DELIVER</text>
+    </g>
+    <g stroke="#2d3852" stroke-width="1.5" fill="none">
+      <path d="M64 87H438"/>
+      <path d="M525 87H761"/>
+      <path d="M825 87H1336"/>
+      <path d="M477 48V355" stroke-dasharray="4 8"/>
+      <path d="M788 48V355" stroke-dasharray="4 8"/>
+    </g>
+
+    <g fill="none" stroke="#4f5b74" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M202 164H224Q240 164 240 148V124Q240 108 256 108H455Q477 108 477 130V186Q477 202 493 202H511"/>
+      <path d="M202 283H224Q240 283 240 299V344Q240 360 256 360H455Q477 360 477 338V330Q477 314 493 314H511"/>
+      <path d="M440 164H450Q468 164 468 182V224Q468 242 486 242H511"/>
+      <path d="M438 283H511"/>
+    </g>
+    <g fill="#58d0c1">
+      <circle cx="511" cy="202" r="3.5"/><circle cx="511" cy="242" r="3.5"/>
+      <circle cx="511" cy="283" r="3.5"/><circle cx="511" cy="314" r="3.5"/>
+    </g>
+
+    <g fill="#f7f8fb">
+      <g transform="translate(64 135)">
+        <g fill="none" stroke="#58d0c1" stroke-width="2.4" stroke-linecap="round">
+          <path d="M0 18h5m7-10v20m7-26v32m7-23v14m7-8v4m7-3h5"/>
+        </g>
+        <text x="58" y="18" font-size="17" font-weight="700">VOICE</text>
+        <text x="58" y="39" fill="#8f99ae" font-size="12">speech &amp; text</text>
+      </g>
+      <g transform="translate(64 254)">
+        <path d="M2 1h37a7 7 0 0 1 7 7v17a7 7 0 0 1-7 7H20L9 41v-9H2a7 7 0 0 1-7-7V8a7 7 0 0 1 7-7Z" fill="none" stroke="#7568ed" stroke-width="2"/>
+        <circle cx="8" cy="17" r="2" fill="#7568ed"/><circle cx="20" cy="17" r="2" fill="#7568ed"/><circle cx="32" cy="17" r="2" fill="#7568ed"/>
+        <text x="58" y="18" font-size="17" font-weight="700">CONVERSATION</text>
+        <text x="58" y="39" fill="#8f99ae" font-size="12">thread &amp; turn</text>
+      </g>
+      <g transform="translate(264 135)">
+        <path d="M0 3c12-3 22 0 28 7v28c-7-6-16-8-28-5Zm56 0c-12-3-22 0-28 7v28c7-6 16-8 28-5Z" fill="none" stroke="#58d0c1" stroke-width="2" stroke-linejoin="round"/>
+        <text x="72" y="18" font-size="17" font-weight="700">KNOWLEDGE</text>
+        <text x="72" y="39" fill="#8f99ae" font-size="12">sources &amp; memory</text>
+      </g>
+      <g transform="translate(264 254)">
+        <circle cx="28" cy="18" r="8" fill="none" stroke="#7568ed" stroke-width="2"/>
+        <circle cx="5" cy="6" r="4" fill="#7568ed"/><circle cx="51" cy="5" r="4" fill="#7568ed"/>
+        <circle cx="8" cy="35" r="4" fill="#7568ed"/><circle cx="50" cy="34" r="4" fill="#7568ed"/>
+        <path d="m9 8 13 7m28-8-15 8M11 33l11-9m25 8-12-8" fill="none" stroke="#7568ed" stroke-width="1.8"/>
+        <text x="72" y="18" font-size="17" font-weight="700">COGNITION</text>
+        <text x="72" y="39" fill="#8f99ae" font-size="12">reason &amp; plan</text>
+      </g>
+    </g>
+
+    <g transform="translate(520 145)">
+      <rect width="236" height="195" rx="34" fill="#6658d3"/>
+      <rect x="20" y="20" width="4" height="155" rx="2" fill="#bdb7ff"/>
+      <ellipse cx="118" cy="82" rx="57" ry="25" fill="none" stroke="#c9c5ff" stroke-width="1.7" opacity=".75" transform="rotate(-22 118 82)"/>
+      <ellipse cx="118" cy="82" rx="57" ry="25" fill="none" stroke="#ffffff" stroke-width="1.2" opacity=".36" transform="rotate(28 118 82)"/>
+      <circle cx="118" cy="82" r="8" fill="#ffffff"/>
+      <circle cx="167" cy="52" r="5" fill="#58d0c1"/>
+      <text x="118" y="133" fill="#ffffff" text-anchor="middle" font-size="30" font-weight="800" letter-spacing="1">ASKME</text>
+      <text x="118" y="157" fill="#dcd9ff" text-anchor="middle" font-size="12">intent → governed action</text>
+    </g>
+
+    <path d="M756 243H812" fill="none" stroke="#58d0c1" stroke-width="2.4" marker-end="url(#arrow-teal)"/>
+    <path d="M966 243H996" fill="none" stroke="#58d0c1" stroke-width="2.4" marker-end="url(#arrow-teal)"/>
+    <path d="M1150 243H1180" fill="none" stroke="#58d0c1" stroke-width="2.4" marker-end="url(#arrow-teal)"/>
+
+    <g transform="translate(820 190)">
+      <rect width="146" height="106" rx="16" fill="#101a2f" stroke="#3a9f96" stroke-width="1.5"/>
+      <g fill="none" stroke="#58d0c1" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m22 30 5 5 8-9m-13 17 5 5 8-9m10-9h22m-22 13h22"/>
+      </g>
+      <text x="22" y="72" fill="#f7f8fb" font-size="16" font-weight="750">TASKS</text>
+      <text x="22" y="91" fill="#8f99ae" font-size="11.5">plan &amp; confirm</text>
+    </g>
+
+    <g transform="translate(1004 190)">
+      <rect width="146" height="106" rx="16" fill="#141a29" stroke="#d8a94e" stroke-width="1.5"/>
+      <path d="M30 22c7 6 14 8 22 9v13c0 12-9 20-22 25-13-5-22-13-22-25V31c8-1 15-3 22-9Z" fill="none" stroke="#d8a94e" stroke-width="2.2"/>
+      <path d="m20 45 7 7 14-16" fill="none" stroke="#d8a94e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="127" cy="18" r="4" fill="#d8a94e"/>
+      <text x="22" y="79" fill="#f7f8fb" font-size="16" font-weight="750">SAFETY</text>
+      <text x="22" y="96" fill="#a59b86" font-size="11.5">policy gate</text>
+    </g>
+
+    <g transform="translate(1188 190)">
+      <rect width="152" height="106" rx="16" fill="#101a2f" stroke="#3a9f96" stroke-width="1.5"/>
+      <rect x="16" y="23" width="39" height="32" rx="8" fill="none" stroke="#58d0c1" stroke-width="2"/>
+      <circle cx="28" cy="39" r="3" fill="#58d0c1"/><circle cx="43" cy="39" r="3" fill="#58d0c1"/>
+      <path d="M35 14v9M8 39h8m39 0h8M25 63h20" fill="none" stroke="#58d0c1" stroke-width="2" stroke-linecap="round"/>
+      <text x="16" y="79" fill="#f7f8fb" font-size="16" font-weight="750">RUNTIME</text>
+      <text x="16" y="96" fill="#8f99ae" font-size="11.5">robot adapters</text>
+    </g>
+
+    <g>
+      <rect x="60" y="392" width="1280" height="70" rx="14" fill="#111a30" stroke="#2c3860"/>
+      <path d="M62 392H1338" stroke="#7568ed" stroke-width="2"/>
+      <path d="M164 283V366Q164 392 190 392" fill="none" stroke="#7568ed" stroke-width="1.8" stroke-dasharray="7 8" marker-end="url(#arrow-violet)"/>
+      <path d="M638 340V392" fill="none" stroke="#7568ed" stroke-width="1.8" stroke-dasharray="7 8" marker-end="url(#arrow-violet)"/>
+      <path d="M1264 296V366Q1264 392 1238 392" fill="none" stroke="#7568ed" stroke-width="1.8" stroke-dasharray="7 8" marker-end="url(#arrow-violet)"/>
+
+      <g transform="translate(86 410)" fill="none" stroke="#8b80ff" stroke-width="2">
+        <path d="M3 0h19l9 9v29H3Z"/><path d="M22 0v10h9M9 20h16M9 27h12"/>
+      </g>
+      <text x="136" y="429" fill="#f7f8fb" font-size="17" font-weight="750">AUDIT</text>
+      <text x="136" y="448" fill="#8f99ae" font-size="11.5">evidence &amp; integrity</text>
+      <text x="840" y="434" fill="#8b80ff" font-size="11.5" font-weight="700" letter-spacing="2.2">TRACEABLE  ·  VERIFIABLE  ·  REPRODUCIBLE</text>
+      <circle cx="783" cy="428" r="4" fill="#7568ed"/>
+    </g>
+  </g>
+</svg>

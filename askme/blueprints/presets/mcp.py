@@ -6,44 +6,57 @@
     python -m askme.blueprints.presets.mcp
 """
 
-from askme.runtime.core.module import Runtime
-from askme.runtime.modules import (
-    CognitionModule,
-    ControlModule,
-    ExecutorModule,
-    HealthModule,
-    LLMModule,
-    MemoryModule,
-    MissionModule,
-    PipelineModule,
-    PulseModule,
-    RuntimeHandoffModule,
-    SafetyModule,
-    SkillModule,
-    ToolsModule,
-    VoiceModule,
-)
+from askme.blueprints.catalog.data import MCP_MODULES
 
-mcp = (
-    Runtime.use(LLMModule)
-    + Runtime.use(ToolsModule)
-    + Runtime.use(PulseModule)
-    + Runtime.use(MemoryModule)
-    + Runtime.use(MissionModule)
-    + Runtime.use(CognitionModule)
-    + Runtime.use(RuntimeHandoffModule)
-    + Runtime.use(SafetyModule)
-    + Runtime.use(PipelineModule)
-    + Runtime.use(SkillModule)
-    + Runtime.use(ExecutorModule)
-    + Runtime.use(VoiceModule)
-    + Runtime.use(ControlModule)
-    + Runtime.use(HealthModule)
-)
+_LABEL = "MCP 工具服务"
+
+
+def _build_mcp():
+    from askme.blueprints.runner.runner import compose_runtime
+    from askme.blueprints.runtime_composition import RuntimeHandoffModule
+    from askme.runtime.modules import (
+        CognitionModule,
+        ControlModule,
+        ExecutorModule,
+        HealthModule,
+        LLMModule,
+        MemoryModule,
+        MissionModule,
+        PipelineModule,
+        PulseModule,
+        SafetyModule,
+        SkillModule,
+        ToolsModule,
+        VoiceModule,
+        WarmSessionModule,
+    )
+
+    return compose_runtime(
+        (
+            LLMModule,
+            ToolsModule,
+            PulseModule,
+            MemoryModule,
+            MissionModule,
+            CognitionModule,
+            RuntimeHandoffModule,
+            SafetyModule,
+            PipelineModule,
+            SkillModule,
+            ExecutorModule,
+            VoiceModule,
+            ControlModule,
+            WarmSessionModule,
+            HealthModule,
+        )
+    )
+
 
 __all__ = ["mcp"]
 
 if __name__ == "__main__":
     from askme.blueprints.runner.runner import run_blueprint
 
-    run_blueprint(mcp, "MCP 工具服务")
+    run_blueprint(_build_mcp, _LABEL, module_names=MCP_MODULES)
+else:
+    mcp = _build_mcp()

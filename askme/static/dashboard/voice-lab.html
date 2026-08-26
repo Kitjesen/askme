@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Askme Voice Lab · 真机协作测试</title>
+  <link rel="stylesheet" href="/dashboard/voice-lab.css?v=20260720-1">
+</head>
+<body>
+  <a class="skip-link" href="#lab-main">跳到测试内容</a>
+  <header class="lab-topbar">
+    <a class="lab-brand" href="/dashboard/voice" aria-label="返回语音系统">
+      <span class="lab-brand-mark" aria-hidden="true">A</span>
+      <span><strong>Askme Voice Lab</strong><small>真机协作测试</small></span>
+    </a>
+    <div class="lab-top-actions">
+      <span id="connection-state" class="status-pill neutral">正在连接</span>
+      <a class="quiet-link" href="/dashboard/voice">返回语音系统</a>
+    </div>
+  </header>
+
+  <main id="lab-main" class="lab-shell">
+    <section class="lab-hero" aria-labelledby="lab-title">
+      <div>
+        <p class="eyebrow">ORDINARY SPEAKERPHONE · WINDOWS · NO ROS2</p>
+        <h1 id="lab-title">把“听起来流畅”变成可一起验证的证据</h1>
+        <p>按向导完成设备检查、安静校准、20 次静默、20 次覆盖打断和 20 次自然响应。人工听感会被保存，但不会冒充物理延迟。</p>
+      </div>
+      <aside class="truth-card" aria-label="证据边界">
+        <span class="truth-icon" aria-hidden="true">!</span>
+        <div><strong>默认严格阻断</strong><p>普通一体设备没有隔离扬声器监听通道时，可以完成诊断，但不会显示“产品级通过”。</p></div>
+      </aside>
+    </section>
+
+    <section class="lab-status-rail" aria-label="测试步骤">
+      <ol id="step-list" class="step-list"></ol>
+      <div class="overall-progress" aria-label="总进度">
+        <div><span>总进度</span><strong id="progress-label">0 / 60</strong></div>
+        <div class="progress-track"><span id="progress-bar" style="width:0%"></span></div>
+      </div>
+    </section>
+
+    <div id="lab-alert" class="lab-alert" role="status" aria-live="polite" hidden></div>
+
+    <section class="lab-grid">
+      <section id="work-panel" class="work-panel" aria-live="polite">
+        <div class="loading-card"><span class="spinner" aria-hidden="true"></span><p>正在读取音频设备…</p></div>
+      </section>
+
+      <aside class="dock-panel" aria-label="测试运行信息">
+        <div class="dock-heading"><span>本次运行</span><strong id="run-status">未创建</strong></div>
+        <dl class="run-facts">
+          <div><dt>Run ID</dt><dd id="run-id">—</dd></div>
+          <div><dt>输入</dt><dd id="run-input">—</dd></div>
+          <div><dt>输出</dt><dd id="run-output">—</dd></div>
+          <div><dt>房间</dt><dd id="run-room">—</dd></div>
+          <div><dt>证据等级</dt><dd id="evidence-grade">诊断</dd></div>
+        </dl>
+        <div id="gate-list" class="gate-list"></div>
+        <div class="dock-actions">
+          <button id="pause-button" class="button secondary" type="button" hidden>暂停并保存</button>
+          <button id="resume-button" class="button primary" type="button" hidden>恢复测试</button>
+          <button id="forget-button" class="button text" type="button" hidden>从此浏览器移除记录</button>
+        </div>
+      </aside>
+    </section>
+
+    <details class="evidence-drawer">
+      <summary>工程证据与原始状态</summary>
+      <pre id="evidence-json">尚未创建测试运行。</pre>
+    </details>
+  </main>
+
+  <template id="busy-template">
+    <div class="loading-card"><span class="spinner" aria-hidden="true"></span><p data-busy-label>正在执行…</p></div>
+  </template>
+
+  <script src="/dashboard/voice-lab.js?v=20260720-1" defer></script>
+</body>
+</html>

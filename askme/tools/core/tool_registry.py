@@ -7,6 +7,7 @@ tool registration, OpenAI-format definition export, and execution dispatch.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -22,6 +23,7 @@ from typing import Any
 from uuid import uuid4
 
 from askme.config import get_config
+from askme.conversation import ApprovalScope, InteractionTurnContext
 from askme.tools.core.execution_control import (
     CircuitBreaker,
     ScheduledWork,
@@ -87,7 +89,7 @@ _DEFAULT_PRIORITY_BY_SAFETY = {
 
 def _json_type_matches(value: object, expected: str) -> bool:
     """Return True if *value* matches the JSON Schema *expected* type string."""
-    _MAP = {
+    type_map: dict[str, type[Any] | tuple[type[Any], ...]] = {
         "string": str,
         "number": (int, float),
         "integer": int,
@@ -96,7 +98,7 @@ def _json_type_matches(value: object, expected: str) -> bool:
         "object": dict,
         "null": type(None),
     }
-    py_type = _MAP.get(expected)
+    py_type = type_map.get(expected)
     if py_type is None:
         return True  # Unknown type — don't block
     # JSON numbers: Python bools are subclasses of int; distinguish them.
@@ -144,6 +146,7 @@ class PendingToolApproval:
     args_json: str | None
     safety_level: str
     requested_at: float
+    approval_scope: ApprovalScope | None = None
 
 
 class BaseTool(ABC):
@@ -301,7 +304,9 @@ class ToolRegistry:
             )
             if str(name).strip()
         }
+        self._approval_lock = threading.RLock()
         self._pending_approval: PendingToolApproval | None = None
+        self._pending_approvals_by_id: dict[str, PendingToolApproval] = {}
 
     def register(self, tool: BaseTool) -> None:
         """Register a tool instance. Overwrites if name already exists."""
@@ -316,8 +321,16 @@ class ToolRegistry:
         if removed:
             logger.debug("Unregistered tool: %s", name)
         self._cooldown_until.pop(name, None)
-        if self._pending_approval and self._pending_approval.tool_name == name:
-            self._pending_approval = None
+        with self._approval_lock:
+            if self._pending_approval and self._pending_approval.tool_name == name:
+                self._pending_approval = None
+            scoped_ids = [
+                approval_id
+                for approval_id, pending in self._pending_approvals_by_id.items()
+                if pending.tool_name == name
+            ]
+            for approval_id in scoped_ids:
+                self._pending_approvals_by_id.pop(approval_id, None)
         return removed is not None
 
     def get(self, name: str) -> BaseTool | None:
@@ -330,8 +343,7 @@ class ToolRegistry:
 
     def get_voice_labels(self) -> dict[str, str]:
         """Return {name: voice_label} for tools with non-empty voice_label."""
-        return {name: tool.voice_label for name, tool in self._tools.items()
-                if tool.voice_label}
+        return {name: tool.voice_label for name, tool in self._tools.items() if tool.voice_label}
 
     def get_definitions(
         self,
@@ -415,11 +427,9 @@ class ToolRegistry:
                 "completed": int(scheduler_diag.get("completed", 0)),
             },
             "cooldown_count": sum(
-                1
-                for expires_at in self._cooldown_until.values()
-                if expires_at > time.monotonic()
+                1 for expires_at in self._cooldown_until.values() if expires_at > time.monotonic()
             ),
-            "pending_approval": self.has_pending_approval(),
+            "pending_approval": self._has_any_pending_approval(),
             "rate_limit": self._rate_limiter.diagnostics(),
             "circuit_breakers": circuit_diag,
             "background_jobs": {
@@ -429,12 +439,42 @@ class ToolRegistry:
             },
         }
 
-    def has_pending_approval(self) -> bool:
-        """Whether a dangerous tool invocation is waiting for approval."""
-        self._expire_pending_approval()
-        return self._pending_approval is not None
+    def has_pending_approval(
+        self,
+        interaction_context: InteractionTurnContext | None = None,
+    ) -> bool:
+        """Whether the caller has a dangerous invocation waiting for approval.
 
-    def matches_confirmation(self, text: str) -> bool:
+        Calls without an interaction context intentionally see only legacy
+        approvals. Scoped approvals require their bound context and exact
+        challenge ID before they can be resolved.
+        """
+        if interaction_context is not None:
+            return self.pending_approval_scope(interaction_context) is not None
+        with self._approval_lock:
+            self._expire_pending_approval_locked(time.monotonic())
+            return self._pending_approval is not None
+
+    def pending_approval_scope(
+        self,
+        interaction_context: InteractionTurnContext,
+    ) -> ApprovalScope | None:
+        """Return the live approval scope eligible for *interaction_context*."""
+        if interaction_context is None:
+            return None
+        now = time.monotonic()
+        with self._approval_lock:
+            self._expire_scoped_approvals_locked(now)
+            pending = self._find_scoped_pending_locked(interaction_context)
+            return pending.approval_scope if pending is not None else None
+
+    def matches_confirmation(
+        self,
+        text: str,
+        interaction_context: InteractionTurnContext | None = None,
+        *,
+        approval_id: str | None = None,
+    ) -> bool:
         """Return True when *text* confirms the pending dangerous action.
 
         Matching rules (ordered by specificity):
@@ -444,49 +484,128 @@ class ToolRegistry:
         Single-character phrases ("是", "好") require exact match to avoid
         false-positive on negations ("不是", "不好").
         """
-        if not self.has_pending_approval():
-            return False
+        if interaction_context is None:
+            if approval_id is not None or not self.has_pending_approval():
+                return False
+        else:
+            with self._approval_lock:
+                pending, _expired = self._scoped_pending_for_response_locked(
+                    interaction_context,
+                    approval_id,
+                    now=time.monotonic(),
+                )
+            if pending is None:
+                return False
         return self._phrase_set_matches(text, self._confirmation_phrases)
 
-    def matches_rejection(self, text: str) -> bool:
+    def matches_rejection(
+        self,
+        text: str,
+        interaction_context: InteractionTurnContext | None = None,
+        *,
+        approval_id: str | None = None,
+    ) -> bool:
         """Return True when *text* rejects the pending dangerous action."""
-        if not self.has_pending_approval():
-            return False
+        if interaction_context is None:
+            if approval_id is not None or not self.has_pending_approval():
+                return False
+        else:
+            with self._approval_lock:
+                pending, _expired = self._scoped_pending_for_response_locked(
+                    interaction_context,
+                    approval_id,
+                    now=time.monotonic(),
+                )
+            if pending is None:
+                return False
         return self._phrase_set_matches(text, self._rejection_phrases)
 
     def handle_pending_input(
         self,
         text: str,
+        interaction_context: InteractionTurnContext | None = None,
         *,
+        approval_id: str | None = None,
         cancel_token: Any | None = None,
     ) -> str | None:
         """Resolve or restate the pending high-risk action for arbitrary operator input."""
-        expired = self._expire_pending_approval()
+        if interaction_context is None:
+            if approval_id is not None:
+                return None
+            with self._approval_lock:
+                expired = self._expire_pending_approval_locked(time.monotonic())
+                pending = self._pending_approval
+            if expired is not None:
+                return self._format_approval_expired(expired)
+            if pending is None:
+                return None
+            if self._phrase_set_matches(text, self._confirmation_phrases):
+                return self.approve_pending(cancel_token=cancel_token)
+            if self._phrase_set_matches(text, self._rejection_phrases):
+                return self.reject_pending()
+            return self._format_approval_pending(pending)
+
+        now = time.monotonic()
+        with self._approval_lock:
+            if not self._normalize_approval_id(approval_id):
+                self._expire_scoped_approvals_locked(now)
+                pending = self._find_scoped_pending_locked(interaction_context)
+                expired = None
+            else:
+                pending, expired = self._scoped_pending_for_response_locked(
+                    interaction_context,
+                    approval_id,
+                    now=now,
+                )
         if expired is not None:
             return self._format_approval_expired(expired)
-
-        pending = self._pending_approval
         if pending is None:
             return None
-
+        if not self._normalize_approval_id(approval_id):
+            return self._format_approval_pending(pending)
         if self._phrase_set_matches(text, self._confirmation_phrases):
-            return self.approve_pending(cancel_token=cancel_token)
+            return self.approve_pending(
+                interaction_context,
+                approval_id=approval_id,
+                cancel_token=cancel_token,
+            )
         if self._phrase_set_matches(text, self._rejection_phrases):
-            return self.reject_pending()
+            return self.reject_pending(
+                interaction_context,
+                approval_id=approval_id,
+            )
         return self._format_approval_pending(pending)
 
-    def approve_pending(self, *, cancel_token: Any | None = None) -> str:
+    def approve_pending(
+        self,
+        interaction_context: InteractionTurnContext | None = None,
+        *,
+        approval_id: str | None = None,
+        cancel_token: Any | None = None,
+    ) -> str:
         """Execute the currently pending dangerous tool invocation."""
-        expired = self._expire_pending_approval()
+        if interaction_context is None:
+            if approval_id is not None:
+                return "[Approval] No pending high-risk operation."
+            with self._approval_lock:
+                expired = self._expire_pending_approval_locked(time.monotonic())
+                pending = self._pending_approval
+                if pending is not None:
+                    self._pending_approval = None
+        else:
+            with self._approval_lock:
+                pending, expired = self._scoped_pending_for_response_locked(
+                    interaction_context,
+                    approval_id,
+                    now=time.monotonic(),
+                    remove=True,
+                )
         if expired is not None:
             return self._format_approval_expired(expired)
-
-        pending = self._pending_approval
         if pending is None:
             return "[Approval] No pending high-risk operation."
 
         tool = self._tools.get(pending.tool_name)
-        self._pending_approval = None
         if tool is None:
             logger.warning("Approved tool disappeared before execution: %s", pending.tool_name)
             return f"[Error] Tool not found: {pending.tool_name}"
@@ -507,17 +626,33 @@ class ToolRegistry:
             cancel_token=cancel_token,
         )
 
-    def reject_pending(self) -> str:
+    def reject_pending(
+        self,
+        interaction_context: InteractionTurnContext | None = None,
+        *,
+        approval_id: str | None = None,
+    ) -> str:
         """Cancel the currently pending dangerous tool invocation."""
-        expired = self._expire_pending_approval()
+        if interaction_context is None:
+            if approval_id is not None:
+                return "[Approval] No pending high-risk operation."
+            with self._approval_lock:
+                expired = self._expire_pending_approval_locked(time.monotonic())
+                pending = self._pending_approval
+                if pending is not None:
+                    self._pending_approval = None
+        else:
+            with self._approval_lock:
+                pending, expired = self._scoped_pending_for_response_locked(
+                    interaction_context,
+                    approval_id,
+                    now=time.monotonic(),
+                    remove=True,
+                )
         if expired is not None:
             return self._format_approval_expired(expired)
-
-        pending = self._pending_approval
         if pending is None:
             return "[Approval] No pending high-risk operation."
-
-        self._pending_approval = None
         return (
             f"{_APPROVAL_CANCELLED_PREFIX} 已取消高风险操作: "
             f"{pending.tool_name}({self._format_kwargs(pending.kwargs)})"
@@ -531,6 +666,7 @@ class ToolRegistry:
         allowed_names: Iterable[str] | None = None,
         max_safety_level: str = "critical",
         timeout: float | None = None,
+        interaction_context: InteractionTurnContext | None = None,
         cancel_token: Any | None = None,
     ) -> str:
         """Execute a tool by name with JSON-encoded arguments."""
@@ -570,23 +706,13 @@ class ToolRegistry:
             guard_error = self._get_operational_guard_error(tool, consume_rate=False)
             if guard_error:
                 return guard_error
-            self._expire_pending_approval()
-            if self._pending_approval is not None:
-                return self._format_approval_pending(self._pending_approval)
-            self._pending_approval = PendingToolApproval(
-                tool_name=name,
-                kwargs=kwargs,
-                args_json=args_json,
-                safety_level=_normalize_safety_level(tool.safety_level),
-                requested_at=time.monotonic(),
-            )
-            logger.warning(
-                "Queued %s tool for operator approval: %s(%s)",
-                _normalize_safety_level(tool.safety_level),
+            return self._queue_pending_approval(
+                tool,
                 name,
                 kwargs,
+                args_json,
+                interaction_context=interaction_context,
             )
-            return self._format_approval_required(tool, kwargs)
 
         guard_error = self._get_operational_guard_error(tool, consume_rate=True)
         if guard_error:
@@ -623,6 +749,7 @@ class ToolRegistry:
         allowed_names: Iterable[str] | None = None,
         max_safety_level: str = "critical",
         priority: int | None = None,
+        interaction_context: InteractionTurnContext | None = None,
     ) -> dict[str, Any]:
         """Queue a background tool job and return its tracked state."""
         prepared = self._prepare_tool_call(
@@ -659,7 +786,13 @@ class ToolRegistry:
                 "job_id": "",
                 "tool_name": name,
                 "status": "pending_approval",
-                "result": self._queue_pending_approval(tool, name, kwargs, args_json),
+                "result": self._queue_pending_approval(
+                    tool,
+                    name,
+                    kwargs,
+                    args_json,
+                    interaction_context=interaction_context,
+                ),
             }
 
         guard_error = self._get_operational_guard_error(tool, consume_rate=True)
@@ -838,24 +971,82 @@ class ToolRegistry:
         name: str,
         kwargs: dict[str, Any],
         args_json: str | None,
+        *,
+        interaction_context: InteractionTurnContext | None = None,
     ) -> str:
-        self._expire_pending_approval()
-        if self._pending_approval is not None:
-            return self._format_approval_pending(self._pending_approval)
-        self._pending_approval = PendingToolApproval(
-            tool_name=name,
-            kwargs=kwargs,
-            args_json=args_json,
-            safety_level=_normalize_safety_level(tool.safety_level),
-            requested_at=time.monotonic(),
-        )
+        requested_at = time.monotonic()
+        if interaction_context is not None:
+            is_voice = str(interaction_context.channel or "").strip().lower() == "voice" or (
+                str(interaction_context.source or "").strip().lower() == "voice"
+            )
+            person_id = str(interaction_context.person_id or "").strip()
+            operator_id = str(interaction_context.operator_id or "").strip()
+            trusted_operator = bool(
+                operator_id and interaction_context.metadata.get("operator_authenticated") is True
+            )
+            if is_voice and not person_id and not trusted_operator:
+                logger.warning(
+                    "Blocked anonymous voice approval for %s; trusted operator required",
+                    name,
+                )
+                return (
+                    f"{_APPROVAL_REQUIRED_PREFIX} 高风险操作需要已认证操作员，"
+                    "请在控制台登录后重新发起。"
+                )
+        safety_level = _normalize_safety_level(tool.safety_level)
+        with self._approval_lock:
+            self._expire_pending_approval_locked(requested_at)
+            self._expire_scoped_approvals_locked(requested_at)
+            if interaction_context is None:
+                if self._pending_approval is not None:
+                    return self._format_approval_pending(self._pending_approval)
+                pending = PendingToolApproval(
+                    tool_name=name,
+                    kwargs=kwargs,
+                    args_json=args_json,
+                    safety_level=safety_level,
+                    requested_at=requested_at,
+                )
+                self._pending_approval = pending
+            else:
+                existing = self._find_scoped_pending_locked(interaction_context)
+                if existing is not None:
+                    return self._format_approval_pending(existing)
+                approval_id = uuid4().hex
+                expires_at = (
+                    requested_at + self._approval_timeout_seconds
+                    if self._approval_timeout_seconds > 0
+                    else math.inf
+                )
+                approval_scope = ApprovalScope.create(
+                    interaction_context,
+                    approval_id=approval_id,
+                    subject=name,
+                    risk_level=safety_level,
+                    payload_digest=self._canonical_payload_digest(kwargs),
+                    expires_at_monotonic=expires_at,
+                    allows_short_reply=True,
+                )
+                pending = PendingToolApproval(
+                    tool_name=name,
+                    kwargs=kwargs,
+                    args_json=args_json,
+                    safety_level=safety_level,
+                    requested_at=requested_at,
+                    approval_scope=approval_scope,
+                )
+                self._pending_approvals_by_id[approval_id] = pending
         logger.warning(
             "Queued %s tool for operator approval: %s(%s)",
-            _normalize_safety_level(tool.safety_level),
+            safety_level,
             name,
             kwargs,
         )
-        return self._format_approval_required(tool, kwargs)
+        return self._format_approval_required(
+            tool,
+            kwargs,
+            approval_scope=pending.approval_scope,
+        )
 
     def _format_tool_result(self, result: str) -> str:
         if len(result) > self._RESULT_MAX_CHARS:
@@ -883,7 +1074,9 @@ class ToolRegistry:
         )
 
     @staticmethod
-    def _validate_args(tool_name: str, kwargs: dict[str, Any], schema: dict[str, Any]) -> str | None:
+    def _validate_args(
+        tool_name: str, kwargs: dict[str, Any], schema: dict[str, Any]
+    ) -> str | None:
         """Lightweight schema validation — checks required fields and basic types.
 
         Returns an error message string on failure, or None if valid.
@@ -894,9 +1087,8 @@ class ToolRegistry:
         required = schema.get("required", [])
         missing = [k for k in required if k not in kwargs]
         if missing:
-            return (
-                f"Tool '{tool_name}' missing required argument(s): "
-                + ", ".join(f"'{m}'" for m in missing)
+            return f"Tool '{tool_name}' missing required argument(s): " + ", ".join(
+                f"'{m}'" for m in missing
             )
 
         properties = schema.get("properties", {})
@@ -982,35 +1174,154 @@ class ToolRegistry:
             return False
         return tool_level in self._require_confirmation_levels
 
+    def _has_any_pending_approval(self) -> bool:
+        now = time.monotonic()
+        with self._approval_lock:
+            self._expire_pending_approval_locked(now)
+            self._expire_scoped_approvals_locked(now)
+            return bool(self._pending_approval or self._pending_approvals_by_id)
+
     def _expire_pending_approval(self) -> PendingToolApproval | None:
+        with self._approval_lock:
+            return self._expire_pending_approval_locked(time.monotonic())
+
+    def _expire_pending_approval_locked(
+        self,
+        now: float,
+    ) -> PendingToolApproval | None:
         pending = self._pending_approval
-        if pending is None:
+        if pending is None or self._approval_timeout_seconds <= 0:
             return None
-        if self._approval_timeout_seconds <= 0:
-            return None
-        if time.monotonic() - pending.requested_at <= self._approval_timeout_seconds:
+        if now - pending.requested_at <= self._approval_timeout_seconds:
             return None
 
         self._pending_approval = None
         logger.warning("Pending approval expired for tool: %s", pending.tool_name)
         return pending
 
-    def _format_approval_required(self, tool: BaseTool, kwargs: dict[str, Any]) -> str:
+    def _expire_scoped_approvals_locked(
+        self,
+        now: float,
+    ) -> dict[str, PendingToolApproval]:
+        expired: dict[str, PendingToolApproval] = {}
+        for approval_id, pending in tuple(self._pending_approvals_by_id.items()):
+            scope = pending.approval_scope
+            if scope is None or now < scope.expires_at_monotonic:
+                continue
+            expired[approval_id] = pending
+            self._pending_approvals_by_id.pop(approval_id, None)
+            logger.warning(
+                "Scoped approval expired for tool: %s (%s)",
+                pending.tool_name,
+                approval_id,
+            )
+        return expired
+
+    def _find_scoped_pending_locked(
+        self,
+        interaction_context: InteractionTurnContext,
+    ) -> PendingToolApproval | None:
+        for pending in reversed(tuple(self._pending_approvals_by_id.values())):
+            scope = pending.approval_scope
+            if scope is not None and self._scope_identity_matches(scope, interaction_context):
+                return pending
+        return None
+
+    def _scoped_pending_for_response_locked(
+        self,
+        interaction_context: InteractionTurnContext,
+        approval_id: str | None,
+        *,
+        now: float,
+        remove: bool = False,
+    ) -> tuple[PendingToolApproval | None, PendingToolApproval | None]:
+        normalized_id = self._normalize_approval_id(approval_id)
+        expired_by_id = self._expire_scoped_approvals_locked(now)
+        if normalized_id is None:
+            return None, None
+
+        expired = expired_by_id.get(normalized_id)
+        if expired is not None:
+            scope = expired.approval_scope
+            if scope is not None and self._scope_identity_matches(scope, interaction_context):
+                return None, expired
+            return None, None
+
+        pending = self._pending_approvals_by_id.get(normalized_id)
+        if pending is None or pending.approval_scope is None:
+            return None, None
+        if not pending.approval_scope.matches(
+            interaction_context,
+            approval_id=normalized_id,
+            now_monotonic=now,
+        ):
+            return None, None
+        if remove:
+            self._pending_approvals_by_id.pop(normalized_id, None)
+        return pending, None
+
+    @staticmethod
+    def _scope_identity_matches(
+        scope: ApprovalScope,
+        interaction_context: InteractionTurnContext,
+    ) -> bool:
+        if str(interaction_context.thread_id).strip() != scope.thread_id:
+            return False
+        person_id = str(interaction_context.person_id or "").strip() or None
+        if scope.person_id is not None and person_id != scope.person_id:
+            return False
+        operator_id = str(interaction_context.operator_id or "").strip() or None
+        return scope.operator_id is None or operator_id == scope.operator_id
+
+    @staticmethod
+    def _normalize_approval_id(approval_id: str | None) -> str | None:
+        normalized = str(approval_id or "").strip()
+        return normalized or None
+
+    @staticmethod
+    def _canonical_payload_digest(kwargs: dict[str, Any]) -> str:
+        canonical = json.dumps(
+            kwargs,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _format_approval_required(
+        self,
+        tool: BaseTool,
+        kwargs: dict[str, Any],
+        *,
+        approval_scope: ApprovalScope | None = None,
+    ) -> str:
         timeout_hint = (
             f"({int(self._approval_timeout_seconds)}s timeout, auto-cancelled)"
             if self._approval_timeout_seconds > 0
             else ""
         )
+        approval_hint = (
+            f" approval_id={approval_scope.approval_id}." if approval_scope is not None else ""
+        )
         return (
             f"{_APPROVAL_REQUIRED_PREFIX} 高风险操作待确认: "
             f"{tool.name}({self._format_kwargs(kwargs)})。"
+            f"{approval_hint}"
             f" 请说[确认执行]继续，或说[取消]放弃。{timeout_hint}"
         )
+
+    @staticmethod
+    def _approval_id_hint(pending: PendingToolApproval) -> str:
+        scope = pending.approval_scope
+        if scope is None:
+            return ""
+        return f" approval_id={scope.approval_id}."
 
     def _format_approval_expired(self, pending: PendingToolApproval) -> str:
         return (
             f"{_APPROVAL_EXPIRED_PREFIX} 待确认操作已过期: "
             f"{pending.tool_name}({self._format_kwargs(pending.kwargs)})。"
+            f"{self._approval_id_hint(pending)}"
             " 如需继续，请重新发起操作。"
         )
 
@@ -1018,6 +1329,7 @@ class ToolRegistry:
         return (
             f"{_APPROVAL_PENDING_PREFIX} 高风险操作等待确认: "
             f"{pending.tool_name}({self._format_kwargs(pending.kwargs)})。"
+            f"{self._approval_id_hint(pending)}"
             " 请先回复【确认执行】继续，或【取消】放弃，再发起新指令。"
         )
 

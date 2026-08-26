@@ -37,6 +37,7 @@ def _make_system(
     if vector:
         vector.retrieve = AsyncMock(return_value="vector context")
         vector.save = AsyncMock()
+        vector.admit_turn = AsyncMock(return_value="admitted")
 
     ms = MemorySystem(
         llm=llm,
@@ -154,18 +155,11 @@ class TestCompress:
 
 class TestBehaviorMemory:
     @pytest.mark.asyncio
-    async def test_compat_save_only_persists_explicit_behavior_fact(self):
-        behavior = MagicMock()
-        behavior.save_fact = AsyncMock(return_value=True)
-        ms, _, _, _, _, vector = _make_system(
-            behavior_memory=behavior,
-            config={"memory": {"robot_behavior_memory_enabled": True}},
-        )
-
-        saved = await ms.save_to_vector("以后请叫我王老师", "好的")
-
-        assert saved is True
-        behavior.save_fact.assert_awaited_once()
+    async def test_save_to_vector(self):
+        ms, _, _, _, _, vector = _make_system()
+        result = await ms.save_to_vector("user", "assistant")
+        assert result == "admitted"
+        vector.admit_turn.assert_awaited_once_with("user")
         vector.save.assert_not_awaited()
 
     @pytest.mark.asyncio

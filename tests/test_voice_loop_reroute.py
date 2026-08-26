@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from askme.pipeline.voice_loop import VoiceLoop
 
 from askme.pipeline.proactive.base import ProactiveResult
+from askme.pipeline.skills.outcome import SkillOutcome
 from askme.robot_interaction import IntentType
 from askme.robot_interaction.interaction_gate import (
     InteractionAction,
@@ -82,6 +83,7 @@ def _make_loop(
     mock_dispatcher = MagicMock()
     mock_dispatcher.dispatch = AsyncMock()
     mock_dispatcher.handle_general = AsyncMock()
+    mock_dispatcher.can_execute = AsyncMock(return_value=SkillOutcome.ready())
     mock_dispatcher.has_active_agent_task = False
 
     loop = VoiceLoop(
@@ -387,7 +389,7 @@ class TestRerouteLogging:
     """VoiceLoop logs when a reroute happens."""
 
     async def test_reroute_is_logged(self):
-        """When reroute fires, logger.info is called with the interrupt_payload."""
+        """Reroute logs structure without persisting the spoken payload."""
         original_intent = _nav_intent()
         original_intent.skill_name = "inspect"
 
@@ -413,12 +415,12 @@ class TestRerouteLogging:
         with patch("askme.pipeline.voice_loop.logger") as mock_logger:
             await loop.run()
 
-        # logger.info should have been called with a message containing the payload
         info_calls = mock_logger.info.call_args_list
         reroute_logged = any(
-            "reroute" in str(call).lower() or "去仓库B" in str(call)
+            "rerouting interrupt payload" in str(call).lower()
             for call in info_calls
         )
         assert reroute_logged, (
             f"Expected a reroute log entry; got info calls: {info_calls}"
         )
+        assert "去仓库B" not in repr(info_calls)

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from http.server import HTTPServer
 from threading import Thread
 from unittest.mock import patch
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 import pytest
 
@@ -259,8 +259,9 @@ def test_http_server_exposes_health_and_json_endpoints():
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = "http://127.0.0.1:" + str(server.server_port)
+    opener = build_opener(ProxyHandler({}))
     try:
-        with urlopen(base_url + "/healthz", timeout=1) as response:
+        with opener.open(base_url + "/healthz", timeout=1) as response:
             health = json.load(response)
         assert health["ready"] is True
         assert health["count"] == 0
@@ -279,7 +280,7 @@ def test_http_server_exposes_health_and_json_endpoints():
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urlopen(request, timeout=1) as response:
+        with opener.open(request, timeout=1) as response:
             result = json.load(response)
         assert result["ok"] is True
         assert collection.rows["drawer-http"][1]["room"] == "robot_behavior"

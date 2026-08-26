@@ -36,7 +36,11 @@ def _evidence_file_modified_at(path: str) -> float:
 
 def _customer_project_evidence_inventory(report: dict[str, Any]) -> list[dict[str, Any]]:
     readiness = _mapping(report.get("field_readiness"))
-    reports = readiness.get("evidence_reports") if isinstance(readiness.get("evidence_reports"), list) else []
+    reports = (
+        readiness.get("evidence_reports")
+        if isinstance(readiness.get("evidence_reports"), list)
+        else []
+    )
     inventory: list[dict[str, Any]] = []
     records_by_path: dict[str, dict[str, Any]] = {}
     for item in reports:
@@ -73,14 +77,21 @@ def _customer_project_evidence_inventory(report: dict[str, Any]) -> list[dict[st
                 record["evidence_url"] = str(receipt.get("evidence_url") or _evidence_url(path))
             record.update(onsite_metadata)
             continue
-        record = _evidence_file_inventory(path, evidence_url=str(receipt.get("evidence_url") or _evidence_url(path)))
+        record = _evidence_file_inventory(
+            path, evidence_url=str(receipt.get("evidence_url") or _evidence_url(path))
+        )
         record.update(onsite_metadata)
         records_by_path[path_key] = record
         inventory.append(record)
     return inventory
 
 
-def _evidence_file_inventory(path: str, *, evidence_url: str) -> dict[str, Any]:
+def _evidence_file_inventory(
+    path: str,
+    *,
+    evidence_url: str,
+    allowed_roots: tuple[Path, ...] = (),
+) -> dict[str, Any]:
     record: dict[str, Any] = {
         "path": path,
         "evidence_url": evidence_url,
@@ -93,9 +104,8 @@ def _evidence_file_inventory(path: str, *, evidence_url: str) -> dict[str, Any]:
     except OSError as exc:
         record["error"] = str(exc)
         return record
-    try:
-        resolved.relative_to(PROJECT_ROOT.resolve())
-    except ValueError:
+    roots = (PROJECT_ROOT, *allowed_roots)
+    if not _is_under_allowed_root(resolved, roots):
         record["error"] = "outside_project"
         return record
     if not resolved.exists() or not resolved.is_file():
@@ -105,12 +115,24 @@ def _evidence_file_inventory(path: str, *, evidence_url: str) -> dict[str, Any]:
     except OSError as exc:
         record["error"] = str(exc)
         return record
-    record.update({
-        "exists": True,
-        "size_bytes": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
-    })
+    record.update(
+        {
+            "exists": True,
+            "size_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    )
     return record
+
+
+def _is_under_allowed_root(path: Path, roots: tuple[Path, ...]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root.resolve())
+        except (OSError, ValueError):
+            continue
+        return True
+    return False
 
 
 def _evidence_path_key(path: str) -> str:

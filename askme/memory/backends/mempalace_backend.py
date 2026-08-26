@@ -158,7 +158,12 @@ class MemPalaceBackend:
         items = await self.retrieve_items(text)
         return "\n".join(f"- {item['text']}" for item in items)
 
-    async def retrieve_items(self, text: str) -> list[dict[str, Any]]:
+    async def retrieve_items(
+        self,
+        text: str,
+        *,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         clean_text = str(text or "").strip()
         if not clean_text:
             return []
@@ -181,12 +186,16 @@ class MemPalaceBackend:
                     timeout=self._retrieve_timeout,
                 )
                 self._accept_http_response(response)
-                return self._http_response_items(response)
+                return self._http_response_items(response, metadata_filter)
             return await asyncio.wait_for(
-                asyncio.to_thread(self._retrieve_items_sync, clean_text),
+                asyncio.to_thread(
+                    self._retrieve_items_sync,
+                    clean_text,
+                    metadata_filter,
+                ),
                 timeout=self._retrieve_timeout,
             )
-        except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
+        except TimeoutError:
             self._record_http_failure("retrieval timeout")
             logger.warning("[Memory] MemPalace retrieval timed out (%.1fs).", self._retrieve_timeout)
             return []
@@ -195,11 +204,15 @@ class MemPalaceBackend:
             logger.debug("[Memory] MemPalace retrieve failed: %s", exc)
             return []
 
-    def _retrieve_items_sync(self, text: str) -> list[dict[str, Any]]:
+    def _retrieve_items_sync(
+        self,
+        text: str,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         collection = self._open_collection(create=False)
         if collection is None:
             return []
-        where = self._where_filter()
+        where = self._where_filter(metadata_filter)
         kwargs: dict[str, Any] = {
             "query_texts": [text],
             "n_results": max(self._n_results * 2, self._n_results),
@@ -211,9 +224,13 @@ class MemPalaceBackend:
         docs = _first_or_empty(results, "documents")
         metas = _first_or_empty(results, "metadatas")
         dists = _first_or_empty(results, "distances")
-        return self._build_items(docs, metas, dists)
+        return self._build_items(docs, metas, dists, metadata_filter)
 
-    def _http_response_items(self, response: dict[str, Any]) -> list[dict[str, Any]]:
+    def _http_response_items(
+        self,
+        response: dict[str, Any],
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         raw_items = response.get("items")
         if not isinstance(raw_items, list):
             return []
@@ -226,10 +243,14 @@ class MemPalaceBackend:
             docs.append(raw_item.get("text"))
             metas.append(raw_item.get("metadata"))
             dists.append(raw_item.get("distance"))
-        return self._build_items(docs, metas, dists)
+        return self._build_items(docs, metas, dists, metadata_filter)
 
     def _build_items(
-        self, docs: list[Any], metas: list[Any], dists: list[Any]
+        self,
+        docs: list[Any],
+        metas: list[Any],
+        dists: list[Any],
+        metadata_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for doc, metadata, distance in zip(docs, metas, dists):
@@ -243,6 +264,11 @@ class MemPalaceBackend:
             if similarity is not None and similarity < self._min_similarity:
                 continue
             meta = dict(metadata or {})
+            if metadata_filter and any(
+                str(meta.get(key) or "") != str(value)
+                for key, value in metadata_filter.items()
+            ):
+                continue
             source_file = str(meta.get("source_file") or "")
             items.append(
                 {
@@ -258,14 +284,25 @@ class MemPalaceBackend:
                 break
         return items
 
-    def _where_filter(self) -> dict[str, Any]:
-        if self._wing and self._room:
-            return {"$and": [{"wing": self._wing}, {"room": self._room}]}
+    def _where_filter(
+        self,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clauses: list[dict[str, Any]] = []
         if self._wing:
-            return {"wing": self._wing}
+            clauses.append({"wing": self._wing})
         if self._room:
-            return {"room": self._room}
-        return {}
+            clauses.append({"room": self._room})
+        for key, value in (metadata_filter or {}).items():
+            clean_key = str(key or "").strip()
+            if not clean_key or clean_key.startswith("$") or value is None:
+                continue
+            clauses.append({clean_key: value})
+        if not clauses:
+            return {}
+        if len(clauses) == 1:
+            return clauses[0]
+        return {"$and": clauses}
 
     async def save(self, user_text: str, assistant_text: str) -> bool:
         user = str(user_text or "").strip()
@@ -283,6 +320,7 @@ class MemPalaceBackend:
         )
 
     async def save_fact(self, text: str, metadata: dict[str, Any] | None = None) -> bool:
+        """Persist one fact and report only a confirmed backend upsert."""
         clean = str(text or "").strip()
         if not clean:
             return False
@@ -351,7 +389,6 @@ class MemPalaceBackend:
             metadatas=[merged_metadata],
         )
         return True
-
     async def update_metadata(
         self, record_id: str, metadata: dict[str, Any] | None = None
     ) -> bool:

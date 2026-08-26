@@ -20,11 +20,14 @@ import json
 import logging
 import os
 import time
+import uuid
 from copy import deepcopy
 from pathlib import Path
+from threading import RLock
 from typing import TYPE_CHECKING, Any
 
 from askme.config import get_config, project_root
+from askme.llm.core.contracts import LLMCallContext
 from askme.telemetry.ota_bridge import OTABridgeMetrics
 
 if TYPE_CHECKING:
@@ -33,9 +36,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Sliding window compression constants
-COMPRESS_THRESHOLD = 30   # Start compressing when history exceeds this
-KEEP_RECENT = 10          # Keep this many recent messages verbatim
-HARD_LIMIT = 80           # Absolute max messages — truncate even if compression failed
+COMPRESS_THRESHOLD = 30  # Start compressing when history exceeds this
+KEEP_RECENT = 10  # Keep this many recent messages verbatim
+HARD_LIMIT = 80  # Absolute max messages — truncate even if compression failed
 SUMMARY_TAG = "[对话摘要]"
 
 COMPRESS_PROMPT = """\
@@ -75,6 +78,8 @@ class ConversationManager:
         self._session_histories: dict[str, list[dict[str, Any]]] = {}
         self._compress_backoff_until: float = 0.0  # back off after compression failure
         self._save_scheduled: bool = False  # debounce: coalesce per-turn saves
+        self._save_dirty: bool = False
+        self._persistence_lock = RLock()
         # Lock prevents concurrent compress calls from clobbering each other's history.
         self._compress_lock: asyncio.Lock = asyncio.Lock()
         self._load()
@@ -90,12 +95,13 @@ class ConversationManager:
         conversation_session_id: str | None = None,
     ) -> None:
         """Append a user message and persist."""
-        history = self._history_for(conversation_session_id)
-        history.append({"role": "user", "content": content})
-        if self._metrics is not None:
-            self._metrics.record_conversation_turn()
-        self._trim(conversation_session_id=conversation_session_id)
-        self._save()
+        with self._persistence_lock:
+            history = self._history_for(conversation_session_id)
+            history.append({"role": "user", "content": content})
+            if self._metrics is not None:
+                self._metrics.record_conversation_turn()
+            self._trim(conversation_session_id=conversation_session_id)
+            self._save()
 
     def add_assistant_message(
         self,
@@ -111,10 +117,11 @@ class ConversationManager:
             message["evidence"] = evidence
         if rag is not None:
             message["rag"] = rag
-        history = self._history_for(conversation_session_id)
-        history.append(message)
-        self._trim(conversation_session_id=conversation_session_id)
-        self._save()
+        with self._persistence_lock:
+            history = self._history_for(conversation_session_id)
+            history.append(message)
+            self._trim(conversation_session_id=conversation_session_id)
+            self._save()
 
     def update_last_assistant_metadata(
         self,
@@ -149,17 +156,21 @@ class ConversationManager:
         if not tool_calls:
             return
         history = self._history_for(conversation_session_id)
-        history.append({
-            "role": "assistant",
-            "content": None,
-            "tool_calls": tool_calls,
-        })
+        history.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": tool_calls,
+            }
+        )
         for tr in tool_results:
-            history.append({
-                "role": "tool",
-                "tool_call_id": tr["tool_call_id"],
-                "content": tr["content"],
-            })
+            history.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tr["tool_call_id"],
+                    "content": tr["content"],
+                }
+            )
 
     def get_messages(
         self,
@@ -172,15 +183,24 @@ class ConversationManager:
             conversation_session_id
         )
 
-    def clear(self, *, conversation_session_id: str | None = None) -> None:
+    def clear(
+        self,
+        *,
+        conversation_session_id: str | None = None,
+        durable: bool = False,
+    ) -> None:
         """Wipe all history and persist the empty state."""
-        session_key = self._session_key(conversation_session_id)
-        if session_key:
-            self._session_histories[session_key] = []
-        else:
-            self.history = []
-            self._session_histories = {}
-        self._save()
+        with self._persistence_lock:
+            session_key = self._session_key(conversation_session_id)
+            if session_key:
+                self._session_histories[session_key] = []
+            else:
+                self.history = []
+                self._session_histories = {}
+            if durable:
+                self._save_sync()
+            else:
+                self._save()
 
     def remove_latest_user_message(
         self,
@@ -190,13 +210,36 @@ class ConversationManager:
     ) -> bool:
         """Remove the latest matching user message from one conversation session."""
 
-        history = self._history_for(conversation_session_id)
-        for i in range(len(history) - 1, -1, -1):
-            msg = history[i]
-            if msg.get("role") == "user" and msg.get("content") == content:
-                history.pop(i)
-                self._save()
-                return True
+        with self._persistence_lock:
+            history = self._history_for(conversation_session_id)
+            for i in range(len(history) - 1, -1, -1):
+                msg = history[i]
+                if msg.get("role") == "user" and msg.get("content") == content:
+                    history.pop(i)
+                    self._save()
+                    return True
+        return False
+
+    def remove_latest_assistant_message(
+        self,
+        content: str,
+        *,
+        conversation_session_id: str | None = None,
+    ) -> bool:
+        """Remove the latest matching assistant message from one session.
+
+        Turn settlement uses this as a rollback seam for cancellation tokens
+        that cannot provide an atomic ``try_run`` handoff themselves.
+        """
+
+        with self._persistence_lock:
+            history = self._history_for(conversation_session_id)
+            for i in range(len(history) - 1, -1, -1):
+                msg = history[i]
+                if msg.get("role") == "assistant" and msg.get("content") == content:
+                    history.pop(i)
+                    self._save()
+                    return True
         return False
 
     async def maybe_compress(
@@ -222,15 +265,16 @@ class ConversationManager:
         history = self._history_for(conversation_session_id)
         # Hard limit: drop oldest messages immediately if compression keeps failing.
         regular = [
-            m for m in history
-            if m.get("role") in ("user", "assistant") and m.get("content")
+            m for m in history if m.get("role") in ("user", "assistant") and m.get("content")
         ]
         if len(regular) > HARD_LIMIT:
             dropped_count = len(regular) - HARD_LIMIT
             logger.warning(
                 "[Conversation] Hard limit %d exceeded (%d messages) — "
                 "dropping %d oldest messages without compression",
-                HARD_LIMIT, len(regular), dropped_count,
+                HARD_LIMIT,
+                len(regular),
+                dropped_count,
             )
             self._set_history(regular[-HARD_LIMIT:], conversation_session_id)
             self._save()
@@ -258,8 +302,7 @@ class ConversationManager:
             return
 
         regular = [
-            m for m in history
-            if m.get("role") in ("user", "assistant") and m.get("content")
+            m for m in history if m.get("role") in ("user", "assistant") and m.get("content")
         ]
         if len(regular) <= COMPRESS_THRESHOLD:
             return
@@ -290,12 +333,25 @@ class ConversationManager:
 
         try:
             summary = await asyncio.wait_for(
-                llm.chat([
-                    {"role": "system", "content": "你是一个对话压缩助手。"},
-                    {"role": "user", "content": COMPRESS_PROMPT.format(
-                        conversation="\n".join(lines)
-                    )},
-                ]),
+                llm.chat(
+                    [
+                        {"role": "system", "content": "你是一个对话压缩助手。"},
+                        {
+                            "role": "user",
+                            "content": COMPRESS_PROMPT.format(conversation="\n".join(lines)),
+                        },
+                    ],
+                    model="memory-compact",
+                    context=LLMCallContext(
+                        session_id=conversation_session_id,
+                        call_id=uuid.uuid4().hex,
+                        purpose="memory_compact",
+                        channel="background",
+                        request_class="memory",
+                        privacy_class="sensitive",
+                        allow_cache=False,
+                    ),
+                ),
                 timeout=10.0,
             )
             summary = summary.strip()
@@ -310,7 +366,8 @@ class ConversationManager:
             # while the LLM was running.  Take KEEP_RECENT from the live state.
             current_history = self._history_for(conversation_session_id)
             current_regular = [
-                m for m in current_history
+                m
+                for m in current_history
                 if m.get("role") in ("user", "assistant") and m.get("content")
             ]
             recent = current_regular[-KEEP_RECENT:]
@@ -319,7 +376,8 @@ class ConversationManager:
             self._save()
             logger.info(
                 "[Conversation] Compressed %d messages into summary (%d new arrivals preserved)",
-                len(to_compress), new_count,
+                len(to_compress),
+                new_count,
             )
         except Exception as exc:
             logger.warning("[Conversation] Compression failed: %s", exc)
@@ -337,24 +395,28 @@ class ConversationManager:
         Trimmed messages are sent to SessionMemory for summarization.
         """
         history = self._history_for(conversation_session_id)
-        clean = [
-            m for m in history
-            if m.get("role") in ("user", "assistant") and m.get("content")
-        ]
+        clean = [m for m in history if m.get("role") in ("user", "assistant") and m.get("content")]
         if len(clean) > self.max_history:
-            dropped = clean[:-self.max_history]
-            clean = clean[-self.max_history:]
+            dropped = clean[: -self.max_history]
+            clean = clean[-self.max_history :]
             # Summarize dropped messages in background (fire-and-forget)
             if dropped and self._session_memory:
                 try:
                     task = asyncio.get_running_loop().create_task(
                         self._session_memory.summarize_and_save(dropped)
                     )
-                    task.add_done_callback(
-                        lambda t: t.exception() and logger.warning(
-                            "[Conversation] Session summary failed: %s", t.exception()
-                        )
-                    )
+
+                    def _report_summary_failure(done: asyncio.Task[Any]) -> None:
+                        if done.cancelled():
+                            return
+                        failure = done.exception()
+                        if failure is not None:
+                            logger.warning(
+                                "[Conversation] Session summary failed: %s",
+                                failure,
+                            )
+
+                    task.add_done_callback(_report_summary_failure)
                 except RuntimeError:
                     # No event loop running (e.g. during tests)
                     logger.debug("[Conversation] No event loop for session summary.")
@@ -372,22 +434,37 @@ class ConversationManager:
         except RuntimeError:
             self._save_sync()
             return
-        if not self._save_scheduled:
-            self._save_scheduled = True
-            def _done(_: object) -> None:
+        if self._save_scheduled:
+            self._save_dirty = True
+            return
+        self._save_scheduled = True
+        self._save_dirty = False
+
+        def _done(_: object) -> None:
+            with self._persistence_lock:
                 self._save_scheduled = False
-            t = loop.create_task(asyncio.to_thread(self._save_sync))
-            t.add_done_callback(_done)
+                dirty = self._save_dirty
+                self._save_dirty = False
+            if dirty:
+                self._save()
+
+        task = loop.create_task(asyncio.to_thread(self._save_sync))
+        task.add_done_callback(_done)
 
     def _save_sync(self) -> None:
         """Persist current history to disk (synchronous, runs in thread)."""
-        try:
-            os.makedirs(self._history_file.parent, exist_ok=True)
-            with open(self._history_file, "w", encoding="utf-8") as fh:
-                json.dump(self._dump_state(), fh, ensure_ascii=False, indent=2)
-        except Exception as exc:
-            # Persistence is best-effort; never crash the conversation.
-            logger.error("[Conversation] Failed to save history: %s", exc)
+        with self._persistence_lock:
+            try:
+                os.makedirs(self._history_file.parent, exist_ok=True)
+                temporary = self._history_file.with_name(f".{self._history_file.name}.tmp")
+                with open(temporary, "w", encoding="utf-8") as fh:
+                    json.dump(self._dump_state(), fh, ensure_ascii=False, indent=2)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(temporary, self._history_file)
+            except Exception as exc:
+                # Persistence is best-effort; never crash the conversation.
+                logger.error("[Conversation] Failed to save history: %s", exc)
 
     def _load(self) -> None:
         """Load history from disk if the file exists."""
@@ -463,9 +540,7 @@ class ConversationManager:
                 # (multiple tool results from the same assistant tool_calls are all valid)
                 prev = clean[-1] if clean else None
                 preceded_by_assistant = (
-                    prev is not None
-                    and prev.get("role") == "assistant"
-                    and prev.get("tool_calls")
+                    prev is not None and prev.get("role") == "assistant" and prev.get("tool_calls")
                 )
                 preceded_by_tool = prev is not None and prev.get("role") == "tool"
                 if preceded_by_assistant or preceded_by_tool:

@@ -8,6 +8,9 @@ import secrets
 import time
 from collections import deque
 from collections.abc import Callable
+from contextvars import ContextVar
+from copy import deepcopy
+from dataclasses import dataclass
 from inspect import Parameter, isawaitable, signature
 from typing import Any
 
@@ -20,12 +23,55 @@ from askme.api.services.space_preview import (
     space_resolution_evidence_items,
     space_resolution_preview,
 )
+from askme.conversation import (
+    GenerationStarted,
+    InteractionInput,
+    InteractionTurnManager,
+    TurnOutcome,
+    canonical_thread_id,
+)
 from askme.pipeline.core.rag_policy import forced_rag_reply
 from askme.robot_interaction.scenario_intents import classify_scenario_intent
+from askme.runtime.control_intent import (
+    runtime_control_intent,
+)
 
 ChatHandler = Callable[..., Any]
 MemoryHandler = Any
 CapabilitiesProvider = Callable[[], dict[str, Any]]
+
+
+def runtime_control_permission_from_body(body: dict[str, Any]) -> str | None:
+    """Return the existing RBAC permission for a privileged chat mutation."""
+    raw_text = body.get("text") or body.get("message") or body.get("prompt") or ""
+    intent = runtime_control_intent(raw_text)
+    if intent in {"pause", "resume", "cancel"}:
+        return f"runtime:{intent}"
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class ChatRuntimeContext:
+    """Request-scoped provenance for an authorized runtime chat mutation."""
+
+    conversation_session_id: str
+    permission: str
+    operator_id: str
+    operator_roles: tuple[str, ...]
+    operator_authenticated: bool
+    operator_source: str
+    authorization: dict[str, Any]
+
+
+_CURRENT_CHAT_RUNTIME_CONTEXT: ContextVar[ChatRuntimeContext | None] = ContextVar(
+    "askme_chat_runtime_context",
+    default=None,
+)
+
+
+def current_chat_runtime_context() -> ChatRuntimeContext | None:
+    """Return the authorized runtime context active for the current chat Task."""
+    return _CURRENT_CHAT_RUNTIME_CONTEXT.get()
 
 
 class EmptyChatText(ValueError):
@@ -67,11 +113,16 @@ class ConversationService:
         chat_diagnostics_history_limit: int = 20,
         capabilities_provider: CapabilitiesProvider | None = None,
         space_dispatch: SpaceDispatch | None = None,
+        turn_ledger: Any | None = None,
+        interaction_turn_manager: Any | None = None,
     ) -> None:
         self._chat_handler = chat_handler
         self._memory_handler = memory_handler
         self._capabilities_provider = capabilities_provider
         self._space_dispatch = space_dispatch
+        self._offline_turn_manager = interaction_turn_manager
+        if self._offline_turn_manager is None and turn_ledger is not None:
+            self._offline_turn_manager = InteractionTurnManager(turn_ledger)
         self._logger = logger or logging.getLogger(__name__)
         self._chat_timeout_s = _optional_positive_float(chat_timeout_s)
         self._chat_max_concurrency = _positive_int(chat_max_concurrency, default=8)
@@ -107,28 +158,62 @@ class ConversationService:
         if not text:
             raise EmptyChatText("empty text")
         speak = bool(body.get("speak") or body.get("voice") or body.get("play_audio"))
-        voice_turn = self.voice_turn_payload_from_body(body, text=text)
+        conversation_session_id = (
+            canonical_thread_id(
+                thread_id=_clean_optional_text(body.get("thread_id")),
+                conversation_thread_id=_clean_optional_text(body.get("conversation_thread_id")),
+                conversation_session_id=_clean_optional_text(body.get("conversation_session_id")),
+                conversation_id=_clean_optional_text(body.get("conversation_id")),
+                chat_session_id=_clean_optional_text(body.get("chat_session_id")),
+                session_id=_clean_optional_text(body.get("session_id")),
+            )
+            or f"chat-thread-{secrets.token_hex(16)}"
+        )
+        normalized_body = dict(body)
+        normalized_body["conversation_thread_id"] = conversation_session_id
+        voice_turn = self.voice_turn_payload_from_body(normalized_body, text=text)
+        runtime_context = authorized_runtime_context_from_body(
+            body,
+            conversation_session_id=conversation_session_id,
+        )
         timings["parse_ms"] = _elapsed_ms(started)
+        offline_turn_context = None
+        offline_turn_manager = None
 
         await self._enter_chat_turn()
+        runtime_context_token = _CURRENT_CHAT_RUNTIME_CONTEXT.set(runtime_context)
         status = "ok"
         error_type = ""
         try:
             handler_started = time.perf_counter()
-            conversation_session_id = _clean_optional_text(
-                body.get("conversation_session_id")
-                or body.get("conversation_id")
-                or body.get("chat_session_id")
-            )
             planning_session_id = _clean_optional_text(body.get("planning_session_id"))
             runtime_policy = _clean_runtime_policy(
                 body.get("runtime_policy") or body.get("runtime_bridge_mode")
             )
 
             if self._chat_handler is None:
+                offline_turn_manager = self._offline_turn_manager
+                if offline_turn_manager is not None:
+                    offline_turn_context = offline_turn_manager.open(
+                        InteractionInput(
+                            user_text=text,
+                            source="dashboard",
+                            thread_id=conversation_session_id,
+                            channel="text",
+                            metadata={"trace_id": turn_trace_id},
+                        )
+                    )
+                    offline_turn_context = offline_turn_manager.advance(
+                        offline_turn_context,
+                        GenerationStarted(
+                            provider="dashboard_offline_fallback",
+                            generation_id=turn_trace_id,
+                        ),
+                    )
                 result = self._offline_chat_result(text=text, speak=speak)
+                captured_turn_rag = None
             else:
-                result = await self._dispatch_chat_handler_with_timeout(
+                result, captured_turn_rag = await self._dispatch_chat_handler_with_timeout(
                     text,
                     speak=speak,
                     conversation_session_id=conversation_session_id,
@@ -144,7 +229,12 @@ class ConversationService:
                 speak=speak,
                 voice_turn=voice_turn,
             )
-            payload = self._attach_handler_turn_rag(payload)
+            payload["conversation_thread_id"] = conversation_session_id
+            payload["conversation_session_id"] = conversation_session_id
+            payload = self._attach_handler_turn_rag(
+                payload,
+                turn_rag=captured_turn_rag,
+            )
             timings["response_build_ms"] = _elapsed_ms(response_started)
 
             memory_started = time.perf_counter()
@@ -154,6 +244,20 @@ class ConversationService:
             space_started = time.perf_counter()
             payload = await self.attach_space_chat_context(payload, body=body, text=text)
             timings["space_context_ms"] = _elapsed_ms(space_started)
+            if offline_turn_manager is not None and offline_turn_context is not None:
+                offline_turn_manager.settle(
+                    offline_turn_context,
+                    TurnOutcome.commit(
+                        user_text=text,
+                        assistant_text=str(payload.get("reply") or ""),
+                        metadata={
+                            "reply_source": str(
+                                payload.get("reply_source") or "dashboard_offline_fallback"
+                            ),
+                            "trace_id": turn_trace_id,
+                        },
+                    ),
+                )
             return payload
         except TimeoutError as exc:
             status = "timeout"
@@ -163,8 +267,20 @@ class ConversationService:
         except Exception as exc:
             status = "error"
             error_type = exc.__class__.__name__
+            if offline_turn_manager is not None and offline_turn_context is not None:
+                offline_turn_manager.settle(
+                    offline_turn_context,
+                    TurnOutcome.fail(
+                        reason="dashboard_offline_fallback_failed",
+                        metadata={
+                            "error_type": error_type,
+                            "trace_id": turn_trace_id,
+                        },
+                    ),
+                )
             raise
         finally:
+            _CURRENT_CHAT_RUNTIME_CONTEXT.reset(runtime_context_token)
             timings["total_ms"] = _elapsed_ms(started)
             await self._finish_chat_turn(
                 status=status,
@@ -215,14 +331,21 @@ class ConversationService:
         conversation_session_id: str | None = None,
         planning_session_id: str | None = None,
         runtime_policy: str = "disabled",
-    ) -> Any:
-        call = self.dispatch_chat_handler(
-            text,
-            speak=speak,
-            conversation_session_id=conversation_session_id,
-            planning_session_id=planning_session_id,
-            runtime_policy=runtime_policy,
-        )
+    ) -> tuple[Any, dict[str, Any] | None]:
+        async def dispatch_and_capture() -> tuple[Any, dict[str, Any] | None]:
+            result = await self.dispatch_chat_handler(
+                text,
+                speak=speak,
+                conversation_session_id=conversation_session_id,
+                planning_session_id=planning_session_id,
+                runtime_policy=runtime_policy,
+            )
+            # asyncio.wait_for runs this coroutine in a child Task. ContextVar
+            # writes made by TurnExecutor do not flow back to the parent Task,
+            # so capture the turn-scoped evidence before leaving this context.
+            return result, self._handler_turn_rag_snapshot()
+
+        call = dispatch_and_capture()
         if self._chat_timeout_s is None:
             return await call
         return await asyncio.wait_for(call, timeout=self._chat_timeout_s)
@@ -348,9 +471,7 @@ class ConversationService:
         channel: str = "voice",
     ) -> dict[str, Any] | None:
         is_voice = bool(
-            body.get("voice")
-            or body.get("transcript_id")
-            or body.get("asr_confidence") is not None
+            body.get("voice") or body.get("transcript_id") or body.get("asr_confidence") is not None
         )
         if not is_voice:
             return None
@@ -362,13 +483,17 @@ class ConversationService:
             "safety_bypass_allowed": False,
             "created_at": time.time(),
         }
-        conversation_session_id = _clean_optional_text(
-            body.get("conversation_session_id")
-            or body.get("conversation_id")
-            or body.get("chat_session_id")
+        conversation_session_id = canonical_thread_id(
+            thread_id=_clean_optional_text(body.get("thread_id")),
+            conversation_thread_id=_clean_optional_text(body.get("conversation_thread_id")),
+            conversation_session_id=_clean_optional_text(body.get("conversation_session_id")),
+            conversation_id=_clean_optional_text(body.get("conversation_id")),
+            chat_session_id=_clean_optional_text(body.get("chat_session_id")),
+            session_id=_clean_optional_text(body.get("session_id")),
         )
         planning_session_id = _clean_optional_text(body.get("planning_session_id"))
         if conversation_session_id:
+            payload["conversation_thread_id"] = conversation_session_id
             payload["conversation_session_id"] = conversation_session_id
         if planning_session_id:
             payload["planning_session_id"] = planning_session_id
@@ -433,7 +558,9 @@ class ConversationService:
                 payload["evidence"] = existing
             _append_unique_evidence(existing, evidence_items)
 
-            resolution = space_resolution.get("resolution") if isinstance(space_resolution, dict) else None
+            resolution = (
+                space_resolution.get("resolution") if isinstance(space_resolution, dict) else None
+            )
             reply = resolution.get("reply") if isinstance(resolution, dict) else ""
             if reply:
                 payload["reply"] = reply
@@ -512,11 +639,21 @@ class ConversationService:
                 rag_payload["block_reason"] = answer_policy.get("reason", "")
         return payload
 
-    def _attach_handler_turn_rag(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _handler_turn_rag_snapshot(self) -> dict[str, Any] | None:
         handler_owner = getattr(self._chat_handler, "__self__", None)
         turn_rag = getattr(handler_owner, "current_turn_rag", None)
         if callable(turn_rag):
             turn_rag = turn_rag()
+        if not isinstance(turn_rag, dict):
+            return None
+        return deepcopy(turn_rag)
+
+    def _attach_handler_turn_rag(
+        self,
+        payload: dict[str, Any],
+        *,
+        turn_rag: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         if not isinstance(turn_rag, dict):
             return payload
         rag = turn_rag.get("rag")
@@ -539,6 +676,57 @@ def _handler_accepts_keyword(handler: ChatHandler, keyword: str) -> bool:
         return True
     return keyword in params or any(
         param.kind == Parameter.VAR_KEYWORD for param in params.values()
+    )
+
+
+def authorized_runtime_context_from_body(
+    body: dict[str, Any],
+    *,
+    conversation_session_id: str,
+    permission: str | None = None,
+) -> ChatRuntimeContext | None:
+    expected_permission = permission or runtime_control_permission_from_body(body)
+    decision = body.get("operator_auth")
+    if expected_permission is None or not isinstance(decision, dict):
+        return None
+    operator = decision.get("operator")
+    if (
+        decision.get("allowed") is not True
+        or str(decision.get("permission") or "") != expected_permission
+        or not isinstance(operator, dict)
+        or operator.get("known") is not True
+        or not _runtime_operator_is_trusted(decision, operator)
+    ):
+        return None
+    operator_id = str(operator.get("operator_id") or "").strip()
+    body_operator_id = str(body.get("operator_id") or "").strip()
+    roles = tuple(str(role).strip() for role in operator.get("roles", ()) if str(role).strip())
+    if not operator_id or operator_id != body_operator_id or not roles:
+        return None
+    return ChatRuntimeContext(
+        conversation_session_id=conversation_session_id,
+        permission=expected_permission,
+        operator_id=operator_id,
+        operator_roles=roles,
+        operator_authenticated=bool(operator.get("authenticated")),
+        operator_source=str(operator.get("source") or ""),
+        authorization=deepcopy(decision),
+    )
+
+
+def _runtime_operator_is_trusted(
+    decision: dict[str, Any],
+    operator: dict[str, Any],
+) -> bool:
+    if operator.get("authenticated") is True:
+        return True
+    audit = decision.get("audit")
+    return bool(
+        operator.get("known") is True
+        and str(operator.get("source") or "") in {"local_config", "demo_config"}
+        and isinstance(audit, dict)
+        and str(audit.get("mode") or "") == "demo_config"
+        and str(audit.get("identity_provider") or "") == str(operator.get("source") or "")
     )
 
 

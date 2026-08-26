@@ -95,6 +95,19 @@ def test_dashboard_customer_visible_fallbacks_do_not_use_raw_english_placeholder
         assert placeholder not in source
 
 
+def test_dashboard_tts_model_card_uses_provider_specific_runtime_values() -> None:
+    source = _dashboard_source()
+    card = _function_body(source, "renderVoiceModelCard")
+    sync = _function_body(source, "syncVoiceModelOptions")
+
+    assert "active[activeProvider]" in card
+    assert "providerRuntime.resource_id" in card
+    assert "providerRuntime.speaker" in card
+    assert 'esc(activeVoiceId)' in card
+    assert '火山 Seed TTS 2.0' in source
+    assert 'providerRuntime.speaker || ""' in sync
+
+
 def test_dashboard_has_customer_readable_scenario_product_page() -> None:
     source = _dashboard_source()
     body = _function_body(source, "renderScenarios")

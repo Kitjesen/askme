@@ -27,6 +27,10 @@ from askme.ports import RobotControlPort, VoiceTurnBridgePort
 
 Current contract modules:
 
+- `runtime_executor/`: provider-neutral DTOs, typed failures, and the transport
+  protocol for supervised external task execution.
+- `speech_playback/`: targeted speech job, artifact, actor, priority, and
+  provider-neutral playback lifecycle contracts.
 - `arm_control.py`: `ArmControlPort` for mechanical-arm action, state, E-STOP,
   and lifecycle.
 - `led.py`: `LedControllerPort` and `LedBridgePort` for status LED output and
@@ -37,7 +41,10 @@ Current contract modules:
   dispatch.
 - `safety.py`: `SafetyPort` for E-STOP state and notification.
 - `voice.py`: `AudioFrontendPort`, `AudioRouterPort`, `ASRProviderPort`,
-  `TTSProviderPort`, `VoiceTurnBridgePort`, and `VoiceIOPort`.
+  `TTSProviderPort`, `RealtimeVoiceFrontendPort`, `RealtimeApprovalPort`,
+  `VoiceTurnBridgePort`, and `VoiceIOPort`. The realtime pair is the explicit
+  optional S2S boundary; pipeline code must not discover those methods with
+  ad-hoc `getattr` checks.
 
 ## Boundary Rules
 

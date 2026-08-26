@@ -1,0 +1,5 @@
+<!-- Icon: ph:waveform-bold via Iconify (MIT). -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-label="Understand">
+  <rect x=".5" y=".5" width="31" height="31" rx="9" fill="#e8f7f5" stroke="#cbeae5"/>
+  <path transform="translate(6 6) scale(.078125)" fill="#268c81" d="M60 96v64a12 12 0 0 1-24 0V96a12 12 0 0 1 24 0m28-76a12 12 0 0 0-12 12v192a12 12 0 0 0 24 0V32a12 12 0 0 0-12-12m40 32a12 12 0 0 0-12 12v128a12 12 0 0 0 24 0V64a12 12 0 0 0-12-12m40 32a12 12 0 0 0-12 12v64a12 12 0 0 0 24 0V96a12 12 0 0 0-12-12m40-16a12 12 0 0 0-12 12v96a12 12 0 0 0 24 0V80a12 12 0 0 0-12-12"/>
+</svg>

@@ -58,6 +58,61 @@ def test_get_or_create_honors_new_explicit_session_id() -> None:
     assert first.session_id != second.session_id
 
 
+def test_anonymous_sessions_are_fail_new_instead_of_reusing_process_history() -> None:
+    manager = ConversationSessionManager(clock=StepClock())
+
+    first = manager.get_or_create(channel="voice")
+    manager.append_turn(
+        first.session_id,
+        user_text="private first request",
+        assistant_text="private first response",
+    )
+    second = manager.get_or_create(channel="voice")
+
+    assert second.session_id != first.session_id
+    assert manager.context_payload(second.session_id)["turn_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "conflicting_field"),
+    [
+        ({"channel": "text"}, "channel"),
+        ({"operator_id": "operator-2"}, "operator_id"),
+        ({"robot_id": "robot-2"}, "robot_id"),
+        ({"site_id": "site-b"}, "site_id"),
+    ],
+)
+def test_explicit_session_id_rejects_identity_takeover(
+    overrides: dict[str, str],
+    conflicting_field: str,
+) -> None:
+    manager = ConversationSessionManager(clock=StepClock())
+    original = manager.get_or_create(
+        channel="voice",
+        session_id="private-session",
+        operator_id="operator-1",
+        robot_id="robot-1",
+        site_id="site-a",
+    )
+    request = {
+        "channel": "voice",
+        "session_id": original.session_id,
+        "operator_id": "operator-1",
+        "robot_id": "robot-1",
+        "site_id": "site-a",
+        **overrides,
+    }
+
+    with pytest.raises(ValueError, match=conflicting_field):
+        manager.get_or_create(**request)
+
+    snapshot = manager.snapshot(original.session_id)
+    assert snapshot is not None
+    assert snapshot.operator_id == "operator-1"
+    assert snapshot.robot_id == "robot-1"
+    assert snapshot.site_id == "site-a"
+
+
 def test_append_turn_updates_timestamp_and_summary() -> None:
     clock = StepClock()
     manager = ConversationSessionManager(clock=clock)
@@ -84,9 +139,7 @@ def test_append_turn_updates_timestamp_and_summary() -> None:
     assert snapshot.turns[0].gate_decision == "allow"
     assert snapshot.turns[0].skill_name == "lookup_place"
     assert snapshot.turns[0].handoff_id == "handoff-1"
-    assert snapshot.turns[0].tool_calls == [
-        {"name": "lookup_place", "args": {"place": "lobby"}}
-    ]
+    assert snapshot.turns[0].tool_calls == [{"name": "lookup_place", "args": {"place": "lobby"}}]
     assert snapshot.turns[0].metadata == {"confidence": 0.91}
     assert snapshot.updated_at > original_updated_at
     assert snapshot.last_activity_at == snapshot.updated_at
@@ -212,15 +265,17 @@ def test_gateway_service_passes_conversation_session_to_bridge() -> None:
             site_id: str | None = None,
             metadata: dict[str, object] | None = None,
         ) -> dict[str, object]:
-            self.calls.append({
-                "text": text,
-                "session_id": session_id,
-                "channel": channel,
-                "operator_id": operator_id,
-                "robot_id": robot_id,
-                "site_id": site_id,
-                "metadata": dict(metadata or {}),
-            })
+            self.calls.append(
+                {
+                    "text": text,
+                    "session_id": session_id,
+                    "channel": channel,
+                    "operator_id": operator_id,
+                    "robot_id": robot_id,
+                    "site_id": site_id,
+                    "metadata": dict(metadata or {}),
+                }
+            )
             return {
                 "handled": True,
                 "turn": {
@@ -244,15 +299,17 @@ def test_gateway_service_passes_conversation_session_to_bridge() -> None:
 
     assert result is not None
     conversation_session_id = result["conversation_session_id"]
-    assert bridge.calls == [{
-        "text": "inspect area A",
-        "session_id": conversation_session_id,
-        "channel": "text",
-        "operator_id": "operator-1",
-        "robot_id": "robot-1",
-        "site_id": "site-a",
-        "metadata": {"locale": "zh-CN"},
-    }]
+    assert bridge.calls == [
+        {
+            "text": "inspect area A",
+            "session_id": conversation_session_id,
+            "channel": "text",
+            "operator_id": "operator-1",
+            "robot_id": "robot-1",
+            "site_id": "site-a",
+            "metadata": {"locale": "zh-CN"},
+        }
+    ]
     snapshot = gateway.conversation_snapshot(str(conversation_session_id))
     context = gateway.conversation_context(str(conversation_session_id))
 
@@ -262,6 +319,34 @@ def test_gateway_service_passes_conversation_session_to_bridge() -> None:
     assert snapshot.turns[0].assistant_text == "ready"
     assert context["recent_turns"][0]["sequence"] == 1
     assert "inspect area A" in context["text"]
+
+
+def test_gateway_anonymous_requests_do_not_share_conversation_context() -> None:
+    class Bridge:
+        def __init__(self) -> None:
+            self.contexts: list[dict[str, object]] = []
+
+        def status_snapshot(self) -> dict[str, object]:
+            return {"enabled": True}
+
+        def handle_text_input(self, text: str, **kwargs) -> dict[str, object]:
+            self.contexts.append(dict(kwargs["conversation_context"]))
+            return {
+                "handled": True,
+                "turn": {"spoken_reply": f"reply:{text}"},
+            }
+
+    bridge = Bridge()
+    gateway = VoiceGatewayService(bridge)
+
+    first = gateway.handle_text_input("first private request", include_session=True)
+    second = gateway.handle_text_input("second private request", include_session=True)
+
+    assert first is not None
+    assert second is not None
+    assert first["conversation_session_id"] != second["conversation_session_id"]
+    assert [context["turn_count"] for context in bridge.contexts] == [0, 0]
+    assert all(context["text"] == "" for context in bridge.contexts)
 
 
 def test_gateway_service_records_local_fallback_turns() -> None:
@@ -287,6 +372,75 @@ def test_gateway_service_records_local_fallback_turns() -> None:
     }
     assert context["turn_count"] == 1
     assert "inspect zone" in context["text"]
+
+
+def test_gateway_deferred_handled_turn_waits_for_explicit_delivery_record() -> None:
+    class Bridge:
+        def status_snapshot(self) -> dict[str, object]:
+            return {"enabled": True}
+
+        def handle_text_input(self, text: str, **kwargs) -> dict[str, object]:
+            return {
+                "handled": True,
+                "turn": {"action_type": "general"},
+            }
+
+    gateway = VoiceGatewayService(Bridge())
+
+    result = gateway.handle_text_input(
+        "inspect zone",
+        conversation_session_id="conv-deferred",
+        defer_recording=True,
+        include_session=True,
+    )
+    before_delivery = gateway.conversation_snapshot("conv-deferred")
+
+    assert result is not None
+    assert result["conversation_recording_deferred"] is True
+    assert before_delivery is not None
+    assert before_delivery.turns == ()
+    assert result["conversation_session"]["turn_count"] == 0
+
+    recorded = gateway.record_local_turn(
+        "conv-deferred",
+        user_text="inspect zone",
+        assistant_text="local reply",
+        metadata={"delivery_confirmed": True},
+    )
+    after_delivery = gateway.conversation_snapshot("conv-deferred")
+
+    assert recorded is True
+    assert after_delivery is not None
+    assert len(after_delivery.turns) == 1
+    assert after_delivery.turns[0].assistant_text == "local reply"
+
+
+def test_gateway_deferred_spoken_reply_is_not_projected_before_delivery() -> None:
+    class Bridge:
+        def status_snapshot(self) -> dict[str, object]:
+            return {"enabled": True}
+
+        def handle_text_input(self, text: str, **kwargs) -> dict[str, object]:
+            return {
+                "handled": True,
+                "turn": {"spoken_reply": "bridge reply"},
+            }
+
+    gateway = VoiceGatewayService(Bridge())
+
+    result = gateway.handle_text_input(
+        "inspect zone",
+        conversation_session_id="conv-deferred-spoken",
+        defer_recording=True,
+        include_session=True,
+    )
+    snapshot = gateway.conversation_snapshot("conv-deferred-spoken")
+
+    assert result is not None
+    assert result["conversation_recording_deferred"] is True
+    assert result["conversation_session"]["turn_count"] == 0
+    assert snapshot is not None
+    assert snapshot.turns == ()
 
 
 def test_gateway_keeps_conversation_and_planning_session_ids_separate_across_turns() -> None:
@@ -332,3 +486,57 @@ def test_gateway_keeps_conversation_and_planning_session_ids_separate_across_tur
     snapshot = gateway.conversation_snapshot(str(first["conversation_session_id"]))
     assert snapshot is not None
     assert snapshot.active_planning_session_id == "plan-1"
+
+
+@pytest.mark.parametrize(
+    ("gateway_method", "bridge_method", "channel"),
+    [
+        ("handle_text_input", "handle_text_input", "text"),
+        ("handle_voice_text", "handle_voice_text", "voice"),
+    ],
+)
+def test_gateway_forwards_admitted_interaction_context(
+    gateway_method: str,
+    bridge_method: str,
+    channel: str,
+) -> None:
+    class Bridge:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, dict[str, object]]] = []
+
+        def status_snapshot(self) -> dict[str, object]:
+            return {"enabled": True}
+
+        def handle_text_input(self, text: str, **kwargs) -> dict[str, object]:
+            self.calls.append(("handle_text_input", text, kwargs))
+            return {"handled": False}
+
+        def handle_voice_text(self, text: str, **kwargs) -> dict[str, object]:
+            self.calls.append(("handle_voice_text", text, kwargs))
+            return {"handled": False}
+
+    bridge = Bridge()
+    gateway = VoiceGatewayService(bridge)
+    cancel_token = object()
+
+    getattr(gateway, gateway_method)(
+        "inspect zone",
+        conversation_session_id="conv-context",
+        voice_turn_id="turn-context",
+        turn_cancel_token=cancel_token,
+        person_id="person-context",
+        operator_id="operator-context",
+    )
+
+    called_method, text, context = bridge.calls[0]
+    assert called_method == bridge_method
+    assert text == "inspect zone"
+    assert context["conversation_session_id"] == "conv-context"
+    assert context["voice_turn_id"] == "turn-context"
+    assert context["turn_cancel_token"] is cancel_token
+    assert context["person_id"] == "person-context"
+    assert context["operator_id"] == "operator-context"
+    assert context["channel"] == channel
+    snapshot = gateway.conversation_snapshot("conv-context")
+    assert snapshot is not None
+    assert snapshot.operator_id == "operator-context"

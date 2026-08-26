@@ -10,6 +10,7 @@ const navDrawer = document.getElementById("nav-drawer");
 const navToggle = document.getElementById("nav-toggle");
 const navClose = document.getElementById("nav-close");
 const navBackdrop = document.getElementById("nav-backdrop");
+const desktopNavigation = window.matchMedia("(min-width: 961px)");
 const ENDPOINTS = {
   chat: "/api/chat",
   governance: "/api/governance/operator-directory",
@@ -86,6 +87,23 @@ const ENDPOINTS = {
   parkBlueprint: "/api/blueprints/park",
 };
 
+const conversationThreadId = createConversationThreadId();
+
+function createConversationThreadId() {
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new Error("secure browser randomness is required for conversation isolation");
+  }
+  if (typeof globalThis.crypto.randomUUID === "function") {
+    return `web-${globalThis.crypto.randomUUID()}`;
+  }
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  return `web-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 const KNOWLEDGE_CATEGORIES = [
   { id: "route", label: "路线与带路", group: "空间", description: "道路、路线说明、带路路径、不可通行路段" },
   { id: "location", label: "地点与点位", group: "空间", description: "楼宇、入口、卫生间、服务点、打卡点" },
@@ -105,7 +123,7 @@ const KNOWLEDGE_CATEGORIES = [
 ];
 
 const fallbackPages = [
-  { path: "/dashboard", key: "overview", label: "总览", hint: "运行状态", title: "现场运行总览", kicker: "运行总览", desc: "集中查看对话链路、现场事件、园区场景和交付门禁。" },
+  { path: "/dashboard", key: "overview", label: "总览", hint: "运行状态", title: "现场运行总览", kicker: "运行总览", desc: "查看当前状态、待办事件和交付阻塞。" },
   { path: "/dashboard/conversation", key: "conversation", label: "对话", hint: "语音文本", title: "语音和文本对话", kicker: "真实交互", desc: "用于输入任务、问路、知识问答和安全确认。回答需要展示证据、任务状态和拒答原因。" },
   { path: "/dashboard/scenarios", key: "scenarios", label: "场景验收", hint: "客户能看懂", title: "场景验收矩阵", kicker: "产品页", desc: "把问路、带路、违停、烟火、垃圾桶、陌生人、机器人故障、恶意挡路和人群聚集逐条展示成客户能验收的业务能力。" },
   { path: "/dashboard/field", key: "field", label: "现场事件", hint: "安防巡检", title: "现场事件处置", kicker: "园区场景", desc: "覆盖摔倒、卡住、陌生人拍照、违停、烟雾火灾、垃圾桶满溢、人群聚集、游客问路和带路。" },
@@ -118,9 +136,9 @@ const fallbackPages = [
 ];
 
 const fallbackPageSections = {
-  customer: { label: "客户可见", description: "客户、交付和销售一眼能看懂的产品页面。" },
-  operations: { label: "运行操作", description: "现场运行、语音交互和业务处置入口。" },
-  governance: { label: "治理交付", description: "权限、审计、验收和交付证据。" },
+  customer: { label: "业务工作区", description: "现场业务、场景、空间与知识入口。" },
+  operations: { label: "运行控制", description: "对话、语音和现场处置入口。" },
+  governance: { label: "交付治理", description: "验收、证据、权限和审计入口。" },
 };
 let pages = fallbackPages;
 let pageSections = fallbackPageSections;
@@ -170,6 +188,7 @@ let operatorSession = null;
 let identityReadiness = null;
 let liveBaseline = null;
 let chatStarted = false;
+let chatRequestInFlight = false;
 let chatRenderedCount = 0;
 let selectedFieldEventId = null;
 let fieldActionResult = null;
@@ -280,7 +299,7 @@ function renderNav(activePage) {
         <div class="nav-section" data-dashboard-page-section="${esc(section)}">
           <div class="nav-section-title">${esc(meta.label || section)}</div>
           ${grouped[section].map((page) => `
-            <a class="nav-link ${page.key === activePage.key ? "active" : ""}" href="${page.path}" title="${esc(page.hint || page.desc || page.label)}">
+            <a class="nav-link ${page.key === activePage.key ? "active" : ""}" data-page-key="${esc(page.key)}" href="${page.path}" title="${esc(page.hint || page.desc || page.label)}">
               <span>${esc(page.label)}</span>
             </a>
           `).join("")}
@@ -291,12 +310,30 @@ function renderNav(activePage) {
 }
 
 function setNavigationOpen(open) {
+  if (desktopNavigation.matches) {
+    document.body.classList.remove("nav-open");
+    navToggle?.setAttribute("aria-expanded", "true");
+    navDrawer?.setAttribute("aria-hidden", "false");
+    navBackdrop?.setAttribute("tabindex", "-1");
+    return;
+  }
   const next = Boolean(open);
   document.body.classList.toggle("nav-open", next);
   navToggle?.setAttribute("aria-expanded", String(next));
   navDrawer?.setAttribute("aria-hidden", String(!next));
   navBackdrop?.setAttribute("tabindex", next ? "0" : "-1");
   if (next) navClose?.focus();
+}
+
+function syncNavigationMode() {
+  if (desktopNavigation.matches) {
+    setNavigationOpen(false);
+    return;
+  }
+  const open = document.body.classList.contains("nav-open");
+  navToggle?.setAttribute("aria-expanded", String(open));
+  navDrawer?.setAttribute("aria-hidden", String(!open));
+  navBackdrop?.setAttribute("tabindex", open ? "0" : "-1");
 }
 
 function routeTo(path) {
@@ -529,6 +566,78 @@ async function refreshGlobalStatus() {
   globalStatusText.textContent = ok ? "服务在线" : "服务异常";
 }
 
+function overviewStatusLabel(value = "") {
+  const labels = {
+    ok: "正常",
+    ready: "可用",
+    healthy: "正常",
+    passed: "可验收",
+    production_ready: "可验收",
+    ready_for_validation: "待验证",
+    ready_for_site_validation: "待现场验证",
+    manual_check: "待复核",
+    blocked: "已阻断",
+    warning: "需注意",
+    degraded: "需检查",
+    missing: "缺失",
+    configuration_incomplete: "待配置",
+    missing_configuration: "待配置",
+    unknown: "待确认",
+  };
+  return labels[String(value || "unknown").trim().toLowerCase()] || "待确认";
+}
+
+function overviewEventStatus(value = "") {
+  const labels = {
+    open: "待处理",
+    new: "待处理",
+    pending: "待处理",
+    needs_attention: "待处理",
+    acknowledged: "已确认",
+    in_progress: "处理中",
+    investigating: "处理中",
+    resolved: "已完成",
+    closed: "已完成",
+  };
+  return labels[String(value || "pending").trim().toLowerCase()] || "待处理";
+}
+
+function renderOverviewEvents(events = []) {
+  if (!events.length) {
+    return `
+      <article class="dashboard-empty-card">
+        <div>
+          <strong>暂无待办事件</strong>
+          <p>当前没有需要处理的现场事件。</p>
+        </div>
+        <button type="button" class="ghost-button" data-route="/dashboard/field">查看事件台账</button>
+      </article>
+    `;
+  }
+  return events.map((event) => {
+    const workflow = event.incident_workflow || {};
+    const stages = Array.isArray(workflow.stages) ? workflow.stages : [];
+    const ownerStage = stages.find((stage) => stage.owner) || {};
+    const priority = String(event.priority || event.severity || "待分级").toUpperCase();
+    const priorityClass = ["P0", "P1", "CRITICAL", "HIGH"].includes(priority) ? "err" : "warn";
+    const status = overviewEventStatus(event.status);
+    return `
+      <article class="dashboard-event-card">
+        <header>
+          ${badge(priority, priorityClass)}
+          ${badge(status, status === "已完成" ? "ok" : "warn")}
+        </header>
+        <h3>${esc(event.title || event.scenario_id || event.event_type || "现场事件")}</h3>
+        <p>${esc(event.narrative || event.summary || "等待现场信息")}</p>
+        <footer>
+          <span>地点 ${esc(event.location || event.location_name || "待确认")}</span>
+          <span>负责人 ${esc(ownerStage.owner || event.owner || "待分配")}</span>
+        </footer>
+      </article>
+    `;
+  }).join("");
+}
+
 async function renderOverview() {
   const [eventsPayload, scenariosPayload, readiness, notification, siteProfiles] = await Promise.all([
     getJson("/api/field/events?limit=6&needs_attention=true", { events: [] }),
@@ -540,78 +649,101 @@ async function renderOverview() {
   const events = eventsPayload.events || eventsPayload.items || [];
   const scenarios = scenariosPayload.scenarios || scenariosPayload.items || [];
   const siteSummary = siteProfiles.summary || {};
+  const fieldSummary = health.field_operations || {};
   const voiceReady = health.voice_pipeline_status?.pipeline_ok === true;
   const notificationReady = notification.ready === true || notification.status === "ready";
   const siteCount = Number(siteSummary.site_count || 0);
   const configuredSites = Number(siteSummary.configured_count || 0);
-  const signals = [
+  const scenarioCount = Number(fieldSummary.scenario_count || 0) || scenarios.length;
+  const scenarioPassed = Number(fieldSummary.passed_count ?? fieldSummary.passed ?? 0) || scenarios.filter((item) => ["passed", "ready", "production_ready"].includes(String(item.status || "").toLowerCase())).length;
+  const blockers = Array.isArray(readiness.blockers) ? readiness.blockers : [];
+  const gateStatus = String(readiness.status || "unknown").toLowerCase();
+  const gateLabel = overviewStatusLabel(gateStatus);
+  const headlineCards = [
     {
-      label: "对话链路",
-      value: voiceReady ? "在线" : "需检查",
-      detail: health.model_name || health.components?.llm?.model || "等待模型状态",
-      cls: voiceReady ? "ok" : "warn",
+      label: "待办事件",
+      value: String(events.length),
+      detail: events.length ? `${events.length} 项需要进入事件台账处理` : "当前没有需要处理的现场事件",
+      cls: events.length ? "warn" : "ok",
+      route: "/dashboard/field",
     },
     {
-      label: "通知链路",
+      label: "对话服务",
+      value: voiceReady ? "在线" : "需检查",
+      detail: voiceReady ? "语音识别、对话与播报链路可用" : "进入语音系统检查服务状态",
+      cls: voiceReady ? "ok" : "warn",
+      route: "/dashboard/voice",
+    },
+    {
+      label: "交付状态",
+      value: gateLabel,
+      detail: blockers.length ? `${blockers.length} 个阻塞项需要处理` : "当前未发现交付阻塞项",
+      cls: statusClass(gateStatus) || "warn",
+      route: "/dashboard/delivery",
+    },
+  ];
+  const readinessRows = [
+    {
+      label: "场景验收",
+      value: scenarioCount ? `${scenarioPassed}/${scenarioCount}` : "待配置",
+      detail: scenarioCount ? "通过场景 / 已配置场景" : "尚未配置现场场景",
+      cls: scenarioCount && scenarioPassed === scenarioCount ? "ok" : "warn",
+      route: "/dashboard/scenarios",
+    },
+    {
+      label: "通知服务",
       value: notificationReady ? "可用" : "待配置",
-      detail: notificationReady ? "现场事件可以按规则通知" : ((notification.blockers || [])[0] || "检查通知配置"),
+      detail: notificationReady ? "事件通知规则已生效" : "通知渠道尚未完成配置",
       cls: notificationReady ? "ok" : "warn",
+      route: "/dashboard/delivery",
     },
     {
       label: "现场档案",
-      value: `${configuredSites}/${siteCount}`,
+      value: siteCount ? `${configuredSites}/${siteCount}` : "待配置",
       detail: siteCount && configuredSites === siteCount ? "现场配置完整" : "仍有现场配置待补齐",
       cls: siteCount && configuredSites === siteCount ? "ok" : "warn",
-    },
-    {
-      label: "交付门禁",
-      value: readiness.status || "unknown",
-      detail: (readiness.blockers || [])[0] || "当前没有已知阻塞项",
-      cls: statusClass(readiness.status) || "warn",
+      route: "/dashboard/space",
     },
   ];
   app.innerHTML = `
-    <section class="dashboard-overview">
-      <div class="dashboard-overview-copy">
-        <p class="page-kicker">当前状态</p>
-        <h2>今天先看状态，再处理任务</h2>
-        <p>对话、事件、场景和交付门禁集中在这一页。需要深入处理时，再进入对应工作区。</p>
-      </div>
-      <div class="dashboard-metrics" aria-label="关键运行指标">
-        <div class="dashboard-metric"><span>待处理事件</span><strong>${esc(events.length)}</strong></div>
-        <div class="dashboard-metric"><span>覆盖场景</span><strong>${esc(scenarios.length || 8)}</strong></div>
-        <div class="dashboard-metric"><span>语音链路</span><strong>${voiceReady ? "在线" : "检查"}</strong></div>
-        <div class="dashboard-metric"><span>交付门禁</span><strong>${esc(readiness.status || "unknown")}</strong></div>
+    <section class="dashboard-section" aria-labelledby="overview-status-title">
+      <header class="dashboard-section-head">
+        <div><p class="page-kicker">今日状态</p><h2 id="overview-status-title">需要关注的三件事</h2></div>
+      </header>
+      <div class="dashboard-status-grid">
+        ${headlineCards.map((card) => `
+          <button type="button" class="dashboard-status-card ${card.cls}" data-route="${card.route}">
+            <span class="dashboard-card-label">${esc(card.label)}</span>
+            <strong>${esc(card.value)}</strong>
+            <small>${esc(card.detail)}</small>
+            <span class="dashboard-card-link" aria-hidden="true">→</span>
+          </button>
+        `).join("")}
       </div>
     </section>
-    <section class="dashboard-shortcuts" aria-label="常用入口">
-      <button type="button" class="dashboard-shortcut" data-route="/dashboard/conversation"><strong>开始对话</strong><small>语音与文本任务</small></button>
-      <button type="button" class="dashboard-shortcut" data-route="/dashboard/field"><strong>处理事件</strong><small>查看证据与处置状态</small></button>
-      <button type="button" class="dashboard-shortcut" data-route="/dashboard/voice"><strong>语音设置</strong><small>模型、Prompt 与记忆</small></button>
-      <button type="button" class="dashboard-shortcut" data-route="/dashboard/delivery"><strong>交付检查</strong><small>门禁、缺口与验收</small></button>
-    </section>
-    <section class="dashboard-columns">
-      <article class="dashboard-panel">
-        <header class="dashboard-panel-head">
-          <div><p class="page-kicker">任务队列</p><h2>最近需要处理</h2></div>
-          <button type="button" class="mini-button" data-route="/dashboard/field">全部事件</button>
+    <section class="dashboard-work-grid">
+      <section class="dashboard-workstream" aria-labelledby="overview-events-title">
+        <header class="dashboard-section-head compact">
+          <div><p class="page-kicker">待办事项</p><h2 id="overview-events-title">现场事件</h2></div>
+          ${events.length ? '<button type="button" class="mini-button" data-route="/dashboard/field">查看全部</button>' : ""}
         </header>
-        <div class="dashboard-event-list">${renderCustomerEvents(events.slice(0, 4))}</div>
-      </article>
-      <article class="dashboard-panel">
-        <header class="dashboard-panel-head">
-          <div><p class="page-kicker">运行门禁</p><h2>服务状态</h2></div>
-          <button type="button" class="mini-button" data-route="/dashboard/delivery">查看门禁</button>
+        <div class="dashboard-event-grid ${events.length ? "" : "is-empty"}">${renderOverviewEvents(events.slice(0, 4))}</div>
+      </section>
+      <aside class="dashboard-readiness-card" aria-labelledby="overview-readiness-title">
+        <header>
+          <p class="page-kicker">运行准备</p>
+          <h2 id="overview-readiness-title">现场配置</h2>
+          <p>只展示会影响现场运行的配置项。</p>
         </header>
-        <div class="dashboard-status-list">
-          ${signals.map((signal) => `
-            <div class="dashboard-status-row">
-              <div><strong>${esc(signal.label)}</strong><span>${esc(signal.detail)}</span></div>
-              ${badge(signal.value, signal.cls)}
-            </div>
+        <div class="dashboard-readiness-list">
+          ${readinessRows.map((row) => `
+            <button type="button" class="dashboard-readiness-row" data-route="${row.route}">
+              <span><strong>${esc(row.label)}</strong><small>${esc(row.detail)}</small></span>
+              ${badge(row.value, row.cls)}
+            </button>
           `).join("")}
         </div>
-      </article>
+      </aside>
     </section>
   `;
 }
@@ -1054,20 +1186,33 @@ function renderChatSpacePolicy(payload = {}) {
 
 async function sendChat() {
   const input = document.getElementById("chat-input");
+  const sendButton = document.getElementById("chat-send");
   const text = (input?.value || "").trim();
-  if (!text) return;
+  if (!text || chatRequestInFlight) return;
+  chatRequestInFlight = true;
+  if (input) input.disabled = true;
+  if (sendButton) sendButton.disabled = true;
   chatStarted = true;
   input.value = "";
   addChatMessage(text, "user");
-  const response = await postJson(ENDPOINTS.chat, {
-    text,
-    speak: true,
-    play_audio: true,
-    ...chatSpaceContextPayload(),
-  });
-  const payload = response.payload || {};
-  if (payload.reply) addChatMessage(payload.reply, "assistant", payload);
-  else addChatMessage(payload.error || "服务没有返回可展示内容", "system");
+  try {
+    const response = await postJson(ENDPOINTS.chat, {
+      text,
+      conversation_thread_id: conversationThreadId,
+      conversation_session_id: conversationThreadId,
+      speak: true,
+      play_audio: true,
+      ...chatSpaceContextPayload(),
+    });
+    const payload = response.payload || {};
+    if (payload.reply) addChatMessage(payload.reply, "assistant", payload);
+    else addChatMessage(payload.error || "服务没有返回可展示内容", "system");
+  } finally {
+    chatRequestInFlight = false;
+    if (input) input.disabled = false;
+    if (sendButton) sendButton.disabled = false;
+    input?.focus();
+  }
 }
 
 async function pollLive() {
@@ -2505,28 +2650,58 @@ function voiceSystemFallback(profiles = {}) {
 }
 
 function renderVoiceCommandBar(snapshot) {
-  const runtime = snapshot.runtime || {};
   const ready = snapshot.status === "ready";
   return `
     <header class="voice-command-bar">
-      <div class="voice-command-brand">
-        <div class="voice-status-chip">
-          <span class="voice-live-dot ${ready ? "ok" : "warn"}" aria-hidden="true"></span>
-          <span>${ready ? "语音链路在线" : "存在待处理项"}</span>
-          <b>聚龙科创 e 谷</b>
-        </div>
-        <div class="voice-command-title">
-          <div>
-            <h1>小算语音系统<br><span>真实对话，持续在线</span></h1>
-          </div>
+      <div class="voice-command-title">
+        <span class="voice-section-icon" aria-hidden="true">${voiceIcon("waveform")}</span>
+        <div>
+          <p>语音系统</p>
+          <h1>AskMe Voice Core</h1>
+          <small>聚龙科创 e 谷 · 导览与巡检</small>
         </div>
       </div>
       <div class="voice-command-actions">
-        <button type="button" class="primary-button" data-route="/dashboard/conversation">测试真实对话 <span aria-hidden="true">↗</span></button>
-        <button type="button" class="ghost-button" data-voice-refresh>刷新运行状态 <span aria-hidden="true">↻</span></button>
+        <span class="voice-status-chip"><span class="voice-live-dot ${ready ? "ok" : "warn"}" aria-hidden="true"></span>${ready ? "服务在线" : "需要检查"}</span>
+        <button type="button" class="voice-icon-button" data-voice-refresh aria-label="刷新运行状态" title="刷新运行状态">${voiceIcon("refresh")}</button>
+        <button type="button" class="primary-button" data-route="/dashboard/conversation">${voiceIcon("chat")}<span>开始对话</span></button>
       </div>
     </header>
     <div id="voice-action-status" class="voice-action-status" role="status" aria-live="polite"></div>
+  `;
+}
+
+function voiceIcon(name) {
+  const paths = {
+    waveform: '<path d="M3 12h2m2-5v10m4-14v18m4-14v10m4-7v4m2-2h2"/>',
+    refresh: '<path d="M20 11a8 8 0 1 0 2 5"/><path d="M20 4v7h-7"/>',
+    chat: '<path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/><path d="M8 10h.01M12 10h.01M16 10h.01"/>',
+    chart: '<path d="M4 20V10m6 10V4m6 16v-7m6 7H2"/>',
+    headset: '<path d="M4 14v-2a8 8 0 0 1 16 0v2"/><path d="M4 14h3v6H5a2 2 0 0 1-2-2v-2a2 2 0 0 1 1-2Zm16 0h-3v6h2a2 2 0 0 0 2-2v-2a2 2 0 0 0-1-2Z"/>',
+    target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    warning: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 4h.01"/>',
+    clipboard: '<path d="M9 5H6a2 2 0 0 0-2 2v13h16V7a2 2 0 0 0-2-2h-3"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M8 12h8m-8 4h6"/>',
+    panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
+    share: '<circle cx="18" cy="5" r="2"/><circle cx="6" cy="12" r="2"/><circle cx="18" cy="19" r="2"/><path d="m8 11 8-5m-8 7 8 5"/>',
+    edit: '<path d="M4 20h4L19 9l-4-4L4 16v4Z"/><path d="m13 7 4 4"/>',
+    expand: '<path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"/>',
+    phone: '<path d="M7 3H4a2 2 0 0 0-2 2c0 9.4 7.6 17 17 17a2 2 0 0 0 2-2v-3l-5-1-2 3a15 15 0 0 1-9-9l3-2-1-5Z"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    sliders: '<path d="M4 7h10m4 0h2M4 17h2m4 0h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
+    calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4m8-4v4M3 10h18"/>',
+    cube: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/>',
+  };
+  return `<svg class="voice-icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.waveform}</svg>`;
+}
+
+function voiceMetricCard(tone, icon, label, value, note) {
+  return `
+    <article class="voice-metric-card ${esc(tone)}">
+      <div class="voice-metric-head"><span>${voiceIcon(icon)}</span><strong>${esc(label)}</strong></div>
+      <b>${esc(value)}</b>
+      <small>${esc(note)}</small>
+    </article>
   `;
 }
 
@@ -2547,66 +2722,106 @@ function renderVoiceOverview(snapshot) {
   const prompt = snapshot.prompt || {};
   const latency = runtime.latency || {};
   const interaction = runtime.interaction || {};
-  const admission = interaction.last_decision || {};
   const strictAdmission = interaction.policy?.mode === "strict_public_site";
-  const audioInput = runtime.audio?.input || {};
-  const inputPeak = Number(audioInput.last_peak || 0);
-  const hasInputSnapshot = Number.isFinite(inputPeak) && inputPeak > 0;
-  const peakScale = hasInputSnapshot ? Math.max(0.25, Math.min(1, Math.sqrt(inputPeak / 12000))) : 0;
-  const vadState = audioInput.vad_state || runtime.vad?.state || "idle";
-  const waveformBars = Array.from({ length: 38 }).map((_, index) => {
-    const baseHeight = 18 + ((index * 17) % 64);
-    const height = hasInputSnapshot ? Math.max(5, Math.round(baseHeight * peakScale)) : 4;
-    return `<i style="--h:${height}%"></i>`;
-  }).join("");
-  const stages = [
-    ["唤醒", "小算", runtime.kws?.enabled !== false],
-    ["语音转文字", voiceProviderLabel(asr.provider || "local", "asr"), asr.available !== false],
-    ["对话准入", admission.action || (strictAdmission ? "严格门控" : "宽松门控"), strictAdmission],
-    ["对话模型", llm.model || "未配置", Boolean(llm.model)],
-    ["语音合成", voiceProviderLabel(tts.backend || "未配置", "tts"), Boolean(tts.backend)],
-    ["记忆", voiceProviderLabel(memory.current_backend || memory.selected_backend || "vector", "memory"), memory.ready !== false],
+  const issues = Array.isArray(snapshot.issues) ? snapshot.issues : [];
+  const criticalIssues = issues.filter((item) => ["critical", "high"].includes(String(item.severity || "").toLowerCase()));
+  const rawAccuracy = Number(asr.last_confidence ?? asr.confidence ?? asr.accuracy);
+  const accuracy = Number.isFinite(rawAccuracy) && rawAccuracy > 0
+    ? (rawAccuracy <= 1 ? rawAccuracy * 100 : rawAccuracy)
+    : null;
+  const latencyBuckets = latency.buckets || {};
+  const latencyParts = ["asr_final_ms", "llm_ttft_ms", "tts_first_audio_ms", "playback_start_ms"]
+    .map((key) => Number(latencyBuckets[key]?.latest_ms))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const measuredLatency = Number(latency.total_ms ?? latency.latest_ms);
+  const totalLatency = Number.isFinite(measuredLatency) && measuredLatency > 0
+    ? measuredLatency
+    : (latencyParts.length ? latencyParts.reduce((sum, value) => sum + value, 0) : null);
+  const todayConversations = Number(snapshot.metrics?.today_conversations ?? runtime.metrics?.today_conversations);
+  const serviceChecks = [
+    runtime.kws?.enabled !== false,
+    asr.available !== false && Boolean(asr.provider || runtime.asr),
+    Boolean(llm.model || llm.provider),
+    Boolean(tts.backend || tts.provider),
+    runtime.audio?.input_ready !== false,
+    memory.ready !== false,
   ];
+  const onlineServices = serviceChecks.filter(Boolean).length;
+  const accuracyText = accuracy === null ? "--" : `${accuracy.toFixed(1)}%`;
+  const latencyText = totalLatency === null ? "--" : Math.round(totalLatency).toLocaleString("zh-CN");
+  const qualityWidth = accuracy === null ? 0 : Math.max(4, Math.min(100, accuracy));
+  const playbackReady = runtime.audio?.output_ready !== false && Boolean(tts.backend || tts.provider);
+  const updateText = snapshot.updated_at || runtime.updated_at || "随运行状态更新";
   return `
-    <section class="voice-stage-strip" aria-label="实时语音链路">
-      ${stages.map(([label, value, ok], index) => `
-        <article class="voice-stage ${ok ? "ok" : "warn"}">
-          <span>${String(index + 1).padStart(2, "0")}</span>
-          <div><small>${esc(label)}</small><strong>${esc(value)}</strong></div>
-        </article>
-      `).join("")}
-    </section>
-    <div class="voice-overview-grid">
-      <section class="voice-panel voice-latency-panel">
-        <div class="voice-panel-head"><div><p>实时性能</p><h3>端到端延迟</h3></div>${badge(runtime.audio?.input_ready && runtime.audio?.output_ready ? "音频就绪" : "检查音频", runtime.audio?.input_ready && runtime.audio?.output_ready ? "ok" : "warn")}</div>
-        <div class="voice-latency-grid">
-          ${[
-            ["ASR 完成", "asr_final_ms"],
-            ["模型首字", "llm_ttft_ms"],
-            ["TTS 首帧", "tts_first_audio_ms"],
-            ["开始播放", "playback_start_ms"],
-          ].map(([label, key]) => {
-            const bucket = latency.buckets?.[key] || {};
-            return `<div><span>${esc(label)}</span><b>${esc(bucket.latest_ms ?? "-")}</b><small>ms</small></div>`;
-          }).join("")}
+    <div class="voice-dashboard-grid">
+      <section class="voice-summary-card">
+        <div class="voice-card-heading">
+          <div><span class="voice-section-icon dark">${voiceIcon("waveform")}</span><h2>运行摘要</h2></div>
+          <button type="button" class="voice-icon-button" data-voice-refresh aria-label="刷新摘要" title="刷新摘要">${voiceIcon("refresh")}</button>
         </div>
-        <div class="voice-waveform ${hasInputSnapshot ? "has-signal" : "idle"}" role="img" aria-label="最近麦克风峰值 ${esc(hasInputSnapshot ? inputPeak : "无数据")}，VAD ${esc(vadState)}">
-          <span><b>MIC SNAPSHOT</b>${esc(hasInputSnapshot ? inputPeak : "NO SIGNAL")} · ${esc(vadState)}</span>
-          <div>${waveformBars}</div>
+        <div class="voice-metric-grid">
+          ${voiceMetricCard("peach", "chart", "今日对话数", Number.isFinite(todayConversations) ? todayConversations.toLocaleString("zh-CN") : "--", Number.isFinite(todayConversations) ? "今日已完成的真实对话" : "等待首轮对话数据")}
+          ${voiceMetricCard("blue", "headset", "在线服务", `${onlineServices}/6`, onlineServices === 6 ? "语音链路全部可用" : "部分组件需要检查")}
+          ${voiceMetricCard("lavender", "target", "语音识别准确率", accuracyText, accuracy === null ? "等待识别置信度数据" : "最近一次有效识别")}
+          ${voiceMetricCard("pink", "clock", "端到端响应延迟", latencyText, totalLatency === null ? "等待完整链路采样" : "毫秒 · 最近一轮")}
+          ${voiceMetricCard("mint", "warning", "阻塞会话", String(criticalIssues.length), criticalIssues.length ? "需要立即处理" : "当前没有高优先级阻塞")}
+          ${voiceMetricCard("rose", "clipboard", "待处理任务", String(issues.length), issues.length ? "来自运行时健康检查" : "当前运行状态稳定")}
         </div>
       </section>
-      <section class="voice-panel">
-        <div class="voice-panel-head"><div><p>上下文</p><h3>Prompt 与记忆</h3></div></div>
-        <dl class="voice-definition-list">
-          <div><dt>角色</dt><dd>${esc(snapshot.prompt?.persona?.role || "导览与巡检机器人")}</dd></div>
-          <div><dt>System</dt><dd>${prompt.relay_compat_mode ? "中继兼容" : "完整保留"}</dd></div>
-          <div><dt>记忆后端</dt><dd>${esc(memory.current_backend || memory.selected_backend || "-")}</dd></div>
-          <div><dt>可回答知识</dt><dd>${esc(memory.counts?.prompt_eligible ?? 0)} 条</dd></div>
-          <div><dt>对话准入</dt><dd>${strictAdmission ? "严格现场模式" : "宽松模式"}</dd></div>
+
+      <aside class="voice-core-card">
+        <div class="voice-core-tools">
+          <button type="button" class="voice-icon-button" data-voice-tab="audio" aria-label="打开音频设置" title="音频设置">${voiceIcon("panel")}</button>
+          <button type="button" class="voice-icon-button" data-voice-tab="models" aria-label="打开模型路由" title="模型路由">${voiceIcon("share")}</button>
+          <span></span>
+          <button type="button" class="voice-icon-button" data-voice-tab="prompt" aria-label="编辑 Prompt" title="编辑 Prompt">${voiceIcon("edit")}</button>
+          <button type="button" class="voice-icon-button" data-route="/dashboard/conversation" aria-label="展开对话" title="展开对话">${voiceIcon("expand")}</button>
+        </div>
+        <div class="voice-core-orbit" aria-hidden="true">
+          <span class="orbit-dot one"></span><span class="orbit-dot two"></span><span class="orbit-dot three"></span>
+          <div>${voiceIcon("waveform")}</div>
+        </div>
+        <h2>AskMe Voice Core</h2>
+        <p>现场智能服务中枢 / Speech Interaction Hub</p>
+        <div class="voice-core-actions">
+          <button type="button" data-voice-tab="audio" aria-label="音频链路" title="音频链路">${voiceIcon("waveform")}</button>
+          <button type="button" data-route="/dashboard/field" aria-label="现场消息" title="现场消息">${voiceIcon("chat")}</button>
+          <button type="button" data-route="/dashboard/conversation" aria-label="开始通话" title="开始通话">${voiceIcon("phone")}</button>
+          <button type="button" data-voice-tab="memory" aria-label="添加记忆" title="添加记忆">${voiceIcon("plus")}</button>
+          <button type="button" data-voice-tab="models" aria-label="模型设置" title="模型设置">${voiceIcon("sliders")}</button>
+          <button type="button" data-route="/dashboard/audit" aria-label="运行记录" title="运行记录">${voiceIcon("calendar")}</button>
+        </div>
+      </aside>
+
+      <section class="voice-quality-card">
+        <div class="voice-card-heading"><div><span class="voice-section-icon dark">${voiceIcon("waveform")}</span><h2>语音质量</h2></div><button type="button" class="voice-icon-button" data-voice-tab="audio" aria-label="查看音频质量" title="查看音频质量">${voiceIcon("plus")}</button></div>
+        <div class="voice-quality-score"><span>整体质量指数</span><strong>${accuracyText}</strong></div>
+        <div class="voice-quality-track"><i style="--quality:${qualityWidth}%"></i></div>
+        <div class="voice-quality-row"><span class="voice-row-icon">${voiceIcon("target")}</span><div><strong>识别质量</strong><small>${voiceProviderLabel(asr.provider || "未配置", "asr")}</small></div><b>${accuracyText}</b><em>${accuracy === null ? "待采样" : "最近一轮"}</em></div>
+        <div class="voice-quality-row"><span class="voice-row-icon">${voiceIcon("headset")}</span><div><strong>播报链路</strong><small>${voiceProviderLabel(tts.backend || tts.provider || "未配置", "tts")}</small></div><b>${playbackReady ? "就绪" : "检查"}</b><em>${playbackReady ? "在线" : "待处理"}</em></div>
+      </section>
+
+      <section class="voice-task-card">
+        <div class="voice-card-heading"><div><span class="voice-section-icon dark">${voiceIcon("target")}</span><h2>重点任务</h2></div><button type="button" class="voice-icon-button" data-route="/dashboard/field" aria-label="查看全部任务" title="查看全部任务">${voiceIcon("plus")}</button></div>
+        <div class="voice-task-progress"><span>运行优化进度</span><div><i style="--progress:${issues.length ? 58 : 100}%"></i></div><small>${issues.length ? "58%" : "100%"}</small></div>
+        <div class="voice-task-list">
+          ${issues.length ? issues.slice(0, 3).map((item) => `<article><span>${voiceIcon(item.severity === "high" ? "warning" : "cube")}</span><div><strong>${esc(item.label || item.id)}</strong><small>${esc(item.id || "runtime")}</small></div>${badge(item.severity === "high" ? "优先" : "待处理", item.severity === "high" ? "err" : "warn")}</article>`).join("") : `<article><span>${voiceIcon("cube")}</span><div><strong>当前没有运行阻断</strong><small>语音链路保持在线</small></div>${badge("稳定", "ok")}</article>`}
+        </div>
+      </section>
+
+      <section class="voice-details-card">
+        <div class="voice-card-heading"><div><span class="voice-section-icon dark">${voiceIcon("clipboard")}</span><h2>详细信息</h2></div><button type="button" class="voice-icon-button" data-voice-tab="models" aria-label="编辑系统配置" title="编辑系统配置">${voiceIcon("edit")}</button></div>
+        <dl class="voice-core-details">
+          <div><dt>${voiceIcon("waveform")}<span>服务名称</span></dt><dd>AskMe Voice Core</dd></div>
+          <div><dt>${voiceIcon("cube")}<span>对话模型</span></dt><dd>${esc(llm.model || llm.provider || "未配置")}</dd></div>
+          <div><dt>${voiceIcon("target")}<span>部署区域</span></dt><dd>聚龙科创 e 谷</dd></div>
+          <div><dt>${voiceIcon("headset")}<span>现场角色</span></dt><dd>${esc(snapshot.prompt?.persona?.role || "导览与巡检机器人")}</dd></div>
+          <div><dt>${voiceIcon("clock")}<span>更新时间</span></dt><dd>${esc(updateText)}</dd></div>
+          <div><dt>${voiceIcon("sliders")}<span>准入模式</span></dt><dd>${strictAdmission ? "严格现场模式" : "标准模式"}</dd></div>
+          <div><dt>${voiceIcon("clipboard")}<span>Prompt / 记忆</span></dt><dd>${prompt.relay_compat_mode ? "中继兼容" : "完整保留"} · ${esc(memory.current_backend || memory.selected_backend || "未配置")}</dd></div>
         </dl>
       </section>
     </div>
-    ${renderVoiceIssues(snapshot)}
   `;
 }
 
@@ -2633,6 +2848,7 @@ function renderVoiceIssues(snapshot) {
 function renderVoiceModels(snapshot) {
   const runtime = snapshot.runtime || {};
   const catalog = snapshot.catalog || {};
+  const switches = runtime.switches || {};
   return `
     <section class="voice-model-intro">
       <div><p>在线热切换</p><h3>模型路由控制</h3><span>新请求使用新模型，正在处理的对话保持原实例。切换前先验证服务可用性。</span></div>
@@ -2640,8 +2856,8 @@ function renderVoiceModels(snapshot) {
     </section>
     <div class="voice-model-grid">
       ${renderVoiceModelCard("llm", "对话模型", runtime.llm || {}, catalog.llm || [])}
-      ${renderVoiceModelCard("asr", "语音识别", runtime.asr?.cloud || runtime.asr || {}, catalog.asr || [])}
-      ${renderVoiceModelCard("tts", "语音合成", runtime.tts || {}, catalog.tts || [])}
+      ${renderVoiceModelCard("asr", "语音识别", runtime.asr || {}, catalog.asr || [], switches.asr)}
+      ${renderVoiceModelCard("tts", "语音合成", runtime.tts || {}, catalog.tts || [], switches.tts)}
     </div>
     <section class="voice-switch-contract">
       <div><strong>切换语义</strong><span>LLM 原子发布；ASR 在下一监听周期生效；TTS 播放中时排队到播报结束。</span></div>
@@ -2651,17 +2867,85 @@ function renderVoiceModels(snapshot) {
   `;
 }
 
-function renderVoiceModelCard(component, title, active, entries) {
+function voiceLegacyModelSelection(component, runtimeState) {
+  if (component !== "asr") return runtimeState || {};
+  const asr = runtimeState || {};
+  const cloud = asr.cloud;
+  if (cloud && cloud.available !== false && asr.provider !== "local") return cloud;
+  const directCloudUnavailable = asr.available === false && asr.provider !== "local";
+  if (asr.provider === "local" || cloud?.available === false || directCloudUnavailable) {
+    const local = asr.local || {};
+    return {
+      ...local,
+      provider: "local",
+      model: local.model || "local",
+    };
+  }
+  return cloud || asr;
+}
+
+function voiceEffectiveModelSelection(component, runtimeState, switchState) {
+  const legacy = voiceLegacyModelSelection(component, runtimeState);
+  const effective = switchState?.effective;
+  if (!effective || typeof effective !== "object" || Array.isArray(effective)) return legacy;
+  return { ...legacy, ...effective };
+}
+
+function voiceModelState(component, switchState) {
+  const knownStates = new Set(["active", "pending", "failed"]);
+  const rawState = String(switchState?.state || "active").trim().toLowerCase();
+  const state = knownStates.has(rawState) ? rawState : "active";
+  let detail = "";
+  if (state === "pending") {
+    const pending = switchState?.pending || switchState?.desired || {};
+    const providerKey = component === "tts" ? "backend" : "provider";
+    const provider = voiceProviderLabel(pending[providerKey] || "", component);
+    detail = `待生效：${[pending.model, provider].filter(Boolean).join(" · ") || "新配置"}`;
+  }
+  if (state === "failed") {
+    const reason = String(switchState?.failed?.reason || "运行时验证失败");
+    detail = `最近切换失败：${reason}；当前运行保持不变`;
+  }
+  return { state, label: state.toUpperCase(), detail };
+}
+
+function renderVoiceModelCard(component, title, runtimeState, entries, switchState = null) {
   const providerKey = component === "tts" ? "backend" : "provider";
+  const active = voiceEffectiveModelSelection(component, runtimeState, switchState);
+  const authoritativeEffective = Boolean(
+    switchState?.effective
+      && typeof switchState.effective === "object"
+      && !Array.isArray(switchState.effective),
+  );
   const activeProvider = voiceCanonicalProvider(
     component,
-    active[providerKey] || (component === "asr" && active.available === false ? "local" : ""),
+    active[providerKey] || "",
   );
-  const activeModel = String(active.model || active.minimax?.model || (component === "tts" ? active.minimax?.model : ""));
+  const providerRuntime = component === "tts" ? (active[activeProvider] || {}) : {};
+  // Volcengine V3 selects the account product/model through
+  // X-Api-Resource-Id.  Display and submit that effective selector instead of
+  // a descriptive model label that may not route the request.
+  const activeModel = String(
+    authoritativeEffective
+      ? (active.model || "")
+      : component === "tts" && activeProvider === "volcengine"
+      ? (providerRuntime.resource_id || providerRuntime.model || "")
+      : (active.model || providerRuntime.model || active.minimax?.model || ""),
+  );
+  const activeVoiceId = component === "tts"
+    ? String(
+      authoritativeEffective
+        ? (active.voice_id || "")
+        : activeProvider === "volcengine"
+        ? (providerRuntime.speaker || "")
+        : (providerRuntime.voice_id || active.minimax?.voice_id || ""),
+    )
+    : "";
+  const modelState = voiceModelState(component, switchState);
   const normalizedEntries = entries.length ? entries : [{ [providerKey]: activeProvider || "unknown", models: [activeModel], credential_ready: true }];
   return `
-    <article class="voice-model-card" data-model-card="${component}">
-      <div class="voice-model-card-head"><div><small>${esc(component.toUpperCase())}</small><h3>${esc(title)}</h3></div><span class="voice-model-state">LIVE</span></div>
+    <article class="voice-model-card" data-model-card="${component}" data-model-state="${esc(modelState.state)}">
+      <div class="voice-model-card-head"><div><small>${esc(component.toUpperCase())}</small><h3>${esc(title)}</h3></div><span class="voice-model-state ${esc(modelState.state)}" title="${esc(modelState.detail)}" aria-label="${esc([modelState.label, modelState.detail].filter(Boolean).join("："))}">${esc(modelState.label)}</span></div>
       <div class="voice-current-model"><span>当前运行</span><strong>${esc(activeModel || activeProvider || "未配置")}</strong><small>${esc(voiceProviderLabel(activeProvider || "-", component))}</small></div>
       <div class="voice-model-fields">
         <label>Provider
@@ -2675,7 +2959,7 @@ function renderVoiceModelCard(component, title, active, entries) {
         <label>Model
           <select data-voice-model="${component}">${voiceModelOptions(normalizedEntries, activeProvider, activeModel, providerKey)}</select>
         </label>
-        ${component === "tts" ? `<label>Voice ID<input data-voice-id value="${esc(active.minimax?.voice_id || "male-qn-qingse")}" autocomplete="off"></label>` : ""}
+        ${component === "tts" ? `<label>Voice ID<input data-voice-id value="${esc(activeVoiceId)}" autocomplete="off"></label>` : ""}
       </div>
       <button type="button" class="primary-button" data-voice-switch="${component}">验证并切换</button>
     </article>
@@ -2693,6 +2977,7 @@ function voiceModelOptions(entries, provider, activeModel, providerKey) {
 function voiceCanonicalProvider(component, value) {
   const key = String(value || "").trim().toLowerCase();
   if (component === "asr" && ["volcengine_seed_asr", "doubao", "cloud+local"].includes(key)) return "volcengine";
+  if (component === "tts" && key === "volc") return "volcengine";
   return key;
 }
 
@@ -2706,7 +2991,7 @@ function voiceProviderLabel(value, component = "") {
   }
   return ({
     volcengine_seed_asr: "火山 Seed ASR 2.0",
-    volcengine: "火山 Seed ASR 2.0",
+    volcengine: component === "tts" ? "火山 Seed TTS 2.0" : "火山 Seed ASR 2.0",
     doubao: "火山 Seed ASR 2.0",
     vector: "本地向量库",
     edge: "Microsoft Edge TTS",
@@ -2866,6 +3151,17 @@ function syncVoiceModelOptions(component, provider) {
   const providerKey = component === "tts" ? "backend" : "provider";
   const select = document.querySelector(`[data-voice-model="${component}"]`);
   if (select) select.innerHTML = voiceModelOptions(catalog, provider, "", providerKey);
+  if (component === "tts") {
+    const canonicalProvider = voiceCanonicalProvider(component, provider);
+    const runtime = voiceControlSnapshot?.runtime?.tts || {};
+    const providerRuntime = runtime[canonicalProvider] || {};
+    const voiceInput = document.querySelector("[data-voice-id]");
+    if (voiceInput) {
+      voiceInput.value = canonicalProvider === "volcengine"
+        ? (providerRuntime.speaker || "")
+        : (providerRuntime.voice_id || runtime.minimax?.voice_id || "");
+    }
+  }
 }
 
 async function switchVoiceComponent(component, button) {
@@ -10516,6 +10812,7 @@ window.addEventListener("popstate", render);
 navToggle?.addEventListener("click", () => setNavigationOpen(!document.body.classList.contains("nav-open")));
 navClose?.addEventListener("click", () => setNavigationOpen(false));
 navBackdrop?.addEventListener("click", () => setNavigationOpen(false));
+desktopNavigation.addEventListener?.("change", syncNavigationMode);
 nav?.addEventListener("click", (event) => {
   if (event.target.closest("a")) setNavigationOpen(false);
 });
@@ -10528,6 +10825,7 @@ setInterval(() => {
 }, 5000);
 
 async function bootDashboard() {
+  syncNavigationMode();
   await loadDashboardPageRegistry();
   await render();
 }

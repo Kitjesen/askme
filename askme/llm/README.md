@@ -38,3 +38,14 @@ from `askme.robot_interaction`.
 assets outside provider transport code.
 - Provider health payloads must expose readiness and capability metadata without
 leaking API keys or raw secrets.
+
+## LiteLLM Proxy
+
+`provider: litellm` uses an out-of-process, OpenAI-compatible gateway. AskMe
+keeps ownership of sessions, turns, memory, tools, safety, and cancellation;
+LiteLLM owns upstream credentials, model routing, retry, fallback, and usage.
+The adapter deliberately does not import the LiteLLM Python SDK.
+
+For deployment, scoped virtual keys, interruption behavior, security pinning,
+latency gates, and rollback instructions, see
+[`docs/LITELLM_GATEWAY.md`](../../docs/LITELLM_GATEWAY.md).

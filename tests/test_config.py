@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from askme.config import get_config, get_section, project_root
 
@@ -24,7 +25,7 @@ class TestGetConfig:
         """Env vars set in conftest should be substituted into config."""
         cfg = get_config(reload=True)
         brain = cfg.get("brain", {})
-        assert brain.get("api_key") == "sk-test-key"
+        assert brain.get("api_key") == "sk-test-litellm-key"
 
     def test_tts_sample_rate(self):
         """TTS sample_rate should be an integer."""
@@ -37,7 +38,13 @@ class TestGetConfig:
         cache_dir = Path(cfg["voice"]["tts"]["phrase_cache_dir"])
 
         assert cache_dir.is_absolute()
-        assert cache_dir == Path.home() / ".cache" / "askme" / "voice_phrases"
+        assert cache_dir == project_root() / "data" / "voice" / "phrase_cache"
+
+    def test_minimax_runtime_endpoints_use_canonical_china_domain(self):
+        cfg = get_config(reload=True)
+
+        assert cfg["brain"]["minimax_base_url"] == "https://api.minimaxi.com/v1"
+        assert cfg["voice"]["tts"]["minimax_tts_url"] == "https://api.minimaxi.com/v1"
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows audio override")
     def test_windows_audio_profile_uses_verified_realtek_route(self):
@@ -58,32 +65,34 @@ class TestGetConfig:
         assert cfg["brain"]["persona"]["customer_name"] == "聚龙科创e谷"
         assert cfg["voice"]["address_detection"]["names"] == ["小算"]
         assert cfg["voice"]["interaction_gate"]["wake_terms"] == ["小算"]
-        assert cfg["voice"]["kws"]["keywords"] == [
-            "x iǎo s uàn :2.0 #0.20 @小算"
-        ]
+        assert cfg["voice"]["kws"]["keywords"] == ["x iǎo s uàn :2.0 #0.20 @小算"]
         assert Path(cfg["field_operations"]["site_profile_path"]) == (
-            project_root()
-            / "deploy"
-            / "site-profiles"
-            / "julong-tech-e-valley.yaml"
+            project_root() / "deploy" / "site-profiles" / "julong-tech-e-valley.yaml"
         )
         assert cfg["field_operations"]["robot_name"] == "小算"
         assert cfg["space_cognition"]["park_id"] == "julong-tech-e-valley"
         assert cfg["space_cognition"]["routes"] == []
 
-    def test_mempalace_is_enabled_with_separate_customer_and_behavior_rooms(self):
+    def test_memory_defaults_are_safe_and_board_profile_enables_mempalace(self):
         cfg = get_config(reload=True)
         memory = cfg.get("memory", {})
 
-        assert memory["backend"] == "mempalace"
-        assert memory["customer_knowledge_backend"] == "mempalace"
-        assert memory["mempalace_fallback_backend"] == "vector"
-        assert memory["auto_backend_order"][:2] == ["mempalace", "vector"]
-        assert memory["robot_behavior_memory_backend"] == "mempalace"
-        assert memory["robot_behavior_memory_enabled"] is True
-        assert memory["mempalace_transport"] == "http"
-        assert memory["mempalace_room"] == "customer_knowledge"
-        assert memory["mempalace_behavior_room"] == "robot_behavior"
+        assert memory["backend"] == "vector"
+        assert memory["customer_knowledge_backend"] == "vector"
+        assert memory["robot_behavior_memory_backend"] == "robotmem"
+        assert memory["robot_behavior_memory_enabled"] is False
+
+        board = yaml.safe_load((project_root() / "config.board.yaml").read_text(encoding="utf-8"))
+        board_memory = board["memory"]
+        assert board_memory["backend"] == "mempalace"
+        assert board_memory["customer_knowledge_backend"] == "mempalace"
+        assert board_memory["mempalace_fallback_backend"] == "vector"
+        assert board_memory["auto_backend_order"][:2] == ["mempalace", "vector"]
+        assert board_memory["robot_behavior_memory_backend"] == "mempalace"
+        assert board_memory["robot_behavior_memory_enabled"] is True
+        assert board_memory["mempalace_transport"] == "http"
+        assert board_memory["mempalace_room"] == "customer_knowledge"
+        assert board_memory["mempalace_behavior_room"] == "robot_behavior"
 
     def test_customer_editable_config_sections_are_readable(self):
         """High-touch deployment config must not contain mojibake text."""
@@ -104,7 +113,7 @@ class TestGetConfig:
                     "simulate:",
                     "MiniMax",
                     "Edge backend",
-                    "local\"",
+                    'local"',
                 )
             ):
                 high_touch_lines.append(line)
@@ -134,12 +143,13 @@ class TestGetConfig:
         profiles = cfg["voice"]["tts"]["voice_profiles"]
         assert profiles["patrol_default"]["label"] == "巡检播报"
         assert profiles["visitor_friendly"]["label"] == "游客服务"
-        assert "待现场标定" in cfg["field_operations"]["site_map"]["zones"][
-            "julong-guide-01"
-        ]["name"]
-        assert cfg["field_operations"]["site_map"]["zones"]["julong-patrol-01"][
-            "type"
-        ] == "patrol_checkpoint"
+        assert (
+            "待现场标定" in cfg["field_operations"]["site_map"]["zones"]["julong-guide-01"]["name"]
+        )
+        assert (
+            cfg["field_operations"]["site_map"]["zones"]["julong-patrol-01"]["type"]
+            == "patrol_checkpoint"
+        )
         assert "确认执行" in cfg["tools"]["confirmation_phrases"]
         assert "取消执行" in cfg["tools"]["rejection_phrases"]
 

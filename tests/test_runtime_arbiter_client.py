@@ -27,7 +27,7 @@ def test_lab_runtime_client_requires_endpoint_when_enabled() -> None:
     assert error.to_dict()["endpoint_configured"] is False
 
 
-def test_external_runtime_client_builds_contract_only_envelope_when_explicitly_enabled() -> None:
+def test_external_runtime_client_builds_transport_diagnostic_when_explicitly_enabled() -> None:
     client = RuntimeArbiterClient.from_config(
         "external",
         {"enable_external_runtime": True, "endpoint": "http://runtime.local/submit"},
@@ -36,6 +36,6 @@ def test_external_runtime_client_builds_contract_only_envelope_when_explicitly_e
     envelope = client.submission_envelope({"handoff_id": "handoff-1", "plan_id": "plan-1"})
 
     assert envelope["accepted"] is True
-    assert envelope["dispatch_mode"] == "contract_only"
+    assert envelope["dispatch_mode"] == "transport_managed"
     assert envelope["handoff_id"] == "handoff-1"
     assert envelope["hardware_dispatch"] is False

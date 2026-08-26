@@ -89,6 +89,21 @@ def test_voice_runtime_bridge_retries_after_failed_startup_precheck(monkeypatch)
     assert captured["json"]["session_id"] == "conv-1"
 
 
+def test_voice_runtime_bridge_explicitly_declines_when_disabled_before_request() -> None:
+    bridge = VoiceRuntimeBridge(
+        {
+            "enabled": False,
+            "base_url": "http://127.0.0.1:5100",
+        }
+    )
+
+    assert bridge.handle_voice_text("status") == {
+        "handled": False,
+        "disposition": "declined",
+        "reason": "disabled",
+    }
+
+
 def test_voice_runtime_bridge_accepts_voice_conversation_session_alias(monkeypatch) -> None:
     captured = {}
 
@@ -208,7 +223,7 @@ def test_voice_runtime_bridge_handle_turn_can_override_payload(monkeypatch) -> N
     assert captured["json"]["metadata"] == {"source": "unit-test"}
 
 
-def test_voice_runtime_bridge_returns_none_on_invalid_json(monkeypatch) -> None:
+def test_voice_runtime_bridge_marks_invalid_json_after_request_ambiguous(monkeypatch) -> None:
     class _BadJsonResponse(_Response):
         def json(self):
             raise ValueError("invalid json")
@@ -225,7 +240,12 @@ def test_voice_runtime_bridge_returns_none_on_invalid_json(monkeypatch) -> None:
         }
     )
 
-    assert bridge.handle_voice_text("status") is None
+    assert bridge.handle_voice_text("status") == {
+        "handled": False,
+        "disposition": "ambiguous",
+        "reason": "bridge_request_outcome_unknown",
+        "error_type": "ValueError",
+    }
     snapshot = bridge.status_snapshot()
     assert snapshot["last_status"] == "failed"
     assert snapshot["last_error_type"] == "ValueError"
@@ -268,9 +288,13 @@ def test_voice_runtime_bridge_opens_circuit_after_repeated_failures(monkeypatch)
         }
     )
 
-    assert bridge.handle_voice_text("first") is None
-    assert bridge.handle_voice_text("second") is None
-    assert bridge.handle_voice_text("third") is None
+    assert bridge.handle_voice_text("first")["disposition"] == "ambiguous"
+    assert bridge.handle_voice_text("second")["disposition"] == "ambiguous"
+    assert bridge.handle_voice_text("third") == {
+        "handled": False,
+        "disposition": "declined",
+        "reason": "circuit_open",
+    }
     assert captured["calls"] == 2
     snapshot = bridge.status_snapshot()
     assert snapshot["last_status"] == "circuit_open"
@@ -305,10 +329,14 @@ def test_voice_runtime_bridge_recovers_after_cooldown(monkeypatch) -> None:
         }
     )
 
-    assert bridge.handle_voice_text("first") is None
+    assert bridge.handle_voice_text("first")["disposition"] == "ambiguous"
 
     current_time["value"] = 102.0
-    assert bridge.handle_voice_text("second") is None
+    assert bridge.handle_voice_text("second") == {
+        "handled": False,
+        "disposition": "declined",
+        "reason": "circuit_open",
+    }
     assert captured["calls"] == 1
 
     current_time["value"] = 106.0

@@ -38,6 +38,8 @@ Current provider modules:
   scene-intelligence, snapshot, image, and depth helpers.
 - `register_defaults.py`: default backend registration for legacy registries.
 - `robot_control.py`: robot command/capability dispatch adapter assembly.
+- `runtime_executor/`: external runtime HTTP transport and its configured
+  factory, exposed behind the runtime executor port.
 - `safety.py`: safety/E-STOP adapter assembly.
 - `spatial/`: nav-gateway adapters for navigation dispatch, navigation status,
   and LingTu temporal scene-memory queries behind ports.

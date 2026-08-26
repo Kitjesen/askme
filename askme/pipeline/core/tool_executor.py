@@ -5,14 +5,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import time as _time
+from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any, Protocol
 
+from askme.conversation import InteractionTurnContext
 from askme.pipeline.core.hooks import _PROCEED, PipelineHooks, ToolCallRecord
 
 if TYPE_CHECKING:
+    from askme.llm.core.contracts import LLMCallContext
     from askme.memory.core.conversation import ConversationManager
     from askme.memory.core.episodic_memory import EpisodicMemory
     from askme.pipeline.core.prompt_builder import PromptBuilder
+    from askme.pipeline.core.protocols import CancellationToken
     from askme.ports import AudioFrontendPort
     from askme.tools.core.tool_registry import ToolRegistry
 
@@ -49,7 +53,7 @@ class ToolExecutor:
         episodic: EpisodicMemory | None,
         general_tool_max_safety_level: str,
         prompt_builder: PromptBuilder,
-        stream_and_speak: _StreamAndSpeakFn,
+        stream_and_speak: _StreamAndSpeakFn | None,
         hooks: PipelineHooks | None = None,
         cancel_token: Any | None = None,
     ) -> None:
@@ -65,6 +69,64 @@ class ToolExecutor:
     def _is_cancelled(self) -> bool:
         return bool(self._cancel_token is not None and self._cancel_token.is_set())
 
+    @staticmethod
+    def _accepts_keyword(callback: Any, name: str) -> bool:
+        """Return whether a callable can accept one named compatibility argument."""
+
+        try:
+            parameters = signature(callback).parameters
+        except (TypeError, ValueError):
+            return False
+        named_parameter = parameters.get(name)
+        return (
+            named_parameter is not None
+            and named_parameter.kind in {Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY}
+        ) or any(parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+    @staticmethod
+    def _interaction_context(
+        *,
+        source: str,
+        conversation_session_id: str | None,
+        turn_cancel_token: CancellationToken | None,
+        llm_call_context: LLMCallContext | None,
+    ) -> InteractionTurnContext | None:
+        """Project internal LLM correlation into canonical tool policy context."""
+
+        explicit_thread = str(conversation_session_id or "").strip()
+        llm_thread = str(getattr(llm_call_context, "session_id", None) or "").strip()
+        if explicit_thread and llm_thread and explicit_thread != llm_thread:
+            raise ValueError("LLM and conversation session identities do not match")
+        thread_id = llm_thread or explicit_thread
+        turn_id = str(getattr(llm_call_context, "turn_id", None) or "").strip()
+        if not thread_id or not turn_id:
+            return None
+        channel = str(getattr(llm_call_context, "channel", None) or source or "text").strip()
+        operator_id = str(getattr(llm_call_context, "operator_id", None) or "").strip()
+        return InteractionTurnContext(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            channel=channel,
+            source=str(source or channel),
+            user_text="",
+            operator_id=operator_id or None,
+            cancel_token=turn_cancel_token,
+        )
+
+    def _has_pending_approval(
+        self,
+        interaction_context: InteractionTurnContext | None,
+    ) -> bool:
+        callback = self._tools.has_pending_approval
+        if interaction_context is None:
+            return bool(callback())
+        if not self._accepts_keyword(callback, "interaction_context"):
+            logger.warning(
+                "Scoped tool approval probe rejected: registry does not accept interaction_context"
+            )
+            return False
+        return bool(callback(interaction_context=interaction_context))
+
     async def execute_tools(
         self,
         tool_calls_acc: dict[int, dict[str, str]],
@@ -72,6 +134,8 @@ class ToolExecutor:
         model: str | None = None,
         source: str = "voice",
         conversation_session_id: str | None = None,
+        turn_cancel_token: CancellationToken | None = None,
+        llm_call_context: LLMCallContext | None = None,
     ) -> str:
         """Execute accumulated tool calls and get follow-up LLM response.
 
@@ -89,6 +153,12 @@ class ToolExecutor:
             return ""
 
         logger.info("Tool calls: %d detected", len(tool_calls_acc))
+        interaction_context = self._interaction_context(
+            source=source,
+            conversation_session_id=conversation_session_id,
+            turn_cancel_token=turn_cancel_token,
+            llm_call_context=llm_call_context,
+        )
 
         tool_call_objs = []
         tool_results = []
@@ -109,8 +179,10 @@ class ToolExecutor:
             hook_override: str | None = None
             if self._hooks and self._hooks.pre_tool:
                 probe = ToolCallRecord(
-                    call_id=call_id, tool_name=tool_name,
-                    arguments=tool_args, result="",
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=tool_args,
+                    result="",
                     elapsed_ms=0.0,
                 )
                 override = await self._hooks.fire_pre_tool(probe)
@@ -130,23 +202,37 @@ class ToolExecutor:
             else:
                 t0 = _time.perf_counter()
                 try:
-                    execution_control = {}
-                    if self._cancel_token is not None:
-                        execution_control["cancel_token"] = self._cancel_token
-                    result = await asyncio.to_thread(
-                        self._tools.execute,
-                        tool_name,
-                        tool_args,
-                        max_safety_level=self._general_tool_max_safety_level,
-                        **execution_control,
-                    )
+                    execute_callback = self._tools.execute
+                    execute_kwargs: dict[str, Any] = {
+                        "max_safety_level": self._general_tool_max_safety_level,
+                    }
+                    if interaction_context is not None and not self._accepts_keyword(
+                        execute_callback,
+                        "interaction_context",
+                    ):
+                        logger.error(
+                            "Scoped tool execution rejected for %s: registry does not "
+                            "accept interaction_context",
+                            tool_name,
+                        )
+                        result = (
+                            "[Error] Tool registry does not support scoped interaction context."
+                        )
+                    else:
+                        if interaction_context is not None:
+                            execute_kwargs["interaction_context"] = interaction_context
+                        if self._cancel_token is not None:
+                            execute_kwargs["cancel_token"] = self._cancel_token
+                        result = await asyncio.to_thread(
+                            execute_callback,
+                            tool_name,
+                            tool_args,
+                            **execute_kwargs,
+                        )
                 except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
-                    logger.error(
-                        "Tool '%s' timed out after %.0fs", tool_name, self._TOOL_TIMEOUT
-                    )
+                    logger.error("Tool '%s' timed out after %.0fs", tool_name, self._TOOL_TIMEOUT)
                     result = (
-                        f"[Error] 工具 {tool_name} 执行超时"
-                        f"（超过 {int(self._TOOL_TIMEOUT)} 秒）"
+                        f"[Error] 工具 {tool_name} 执行超时（超过 {int(self._TOOL_TIMEOUT)} 秒）"
                     )
                     timed_out = True
                 elapsed_ms = (_time.perf_counter() - t0) * 1000
@@ -162,9 +248,12 @@ class ToolExecutor:
             # post_tool hook (Claude Code: PostToolUse).
             if self._hooks and self._hooks.post_tool:
                 record = ToolCallRecord(
-                    call_id=call_id, tool_name=tool_name,
-                    arguments=tool_args, result=str(result),
-                    elapsed_ms=elapsed_ms, timed_out=timed_out,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=tool_args,
+                    result=str(result),
+                    elapsed_ms=elapsed_ms,
+                    timed_out=timed_out,
                 )
                 result = await self._hooks.fire_post_tool(record)
 
@@ -172,13 +261,15 @@ class ToolExecutor:
                 logger.info("Turn cancelled after post-tool processing; dropping result")
                 return ""
 
-            tool_call_objs.append({
-                "id": call_id,
-                "type": "function",
-                "function": {"name": tool_name, "arguments": tool_args},
-            })
+            tool_call_objs.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": tool_args},
+                }
+            )
             tool_results.append({"tool_call_id": call_id, "content": str(result)})
-            if self._tools.has_pending_approval():
+            if self._has_pending_approval(interaction_context):
                 approval_response = str(result)
                 break
 
@@ -212,6 +303,8 @@ class ToolExecutor:
         if self._is_cancelled():
             logger.info("Turn cancelled before follow-up LLM")
             return ""
+        if self._stream_and_speak is None:
+            raise RuntimeError("stream_and_speak callback is not configured")
         return await self._stream_and_speak(follow_msgs, model=model, source=source)
 
     async def respond_without_llm(
@@ -221,19 +314,46 @@ class ToolExecutor:
         *,
         audio: AudioFrontendPort,
         source: str = "voice",
+        interaction_context: InteractionTurnContext | None = None,
     ) -> str:
-        """Speak and record a direct response that doesn't need another LLM turn."""
+        """Deliver a direct response, then project only completed delivery to history."""
+
+        cancel_token = interaction_context.cancel_token if interaction_context is not None else None
+        if cancel_token is not None and cancel_token.is_set():
+            return ""
+
         audio.drain_buffers()
         audio.start_playback()
         audio.speak(assistant_text)
-        self._conversation.add_user_message(user_text)
-        self._conversation.add_assistant_message(assistant_text)
+        if source == "voice":
+            try:
+                await asyncio.to_thread(audio.wait_speaking_done)
+            finally:
+                audio.stop_playback()
+            if cancel_token is not None and cancel_token.is_set():
+                audio.drain_buffers()
+                return ""
+
+        conversation_session_id = (
+            str(interaction_context.thread_id or "").strip()
+            if interaction_context is not None
+            else ""
+        )
+        if conversation_session_id:
+            self._conversation.add_user_message(
+                user_text,
+                conversation_session_id=conversation_session_id,
+            )
+            self._conversation.add_assistant_message(
+                assistant_text,
+                conversation_session_id=conversation_session_id,
+            )
+        else:
+            self._conversation.add_user_message(user_text)
+            self._conversation.add_assistant_message(assistant_text)
         if self._episodic:
             self._episodic.log("command", f"用户说: {user_text}")
             self._episodic.log("outcome", f"直接回复: {assistant_text[:100]}")
-        if source == "voice":
-            await asyncio.to_thread(audio.wait_speaking_done)
-            audio.stop_playback()
         return assistant_text
 
     async def handle_pending_tool_response(
@@ -242,16 +362,71 @@ class ToolExecutor:
         *,
         audio: AudioFrontendPort,
         source: str = "voice",
+        interaction_context: InteractionTurnContext | None = None,
     ) -> str | None:
-        """Resolve or restate the pending dangerous tool based on user input."""
-        execution_control = {}
-        if self._cancel_token is not None:
-            execution_control["cancel_token"] = self._cancel_token
-        result = self._tools.handle_pending_input(user_text, **execution_control)
+        """Resolve one exact pending approval challenge for this later Turn."""
+
+        if interaction_context is None:
+            unscoped_handler = self._tools.handle_pending_input
+            unscoped_kwargs: dict[str, Any] = {}
+            if self._cancel_token is not None and self._accepts_keyword(
+                unscoped_handler,
+                "cancel_token",
+            ):
+                unscoped_kwargs["cancel_token"] = self._cancel_token
+            result = unscoped_handler(user_text, **unscoped_kwargs)
+        else:
+            cancel_token = interaction_context.cancel_token
+            if cancel_token is not None and cancel_token.is_set():
+                return None
+            scope_getter = getattr(self._tools, "pending_approval_scope", None)
+            if not callable(scope_getter) or not self._accepts_keyword(
+                scope_getter,
+                "interaction_context",
+            ):
+                logger.warning(
+                    "Scoped tool approval response rejected: registry does not expose "
+                    "pending_approval_scope(interaction_context)"
+                )
+                return None
+            scope = scope_getter(interaction_context=interaction_context)
+            approval_id = str(getattr(scope, "approval_id", "") or "").strip()
+            if not approval_id:
+                return None
+            scoped_handler = getattr(self._tools, "handle_pending_input", None)
+            if not callable(scoped_handler) or not self._accepts_keyword(
+                scoped_handler,
+                "interaction_context",
+            ):
+                logger.warning(
+                    "Scoped tool approval response rejected: registry handler does "
+                    "not accept interaction_context"
+                )
+                return None
+            if not self._accepts_keyword(scoped_handler, "approval_id"):
+                logger.warning(
+                    "Scoped tool approval response rejected: registry handler does "
+                    "not accept approval_id"
+                )
+                return None
+            scoped_kwargs: dict[str, Any] = {
+                "interaction_context": interaction_context,
+                "approval_id": approval_id,
+            }
+            if cancel_token is not None and self._accepts_keyword(
+                scoped_handler,
+                "cancel_token",
+            ):
+                scoped_kwargs["cancel_token"] = cancel_token
+            result = scoped_handler(user_text, **scoped_kwargs)
         if self._is_cancelled():
             return ""
         if result is None:
             return None
         return await self.respond_without_llm(
-            user_text, result, audio=audio, source=source
+            user_text,
+            result,
+            audio=audio,
+            source=source,
+            interaction_context=interaction_context,
         )

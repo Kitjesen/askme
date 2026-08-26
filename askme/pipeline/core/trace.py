@@ -24,12 +24,29 @@ import time
 from collections import deque
 from collections.abc import Generator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _MAX_TRACE_HISTORY = 50
+_MIN_DURATION_SECONDS = 1e-9
+
+
+def _monotonic_after(start: float) -> float:
+    """Return a monotonic timestamp that is strictly after ``start``.
+
+    On coarse Windows timer ticks a start/end pair can land on the same
+    ``time.monotonic()`` value for extremely fast traces.  Trace completion is
+    a lifecycle fact, so expose it as a positive duration instead of a
+    zero-length completed trace.
+    """
+
+    current = time.monotonic()
+    if current <= start:
+        return start + _MIN_DURATION_SECONDS
+    return current
 
 
 @dataclass
@@ -111,36 +128,41 @@ class PipelineTracer:
 
     def __init__(self, max_history: int = _MAX_TRACE_HISTORY) -> None:
         self._lock = threading.Lock()
-        self._current: Trace | None = None
+        self._current: ContextVar[Trace | None] = ContextVar(
+            f"pipeline_trace_{id(self)}",
+            default=None,
+        )
         self._history: deque[Trace] = deque(maxlen=max_history)
         self._trace_counter = 0
 
     def start_trace(self, name: str = "voice_turn") -> Trace:
         """Begin a new trace for one pipeline turn."""
+        current = self._current.get()
         with self._lock:
-            if self._current is not None and self._current.end <= 0:
-                self._current.end = time.monotonic()
-                self._history.append(self._current)
+            if current is not None and current.end <= 0:
+                current.end = _monotonic_after(current.start)
+                self._history.append(current)
             self._trace_counter += 1
             trace = Trace(
                 id=f"t{self._trace_counter:05d}",
                 name=name,
                 start=time.monotonic(),
             )
-            self._current = trace
-            return trace
+        self._current.set(trace)
+        return trace
 
     def finish_trace(self) -> Trace | None:
         """Complete the current trace and add it to history."""
+        trace = self._current.get()
+        if trace is None:
+            return None
         with self._lock:
-            trace = self._current
-            if trace is None:
-                return None
-            trace.end = time.monotonic()
-            self._history.append(trace)
-            self._current = None
-            logger.info("[Trace] %s", trace.summary())
-            return trace
+            if trace.end <= 0:
+                trace.end = _monotonic_after(trace.start)
+                self._history.append(trace)
+        self._current.set(None)
+        logger.info("[Trace] %s", trace.summary())
+        return trace
 
     @contextmanager
     def span(self, name: str, **metadata: Any) -> Generator[Span, None, None]:
@@ -156,10 +178,11 @@ class PipelineTracer:
         try:
             yield s
         finally:
-            s.end = time.monotonic()
+            s.end = _monotonic_after(s.start)
+            trace = self._current.get()
             with self._lock:
-                if self._current is not None:
-                    self._current.spans.append(s)
+                if trace is not None and trace.end <= 0:
+                    trace.spans.append(s)
 
     def record_span(self, name: str, duration_ms: float, **metadata: Any) -> None:
         """Record a pre-measured span (for stages timed externally)."""
@@ -170,14 +193,14 @@ class PipelineTracer:
             end=now,
             metadata=metadata,
         )
+        trace = self._current.get()
         with self._lock:
-            if self._current is not None:
-                self._current.spans.append(s)
+            if trace is not None and trace.end <= 0:
+                trace.spans.append(s)
 
     @property
     def current_trace(self) -> Trace | None:
-        with self._lock:
-            return self._current
+        return self._current.get()
 
     def get_history(self, limit: int = 10) -> list[dict[str, Any]]:
         """Return recent completed traces as dicts (for ``/trace`` API)."""

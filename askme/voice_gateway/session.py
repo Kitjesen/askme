@@ -1,4 +1,4 @@
-"""In-memory conversation session management for the voice gateway."""
+"""Process-local conversation context projection for gateway compatibility."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def _as_utc(value: datetime) -> datetime:
 
 @dataclass(slots=True)
 class ConversationTurn:
-    """One user/assistant exchange inside a conversation session."""
+    """One projected user/assistant exchange in the gateway context cache."""
 
     user_text: str = ""
     assistant_text: str = ""
@@ -61,7 +61,7 @@ class ConversationTurn:
 
 @dataclass(slots=True)
 class ConversationSession:
-    """Mutable runtime state for one active voice gateway conversation."""
+    """Mutable process-local context projection for one gateway conversation."""
 
     channel: str
     operator_id: str | None = None
@@ -122,7 +122,7 @@ class SessionSnapshot:
 
 
 class InMemorySessionStore:
-    """Thread-safe process-local store for conversation sessions."""
+    """Thread-safe process-local store for gateway context projections."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, ConversationSession] = {}
@@ -167,7 +167,11 @@ class InMemorySessionStore:
 
 
 class ConversationSessionManager:
-    """Session lifecycle operations used by voice gateway entrypoints."""
+    """Maintain the voice gateway's process-local compatibility projection.
+
+    Conversation Core owns authoritative thread and turn lifecycle. This manager
+    only caches delivered turns for bridge context and compatibility diagnostics.
+    """
 
     def __init__(
         self,
@@ -207,6 +211,13 @@ class ConversationSessionManager:
                         raise ValueError(
                             f"Conversation session is not active: {requested_session_id}"
                         )
+                    _validate_session_identity(
+                        existing,
+                        channel=channel,
+                        operator_id=operator_id,
+                        robot_id=robot_id,
+                        site_id=site_id,
+                    )
                     existing.last_activity_at = now
                     existing.updated_at = now
                     if metadata:
@@ -219,7 +230,9 @@ class ConversationSessionManager:
                         existing.handoff_id = handoff_id
                     return existing
 
-            if requested_session_id is None:
+            if requested_session_id is None and any(
+                _has_identity(value) for value in (operator_id, robot_id, site_id)
+            ):
                 existing = self._store.find_active(
                     channel=channel,
                     operator_id=operator_id,
@@ -449,9 +462,9 @@ class ConversationSessionManager:
                 if len(line) > available:
                     line = line[:available]
                     if turn_payload.get("assistant_text"):
-                        turn_payload["assistant_text"] = str(
-                            turn_payload["assistant_text"]
-                        )[:available]
+                        turn_payload["assistant_text"] = str(turn_payload["assistant_text"])[
+                            :available
+                        ]
                     elif turn_payload.get("user_text"):
                         turn_payload["user_text"] = str(turn_payload["user_text"])[:available]
                 remaining -= separator_cost + len(line)
@@ -497,3 +510,32 @@ class ConversationSessionManager:
         if turn.assistant_text:
             parts.append(f"Assistant: {turn.assistant_text}")
         return " | ".join(parts)
+
+
+def _has_identity(value: str | None) -> bool:
+    return bool(str(value or "").strip())
+
+
+def _validate_session_identity(
+    session: ConversationSession,
+    *,
+    channel: str,
+    operator_id: str | None,
+    robot_id: str | None,
+    site_id: str | None,
+) -> None:
+    """Reject attempts to reuse an explicit session under a different identity."""
+
+    if session.channel != channel:
+        raise ValueError(
+            f"Conversation session identity conflict for {session.session_id}: channel"
+        )
+    for field_name, supplied in (
+        ("operator_id", operator_id),
+        ("robot_id", robot_id),
+        ("site_id", site_id),
+    ):
+        if _has_identity(supplied) and getattr(session, field_name) != supplied:
+            raise ValueError(
+                f"Conversation session identity conflict for {session.session_id}: {field_name}"
+            )

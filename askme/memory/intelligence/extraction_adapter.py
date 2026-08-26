@@ -9,11 +9,24 @@ ExtractionCallback protocol using the LLM client.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
+import uuid
+from collections.abc import Awaitable
 from typing import Any
 
+from askme.llm.core.contracts import LLMCallContext
+
 logger = logging.getLogger(__name__)
+
+
+async def _resolve_awaitable(value: Awaitable[Any]) -> Any:
+    """Normalize an arbitrary awaitable into a coroutine for ``asyncio.run``."""
+
+    return await value
+
 
 # Extraction prompt — asks LLM to identify facts from a conversation turn
 _EXTRACT_PROMPT = """From this conversation turn, extract any factual observations.
@@ -40,12 +53,12 @@ class ExtractionAdapter:
 
     Usage::
 
-        adapter = ExtractionAdapter(llm_client, model="qwen-turbo")
+        adapter = ExtractionAdapter(llm_client, model="memory-compact")
         mem.set_extraction_callback(adapter)
         # Now mem.process_turn(user, assistant) auto-extracts facts
     """
 
-    def __init__(self, llm_client: Any, model: str = "qwen-turbo") -> None:
+    def __init__(self, llm_client: Any | None, model: str = "memory-compact") -> None:
         self._llm = llm_client
         self._model = model
         self._enabled = True
@@ -84,30 +97,9 @@ class ExtractionAdapter:
                 assistant_text=assistant_text[:200],
             )
 
-            # Synchronous LLM call (fire-and-forget, not on hot path)
-            import os
-
-            import httpx
-
-            key = os.environ.get("DASHSCOPE_API_KEY", "")
-            if not key:
+            text = self._complete(prompt).strip()
+            if not text:
                 return []
-
-            resp = httpx.post(
-                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-                json={
-                    "model": self._model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 200,
-                    "temperature": 0.1,
-                },
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=5,
-            )
-            text = resp.json()["choices"][0]["message"]["content"].strip()
 
             # Parse JSON from response (handle markdown fences)
             if text.startswith("```"):
@@ -124,15 +116,55 @@ class ExtractionAdapter:
             valid = []
             for f in facts[:3]:  # max 3
                 if isinstance(f, dict) and "type" in f and "text" in f:
-                    valid.append({
-                        "type": f.get("type", "observation"),
-                        "location": f.get("location", "general"),
-                        "text": str(f["text"])[:100],
-                    })
+                    valid.append(
+                        {
+                            "type": f.get("type", "observation"),
+                            "location": f.get("location", "general"),
+                            "text": str(f["text"])[:100],
+                        }
+                    )
             if valid:
                 logger.info("Extracted %d facts from turn", len(valid))
             return valid
 
-        except Exception as e:
-            logger.debug("Extraction failed: %s", e)
+        except Exception as exc:
+            logger.debug("Extraction failed: %s", exc)
             return []
+
+    def _complete(self, prompt: str) -> str:
+        """Call only the injected central LLM boundary, or fail closed."""
+
+        if self._llm is None:
+            return ""
+        chat = getattr(self._llm, "chat", None)
+        if not callable(chat):
+            return ""
+
+        result = chat(
+            [{"role": "user", "content": prompt}],
+            model=self._model,
+            temperature=0.1,
+            context=LLMCallContext(
+                call_id=uuid.uuid4().hex,
+                purpose="memory_compact",
+                channel="background",
+                request_class="memory",
+                privacy_class="sensitive",
+                allow_cache=False,
+            ),
+        )
+        if not inspect.isawaitable(result):
+            return str(result or "")
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return str(asyncio.run(_resolve_awaitable(result)) or "")
+
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
+        logger.debug(
+            "Extraction skipped: synchronous callback cannot await central LLM on event-loop thread"
+        )
+        return ""

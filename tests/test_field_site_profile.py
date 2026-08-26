@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -91,35 +92,39 @@ def _write_real_link_acceptance_reports(root: Path) -> dict[str, str]:
     notification = root / "notification.json"
     runtime = root / "runtime.json"
     archive.write_text(
-        json.dumps({
-            "event_id": "field-real-1",
-            "scenario_id": "illegal_parking",
-            "status": "archived",
-            "created_at": time.time(),
-            "payload": {
-                "source": "camera",
-                "device_trust": {
-                    "trusted": True,
-                    "device_id": "camera-main-road-1",
+        json.dumps(
+            {
+                "event_id": "field-real-1",
+                "scenario_id": "illegal_parking",
+                "status": "archived",
+                "created_at": time.time(),
+                "payload": {
                     "source": "camera",
-                    "status": "trusted",
-                    "signature_verified": True,
-                    "reason": "",
+                    "device_trust": {
+                        "trusted": True,
+                        "device_id": "camera-main-road-1",
+                        "source": "camera",
+                        "status": "trusted",
+                        "signature_verified": True,
+                        "reason": "",
+                    },
                 },
-            },
-        })
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
     scenario.write_text(
-        json.dumps({
-            "status": "passed",
-            "scenario_count": 1,
-            "passed": 1,
-            "failed": 0,
-            "external_services": True,
-            "hardware_dispatch": True,
-        }),
+        json.dumps(
+            {
+                "status": "passed",
+                "scenario_count": 1,
+                "passed": 1,
+                "failed": 0,
+                "external_services": True,
+                "hardware_dispatch": True,
+            }
+        ),
         encoding="utf-8",
     )
     ingest.write_text(
@@ -127,36 +132,42 @@ def _write_real_link_acceptance_reports(root: Path) -> dict[str, str]:
         encoding="utf-8",
     )
     voice.write_text(
-        json.dumps({
-            "status": "passed",
-            "local_server": False,
-            "live_tts": True,
-            "voice_delivery": {"status": "queued"},
-            "voice_directive": {"resolved_profile": "emergency_short"},
-        }),
+        json.dumps(
+            {
+                "status": "passed",
+                "local_server": False,
+                "live_tts": True,
+                "voice_delivery": {"status": "queued"},
+                "voice_directive": {"resolved_profile": "emergency_short"},
+            }
+        ),
         encoding="utf-8",
     )
     notification.write_text(
-        json.dumps({
-            "status": "passed",
-            "local_server": False,
-            "external_services": True,
-            "collector_request_count": 1,
-        }),
+        json.dumps(
+            {
+                "status": "passed",
+                "local_server": False,
+                "external_services": True,
+                "collector_request_count": 1,
+            }
+        ),
         encoding="utf-8",
     )
     runtime.write_text(
-        json.dumps({
-            "ok": True,
-            "mode": "shadow",
-            "receipt_count": 3,
-            "callback_status_codes": [200, 200, 200],
-            "runtime_statuses": ["created", "submitted", "shadowed"],
-            "final_runtime_delivery": {
-                "status": "shadowed",
-                "runtime_callback_trust": {"trusted": True, "status": "trusted"},
-            },
-        }),
+        json.dumps(
+            {
+                "ok": True,
+                "mode": "shadow",
+                "receipt_count": 3,
+                "callback_status_codes": [200, 200, 200],
+                "runtime_statuses": ["created", "submitted", "shadowed"],
+                "final_runtime_delivery": {
+                    "status": "shadowed",
+                    "runtime_callback_trust": {"trusted": True, "status": "trusted"},
+                },
+            }
+        ),
         encoding="utf-8",
     )
     return {
@@ -182,9 +193,10 @@ def test_demo_field_site_profile_passes_and_exports_runtime_config() -> None:
     assert report["summary"]["device_sources"]["sensor"] >= 1
     assert report["summary"]["device_sources"]["robot"] >= 1
     assert report["readiness"]["wayfinding_configured"] is True
-    assert report["field_operations_config"]["site_map"]["zones"]["main-road-1"][
-        "parking_allowed"
-    ] is False
+    assert (
+        report["field_operations_config"]["site_map"]["zones"]["main-road-1"]["parking_allowed"]
+        is False
+    )
     assert report["field_operations_config"]["dingtalk_webhooks"]["security"] == (
         "${ASKME_DINGTALK_SECURITY_WEBHOOK}"
     )
@@ -207,12 +219,8 @@ def test_julong_site_profile_scopes_guide_and_patrol_for_commissioning() -> None
     }
     objects = report["field_operations_config"]["managed_objects"]
     assert set(objects) == {"patrol_checkpoints", "visitors"}
-    assert "capability.patrol_scan" in objects["patrol_checkpoints"]["bindings"][
-        "skill_packages"
-    ]
-    assert "capability.answer_wayfinding" in objects["visitors"]["bindings"][
-        "skill_packages"
-    ]
+    assert "capability.patrol_scan" in objects["patrol_checkpoints"]["bindings"]["skill_packages"]
+    assert "capability.answer_wayfinding" in objects["visitors"]["bindings"]["skill_packages"]
     zones = report["field_operations_config"]["site_map"]["zones"]
     assert all("待现场标定" in zone["name"] for zone in zones.values())
 
@@ -233,15 +241,17 @@ def test_field_site_profile_env_check_warns_for_unset_references(monkeypatch) ->
 
 
 def test_field_site_profile_rejects_missing_product_critical_sections() -> None:
-    report = validate_field_site_profile({
-        "site": {"site_id": "bad"},
-        "zones": {
-            "parking": {"type": "parking_area", "parking_allowed": True},
-        },
-        "responder_groups": {},
-        "devices": {},
-        "thresholds": {},
-    })
+    report = validate_field_site_profile(
+        {
+            "site": {"site_id": "bad"},
+            "zones": {
+                "parking": {"type": "parking_area", "parking_allowed": True},
+            },
+            "responder_groups": {},
+            "devices": {},
+            "thresholds": {},
+        }
+    )
 
     assert report["status"] == "failed"
     assert "site.name is required" in report["errors"]
@@ -290,20 +300,24 @@ def test_site_profile_managed_objects_are_customer_specific_delivery_scope() -> 
 
 
 def test_managed_object_resource_binding_reports_unregistered_resources() -> None:
-    catalog = managed_object_catalog_from_site_profile({
-        "managed_objects": {
-            "custom_camera_gate": {
-                "display_name": "Custom camera gate",
-                "category": "access",
-                "bindings": {
-                    "vision_models": ["tenant-only-gate-model"],
-                    "sensor_protocols": ["camera-detection-json"],
-                    "skill_packages": ["capability.inspect_gate"],
-                    "acceptance_tests": ["tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking"],
-                },
+    catalog = managed_object_catalog_from_site_profile(
+        {
+            "managed_objects": {
+                "custom_camera_gate": {
+                    "display_name": "Custom camera gate",
+                    "category": "access",
+                    "bindings": {
+                        "vision_models": ["tenant-only-gate-model"],
+                        "sensor_protocols": ["camera-detection-json"],
+                        "skill_packages": ["capability.inspect_gate"],
+                        "acceptance_tests": [
+                            "tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking"
+                        ],
+                    },
+                }
             }
         }
-    })
+    )
 
     resource_status = catalog["objects_by_id"]["custom_camera_gate"]["resource_binding_status"]
     assert resource_status["overall_status"] == "manual_check"
@@ -320,31 +334,35 @@ def test_managed_object_resource_binding_reports_unregistered_resources() -> Non
 
 
 def test_profile_delivery_resources_register_project_specific_bindings() -> None:
-    catalog = managed_object_catalog_from_site_profile({
-        "delivery_resources": {
-            "vision_models": {
-                "tenant-only-gate-model": {
-                    "display_name": "Tenant gate detector",
-                    "version": "v1.0.0",
-                    "owner": "delivery.team",
-                    "source": "project",
-                    "description": "Customer-specific gate model.",
+    catalog = managed_object_catalog_from_site_profile(
+        {
+            "delivery_resources": {
+                "vision_models": {
+                    "tenant-only-gate-model": {
+                        "display_name": "Tenant gate detector",
+                        "version": "v1.0.0",
+                        "owner": "delivery.team",
+                        "source": "project",
+                        "description": "Customer-specific gate model.",
+                    }
                 }
-            }
-        },
-        "managed_objects": {
-            "custom_camera_gate": {
-                "display_name": "Custom camera gate",
-                "category": "access",
-                "bindings": {
-                    "vision_models": ["tenant-only-gate-model"],
-                    "sensor_protocols": ["camera-detection-json"],
-                    "skill_packages": ["capability.inspect_gate"],
-                    "acceptance_tests": ["tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking"],
-                },
-            }
-        },
-    })
+            },
+            "managed_objects": {
+                "custom_camera_gate": {
+                    "display_name": "Custom camera gate",
+                    "category": "access",
+                    "bindings": {
+                        "vision_models": ["tenant-only-gate-model"],
+                        "sensor_protocols": ["camera-detection-json"],
+                        "skill_packages": ["capability.inspect_gate"],
+                        "acceptance_tests": [
+                            "tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking"
+                        ],
+                    },
+                }
+            },
+        }
+    )
 
     resource_status = catalog["objects_by_id"]["custom_camera_gate"]["resource_binding_status"]
     assert resource_status["overall_status"] == "ready"
@@ -412,8 +430,7 @@ def test_shared_delivery_resource_registry_resolves_object_bindings(tmp_path: Pa
     shared_model = next(
         item
         for item in resource_status["checks"]
-        if item["resource_type"] == "vision_models"
-        and item["resource_id"] == "shared-gate-model"
+        if item["resource_type"] == "vision_models" and item["resource_id"] == "shared-gate-model"
     )
     assert shared_model["status"] == "linked"
     assert shared_model["display_name"] == "Shared gate detector"
@@ -428,15 +445,20 @@ def test_default_delivery_resource_registry_seed_covers_customer_projects() -> N
     assert registry["found"] is True
     assert registry["summary"]["resource_count"] >= 35
     assert registry["summary"]["unregistered_resource_count"] == 0
-    assert registry["delivery_resources"]["vision_models"]["vehicle-detection"][
-        "publish_status"
-    ] == "published"
-    assert registry["delivery_resources"]["sensor_protocols"]["voice-turn-json"][
-        "owner"
-    ] == "voice.platform"
-    assert registry["delivery_resources"]["skill_packages"]["capability.answer_wayfinding"][
-        "publish_status"
-    ] == "published"
+    assert (
+        registry["delivery_resources"]["vision_models"]["vehicle-detection"]["publish_status"]
+        == "published"
+    )
+    assert (
+        registry["delivery_resources"]["sensor_protocols"]["voice-turn-json"]["owner"]
+        == "voice.platform"
+    )
+    assert (
+        registry["delivery_resources"]["skill_packages"]["capability.answer_wayfinding"][
+            "publish_status"
+        ]
+        == "published"
+    )
     assert (
         registry["delivery_resources"]["acceptance_tests"][
             "tests/scenario_tests/test_field_operations_evaluation.py::illegal_parking"
@@ -455,8 +477,7 @@ def test_default_delivery_resource_registry_seed_covers_customer_projects() -> N
     vehicle = next(
         item
         for item in catalog["resources"]
-        if item["resource_type"] == "vision_models"
-        and item["resource_id"] == "vehicle-detection"
+        if item["resource_type"] == "vision_models" and item["resource_id"] == "vehicle-detection"
     )
     assert vehicle["source"] == "shared_registry"
     assert vehicle["publish_status"] == "published"
@@ -539,8 +560,7 @@ def test_delivery_resource_registry_history_disable_and_rollback(tmp_path: Path)
     shared_model = next(
         item
         for item in resource_status["checks"]
-        if item["resource_type"] == "vision_models"
-        and item["resource_id"] == "shared-gate-model"
+        if item["resource_type"] == "vision_models" and item["resource_id"] == "shared-gate-model"
     )
     assert shared_model["status"] == "blocked"
     assert shared_model["publish_status"] == "disabled"
@@ -606,9 +626,7 @@ def test_delivery_resource_governance_request_requires_second_approver_before_di
     assert request["request"]["operation"]["resource_type"] == "vision_models"
     assert request["request"]["operation"]["resource_id"] == "vehicle-detection"
     assert request["request"]["sla_target_s"] == 60
-    assert request["request"]["due_at"] == pytest.approx(
-        request["request"]["requested_at"] + 60
-    )
+    assert request["request"]["due_at"] == pytest.approx(request["request"]["requested_at"] + 60)
     assert request["request"]["review_sla"]["state"] in {"active", "due_soon"}
     assert request["request"]["review_sla"]["escalation_required"] is False
     assert request["preview"]["accepted"] is True
@@ -636,7 +654,9 @@ def test_delivery_resource_governance_request_requires_second_approver_before_di
     )
     still_published = list_delivery_resource_registry(resource_root)
     assert (
-        still_published["delivery_resources"]["vision_models"]["vehicle-detection"]["publish_status"]
+        still_published["delivery_resources"]["vision_models"]["vehicle-detection"][
+            "publish_status"
+        ]
         == "published"
     )
 
@@ -725,9 +745,7 @@ def test_delivery_resource_governance_request_requires_second_approver_before_di
     )
     assert captured_escalations
     assert delivered["escalations"][0]["status"] == "sent"
-    assert delivered["escalations"][0]["notification"]["delivery_mode"] == (
-        "configured_channels"
-    )
+    assert delivered["escalations"][0]["notification"]["delivery_mode"] == ("configured_channels")
     assert delivered["escalations"][0]["notification"]["sent_channels"] == ["log"]
     assert delivered["escalations"][0]["delivery_report"][0]["channel"] == "log"
     duplicate_escalation = escalate_overdue_delivery_resource_governance_requests(
@@ -834,7 +852,9 @@ def test_delivery_resource_governance_request_approves_registry_rollback(
     assert request["preview"]["dry_run"] is True
     assert request["preview"]["would_write"] is True
     current = list_delivery_resource_registry(resource_root)
-    assert current["delivery_resources"]["vision_models"]["shared-gate-model"]["version"] == "v2.0.0"
+    assert (
+        current["delivery_resources"]["vision_models"]["shared-gate-model"]["version"] == "v2.0.0"
+    )
 
     approved = review_delivery_resource_governance_request(
         resource_root,
@@ -848,7 +868,9 @@ def test_delivery_resource_governance_request_approves_registry_rollback(
     assert approved["request"]["status"] == "approved"
     assert approved["apply_result"]["accepted"] is True
     restored = list_delivery_resource_registry(resource_root)
-    assert restored["delivery_resources"]["vision_models"]["shared-gate-model"]["version"] == "v1.0.0"
+    assert (
+        restored["delivery_resources"]["vision_models"]["shared-gate-model"]["version"] == "v1.0.0"
+    )
     approved_requests = list_delivery_resource_governance_requests(resource_root, status="approved")
     assert approved_requests["summary"]["approved_count"] == 1
 
@@ -949,29 +971,29 @@ def test_disabled_acceptance_resource_blocks_binding_readiness(tmp_path: Path) -
     resource_status = catalog["objects_by_id"]["parking_lane"]["resource_binding_status"]
     assert resource_status["overall_status"] == "blocked"
     acceptance_check = next(
-        item
-        for item in resource_status["checks"]
-        if item["resource_type"] == "acceptance_tests"
+        item for item in resource_status["checks"] if item["resource_type"] == "acceptance_tests"
     )
     assert acceptance_check["status"] == "blocked"
     assert acceptance_check["publish_status"] == "disabled"
 
 
 def test_managed_object_acceptance_gate_blocks_missing_test_file() -> None:
-    catalog = managed_object_catalog_from_site_profile({
-        "managed_objects": {
-            "bad_gate": {
-                "display_name": "Bad gate",
-                "category": "access",
-                "bindings": {
-                    "vision_models": ["gate-detection"],
-                    "sensor_protocols": ["camera-detection-json"],
-                    "skill_packages": ["capability.inspect_gate"],
-                    "acceptance_tests": ["tests/nope.py::missing_gate"],
-                },
+    catalog = managed_object_catalog_from_site_profile(
+        {
+            "managed_objects": {
+                "bad_gate": {
+                    "display_name": "Bad gate",
+                    "category": "access",
+                    "bindings": {
+                        "vision_models": ["gate-detection"],
+                        "sensor_protocols": ["camera-detection-json"],
+                        "skill_packages": ["capability.inspect_gate"],
+                        "acceptance_tests": ["tests/nope.py::missing_gate"],
+                    },
+                }
             }
         }
-    })
+    )
 
     status = catalog["objects_by_id"]["bad_gate"]["acceptance_status"]
     assert status["status"] == "blocked"
@@ -993,8 +1015,7 @@ def test_customer_project_acceptance_registry_resolves_project_and_template_refe
     vehicle_consumer = next(
         item
         for item in registry["consumers"]
-        if item.get("project_id") == "demo-field-ops"
-        and item.get("object_id") == "vehicles"
+        if item.get("project_id") == "demo-field-ops" and item.get("object_id") == "vehicles"
     )
     assert vehicle_consumer["status"] == "linked"
     assert vehicle_consumer["matched"] == "illegal_parking_camera_ingest"
@@ -1096,16 +1117,14 @@ def test_customer_project_resource_catalog_uses_custom_delivery_resource_root(
     consumer = next(
         item
         for item in catalog["consumers"]
-        if item["object_id"] == "custom_camera_gate"
-        and item["resource_type"] == "vision_models"
+        if item["object_id"] == "custom_camera_gate" and item["resource_type"] == "vision_models"
     )
     assert consumer["status"] == "linked"
     assert consumer["source"] == "shared_registry"
     resource = next(
         item
         for item in catalog["resources"]
-        if item["resource_type"] == "vision_models"
-        and item["resource_id"] == "shared-gate-model"
+        if item["resource_type"] == "vision_models" and item["resource_id"] == "shared-gate-model"
     )
     assert resource["source"] == "shared_registry"
     assert resource["consumer_count"] == 1
@@ -1175,7 +1194,13 @@ def test_customer_project_acceptance_report_summarizes_delivery_gates(tmp_path: 
     notification = tmp_path / "notification.json"
     runtime = tmp_path / "runtime.json"
     archive.write_text(
-        json.dumps({"event_id": "field-1", "scenario_id": "illegal_parking", "payload": {"source": "camera"}})
+        json.dumps(
+            {
+                "event_id": "field-1",
+                "scenario_id": "illegal_parking",
+                "payload": {"source": "camera"},
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -1183,38 +1208,46 @@ def test_customer_project_acceptance_report_summarizes_delivery_gates(tmp_path: 
         json.dumps({"status": "passed", "scenario_count": 1, "passed": 1, "failed": 0}),
         encoding="utf-8",
     )
-    ingest.write_text(json.dumps({"status": "passed", "event_count": 1, "local_server": True}), encoding="utf-8")
+    ingest.write_text(
+        json.dumps({"status": "passed", "event_count": 1, "local_server": True}), encoding="utf-8"
+    )
     voice.write_text(
-        json.dumps({
-            "status": "passed",
-            "local_server": True,
-            "live_tts": False,
-            "voice_delivery": {"status": "queued"},
-            "voice_directive": {"resolved_profile": "emergency_short"},
-        }),
+        json.dumps(
+            {
+                "status": "passed",
+                "local_server": True,
+                "live_tts": False,
+                "voice_delivery": {"status": "queued"},
+                "voice_directive": {"resolved_profile": "emergency_short"},
+            }
+        ),
         encoding="utf-8",
     )
     notification.write_text(
-        json.dumps({
-            "status": "passed",
-            "local_server": True,
-            "external_services": False,
-            "collector_request_count": 1,
-        }),
+        json.dumps(
+            {
+                "status": "passed",
+                "local_server": True,
+                "external_services": False,
+                "collector_request_count": 1,
+            }
+        ),
         encoding="utf-8",
     )
     runtime.write_text(
-        json.dumps({
-            "ok": True,
-            "mode": "local_server",
-            "receipt_count": 1,
-            "callback_status_codes": [200],
-            "runtime_statuses": ["created", "shadowed"],
-            "final_runtime_delivery": {
-                "status": "shadowed",
-                "runtime_callback_trust": {"trusted": True, "status": "trusted"},
-            },
-        }),
+        json.dumps(
+            {
+                "ok": True,
+                "mode": "local_server",
+                "receipt_count": 1,
+                "callback_status_codes": [200],
+                "runtime_statuses": ["created", "shadowed"],
+                "final_runtime_delivery": {
+                    "status": "shadowed",
+                    "runtime_callback_trust": {"trusted": True, "status": "trusted"},
+                },
+            }
+        ),
         encoding="utf-8",
     )
     report = customer_project_acceptance_report(
@@ -1357,16 +1390,18 @@ def test_acceptance_report_auto_backfills_required_onsite_evidence_from_real_lin
         assert receipts_by_type["device_ingest"]["path"].endswith("field-events.jsonl")
         assert receipts_by_type["voice_playback"]["sha256"]
         assert receipts_by_type["notification_delivery"]["exists"] is True
-        assert receipts_by_type["runtime_roundtrip"]["external_reference"] == "final_status=shadowed"
+        assert (
+            receipts_by_type["runtime_roundtrip"]["external_reference"] == "final_status=shadowed"
+        )
         assert report["field_readiness"]["device_onboarding"]["ready"] == 1
         assert report["field_readiness"]["device_onboarding"]["manual_check"] == 3
         assert report["field_readiness"]["device_onboarding"]["blocked"] == 0
         gates_by_id = {gate["gate_id"]: gate for gate in report["gates"]}
         assert gates_by_id["onsite_acceptance_boundary"]["status"] == "ready"
         assert gates_by_id["field_device_onboarding"]["status"] == "manual_check"
-        assert "4/4 个必需现场证据回执已通过" in gates_by_id[
-            "onsite_acceptance_boundary"
-        ]["evidence"]
+        assert (
+            "4/4 个必需现场证据回执已通过" in gates_by_id["onsite_acceptance_boundary"]["evidence"]
+        )
         checklist = report["site_acceptance_checklist"]
         checklist_by_id = {item["item_id"]: item for item in checklist["items"]}
         assert checklist_by_id["device_ingest"]["status"] == "ready"
@@ -1389,8 +1424,7 @@ def test_acceptance_report_auto_backfills_required_onsite_evidence_from_real_lin
         assert dossier_result["dossier"]["manifest"]["launch_readiness_status"] == "manual_check"
         assert dossier_result["dossier"]["manifest"]["launch_stage"] == "pilot_or_site_trial"
         launch_gates = {
-            gate["gate_id"]: gate
-            for gate in dossier_result["dossier"]["launch_readiness"]["gates"]
+            gate["gate_id"]: gate for gate in dossier_result["dossier"]["launch_readiness"]["gates"]
         }
         assert launch_gates["field_device_onboarding"]["status"] == "manual_check"
         assert "ready=1" in launch_gates["field_device_onboarding"]["evidence"]
@@ -1448,9 +1482,10 @@ def test_acceptance_report_auto_backfill_is_read_only_and_idempotent(
         assert [item["receipt_id"] for item in first_receipts] == [
             item["receipt_id"] for item in second_receipts
         ]
-        assert first["onsite_acceptance_evidence"]["summary"] == second[
-            "onsite_acceptance_evidence"
-        ]["summary"]
+        assert (
+            first["onsite_acceptance_evidence"]["summary"]
+            == second["onsite_acceptance_evidence"]["summary"]
+        )
         assert profile_file.read_text(encoding="utf-8") == profile_before
         listing = list_customer_project_onsite_evidence(
             profile_root,
@@ -1664,9 +1699,9 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
         )
         gates_by_id = {gate["gate_id"]: gate for gate in report["gates"]}
         assert gates_by_id["onsite_acceptance_boundary"]["status"] == "manual_check"
-        assert "0/4 个必需现场证据回执已通过" in gates_by_id[
-            "onsite_acceptance_boundary"
-        ]["evidence"]
+        assert (
+            "0/4 个必需现场证据回执已通过" in gates_by_id["onsite_acceptance_boundary"]["evidence"]
+        )
 
         review_result = register_customer_project_acceptance_review(
             profile_root,
@@ -1675,7 +1710,9 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
                 "decision": "accepted",
                 "reason": "Onsite evidence is complete enough for customer signoff.",
                 "risk_acknowledgement": True,
-                "evidence_refs": [listing["onsite_acceptance_evidence"]["summary"]["latest_receipt_id"]],
+                "evidence_refs": [
+                    listing["onsite_acceptance_evidence"]["summary"]["latest_receipt_id"]
+                ],
             },
             operator_id="delivery.lead",
             reason="Delivery owner review.",
@@ -1688,7 +1725,11 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
         )
         closure_gates = {gate["gate_id"]: gate for gate in closure["gates"]}
         assert "site_acceptance_checklist" in closure_gates
-        assert closure_gates["site_acceptance_checklist"]["status"] in {"ready", "manual_check", "blocked"}
+        assert closure_gates["site_acceptance_checklist"]["status"] in {
+            "ready",
+            "manual_check",
+            "blocked",
+        }
         assert closure_gates["manual_acceptance_review"]["status"] == "ready"
         assert closure_gates["dossier_verification"]["status"] == "ready"
         assert closure_gates["proposal_verification"]["status"] in {"ready", "manual_check"}
@@ -1709,7 +1750,9 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
                 "organization": "Fanmu Creative Park",
                 "reason": "Customer accepts the pilot handoff.",
                 "risk_acknowledgement": True,
-                "evidence_refs": [listing["onsite_acceptance_evidence"]["summary"]["latest_receipt_id"]],
+                "evidence_refs": [
+                    listing["onsite_acceptance_evidence"]["summary"]["latest_receipt_id"]
+                ],
             },
             operator_id="delivery.lead",
             reason="Customer signoff attempt.",
@@ -1726,7 +1769,9 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
                 "signatory_role": "Customer operations owner",
                 "organization": "Fanmu Creative Park",
                 "reason": "Customer asks delivery to attach final audit export.",
-                "evidence_refs": [listing["onsite_acceptance_evidence"]["summary"]["latest_receipt_id"]],
+                "evidence_refs": [
+                    listing["onsite_acceptance_evidence"]["summary"]["latest_receipt_id"]
+                ],
             },
             operator_id="delivery.lead",
             reason="Customer asks for final audit export.",
@@ -1744,12 +1789,18 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
             "demo-field-ops",
             check_env=False,
         )
-        signoff_gate = {
-            gate["gate_id"]: gate for gate in closure_after_signoff["gates"]
-        }["customer_signoff"]
+        signoff_gate = {gate["gate_id"]: gate for gate in closure_after_signoff["gates"]}[
+            "customer_signoff"
+        ]
         assert signoff_gate["status"] == "manual_check"
-        assert closure_after_signoff["customer_signoff"]["latest"]["signatory_name"] == "Fanmu Operator"
-        assert any(item["type"] == "customer_signoff" for item in closure_after_signoff["evidence_timeline"])
+        assert (
+            closure_after_signoff["customer_signoff"]["latest"]["signatory_name"]
+            == "Fanmu Operator"
+        )
+        assert any(
+            item["type"] == "customer_signoff"
+            for item in closure_after_signoff["evidence_timeline"]
+        )
 
         dossier_result = export_customer_project_acceptance_dossier(
             profile_root,
@@ -1782,7 +1833,10 @@ def test_customer_project_onsite_evidence_updates_acceptance_dossier(tmp_path: P
         assert all(item["sha256"] for item in onsite_inventory)
         assert all(item["exists"] is True for item in onsite_inventory)
         assert all(item["size_bytes"] > 0 for item in onsite_inventory)
-        assert all(item["evidence_url"].startswith("/api/field/evidence?path=") for item in onsite_inventory)
+        assert all(
+            item["evidence_url"].startswith("/api/field/evidence?path=")
+            for item in onsite_inventory
+        )
         assert {item["onsite_evidence_type"] for item in onsite_inventory} == {
             "device_ingest",
             "voice_playback",
@@ -2154,7 +2208,9 @@ def test_customer_project_onsite_evidence_rejects_invalid_receipts(tmp_path: Pat
     profile_path = Path(detail["profile_path"])
     before = profile_path.read_text(encoding="utf-8")
     evidence_path = tmp_path / "verified-device-ingest.json"
-    evidence_path.write_text(json.dumps(_forged_onsite_evidence_payload("device_ingest")), encoding="utf-8")
+    evidence_path.write_text(
+        json.dumps(_forged_onsite_evidence_payload("device_ingest")), encoding="utf-8"
+    )
 
     bad_type = register_customer_project_onsite_evidence(
         profile_root,
@@ -2204,6 +2260,18 @@ def test_customer_project_onsite_evidence_rejects_invalid_receipts(tmp_path: Pat
         operator_id="delivery.lead",
         reason="Production trust tier should not write.",
     )
+    bad_tier_missing_file = register_customer_project_onsite_evidence(
+        profile_root,
+        "demo-field-ops",
+        {
+            "evidence_type": "device_ingest",
+            "status": "passed",
+            "path": str(tmp_path / "missing-production-launch.json"),
+            "evidence_tier": "production_launch",
+        },
+        operator_id="delivery.lead",
+        reason="Unsupported trust tier should be rejected before artifact checks.",
+    )
 
     assert bad_type["accepted"] is False
     assert bad_type["reason"] == "unsupported_onsite_evidence_type"
@@ -2216,6 +2284,8 @@ def test_customer_project_onsite_evidence_rejects_invalid_receipts(tmp_path: Pat
     assert missing_file["reason"] == "passed_required_onsite_evidence_path_not_found"
     assert bad_tier["accepted"] is False
     assert bad_tier["reason"] == "unsupported_onsite_evidence_trust_tier"
+    assert bad_tier_missing_file["accepted"] is False
+    assert bad_tier_missing_file["reason"] == "unsupported_onsite_evidence_trust_tier"
     assert profile_path.read_text(encoding="utf-8") == before
 
 
@@ -2225,7 +2295,9 @@ def test_customer_project_onsite_evidence_sanitizes_client_production_claims(
     profile_root = tmp_path / "profiles"
     shutil.copytree(Path("deploy/site-profiles"), profile_root)
     evidence_path = tmp_path / "verified-device-ingest.json"
-    evidence_path.write_text(json.dumps(_forged_onsite_evidence_payload("device_ingest")), encoding="utf-8")
+    evidence_path.write_text(
+        json.dumps(_forged_onsite_evidence_payload("device_ingest")), encoding="utf-8"
+    )
 
     registered = register_customer_project_onsite_evidence(
         profile_root,
@@ -2324,6 +2396,42 @@ def test_customer_project_onsite_evidence_ignores_claimed_sha256(tmp_path: Path)
     assert registered["receipt"]["sha256"] != claimed_sha
 
 
+def test_customer_project_onsite_evidence_accepts_profile_bundle_sibling_evidence() -> None:
+    with tempfile.TemporaryDirectory(prefix="askme-field-evidence-") as temp_dir:
+        temp_path = Path(temp_dir)
+        profile_root = temp_path / "profiles"
+        shutil.copytree(Path("deploy/site-profiles"), profile_root)
+        evidence_path = temp_path / "manual-device-ingest.json"
+        evidence_path.write_text(
+            json.dumps(_forged_onsite_evidence_payload("device_ingest")),
+            encoding="utf-8",
+        )
+        claimed_sha = "f" * 64
+
+        registered = register_customer_project_onsite_evidence(
+            profile_root,
+            "demo-field-ops",
+            {
+                "evidence_type": "device_ingest",
+                "status": "passed",
+                "path": str(evidence_path),
+                "sha256": claimed_sha,
+                "production_eligible": True,
+            },
+            operator_id="delivery.lead",
+            reason="Profile-bundle-local manual evidence should remain auditable.",
+        )
+
+        actual_sha = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+        assert registered["accepted"] is True
+        receipt = registered["receipt"]
+        assert receipt["sha256"] == actual_sha
+        assert receipt["sha256"] != claimed_sha
+        assert receipt["production_eligible"] is False
+        assert receipt["trust_status"] == "manual_check"
+        assert receipt["acceptance_gate_eligible"] is False
+
+
 def test_customer_project_onsite_evidence_plain_file_does_not_open_acceptance_gate(
     tmp_path: Path,
 ) -> None:
@@ -2364,8 +2472,7 @@ def test_customer_project_onsite_evidence_plain_file_does_not_open_acceptance_ga
         check_env=False,
     )
     checklist_by_id = {
-        item["item_id"]: item
-        for item in report["site_acceptance_checklist"]["items"]
+        item["item_id"]: item for item in report["site_acceptance_checklist"]["items"]
     }
     assert checklist_by_id["device_ingest"]["status"] == "manual_check"
     assert report["site_acceptance_checklist"]["overall_status"] != "ready"
@@ -2457,17 +2564,20 @@ def test_customer_project_onsite_failed_receipt_blocks_acceptance(tmp_path: Path
                 json.dumps(_forged_onsite_evidence_payload(evidence_type)),
                 encoding="utf-8",
             )
-            assert register_customer_project_onsite_evidence(
-                profile_root,
-                "demo-field-ops",
-                {
-                    "evidence_type": evidence_type,
-                    "status": "passed",
-                    "path": str(evidence_path),
-                },
-                operator_id="delivery.lead",
-                reason="Required smoke passed.",
-            )["accepted"] is True
+            assert (
+                register_customer_project_onsite_evidence(
+                    profile_root,
+                    "demo-field-ops",
+                    {
+                        "evidence_type": evidence_type,
+                        "status": "passed",
+                        "path": str(evidence_path),
+                    },
+                    operator_id="delivery.lead",
+                    reason="Required smoke passed.",
+                )["accepted"]
+                is True
+            )
 
         failed_path = evidence_root / "device_ingest_failed.json"
         failed_path.write_text(
@@ -2527,11 +2637,17 @@ def test_customer_project_onsite_failed_receipt_blocks_acceptance(tmp_path: Path
 
 
 def test_customer_project_acceptance_dossier_exports_hash_manifest(tmp_path: Path) -> None:
+    smoke_report = tmp_path / "field-ingest-smoke.json"
+    smoke_report.write_text(
+        json.dumps({"status": "passed", "event_count": 1, "local_server": True}),
+        encoding="utf-8",
+    )
     dossier_result = export_customer_project_acceptance_dossier(
         Path("deploy/site-profiles"),
         "demo-field-ops",
         output_root=tmp_path / "dossiers",
         check_env=False,
+        field_evidence_config={"smoke_report_path": str(smoke_report)},
     )
 
     assert dossier_result["accepted"] is True
@@ -2549,12 +2665,18 @@ def test_customer_project_acceptance_dossier_exports_hash_manifest(tmp_path: Pat
     assert dossier["manifest"]["project_id"] == "demo-field-ops"
     assert dossier["manifest"]["evidence_count"] >= 1
     assert "site_acceptance_checklist_status" in dossier["manifest"]
-    assert dossier["launch_readiness"]["readiness_type"] == "askme.customer_project_launch_readiness.v1"
-    assert dossier["manifest"]["launch_readiness_status"] == dossier["launch_readiness"][
-        "overall_status"
-    ]
+    assert (
+        dossier["launch_readiness"]["readiness_type"]
+        == "askme.customer_project_launch_readiness.v1"
+    )
+    assert (
+        dossier["manifest"]["launch_readiness_status"]
+        == dossier["launch_readiness"]["overall_status"]
+    )
     assert dossier["manifest"]["launch_stage"] == dossier["launch_readiness"]["launch_stage"]
-    assert dossier["manifest"]["production_ready"] is dossier["launch_readiness"]["production_ready"]
+    assert (
+        dossier["manifest"]["production_ready"] is dossier["launch_readiness"]["production_ready"]
+    )
     assert dossier["manifest"]["site_acceptance_checklist_ready_count"] >= 0
     assert dossier["delivery_workflow"]["steps"]
     assert dossier["site_acceptance_checklist"]["items"]
@@ -2565,7 +2687,9 @@ def test_customer_project_acceptance_dossier_exports_hash_manifest(tmp_path: Pat
     assert all(item["size_bytes"] > 0 for item in hashed_inventory)
     assert all(len(item["sha256"]) == 64 for item in hashed_inventory)
     assert all(item["path"] for item in hashed_inventory)
-    assert all(item["evidence_url"].startswith("/api/field/evidence?path=") for item in hashed_inventory)
+    assert all(
+        item["evidence_url"].startswith("/api/field/evidence?path=") for item in hashed_inventory
+    )
     assert "交付流程" in html
     assert "上线准入" in html
     assert dossier["launch_readiness"]["launch_stage"] in html
@@ -2610,9 +2734,10 @@ def test_customer_project_acceptance_dossier_verify_rejects_tamper_and_bad_signa
     monkeypatch.delenv("ASKME_CUSTOMER_ACCEPTANCE_DOSSIER_HMAC_SECRET", raising=False)
     missing_secret_result = verify_customer_project_acceptance_dossier(dossier)
     assert missing_secret_result["valid"] is False
-    assert "signature present but verification secret is not configured" in missing_secret_result[
-        "errors"
-    ]
+    assert (
+        "signature present but verification secret is not configured"
+        in missing_secret_result["errors"]
+    )
 
 
 def test_customer_project_proposal_bundle_binds_package_dossier_and_release_notes(
@@ -2662,16 +2787,24 @@ def test_customer_project_proposal_bundle_binds_package_dossier_and_release_note
     assert proposal["manifest"]["proposal_customer_prerequisite_count"] == len(
         readable["customer_prerequisites"]
     )
-    assert proposal["launch_readiness"]["readiness_type"] == "askme.customer_project_launch_readiness.v1"
-    assert proposal["acceptance_dossier"]["launch_readiness"]["overall_status"] == proposal[
-        "launch_readiness"
-    ]["overall_status"]
-    assert proposal["manifest"]["launch_readiness_status"] == proposal["launch_readiness"][
-        "overall_status"
-    ]
+    assert (
+        proposal["launch_readiness"]["readiness_type"]
+        == "askme.customer_project_launch_readiness.v1"
+    )
+    assert (
+        proposal["acceptance_dossier"]["launch_readiness"]["overall_status"]
+        == proposal["launch_readiness"]["overall_status"]
+    )
+    assert (
+        proposal["manifest"]["launch_readiness_status"]
+        == proposal["launch_readiness"]["overall_status"]
+    )
     assert proposal["manifest"]["launch_stage"] == proposal["launch_readiness"]["launch_stage"]
     assert proposal["approved_template_release_bundle"]["summary"]["approved_release_count"] == 1
-    assert proposal["approved_template_release_bundle"]["release_notes"][0]["template_id"] == "factory-inspection"
+    assert (
+        proposal["approved_template_release_bundle"]["release_notes"][0]["template_id"]
+        == "factory-inspection"
+    )
     assert proposal["proposal_insert"]["safe_claims"]
     assert proposal["manifest"]["payload_sha256"]
     assert proposal["manifest"]["tenant_id"] == proposal["customer"]["tenant_id"]
@@ -2805,15 +2938,18 @@ def test_customer_project_catalog_groups_sites_by_customer_and_objects(tmp_path:
     }
     assert all(project["managed_objects"] for project in catalog["projects"])
     assert all(project["delivery_workflow"]["steps"] for project in catalog["projects"])
-    assert all(project["delivery_workflow"]["overall_status"] in {"ready", "manual_check", "blocked"} for project in catalog["projects"])
-    demo = next(project for project in catalog["projects"] if project["project_id"] == "demo-field-ops")
+    assert all(
+        project["delivery_workflow"]["overall_status"] in {"ready", "manual_check", "blocked"}
+        for project in catalog["projects"]
+    )
+    demo = next(
+        project for project in catalog["projects"] if project["project_id"] == "demo-field-ops"
+    )
     assert demo["product_acceptance_gate"]["gate_type"] == (
         "askme.solution_delivery_product_acceptance_gate"
     )
     assert demo["product_acceptance_gate"]["gates"]
-    assert {
-        gate["gate_id"] for gate in demo["product_acceptance_gate"]["gates"]
-    } >= {
+    assert {gate["gate_id"] for gate in demo["product_acceptance_gate"]["gates"]} >= {
         "customer_scope",
         "site_profile",
         "managed_object_catalog",
@@ -2850,14 +2986,31 @@ def test_customer_project_templates_are_valid_solution_starters() -> None:
     assert payload["summary"]["manual_check_count"] >= 4
     industries = {item["industry"] for item in payload["templates"]}
     assert {"manufacturing", "creative_park", "warehouse", "scenic_area"} <= industries
-    assert all(item["managed_objects_summary"]["object_type_count"] >= 2 for item in payload["templates"])
-    assert all(item["template_package"]["package_schema"] == "askme.customer_project_template.v1" for item in payload["templates"])
+    assert all(
+        item["managed_objects_summary"]["object_type_count"] >= 2 for item in payload["templates"]
+    )
+    assert all(
+        item["template_package"]["package_schema"] == "askme.customer_project_template.v1"
+        for item in payload["templates"]
+    )
     assert all(item["template_package"]["version"] == "0.1.0" for item in payload["templates"])
-    assert all(item["template_package"]["publish_status"] == "pilot" for item in payload["templates"])
-    assert all(item["template_package"]["product_status"] == "manual_check" for item in payload["templates"])
-    assert all(item["template_package"]["dependencies"]["skill_package_count"] >= 1 for item in payload["templates"])
-    assert all(item["delivery_summary"]["default_object_count"] >= 2 for item in payload["templates"])
-    assert all(item["delivery_summary"]["template_version"] == "0.1.0" for item in payload["templates"])
+    assert all(
+        item["template_package"]["publish_status"] == "pilot" for item in payload["templates"]
+    )
+    assert all(
+        item["template_package"]["product_status"] == "manual_check"
+        for item in payload["templates"]
+    )
+    assert all(
+        item["template_package"]["dependencies"]["skill_package_count"] >= 1
+        for item in payload["templates"]
+    )
+    assert all(
+        item["delivery_summary"]["default_object_count"] >= 2 for item in payload["templates"]
+    )
+    assert all(
+        item["delivery_summary"]["template_version"] == "0.1.0" for item in payload["templates"]
+    )
     assert all(item["delivery_summary"]["scenario_ids"] for item in payload["templates"])
     assert all(item["delivery_summary"]["skill_packages"] for item in payload["templates"])
     assert all(item["delivery_summary"]["acceptance_tests"] for item in payload["templates"])
@@ -2879,7 +3032,11 @@ def test_customer_project_templates_are_valid_solution_starters() -> None:
         is True
         for item in payload["templates"]
     )
-    assert all(item["applicability_scope"]["scope_type"] == "askme.customer_delivery_applicability_scope.v1" for item in payload["templates"])
+    assert all(
+        item["applicability_scope"]["scope_type"]
+        == "askme.customer_delivery_applicability_scope.v1"
+        for item in payload["templates"]
+    )
     assert all(item["applicability_scope"]["industries"] for item in payload["templates"])
     assert all(item["applicability_scope"]["scenarios"] for item in payload["templates"])
     assert all(item["applicability_scope"]["managed_object_types"] for item in payload["templates"])
@@ -2899,7 +3056,9 @@ def test_customer_project_templates_are_valid_solution_starters() -> None:
             assert obj["object_id"]
             assert obj["display_name"]
             assert obj["category"] != "uncategorized"
-    factory = next(item for item in payload["templates"] if item["template_id"] == "factory-inspection")
+    factory = next(
+        item for item in payload["templates"] if item["template_id"] == "factory-inspection"
+    )
     assert factory["tenant_id"] == "default"
     assert factory["delivery_namespace"] == "default"
     assert factory["product_status"] == "manual_check"
@@ -3010,7 +3169,9 @@ def test_customer_project_template_release_governance_records_revisions(tmp_path
     assert Path(updated["revision"]["revision_path"]).exists()
 
     payload = list_customer_project_templates(template_root)
-    factory = next(item for item in payload["templates"] if item["template_id"] == "factory-inspection")
+    factory = next(
+        item for item in payload["templates"] if item["template_id"] == "factory-inspection"
+    )
     assert factory["template_package"]["version"] == "0.1.1"
     assert factory["template_package"]["publish_status"] == "published"
     assert factory["template_package"]["product_status"] == "manual_check"
@@ -3118,7 +3279,10 @@ def test_customer_project_template_release_request_requires_second_approver(tmp_
     )
     assert approved_request_storage["status"] == "approved"
     assert "request_path" not in approved_request_storage
-    assert list_customer_project_template_release_requests(template_root)["summary"]["applying_count"] == 0
+    assert (
+        list_customer_project_template_release_requests(template_root)["summary"]["applying_count"]
+        == 0
+    )
 
     notes = customer_project_template_release_notes(template_root)
     assert notes["summary"]["approved_release_count"] == 1
@@ -3146,13 +3310,20 @@ def test_customer_project_template_release_request_requires_second_approver(tmp_
     assert bundle["bundle"]["proposal_insert"]["section_title"] == (
         "Robot Patrol Pilot approved reusable capabilities"
     )
-    assert bundle["bundle"]["proposal_insert"]["scenario_coverage"][0]["acceptance_criteria_count"] >= 1
+    assert (
+        bundle["bundle"]["proposal_insert"]["scenario_coverage"][0]["acceptance_criteria_count"]
+        >= 1
+    )
     assert bundle["bundle"]["proposal_insert"]["dependency_summary"]["dependency_count"] >= 1
-    assert "approved reusable robot-service template" in (
-        bundle["bundle"]["proposal_insert"]["safe_claims"][0]
+    assert (
+        "approved reusable robot-service template"
+        in (bundle["bundle"]["proposal_insert"]["safe_claims"][0])
     )
     assert bundle["bundle"]["manifest"]["release_note_count"] == 1
-    assert bundle["bundle"]["files"]["json_filename"] == "robot-patrol-pilot-template-release-notes.json"
+    assert (
+        bundle["bundle"]["files"]["json_filename"]
+        == "robot-patrol-pilot-template-release-notes.json"
+    )
     assert "ACME Factory" in bundle["bundle"]["html"]
     assert "approved reusable capabilities" in bundle["bundle"]["html"]
     assert "factory-inspection" in bundle["bundle"]["html"]
@@ -3257,9 +3428,12 @@ def test_customer_project_template_release_request_records_apply_failures(
     )
     assert crashed_storage["status"] == "apply_failed"
     assert crashed_storage["apply_failure_reason"] == "simulated apply crash"
-    assert list_customer_project_template_release_requests(template_root)["summary"][
-        "apply_failed_count"
-    ] == 2
+    assert (
+        list_customer_project_template_release_requests(template_root)["summary"][
+            "apply_failed_count"
+        ]
+        == 2
+    )
 
 
 def test_customer_project_template_create_update_export_import_and_archive(tmp_path: Path) -> None:
@@ -3323,7 +3497,9 @@ def test_customer_project_template_create_update_export_import_and_archive(tmp_p
                 "vision_models": ["gate-detection"],
                 "sensor_protocols": ["camera-detection-json"],
                 "skill_packages": ["capability.inspect_gate"],
-                "acceptance_tests": ["tests/scenario_tests/test_field_operations_evaluation.py::gate_inspection"],
+                "acceptance_tests": [
+                    "tests/scenario_tests/test_field_operations_evaluation.py::gate_inspection"
+                ],
             },
         },
         operator_id="delivery.manager",
@@ -3347,7 +3523,9 @@ def test_customer_project_template_create_update_export_import_and_archive(tmp_p
     assert detail_after_update["object_change_log"][-1]["object_id"] == "custom_gate"
     assert detail_after_update["object_change_log"][-1]["action"] == "created"
 
-    exported = export_customer_project_package(profile_root, "line-one", output_root=tmp_path / "packages")
+    exported = export_customer_project_package(
+        profile_root, "line-one", output_root=tmp_path / "packages"
+    )
     assert exported["accepted"] is True
     assert exported["package"]["package_type"] == "askme.customer_project"
     assert exported["package"]["manifest"]["payload_sha256"]
@@ -3362,21 +3540,27 @@ def test_customer_project_template_create_update_export_import_and_archive(tmp_p
     assert exported["package"]["manifest"]["acceptance_manual_check_object_count"] >= 1
     assert exported["package"]["binding_readiness_summary"]["overall_status"] == "manual_check"
     assert exported["package"]["manifest"]["resource_binding_overall_status"] == "manual_check"
-    assert exported["package"]["manifest"]["resource_binding_ready_object_count"] == (
-        exported["package"]["binding_readiness_summary"]["ready_object_count"]
+    assert (
+        exported["package"]["manifest"]["resource_binding_ready_object_count"]
+        == (exported["package"]["binding_readiness_summary"]["ready_object_count"])
     )
-    assert exported["package"]["manifest"]["resource_binding_manual_check_object_count"] == (
-        exported["package"]["binding_readiness_summary"]["manual_check_object_count"]
+    assert (
+        exported["package"]["manifest"]["resource_binding_manual_check_object_count"]
+        == (exported["package"]["binding_readiness_summary"]["manual_check_object_count"])
     )
-    assert exported["package"]["manifest"]["resource_binding_blocked_object_count"] == (
-        exported["package"]["binding_readiness_summary"]["blocked_object_count"]
+    assert (
+        exported["package"]["manifest"]["resource_binding_blocked_object_count"]
+        == (exported["package"]["binding_readiness_summary"]["blocked_object_count"])
     )
     assert exported["package"]["manifest"]["resource_binding_manual_check_object_count"] >= 1
     assert exported["package"]["manifest"]["resource_binding_unregistered_resource_count"] == 0
     assert exported["package"]["manifest"]["delivery_resource_count"] >= 10
     assert exported["package"]["reuse_assessment"]["status"] == "manual_check"
     assert exported["package"]["reuse_assessment"]["manual_check_count"] >= 1
-    assert exported["package"]["deployment_dependencies"]["binding_readiness"]["overall_status"] == "manual_check"
+    assert (
+        exported["package"]["deployment_dependencies"]["binding_readiness"]["overall_status"]
+        == "manual_check"
+    )
     assert exported["package"]["deployment_dependencies"]["device_count"] >= 3
     assert exported["package"]["deployment_dependencies"]["missing_env_count"] >= 1
     assert exported["package"]["manifest"]["reuse_status"] == "manual_check"
@@ -3395,12 +3579,20 @@ def test_customer_project_template_create_update_export_import_and_archive(tmp_p
     assert exported["package"]["manifest"]["dependency_matrix_count"] == len(
         exported["package"]["dependency_matrix"]
     )
-    assert exported["package"]["managed_object_action_plan"]["overall_status"] == "manual_check_required"
-    assert exported["package"]["package_delivery_gate"]["delivery_gate_status"] == "manual_check_required"
+    assert (
+        exported["package"]["managed_object_action_plan"]["overall_status"]
+        == "manual_check_required"
+    )
+    assert (
+        exported["package"]["package_delivery_gate"]["delivery_gate_status"]
+        == "manual_check_required"
+    )
     assert exported["package"]["package_delivery_gate"]["export_allowed"] is True
     assert exported["package"]["package_delivery_gate"]["import_allowed"] is True
     assert exported["package"]["package_delivery_gate"]["customer_handoff_ready"] is False
-    assert exported["package"]["manifest"]["package_delivery_gate_status"] == "manual_check_required"
+    assert (
+        exported["package"]["manifest"]["package_delivery_gate_status"] == "manual_check_required"
+    )
     assert exported["package"]["manifest"]["package_delivery_import_allowed"] is True
     assert exported["package"]["manifest"]["package_delivery_customer_handoff_ready"] is False
     verification = verify_customer_project_package(exported["package"])
@@ -3416,14 +3608,17 @@ def test_customer_project_template_create_update_export_import_and_archive(tmp_p
     assert dry_run["diff"]["change_type"] == "create"
     assert dry_run["diff"]["incoming_acceptance_summary"]["overall_status"] == "manual_check"
     assert dry_run["diff"]["incoming_binding_readiness_summary"]["overall_status"] == "manual_check"
-    assert dry_run["diff"]["incoming_binding_readiness_summary"]["ready_object_count"] == (
-        exported["package"]["binding_readiness_summary"]["ready_object_count"]
+    assert (
+        dry_run["diff"]["incoming_binding_readiness_summary"]["ready_object_count"]
+        == (exported["package"]["binding_readiness_summary"]["ready_object_count"])
     )
     assert dry_run["diff"]["incoming_binding_readiness_summary"]["manual_check_object_count"] >= 1
     assert dry_run["diff"]["incoming_binding_readiness_summary"]["blocked_object_count"] == 0
     assert dry_run["diff"]["incoming_binding_readiness_summary"]["unregistered_resource_count"] == 0
     assert dry_run["diff"]["incoming_reuse_assessment"]["status"] == "manual_check"
-    assert dry_run["diff"]["incoming_delivery_gate"]["delivery_gate_status"] == "manual_check_required"
+    assert (
+        dry_run["diff"]["incoming_delivery_gate"]["delivery_gate_status"] == "manual_check_required"
+    )
     assert dry_run["diff"]["incoming_delivery_gate"]["import_allowed"] is True
     assert dry_run["import_gate_result"] == "accepted_with_manual_check"
     assert dry_run["would_write"] is True
@@ -3463,9 +3658,12 @@ def test_customer_project_template_create_update_export_import_and_archive(tmp_p
     assert deleted["implementation_handoff"]["project_id"] == "line-one"
     assert deleted["implementation_handoff"]["summary"]["object_count"] >= 2
     assert deleted["next_step"] == deleted["implementation_handoff"]["customer_status"]
-    assert "custom_gate" not in get_customer_project_profile(
-        profile_root, "line-one"
-    )["managed_objects"]["objects_by_id"]
+    assert (
+        "custom_gate"
+        not in get_customer_project_profile(profile_root, "line-one")["managed_objects"][
+            "objects_by_id"
+        ]
+    )
     after_delete = get_customer_project_profile(profile_root, "line-one")
     assert [item["action"] for item in after_delete["object_change_log"][-2:]] == [
         "created",
@@ -3480,7 +3678,9 @@ def test_customer_project_template_create_update_export_import_and_archive(tmp_p
     actions = [item["action"] for item in history["revisions"]]
     assert "managed_object_upsert" in actions
     assert "managed_object_delete" in actions
-    restore_revision = next(item for item in history["revisions"] if item["action"] == "managed_object_delete")
+    restore_revision = next(
+        item for item in history["revisions"] if item["action"] == "managed_object_delete"
+    )
 
     dry_rollback = rollback_customer_project_profile(
         profile_root,
@@ -3510,7 +3710,9 @@ def test_customer_project_template_create_update_export_import_and_archive(tmp_p
         "rollback_current"
     )
 
-    archived = archive_customer_project_profile(profile_root, "line-one", archive_root=tmp_path / "archive")
+    archived = archive_customer_project_profile(
+        profile_root, "line-one", archive_root=tmp_path / "archive"
+    )
     assert archived["accepted"] is True
     assert Path(archived["archived_path"]).exists()
     assert get_customer_project_profile(profile_root, "line-one")["found"] is False
@@ -3553,7 +3755,9 @@ def test_customer_project_package_blocks_import_when_delivery_gate_is_blocked(
                 "vision_models": ["missing-gate-model"],
                 "sensor_protocols": ["camera-detection-json"],
                 "skill_packages": ["capability.inspect_gate"],
-                "acceptance_tests": ["tests/scenario_tests/missing_customer_acceptance.py::bad_gate"],
+                "acceptance_tests": [
+                    "tests/scenario_tests/missing_customer_acceptance.py::bad_gate"
+                ],
             },
         },
         operator_id="delivery.manager",
@@ -3630,7 +3834,9 @@ def test_customer_project_profile_upsert_updates_metadata_without_losing_objects
 
     profile["customer"]["customer_name"] = "ACME Factory Customer"
     profile["customer"]["project_name"] = "Line One Pilot"
-    profile["customer"]["object_scope_note"] = "Customer-visible metadata can change without losing objects."
+    profile["customer"]["object_scope_note"] = (
+        "Customer-visible metadata can change without losing objects."
+    )
     profile["site"]["name"] = "ACME Factory Site"
 
     updated = upsert_customer_project_profile(profile_root, profile)
@@ -3681,7 +3887,9 @@ def test_customer_project_package_import_isolates_same_project_by_delivery_names
 
     imported_root = tmp_path / "imported"
     pilot_import = import_customer_project_package(imported_root, packages["pilot"])
-    production_dry_run = import_customer_project_package(imported_root, packages["production"], dry_run=True)
+    production_dry_run = import_customer_project_package(
+        imported_root, packages["production"], dry_run=True
+    )
     production_import = import_customer_project_package(imported_root, packages["production"])
 
     assert pilot_import["accepted"] is True
@@ -3698,7 +3906,11 @@ def test_customer_project_package_import_isolates_same_project_by_delivery_names
     production_profile = load_field_site_profile(Path(production_import["profile_path"]))
     assert pilot_profile["customer"]["delivery_namespace"] == "pilot"
     assert production_profile["customer"]["delivery_namespace"] == "production"
-    assert pilot_profile["customer"]["project_id"] == production_profile["customer"]["project_id"] == "line-one"
+    assert (
+        pilot_profile["customer"]["project_id"]
+        == production_profile["customer"]["project_id"]
+        == "line-one"
+    )
 
 
 def test_customer_project_package_rejects_manifest_scope_tamper(tmp_path: Path) -> None:
@@ -3719,7 +3931,9 @@ def test_customer_project_package_rejects_manifest_scope_tamper(tmp_path: Path) 
         site={"site_id": "acme-site", "name": "ACME Site"},
     )
     assert created["accepted"] is True
-    exported = export_customer_project_package(source_root, "line-one", output_root=tmp_path / "packages")
+    exported = export_customer_project_package(
+        source_root, "line-one", output_root=tmp_path / "packages"
+    )
     assert exported["accepted"] is True
 
     tampered = json.loads(json.dumps(exported["package"]))
@@ -3744,19 +3958,23 @@ def test_customer_project_package_rejects_manifest_scope_tamper(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_field_operations_service_loads_site_profile_for_real_ingest(tmp_path: Path) -> None:
-    service = FieldOperationsService(config={
-        "archive_path": str(tmp_path / "events.jsonl"),
-        "site_profile_path": "deploy/site-profiles/park-demo.yaml",
-    })
+    service = FieldOperationsService(
+        config={
+            "archive_path": str(tmp_path / "events.jsonl"),
+            "site_profile_path": "deploy/site-profiles/park-demo.yaml",
+        }
+    )
 
-    result = await service.ingest_payload({
-        "source": "camera",
-        "observed_at": time.time(),
-        "zone_id": "main-road-1",
-        "detections": [{"label": "vehicle", "confidence": 0.92}],
-        "duration_s": 180,
-        "image_path": "artifacts/evidence/car.jpg",
-    })
+    result = await service.ingest_payload(
+        {
+            "source": "camera",
+            "observed_at": time.time(),
+            "zone_id": "main-road-1",
+            "detections": [{"label": "vehicle", "confidence": 0.92}],
+            "duration_s": 180,
+            "image_path": "artifacts/evidence/car.jpg",
+        }
+    )
 
     assert result["accepted"] is True
     assert result["normalized"]["location"] == "B区主通道"
@@ -3806,11 +4024,13 @@ def test_field_operations_service_can_surface_site_profile_env_warnings(
     tmp_path: Path,
 ) -> None:
     monkeypatch.delenv("ASKME_DINGTALK_SECURITY_WEBHOOK", raising=False)
-    service = FieldOperationsService(config={
-        "archive_path": str(tmp_path / "events.jsonl"),
-        "site_profile_path": "deploy/site-profiles/park-demo.yaml",
-        "site_profile_check_env": True,
-    })
+    service = FieldOperationsService(
+        config={
+            "archive_path": str(tmp_path / "events.jsonl"),
+            "site_profile_path": "deploy/site-profiles/park-demo.yaml",
+            "site_profile_check_env": True,
+        }
+    )
 
     payload = service.readiness_payload()
 

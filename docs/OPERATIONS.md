@@ -1,10 +1,12 @@
 # askme Operations
 
-更新时间：2026-05-10
+更新时间：2026-07-27
 
 本文合并配置、S100P 验收、语音健康检查、交接信息和故障排查。
 
 ## 本地快速启动
+
+LiteLLM 是默认 LLM 控制面。启动 Runtime 前，必须按 [LiteLLM 运行手册](LITELLM_GATEWAY.md) 启动 sidecar、等待 readiness，并在根环境中配置 AskMe scoped virtual key。Proxy、readiness 或 scoped key 缺失时会 fail-closed，不会自动回退到 MiniMax/DeepSeek 直连。
 
 ```powershell
 cd <repo-root>
@@ -70,14 +72,17 @@ python -m askme.mcp.server
 `config.yaml` 和 `.mcp.json` 保留在项目根目录是有意的：`askme/config.py`
 默认从根目录加载 `config.yaml`，Codex/Claude Desktop 等 MCP 客户端也按项目
 根目录发现 `.mcp.json`。提示词和规划文件不放根目录，分别放在 `prompts/`
-和 `plans/`。
+和 `docs/plans/`。
 
 关键环境变量：
 
 ```text
-LLM_API_KEY=
-LLM_BASE_URL=
-MINIMAX_API_KEY=
+LITELLM_BASE_URL=http://127.0.0.1:4000/v1
+LITELLM_VIRTUAL_KEY=
+ZEROCLAW_LITELLM_VIRTUAL_KEY=
+VISION_LITELLM_VIRTUAL_KEY=
+NO_PROXY=127.0.0.1,localhost,litellm
+MINIMAX_API_KEY=  # 默认仅供 TTS
 MINIMAX_GROUP_ID=
 DOG_CONTROL_SERVICE_URL=http://localhost:5080
 DOG_SAFETY_SERVICE_URL=http://localhost:5070
@@ -172,7 +177,7 @@ Dashboard 运营诊断会读取：
 现场前置条件：
 
 - 当前 commit 已记录。
-- `.env` 包含 LLM、MiniMax、机器人服务 URL。
+- `.env` 包含 LiteLLM base URL、AskMe scoped virtual key、TTS/ASR 与机器人服务 URL；master/provider key 只放在受控的 `docker/.env.litellm`。
 - 如 Cloud ASR 是部署硬门，必须配置对应 API key 并启用。
 - ASR/VAD/TTS 模型已在 `models/`，不要依赖现场临时下载。
 - `sunrise` 用户在 `audio` 组内。

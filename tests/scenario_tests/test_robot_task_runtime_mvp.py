@@ -186,10 +186,26 @@ def test_scenario_sim_runtime_pause_resume_advance_and_cancel() -> None:
     )
     submitted = runtime.submit_plan_payload(confirmed.to_dict())
     run_id = submitted["run"]["run_id"]
-    advanced = runtime.advance_payload(run_id)
-    paused = runtime.pause_payload(run_id)
-    resumed = runtime.resume_payload(run_id)
-    cancelled = runtime.cancel_payload(run_id)
+    advanced = runtime.advance_payload(
+        run_id,
+        operator_id="scenario-operator",
+        operator_context=_runtime_operator_context("runtime:advance"),
+    )
+    paused = runtime.pause_payload(
+        run_id,
+        operator_id="scenario-operator",
+        operator_context=_runtime_operator_context("runtime:pause"),
+    )
+    resumed = runtime.resume_payload(
+        run_id,
+        operator_id="scenario-operator",
+        operator_context=_runtime_operator_context("runtime:resume"),
+    )
+    cancelled = runtime.cancel_payload(
+        run_id,
+        operator_id="scenario-operator",
+        operator_context=_runtime_operator_context("runtime:cancel"),
+    )
 
     assert submitted["run"]["current_state"] == "queued"
     assert advanced["run"]["current_step_index"] == 1
@@ -211,11 +227,27 @@ def test_scenario_voice_style_runtime_controls_share_task_state() -> None:
     )
     submitted = runtime.submit_plan_payload(confirmed.to_dict())
     run_id = submitted["run"]["run_id"]
-    runtime.advance_payload(run_id)
+    runtime.advance_payload(
+        run_id,
+        operator_id="scenario-operator",
+        operator_context=_runtime_operator_context("runtime:advance"),
+    )
 
-    paused = runtime.voice_turn_payload("先停一下", transcript_id="voice-pause")
-    status = runtime.voice_turn_payload("现在执行到哪了", transcript_id="voice-status")
-    resumed = runtime.voice_turn_payload("继续", transcript_id="voice-resume")
+    paused = runtime.voice_turn_payload(
+        "先停一下",
+        transcript_id="voice-pause",
+        **_voice_operator_provenance("runtime:pause"),
+    )
+    status = runtime.voice_turn_payload(
+        "现在执行到哪了",
+        transcript_id="voice-status",
+        **_voice_operator_provenance("runtime:read"),
+    )
+    resumed = runtime.voice_turn_payload(
+        "继续",
+        transcript_id="voice-resume",
+        **_voice_operator_provenance("runtime:resume"),
+    )
     confirm = runtime.voice_turn_payload("确认", transcript_id="voice-confirm")
 
     assert paused["runtime"]["run"]["current_state"] == "paused"
@@ -225,3 +257,25 @@ def test_scenario_voice_style_runtime_controls_share_task_state() -> None:
     assert confirm["handled"] is False
     assert confirm["reason"] == "no_runtime_control_intent"
     assert confirm["voice_turn"]["safety_bypass_allowed"] is False
+
+
+def _runtime_operator_context(permission: str) -> dict:
+    return {
+        "operator_id": "scenario-operator",
+        "roles": ["operator"],
+        "authenticated": True,
+        "source": "scenario-test",
+        "permission": permission,
+        "conversation_session_id": "scenario-runtime-session",
+    }
+
+
+def _voice_operator_provenance(permission: str) -> dict:
+    return {
+        "operator_id": "scenario-operator",
+        "operator_roles": ["operator"],
+        "operator_authenticated": True,
+        "operator_source": "scenario-test",
+        "runtime_permission": permission,
+        "conversation_session_id": "scenario-runtime-session",
+    }

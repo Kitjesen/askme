@@ -83,7 +83,7 @@ from openai import OpenAI
 brain_cfg = cfg.get("brain", {})
 client = OpenAI(
     api_key=brain_cfg.get("api_key", os.environ.get("MINIMAX_API_KEY", "")),
-    base_url=brain_cfg.get("base_url", "https://api.minimax.chat/v1"),
+    base_url=brain_cfg.get("base_url", "https://api.minimaxi.com/v1"),
 )
 
 system_prompt = brain_cfg.get("system_prompt", "你是Thunder，工业巡检机器人。中文简洁回答。")

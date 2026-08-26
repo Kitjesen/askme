@@ -7,6 +7,7 @@ audio frontend facade.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +22,10 @@ from askme.ports import (
     VoiceIOPort,
     VoiceTurnBridgePort,
 )
+from askme.voice.core.turn_timeline import VoiceTurnTimeline
+from askme.voice.core.turn_trace import VoiceTurnTraceRecorder
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,8 @@ class VoiceProviderStack:
     audio_router: AudioRouterPort
     asr: ASRProviderPort | None = None
     tts: TTSProviderPort | None = None
+    realtime: Any | None = None
+    turn_timeline: VoiceTurnTimeline | None = None
 
 
 class EdgeVoiceIO:
@@ -97,21 +104,86 @@ def build_audio_frontend(
     metrics: Any | None = None,
 ) -> VoiceProviderStack:
     """Build the concrete audio frontend stack behind voice ports."""
+    from askme.voice.input.aec_processor import create_aec_processor
+    from askme.voice.input.full_duplex_gate import decide_full_duplex
     from askme.voice.orchestration.audio_agent import AudioAgent
+    from askme.voice.orchestration.full_duplex_setup import configure_full_duplex
     from askme.voice.output.audio_router import AudioRouter
+    from askme.voice.realtime.config import resolve_realtime_voice_config
+    from askme.voice.realtime.factory import build_realtime_dialogue
 
+    voice_cfg = config.get("voice", {}) if isinstance(config, dict) else {}
+    full_duplex_cfg = voice_cfg.get("full_duplex", {}) or {}
+    aec_sample_rate_hz = int(full_duplex_cfg.get("aec_sample_rate_hz", 16_000))
+    aec_delay_ms = int(full_duplex_cfg.get("aec_delay_ms", 40))
+    aec_processor = create_aec_processor(
+        sample_rate_hz=aec_sample_rate_hz,
+        channels=1,
+        required=False,
+    )
+    decision = decide_full_duplex(
+        full_duplex_cfg,
+        aec_status=aec_processor.stats(),
+    )
     audio_router = AudioRouter()
+    # The audio hot path writes only to the bounded in-memory timeline. Durable
+    # JSONL and OTel export belong behind asynchronous downstream adapters.
+    turn_timeline = VoiceTurnTimeline()
+    turn_traces = VoiceTurnTraceRecorder(timeline=turn_timeline)
     audio = AudioAgent(
         config,
         voice_mode=voice_mode,
         metrics=metrics,
         audio_router=audio_router,
+        turn_traces=turn_traces,
     )
+    setup = configure_full_duplex(
+        audio=audio,
+        audio_router=audio_router,
+        decision=decision,
+        aec_processor=aec_processor,
+        aec_sample_rate_hz=aec_sample_rate_hz,
+        aec_delay_ms=aec_delay_ms,
+    )
+    if decision.requested:
+        log = logger.info if setup.enabled else logger.warning
+        log(
+            "Full-duplex voice %s: reason=%s echo_control=%s aec_backend=%s",
+            "enabled" if setup.enabled else "degraded_to_half_duplex",
+            setup.reason,
+            setup.echo_control,
+            setup.aec_backend,
+        )
+    realtime = build_realtime_dialogue(config) if voice_mode else None
+    if realtime is not None:
+        configure_realtime = getattr(audio, "configure_realtime_dialogue", None)
+        if not callable(configure_realtime):
+            logger.warning(
+                "Realtime provider built but audio frontend cannot attach it; "
+                "using cascade fallback"
+            )
+            realtime.close("unsupported_audio_frontend")
+            realtime = None
+        else:
+            try:
+                configure_realtime(
+                    realtime,
+                    resolve_realtime_voice_config(config),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Realtime provider attachment failed; using cascade fallback: %s",
+                    exc,
+                )
+                realtime.close("attachment_failed")
+                realtime = None
     return VoiceProviderStack(
         audio=audio,
         audio_router=audio_router,
         asr=getattr(audio, "_asr_mgr", None),
         tts=getattr(audio, "tts", None),
+        realtime=realtime,
+        turn_timeline=turn_timeline,
     )
 
 

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from enum import Enum
 
@@ -101,13 +101,35 @@ class AudioRouter:
             ...
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, mode: str = "exclusive") -> None:
+        self._mode = self._normalize_mode(mode)
         self._lock = threading.Lock()
         self._depth: int = 0            # re-entrancy depth counter
         # Set   = output is idle  → safe to open mic
         # Clear = output is active → mic must wait
         self._input_ready = threading.Event()
         self._input_ready.set()         # start idle
+        self._input_quiesced = threading.Event()
+        self._input_quiesced.set()
+        self._suspend_input: Callable[[], None] | None = None
+        self._resume_input: Callable[[], None] | None = None
+        self._input_suspended = False
+
+    def set_input_controller(
+        self,
+        *,
+        suspend: Callable[[], None] | None,
+        resume: Callable[[], None] | None,
+    ) -> None:
+        """Attach the persistent mic lifecycle used by exclusive routing."""
+
+        if suspend is not None and not callable(suspend):
+            raise TypeError("input suspend callback must be callable or None")
+        if resume is not None and not callable(resume):
+            raise TypeError("input resume callback must be callable or None")
+        with self._lock:
+            self._suspend_input = suspend
+            self._resume_input = resume
 
     # ── Output ownership ──────────────────────────────────────────────────
 
@@ -120,24 +142,111 @@ class AudioRouter:
         *last* exit only.  A ``try/finally`` inside the context manager
         guarantees the event is always released even if the body raises.
         """
+        suspend_input: Callable[[], None] | None = None
+        wait_for_quiesce = False
         with self._lock:
             self._depth += 1
-            if self._depth == 1:
+            if self._mode == "exclusive":
                 self._input_ready.clear()
-                logger.debug("AudioRouter: OUTPUT acquired (depth=1)")
+                if self._depth == 1:
+                    self._input_quiesced.clear()
+                    suspend_input = self._suspend_input
+                    self._input_suspended = suspend_input is not None
+                else:
+                    wait_for_quiesce = not self._input_quiesced.is_set()
         try:
-            yield
-        finally:
+            if suspend_input is not None:
+                suspend_input()
+                self._input_quiesced.set()
+            elif wait_for_quiesce:
+                if not self._input_quiesced.wait(timeout=5.0):
+                    raise TimeoutError("microphone did not quiesce for output")
+            else:
+                self._input_quiesced.set()
+            logger.debug("AudioRouter: OUTPUT acquired (depth=%d)", self._depth)
+        except Exception:
             with self._lock:
                 self._depth -= 1
                 if self._depth == 0:
+                    self._input_suspended = False
                     self._input_ready.set()
-                    logger.debug("AudioRouter: OUTPUT released (depth=0)")
+                    self._input_quiesced.set()
+            raise
+        try:
+            yield
+        finally:
+            resume_input: Callable[[], None] | None = None
+            with self._lock:
+                self._depth -= 1
+                if self._depth == 0:
+                    if self._mode == "exclusive":
+                        self._input_ready.set()
+                    if self._input_suspended:
+                        resume_input = self._resume_input
+                        self._input_suspended = False
+                    self._input_quiesced.set()
+            if resume_input is not None:
+                try:
+                    resume_input()
+                except Exception as exc:
+                    logger.error("AudioRouter: failed to resume microphone: %s", exc)
+            logger.debug("AudioRouter: OUTPUT released (depth=0)")
+
+    @staticmethod
+    def _normalize_mode(mode: str) -> str:
+        normalized = str(mode or "exclusive").strip().lower()
+        if normalized not in {"exclusive", "full_duplex"}:
+            raise ValueError("audio router mode must be 'exclusive' or 'full_duplex'")
+        return normalized
+
+    @property
+    def mode(self) -> str:
+        with self._lock:
+            return self._mode
+
+    def set_mode(self, mode: str) -> None:
+        """Change routing before capture/playback owns the device."""
+
+        normalized = self._normalize_mode(mode)
+        with self._lock:
+            if self._depth:
+                raise RuntimeError("cannot change audio router mode during playback")
+            self._mode = normalized
+            self._input_ready.set()
+
+    def fail_closed(self) -> None:
+        """Immediately restore exclusive routing after a duplex-path failure.
+
+        Unlike :meth:`set_mode`, this safety transition is valid while output
+        is active.  New input waits are blocked until the current output
+        session releases ownership.
+        """
+
+        suspend_input: Callable[[], None] | None = None
+        with self._lock:
+            self._mode = "exclusive"
+            if self._depth:
+                self._input_ready.clear()
+                if not self._input_suspended:
+                    self._input_quiesced.clear()
+                    suspend_input = self._suspend_input
+                    self._input_suspended = suspend_input is not None
+            else:
+                self._input_ready.set()
+        if suspend_input is not None:
+            try:
+                suspend_input()
+            except Exception as exc:
+                logger.error("AudioRouter: failed to suspend microphone: %s", exc)
+            finally:
+                self._input_quiesced.set()
+        logger.warning("AudioRouter: failed closed to exclusive mode")
 
     @property
     def is_output_active(self) -> bool:
         """True while an ``output_session`` is currently held."""
-        return not self._input_ready.is_set()
+        with self._lock:
+            return self._depth > 0
 
     # ── Input readiness ───────────────────────────────────────────────────
 
@@ -157,6 +266,8 @@ class AudioRouter:
             ``True`` if the device became free within *timeout* seconds,
             ``False`` if the wait timed out.
         """
+        if self._mode == "full_duplex":
+            return True
         ready = self._input_ready.wait(timeout=timeout)
         if not ready:
             logger.warning(
@@ -185,6 +296,7 @@ class AudioRouter:
         "no such device",
         "no such file or directory",
         "card index",
+        "microphone input callback stopped",
     )
 
     _DEVICE_BUSY_PATTERNS: tuple[str, ...] = (

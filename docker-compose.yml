@@ -1,21 +1,67 @@
-# Askme MCP Server — Docker Compose
+# AskMe MCP Server + LiteLLM — Docker Compose
+name: askme-litellm
 # Usage:
-#   docker compose up -d
+#   docker compose --env-file .env --env-file docker/.env.litellm up -d
 #   docker compose logs -f askme
 
 services:
+  litellm-db:
+    extends:
+      file: docker/docker-compose.litellm.yml
+      service: litellm-db
+    networks:
+      - askme-net
+
+  litellm:
+    extends:
+      file: docker/docker-compose.litellm.yml
+      service: litellm
+    networks:
+      - askme-net
+
+  litellm-key-policy:
+    build: .
+    restart: "no"
+    entrypoint: ["python", "-m", "askme.llm.key_policy"]
+    environment:
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}"
+      LITELLM_VIRTUAL_KEY: "${LITELLM_VIRTUAL_KEY:?set LITELLM_VIRTUAL_KEY}"
+      LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?set LITELLM_SALT_KEY}"
+      LITELLM_DATABASE_PASSWORD: "${LITELLM_DATABASE_PASSWORD:?set LITELLM_DATABASE_PASSWORD}"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
   askme:
     build: .
     ports:
       - "8080:8080"
     environment:
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
-      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-      - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
-      - MINIMAX_GROUP_ID=${MINIMAX_GROUP_ID:-}
-      - ASKME_FEATURE_ROBOT=0
-      - ASKME_FEATURE_VOICE=0
+      LITELLM_BASE_URL: "http://litellm:4000/v1"
+      LITELLM_VIRTUAL_KEY: "${LITELLM_VIRTUAL_KEY:?set LITELLM_VIRTUAL_KEY}"
+      NO_PROXY: "${NO_PROXY:-127.0.0.1,localhost,litellm}"
+      MINIMAX_API_KEY: "${MINIMAX_API_KEY:-}"
+      MINIMAX_GROUP_ID: "${MINIMAX_GROUP_ID:-}"
+      ASKME_FEATURE_ROBOT: "0"
+      ASKME_FEATURE_VOICE: "0"
+    depends_on:
+      litellm:
+        condition: service_healthy
+      litellm-key-policy:
+        condition: service_completed_successfully
+    networks:
+      - askme-net
     volumes:
       - ./data:/app/data
       - ./config.yaml:/app/config.yaml:ro
     restart: unless-stopped
+
+networks:
+  askme-net:
+    driver: bridge
+
+volumes:
+  litellm_db:

@@ -9,8 +9,12 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -24,6 +28,7 @@ def _cli_root_override(name: str, default: Any) -> Any:
         return default
     return vars(cli_root).get(name, default)
 
+
 # ---------------------------------------------------------------------------
 # HTTP 工具函数
 # ---------------------------------------------------------------------------
@@ -32,6 +37,49 @@ def _cli_root_override(name: str, default: Any) -> Any:
 def _normalise_server_url(server: str) -> str:
     """Remove trailing slashes from a server URL for consistent concatenation."""
     return server.rstrip("/")
+
+
+def _loopback_proxy_kwargs(url: str) -> dict[str, Any]:
+    """Keep in-process control traffic off developer and CI proxies."""
+    hostname = (urlsplit(url).hostname or "").rstrip(".").casefold()
+    if not hostname:
+        return {}
+
+    is_loopback = hostname == "localhost"
+    if not is_loopback:
+        try:
+            is_loopback = ip_address(hostname).is_loopback
+        except ValueError:
+            return {}
+
+    if not is_loopback:
+        return {}
+    return {"proxies": {"http": None, "https": None, "all": None}}
+
+
+@contextmanager
+def _loopback_proxy_environment() -> Iterator[None]:
+    """Temporarily add loopback hosts to urllib's proxy bypass list."""
+    names = ("NO_PROXY", "no_proxy")
+    previous = {name: os.environ.get(name) for name in names}
+
+    try:
+        for name in names:
+            raw = str(previous[name] or "")
+            values = [item.strip() for item in raw.split(",") if item.strip()]
+            known = {item.casefold() for item in values}
+            for entry in ("localhost", "127.0.0.1", "::1"):
+                if entry.casefold() not in known:
+                    values.append(entry)
+                    known.add(entry.casefold())
+            os.environ[name] = ",".join(values)
+        yield
+    finally:
+        for name, prior in previous.items():
+            if prior is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = prior
 
 
 def _server_auth_headers() -> dict[str, str] | None:
@@ -60,6 +108,7 @@ def _configured_control_api_key() -> str:
 def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
     """POST a JSON payload to *url* and return the decoded response."""
     kwargs: dict[str, Any] = {"json": payload, "timeout": 5}
+    kwargs.update(_loopback_proxy_kwargs(url))
     headers = _server_auth_headers()
     if headers:
         kwargs["headers"] = headers
@@ -93,6 +142,7 @@ def _post_json_with_retries(url: str, payload: dict[str, Any], *, attempts: int)
 def _get_json(url: str, *, headers: dict[str, str] | None = None) -> dict[str, Any]:
     """GET a JSON resource from *url* and return the decoded response."""
     kwargs: dict[str, Any] = {"timeout": 5}
+    kwargs.update(_loopback_proxy_kwargs(url))
     request_headers = _server_auth_headers() or {}
     if headers:
         request_headers.update(headers)
@@ -286,8 +336,16 @@ def _field_signed_payload_text(
     output_path: Path,
 ) -> str:
     """Format signed events as JSON text (JSONL for .jsonl/.ndjson, otherwise pretty-printed)."""
-    if output_path.suffix.lower() in {".jsonl", ".ndjson"} or source_path.suffix.lower() in {".jsonl", ".ndjson"}:
-        return "\n".join(json.dumps(event, ensure_ascii=False, sort_keys=True) for event in signed_events) + "\n"
+    if output_path.suffix.lower() in {".jsonl", ".ndjson"} or source_path.suffix.lower() in {
+        ".jsonl",
+        ".ndjson",
+    }:
+        return (
+            "\n".join(
+                json.dumps(event, ensure_ascii=False, sort_keys=True) for event in signed_events
+            )
+            + "\n"
+        )
     payload: dict[str, Any] | list[dict[str, Any]]
     payload = signed_events[0] if len(signed_events) == 1 else signed_events
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
@@ -349,13 +407,13 @@ def _load_mission_source(source: str) -> dict[str, Any]:
 
 def _load_local_capabilities(*, voice_mode: bool, robot_mode: bool) -> dict[str, Any]:
     """Load capabilities from the local runtime synchronously."""
-    return asyncio.run(
-        _load_local_capabilities_async(voice_mode=voice_mode, robot_mode=robot_mode)
-    )
+    return asyncio.run(_load_local_capabilities_async(voice_mode=voice_mode, robot_mode=robot_mode))
 
 
 async def _load_local_capabilities_async(
-    *, voice_mode: bool, robot_mode: bool,
+    *,
+    voice_mode: bool,
+    robot_mode: bool,
 ) -> dict[str, Any]:
     """Async helper that builds a blueprint and collects module capabilities."""
     from askme.config import get_config
@@ -370,7 +428,9 @@ async def _load_local_capabilities_async(
     skill_mod = app.modules.get("skill")
     sm = getattr(skill_mod, "skill_manager", None) if skill_mod else None
     contracts = sm.get_contracts() if sm else []
-    openapi_doc = sm.openapi_document() if sm else {"info": {"title": "", "version": ""}, "paths": {}}
+    openapi_doc = (
+        sm.openapi_document() if sm else {"info": {"title": "", "version": ""}, "paths": {}}
+    )
 
     from askme import __version__ as ASKME_VERSION
 
@@ -397,12 +457,8 @@ async def _load_local_capabilities_async(
             "count": len(sm.get_all()) if sm else 0,
             "enabled_count": len(sm.get_enabled()) if sm else 0,
             "contract_count": len(contracts),
-            "code_contract_count": sum(
-                1 for c in contracts if c.source == "code"
-            ),
-            "legacy_contract_count": sum(
-                1 for c in contracts if c.source != "code"
-            ),
+            "code_contract_count": sum(1 for c in contracts if c.source == "code"),
+            "legacy_contract_count": sum(1 for c in contracts if c.source != "code"),
             "catalog": sm.get_contract_catalog() if sm else [],
         },
         "openapi": {
@@ -477,9 +533,7 @@ def _runtime_blueprints_payload(
                 1 for item in items if item["readiness"]["status"] == "configuration_incomplete"
             ),
             "pilot_blueprints": [
-                item["name"]
-                for item in items
-                if item["product_stage"] in {"pilot", "lab"}
+                item["name"] for item in items if item["product_stage"] in {"pilot", "lab"}
             ],
         },
         "items": items,
@@ -526,7 +580,9 @@ def _emit_runtime_blueprints_summary(payload: dict[str, Any]) -> None:
                 run=item.get("startup_command"),
             )
         )
-        package = item.get("delivery_package") if isinstance(item.get("delivery_package"), dict) else {}
+        package = (
+            item.get("delivery_package") if isinstance(item.get("delivery_package"), dict) else {}
+        )
         if package:
             print(  # noqa: T201
                 "  delivery-package: {package_id} status={status} claim={claim}".format(
@@ -686,11 +742,16 @@ def _start_field_smoke_server(
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     base_url = f"http://{host}:{port}"
+    health_url = f"{base_url}/health"
     deadline = time.time() + 5
     last_error: Exception | None = None
     while time.time() < deadline:
         try:
-            requests.get(f"{base_url}/health", timeout=0.5).raise_for_status()
+            requests.get(
+                health_url,
+                timeout=0.5,
+                **_loopback_proxy_kwargs(health_url),
+            ).raise_for_status()
             return {"server": server, "thread": thread, "base_url": base_url}
         except Exception as exc:
             last_error = exc
@@ -716,11 +777,13 @@ def _start_local_webhook_collector() -> dict[str, Any]:
                 body: Any = json.loads(raw.decode("utf-8")) if raw else {}
             except json.JSONDecodeError:
                 body = {"raw": raw.decode("utf-8", errors="replace")}
-            requests_seen.append({
-                "path": self.path,
-                "headers": {key: value for key, value in self.headers.items()},
-                "body": body,
-            })
+            requests_seen.append(
+                {
+                    "path": self.path,
+                    "headers": {key: value for key, value in self.headers.items()},
+                    "body": body,
+                }
+            )
             response = b'{"ok":true}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -750,11 +813,7 @@ def _load_field_ingest_events(path: Path) -> list[dict[str, Any]]:
     """Load field events from a JSON or JSONL file, returning a list of event dicts."""
     raw = path.read_text(encoding="utf-8-sig")
     if path.suffix.lower() in {".jsonl", ".ndjson"}:
-        events = [
-            json.loads(line)
-            for line in raw.splitlines()
-            if line.strip()
-        ]
+        events = [json.loads(line) for line in raw.splitlines() if line.strip()]
     else:
         loaded = json.loads(raw)
         events = loaded if isinstance(loaded, list) else [loaded]
@@ -830,4 +889,8 @@ def _read_field_audit_retry_lock(path: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         return {"path": str(path), "error": str(exc)}
-    return payload if isinstance(payload, dict) else {"path": str(path), "error": "invalid_lock_payload"}
+    return (
+        payload
+        if isinstance(payload, dict)
+        else {"path": str(path), "error": "invalid_lock_payload"}
+    )

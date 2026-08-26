@@ -6,6 +6,7 @@ This file is the quick map for deciding where robot-facing code belongs.
 
 ```text
 robot_interaction decides who is interacting and what the user wants.
+conversation owns the durable thread, turn, and provider-generation truth.
 ports define what upper layers may ask for.
 interfaces define legacy backend registries and ABC contracts.
 providers choose concrete implementations for this deployment.
@@ -17,6 +18,8 @@ robot implements concrete robot, hardware, and telemetry clients.
 | You are changing... | Start here | Do not start here |
 | --- | --- | --- |
 | User intent, address detection, interaction gate, wake/ignore/refuse decisions | `robot_interaction/` | `voice/`, `robot/`, `providers/` |
+| Conversation identity, turn settlement, interruption history, provider-session correlation | `conversation/` | `memory/`, `voice_gateway/`, provider SDK sessions |
+| Provider connection/reconnect mechanics | `voice/realtime/` and provider adapters | `conversation/`, `memory/` |
 | A stable capability contract used by runtime/pipeline | `ports/` | `robot/` |
 | Legacy backend registry or ABC contract | `interfaces/` | `runtime/`, `robot/`, `voice/`, `perception/` |
 | Which implementation a deployment should use | `providers/` | `runtime/`, `pipeline/` |
@@ -31,6 +34,7 @@ Allowed high-level direction:
 ```text
 blueprints
   -> runtime / pipeline / voice / robot_interaction
+  -> conversation
   -> ports / interfaces
   -> providers
   -> robot / perception / external SDKs / hardware services
@@ -39,6 +43,16 @@ blueprints
 Important constraints:
 
 - `robot_interaction` may depend on policies, text routing, and ports.
+- `conversation` is provider-neutral and must not import pipeline, runtime,
+  memory, perception, voice, provider SDKs, or hardware code.
+- Pipeline and gateway code may command Conversation Core. Memory, perception,
+  and task systems must not own the thread or turn lifecycle. External task
+  correlation and task-status notifications already settle through canonical
+  Conversation Core turns; generic committed-event consumers for memory,
+  perception, and tasks remain a target boundary after Phase 1.
+- A realtime provider session is replaceable transport state. Reconnects create
+  a new generation under the same conversation thread, never a new product
+  conversation by themselves.
 - `robot_interaction` must not import concrete robot clients.
 - `providers` may import `ports` and concrete adapter packages such as `robot`.
 - `providers` must not import `runtime`, `pipeline`, `blueprints`, `api`,
@@ -67,6 +81,7 @@ Important constraints:
 | Audio frontend / ASR / TTS | `ports/voice.py` | `providers/voice.py` | `voice/orchestration`, `voice/input`, `voice/output` |
 | Edge voice I/O | `ports/voice.py` | `providers/voice.py` | `voice/input`, `voice/output` |
 | Voice runtime bridge | `ports/voice.py` | `providers/voice.py` / `providers/voice_runtime.py` | external askme-edge-service HTTP API |
+| External runtime executor | `ports/runtime_executor/` | `providers/runtime_executor/` | external runtime HTTP API |
 
 ## How To Read A Flow
 
@@ -113,4 +128,16 @@ VoiceGatewayService
   -> providers.build_voice_runtime_bridge()
   -> providers.voice_runtime.VoiceRuntimeBridge
   -> external askme-edge-service
+```
+
+For authoritative conversation settlement:
+
+```text
+Voice/Text/Realtime input
+  -> Conversation Thread
+    -> Turn
+      -> one or more provider Generations
+    -> settle final user text and delivery evidence
+      -> Phase 1 compatibility projections
+      -> future memory / perception / task event consumers
 ```

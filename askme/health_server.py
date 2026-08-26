@@ -20,7 +20,10 @@ from fastapi.responses import JSONResponse, Response
 from askme.api.composition import ApiRouteDependencies, register_api_routes
 from askme.api.services import field_runtime_callback_security as _callback_security
 from askme.api.services import prometheus_metrics as _prometheus_metrics
-from askme.api.services.conversation_service import ConversationService
+from askme.api.services.conversation_service import (
+    ConversationService,
+    authorized_runtime_context_from_body,
+)
 from askme.api.services.field_route_roots import (
     field_operations_path_roots as _resolve_field_operations_path_roots,
 )
@@ -61,7 +64,7 @@ _PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 _DEGRADED_OTA_STATES = {"auth_error", "degraded"}
 _UTC = timezone.utc  # noqa: UP017 - Sunrise runs Python 3.10, where datetime.UTC is unavailable.
 _PUBLIC_HTTP_PATHS = frozenset(("/health", "/healthz", "/metrics", "/metrics/prometheus"))
-_PROTECTED_HTTP_PREFIXES = ("/api/",)
+_PROTECTED_HTTP_PREFIXES = ("/api/", "/dashboard/")
 _PROTECTED_HTTP_PATHS = frozenset(("/dashboard", "/trace"))
 _FIELD_EVIDENCE_ROOT_NAMES = ("artifacts", "output", "data")
 _append_metric = _prometheus_metrics.append_metric
@@ -219,8 +222,7 @@ def build_health_snapshot(
     else:
         _now_rec = datetime.now(_UTC)
         merged_voice_status["recorded_at"] = (
-            _now_rec.strftime("%Y-%m-%dT%H:%M:%S.")
-            + f"{_now_rec.microsecond // 1000:03d}Z"
+            _now_rec.strftime("%Y-%m-%dT%H:%M:%S.") + f"{_now_rec.microsecond // 1000:03d}Z"
         )
 
     degraded_reasons: list[str] = []
@@ -231,10 +233,7 @@ def build_health_snapshot(
 
     # ISO 8601 UTC timestamp for this snapshot — lets OTA Agent detect stale payloads.
     now_utc = datetime.now(_UTC)
-    snapshot_at = (
-        now_utc.strftime("%Y-%m-%dT%H:%M:%S.")
-        + f"{now_utc.microsecond // 1000:03d}Z"
-    )
+    snapshot_at = now_utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now_utc.microsecond // 1000:03d}Z"
 
     snapshot: dict[str, Any] = {
         "status": "degraded" if degraded_reasons else "ok",
@@ -259,6 +258,7 @@ def build_health_snapshot(
     # Runtime service connectivity (nav-gateway, dog-control, dog-safety)
     try:
         from askme.robot.dog.runtime_health import get_service_summary
+
         snapshot["services"] = get_service_summary()
     except Exception:
         logger.exception("[Health] Runtime service summary fetch failed")
@@ -269,14 +269,14 @@ def build_health_snapshot(
 ChatHandler = Callable[..., Any]  # async def handler(text: str, *, speak: bool = False)
 
 
-VisionSnapshotHandler = Callable[[], Any]   # async () -> dict | None
+VisionSnapshotHandler = Callable[[], Any]  # async () -> dict | None
 VisionAnalyzeHandler = Callable[[str], Any]  # async (image_b64: str) -> str
 
 # async (image_bytes, label, description, width, height) -> dict
 ArchiveSnapshotHandler = Callable[[bytes, str, str, int, int], Any]
-ArchiveListHandler = Callable[[], Any]           # async () -> list[dict]
-ArchiveGetHandler = Callable[[str], Any]         # async (capture_id) -> dict | None
-ArchiveDeleteHandler = Callable[[str], Any]      # async (capture_id) -> bool
+ArchiveListHandler = Callable[[], Any]  # async () -> list[dict]
+ArchiveGetHandler = Callable[[str], Any]  # async (capture_id) -> dict | None
+ArchiveDeleteHandler = Callable[[str], Any]  # async (capture_id) -> bool
 
 
 def create_health_app(
@@ -311,8 +311,7 @@ def create_health_app(
     resolved_metrics_provider = metrics_provider or resolved_health_provider
     resolved_control_api_key = _clean_secret(control_api_key)
     resolved_runtime_callback_secret = _clean_secret(
-        field_runtime_callback_secret
-        or os.getenv("ASKME_FIELD_RUNTIME_CALLBACK_HMAC_SECRET")
+        field_runtime_callback_secret or os.getenv("ASKME_FIELD_RUNTIME_CALLBACK_HMAC_SECRET")
     )
     resolved_runtime_callback_max_age_s = max(1.0, float(field_runtime_callback_max_age_s))
     app_config = get_config()
@@ -337,8 +336,7 @@ def create_health_app(
     _CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
     _MISSION_JSON_HEADERS = {"Cache-Control": "no-store", **_CORS_HEADERS}
     _CORS_ALLOW_HEADERS = (
-        "Content-Type, Authorization, X-Askme-Api-Key, "
-        "X-Askme-Operator-Id, X-Operator-Id"
+        "Content-Type, Authorization, X-Askme-Api-Key, X-Askme-Operator-Id, X-Operator-Id"
     )
     _operator_directory = OperatorDirectory(app_config)
 
@@ -376,10 +374,7 @@ def create_health_app(
             if secrets.compare_digest(supplied, resolved_control_api_key):
                 return True
         supplied_key = request.headers.get("x-askme-api-key", "").strip()
-        return bool(
-            supplied_key
-            and secrets.compare_digest(supplied_key, resolved_control_api_key)
-        )
+        return bool(supplied_key and secrets.compare_digest(supplied_key, resolved_control_api_key))
 
     def _request_requires_control_auth(request: Request) -> bool:
         if not resolved_control_api_key:
@@ -476,14 +471,36 @@ def create_health_app(
         return body
 
     def _operator_action_kwargs(body: dict[str, Any]) -> dict[str, Any]:
+        decision = body.get("operator_auth")
+        permission = (
+            str(decision.get("permission") or "").strip() if isinstance(decision, dict) else ""
+        )
+        context = authorized_runtime_context_from_body(
+            body,
+            conversation_session_id=str(body.get("conversation_session_id") or "").strip(),
+            permission=permission or None,
+        )
+        operator_context = None
+        if context is not None:
+            operator_context = {
+                "operator_id": context.operator_id,
+                "roles": list(context.operator_roles),
+                "authenticated": context.operator_authenticated,
+                "source": context.operator_source,
+                "permission": context.permission,
+            }
+            if context.conversation_session_id:
+                operator_context["conversation_session_id"] = context.conversation_session_id
+
         return {
-            "operator_id": str(body.get("operator_id") or "askme.operator"),
+            "operator_id": context.operator_id
+            if context is not None
+            else str(body.get("operator_id") or ""),
             "reason": str(body.get("reason") or ""),
             "risk_acknowledgement": bool(
-                body.get("risk_acknowledgement")
-                or body.get("risk_ack")
-                or body.get("acknowledged")
+                body.get("risk_acknowledgement") or body.get("risk_ack") or body.get("acknowledged")
             ),
+            "operator_context": operator_context,
         }
 
     def _field_manual_trigger_body(request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -502,6 +519,26 @@ def create_health_app(
         body: dict[str, Any],
         permission: str,
     ) -> JSONResponse | None:
+        if permission.startswith("runtime:") and permission != "runtime:read":
+            explicit_operator_id = str(
+                body.get("operator_id")
+                or request.headers.get("x-askme-operator-id")
+                or request.headers.get("x-operator-id")
+                or request.headers.get("x-askme-iam-operator-id")
+                or ""
+            ).strip()
+            if not explicit_operator_id:
+                return _mission_json(
+                    {
+                        "ok": False,
+                        "error": "operator authorization provenance unavailable",
+                        "reason": "runtime_operator_context_required",
+                        "message": "Runtime mutations require an explicit operator identity.",
+                        "next_action": "Attach an operator identity before requesting runtime control.",
+                    },
+                    status_code=403,
+                )
+
         decision = _operator_directory.authorize(
             None,
             permission,
@@ -509,11 +546,10 @@ def create_health_app(
             body=body,
         )
         if decision.get("allowed"):
-            body["operator_id"] = (
-                decision.get("operator", {}).get("operator_id")
-                or _operator_id_from_request(request, body)
-            )
-            body.setdefault("operator_auth", decision)
+            body["operator_id"] = decision.get("operator", {}).get(
+                "operator_id"
+            ) or _operator_id_from_request(request, body)
+            body["operator_auth"] = decision
             return None
         return _mission_json(
             {
@@ -550,7 +586,10 @@ def create_health_app(
         source = str(body.get("source") or "").strip().lower()
         if source in {"camera", "sensor", "robot", "mqtt", "ros", "hikvision"}:
             return True
-        return any(key in body for key in ("device_id", "camera_id", "sensor", "robot", "detections", "predictions"))
+        return any(
+            key in body
+            for key in ("device_id", "camera_id", "sensor", "robot", "detections", "predictions")
+        )
 
     async def _dispatch_memory(
         method_name: str,
@@ -698,9 +737,7 @@ def create_health_app(
             "text_chars": len(str(directive.get("text") or "")),
         }
         profile_id = str(
-            directive.get("resolved_profile")
-            or directive.get("requested_profile")
-            or ""
+            directive.get("resolved_profile") or directive.get("requested_profile") or ""
         ).strip()
         if profile_id:
             try:
@@ -781,9 +818,7 @@ def create_health_app(
                 "profile": runtime_result.get("profile") or run.get("profile") or "",
                 "run_id": str(run.get("run_id") or runtime_result.get("run_id") or ""),
                 "handoff_id": str(
-                    handoff.get("handoff_id")
-                    or runtime_result.get("handoff_id")
-                    or ""
+                    handoff.get("handoff_id") or runtime_result.get("handoff_id") or ""
                 ),
                 "current_state": str(run.get("current_state") or runtime_result.get("state") or ""),
                 "reason": str(runtime_result.get("reason") or ""),
@@ -904,8 +939,7 @@ class AskmeHealthServer:
             or os.environ.get("ASKME_HEALTH_API_KEY")
         )
         self._allow_unsafe_remote = bool(
-            cfg.get("allow_unsafe_remote", False)
-            or cfg.get("allow_unsafe_control_api", False)
+            cfg.get("allow_unsafe_remote", False) or cfg.get("allow_unsafe_control_api", False)
         )
         if (
             self.enabled
@@ -1193,6 +1227,7 @@ class AskmeHealthServer:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self._dispatch_runtime_handler(
             "pause_payload",
@@ -1200,6 +1235,7 @@ class AskmeHealthServer:
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
     async def runtime_resume_payload(
@@ -1209,6 +1245,7 @@ class AskmeHealthServer:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self._dispatch_runtime_handler(
             "resume_payload",
@@ -1216,6 +1253,7 @@ class AskmeHealthServer:
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
     async def runtime_cancel_payload(
@@ -1225,6 +1263,7 @@ class AskmeHealthServer:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self._dispatch_runtime_handler(
             "cancel_payload",
@@ -1232,6 +1271,7 @@ class AskmeHealthServer:
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
     async def runtime_advance_payload(
@@ -1241,6 +1281,7 @@ class AskmeHealthServer:
         operator_id: str = "askme.operator",
         reason: str = "",
         risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self._dispatch_runtime_handler(
             "advance_payload",
@@ -1248,6 +1289,7 @@ class AskmeHealthServer:
             operator_id=operator_id,
             reason=reason,
             risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
         )
 
     async def _dispatch_mission_handler(
@@ -1360,9 +1402,7 @@ class AskmeHealthServer:
         archive = self._image_archive
         if archive is None:
             return {}
-        return await asyncio.to_thread(
-            archive.save, image_bytes, label, description, width, height
-        )
+        return await asyncio.to_thread(archive.save, image_bytes, label, description, width, height)
 
     async def _dispatch_archive_list(self) -> list[dict[str, Any]]:
         """Return all captures metadata list. Runs blocking IO in a thread."""
@@ -1499,9 +1539,7 @@ class AskmeHealthServer:
                 exc = task.exception()
                 if exc is not None:
                     raise exc
-                raise RuntimeError(
-                    f"Askme health server exited before binding {self.url}"
-                )
+                raise RuntimeError(f"Askme health server exited before binding {self.url}")
             await asyncio.sleep(0.05)
 
         raise RuntimeError(f"Askme health server did not start within {timeout_s:.1f}s")

@@ -6,40 +6,53 @@
     python -m askme.blueprints.presets.voice
 """
 
-from askme.runtime.core.module import Runtime
-from askme.runtime.modules import (
-    CognitionModule,
-    ExecutorModule,
-    HealthModule,
-    LLMModule,
-    MemoryModule,
-    MissionModule,
-    PipelineModule,
-    RuntimeHandoffModule,
-    SkillModule,
-    TextModule,
-    ToolsModule,
-    VoiceModule,
-)
+from askme.blueprints.catalog.data import VOICE_MODULES
 
-voice = (
-    Runtime.use(LLMModule)
-    + Runtime.use(ToolsModule)
-    + Runtime.use(MemoryModule)
-    + Runtime.use(MissionModule)
-    + Runtime.use(CognitionModule)
-    + Runtime.use(RuntimeHandoffModule)
-    + Runtime.use(PipelineModule)
-    + Runtime.use(SkillModule)
-    + Runtime.use(ExecutorModule)
-    + Runtime.use(VoiceModule)
-    + Runtime.use(TextModule)
-    + Runtime.use(HealthModule)
-)
+_LABEL = "语音任务中心"
+
+
+def _build_voice():
+    from askme.blueprints.runner.runner import compose_runtime
+    from askme.blueprints.runtime_composition import RuntimeHandoffModule
+    from askme.runtime.modules import (
+        CognitionModule,
+        ExecutorModule,
+        HealthModule,
+        LLMModule,
+        MemoryModule,
+        MissionModule,
+        PipelineModule,
+        SkillModule,
+        TextModule,
+        ToolsModule,
+        VoiceModule,
+        WarmSessionModule,
+    )
+
+    return compose_runtime(
+        (
+            LLMModule,
+            ToolsModule,
+            MemoryModule,
+            MissionModule,
+            CognitionModule,
+            RuntimeHandoffModule,
+            PipelineModule,
+            SkillModule,
+            ExecutorModule,
+            VoiceModule,
+            TextModule,
+            WarmSessionModule,
+            HealthModule,
+        )
+    )
+
 
 __all__ = ["voice"]
 
 if __name__ == "__main__":
     from askme.blueprints.runner.runner import run_blueprint
 
-    run_blueprint(voice, "语音任务中心")
+    run_blueprint(_build_voice, _LABEL, module_names=VOICE_MODULES)
+else:
+    voice = _build_voice()

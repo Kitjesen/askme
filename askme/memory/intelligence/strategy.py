@@ -7,8 +7,11 @@ ranked action suggestions via a single LLM call.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from askme.llm.core.contracts import LLMCallContext
 
 if TYPE_CHECKING:
     from askme.llm.core.client import LLMClient
@@ -61,10 +64,24 @@ class StrategyGenerator:
             prompt += f"程序记录:\n{procedures}\n"
 
         try:
-            result = await self._llm.chat([
-                {"role": "system", "content": "你是决策助手。输出格式严格按照：行动|原因|信心(0-1)。每行一个建议。"},
-                {"role": "user", "content": prompt},
-            ])
+            result = await self._llm.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": "你是决策助手。输出格式严格按照：行动|原因|信心(0-1)。每行一个建议。",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                model="robot-action",
+                context=LLMCallContext(
+                    call_id=uuid.uuid4().hex,
+                    purpose="general",
+                    channel="background",
+                    request_class="robot_action",
+                    privacy_class="sensitive",
+                    allow_cache=False,
+                ),
+            )
             return self._parse(result)
         except Exception as exc:
             logger.warning("[StrategyGenerator] LLM call failed: %s", exc)
@@ -92,9 +109,11 @@ class StrategyGenerator:
             except (ValueError, IndexError):
                 confidence = 0.5
             if action:
-                suggestions.append(Suggestion(
-                    action=action,
-                    reason=reason,
-                    confidence=confidence,
-                ))
+                suggestions.append(
+                    Suggestion(
+                        action=action,
+                        reason=reason,
+                        confidence=confidence,
+                    )
+                )
         return suggestions[:3]  # cap at 3

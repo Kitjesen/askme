@@ -10,6 +10,7 @@ build/
 
 # Environment
 .env
+docker/.env.litellm
 .venv/
 .venv-mempalace/
 venv/
@@ -38,12 +39,11 @@ Thumbs.db
 # Temp / dev artifacts
 archive/
 artifacts/
-output/
+/output/
+/plans/
 # Host-local recovery snapshots are retained outside version control.
 .backup_*/
 *.bak-open-voice-*
-!askme/voice/output/
-!askme/voice/output/phrase_cache.py
 .codex/
 .tmp/
 .omc/
@@ -76,6 +76,10 @@ _remote_*/
 *-key.json
 credentials*
 secrets/
+.codex-ssh-askpass.cmd
+
+# Local patch probes (never commit)
+.tmp_patch_probe
 
 # Frontend/video generated artifacts
 video-lab/node_modules/

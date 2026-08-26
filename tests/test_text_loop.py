@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from unittest.mock import patch
 
 import askme.pipeline.text_loop as text_loop_module
@@ -6,6 +7,7 @@ import pytest
 from askme.pipeline.text_loop import TextLoop
 from askme.pipeline.trace import PipelineTracer
 
+from askme.conversation import VoiceTurnLedger
 from askme.robot_interaction import Intent, IntentType
 
 
@@ -89,6 +91,26 @@ class _Commands:
 
 class _Conversation:
     history: list[str] = []
+
+
+class _RecordingConversation:
+    def __init__(self) -> None:
+        self.user_messages: list[str] = []
+        self.assistant_messages: list[str] = []
+
+    def add_user_message(self, content: str) -> None:
+        self.user_messages.append(content)
+
+    def add_assistant_message(self, content: str) -> None:
+        self.assistant_messages.append(content)
+
+
+class _LedgerPipeline(_Pipeline):
+    def __init__(self, ledger: VoiceTurnLedger) -> None:
+        super().__init__()
+        self._turn_ledger = ledger
+        self._conversation = _RecordingConversation()
+        self._episodic = None
 
 
 class _Skills:
@@ -260,6 +282,7 @@ async def test_text_loop_passes_conversation_session_to_runtime_bridge() -> None
     assert bridge.calls[0]["session_id"]
     assert bridge.calls[0]["session_id"] == bridge.calls[0]["conversation_session_id"]
     assert bridge.calls[0]["channel"] == "text"
+    assert str(bridge.calls[0]["voice_turn_id"]).startswith("text-turn-")
 
 
 @pytest.mark.asyncio
@@ -360,7 +383,10 @@ async def test_text_loop_calls_runtime_bridge_without_session_when_manager_unava
 
     assert await loop._maybe_handle_runtime_bridge("status") is True
 
-    assert bridge.calls == [{"text": "status"}]
+    assert bridge.calls[0]["text"] == "status"
+    degraded_session_id = bridge.calls[0]["conversation_session_id"]
+    assert str(degraded_session_id).startswith("text-degraded-")
+    assert bridge.calls[0]["session_id"] == degraded_session_id
 
 
 @pytest.mark.asyncio
@@ -385,6 +411,60 @@ async def test_text_loop_handles_pending_tool_confirmation_before_llm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_text_loop_reuses_one_turn_context_from_pending_check_to_pipeline() -> None:
+    class ContextPipeline(_Pipeline):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pending_contexts: list[tuple[str | None, str | None, str]] = []
+            self.process_contexts: list[tuple[str | None, str | None, str]] = []
+
+        async def handle_pending_tool_response(
+            self,
+            user_text: str,
+            *,
+            conversation_session_id: str | None = None,
+            voice_turn_id: str | None = None,
+            source: str = "voice",
+        ) -> None:
+            self.pending_calls.append(user_text)
+            self.pending_contexts.append((conversation_session_id, voice_turn_id, source))
+
+        async def process(
+            self,
+            user_text: str,
+            *,
+            memory_task=None,
+            source: str = "voice",
+            conversation_session_id: str | None = None,
+            voice_turn_id: str | None = None,
+        ) -> str:
+            self.process_calls.append(user_text)
+            self.process_contexts.append((conversation_session_id, voice_turn_id, source))
+            return "fallback"
+
+    pipeline = ContextPipeline()
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+    )
+
+    with patch("builtins.input", side_effect=["status?", "/quit"]):
+        await loop.run()
+
+    assert pipeline.process_calls == ["status?"]
+    assert len(pipeline.pending_contexts) == 2
+    assert pipeline.pending_contexts[0] == pipeline.process_contexts[0]
+    session_id, turn_id, source = pipeline.process_contexts[0]
+    assert session_id
+    assert turn_id
+    assert source == "text"
+
+
+@pytest.mark.asyncio
 async def test_text_loop_falls_back_to_local_pipeline_when_runtime_bridge_fails() -> None:
     bridge = _ExplodingBridge()
     pipeline = _Pipeline()
@@ -403,8 +483,8 @@ async def test_text_loop_falls_back_to_local_pipeline_when_runtime_bridge_fails(
 
     assert [call["text"] for call in bridge.calls] == ["status?"]
     assert pipeline.process_calls == ["status?"]
-    assert pipeline.process_conversation_session_ids == [None]
-    assert pipeline.process_turn_owners == ["text"]
+    assert len(pipeline.process_conversation_session_ids) == 1
+    assert pipeline.process_conversation_session_ids[0]
 
 
 @pytest.mark.asyncio
@@ -431,6 +511,57 @@ async def test_process_turn_runtime_fallback_keeps_conversation_session() -> Non
     bridge_session_id = bridge.calls[0]["session_id"]
     assert bridge_session_id
     assert pipeline.process_conversation_session_ids == [bridge_session_id]
+
+
+@pytest.mark.asyncio
+async def test_process_turn_reuses_admission_context_for_pending_and_general() -> None:
+    class _ContextPipeline(_Pipeline):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pending_contexts: list[tuple[str | None, str | None]] = []
+            self.process_contexts: list[tuple[str | None, str | None]] = []
+
+        async def handle_pending_tool_response(
+            self,
+            user_text: str,
+            *,
+            conversation_session_id: str | None = None,
+            voice_turn_id: str | None = None,
+        ) -> None:
+            self.pending_calls.append(user_text)
+            self.pending_contexts.append((conversation_session_id, voice_turn_id))
+
+        async def process(
+            self,
+            user_text: str,
+            *,
+            memory_task=None,
+            source: str = "voice",
+            conversation_session_id: str | None = None,
+            voice_turn_id: str | None = None,
+        ) -> str:
+            self.process_calls.append(user_text)
+            self.process_contexts.append((conversation_session_id, voice_turn_id))
+            return "fallback"
+
+    pipeline = _ContextPipeline()
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+    )
+
+    reply = await loop.process_turn("status?")
+
+    assert reply == "fallback"
+    assert pipeline.pending_calls == ["status?"]
+    assert pipeline.pending_contexts == pipeline.process_contexts
+    session_id, turn_id = pipeline.process_contexts[0]
+    assert session_id
+    assert turn_id
 
 
 @pytest.mark.asyncio
@@ -505,11 +636,226 @@ async def test_process_turn_can_use_runtime_bridge_when_explicitly_requested() -
         voice_runtime_bridge=bridge,
     )
 
-    reply = await loop.process_turn("status?", runtime_policy="runtime_first")
+    reply = await loop.process_turn(
+        "status?",
+        runtime_policy="runtime_first",
+        conversation_session_id="conv-explicit",
+    )
 
     assert reply == "runtime handled"
     assert bridge.calls[0]["text"] == "status?"
+    assert bridge.calls[0]["conversation_session_id"] == "conv-explicit"
+    assert bridge.calls[0]["session_id"] == "conv-explicit"
+    assert str(bridge.calls[0]["voice_turn_id"]).startswith("text-turn-")
     assert pipeline.process_calls == []
+
+
+@pytest.mark.asyncio
+async def test_process_turn_runtime_voice_reply_waits_for_playback_once() -> None:
+    class _BlockingAudio(_Audio):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wait_entered = threading.Event()
+            self.release_wait = threading.Event()
+
+        def wait_speaking_done(self) -> None:
+            self.waited += 1
+            self.wait_entered.set()
+            assert self.release_wait.wait(timeout=2.0)
+
+    audio = _BlockingAudio()
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=audio,
+        voice_runtime_bridge=_Bridge(),
+    )
+
+    turn = asyncio.create_task(
+        loop.process_turn(
+            "status?",
+            speak=True,
+            runtime_policy="runtime_first",
+            conversation_session_id="conv-spoken-runtime",
+        )
+    )
+    assert await asyncio.to_thread(audio.wait_entered.wait, 1.0)
+    assert turn.done() is False
+    audio.release_wait.set()
+
+    assert await turn == "runtime handled"
+    assert audio.spoken == ["runtime handled"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_runtime_first_turns_keep_their_explicit_sessions() -> None:
+    bridge = _Bridge()
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+        voice_runtime_bridge=bridge,
+    )
+
+    replies = await asyncio.gather(
+        loop.process_turn(
+            "request-a",
+            runtime_policy="runtime_first",
+            conversation_session_id="conv-a",
+        ),
+        loop.process_turn(
+            "request-b",
+            runtime_policy="runtime_first",
+            conversation_session_id="conv-b",
+        ),
+    )
+
+    assert replies == ["runtime handled", "runtime handled"]
+    sessions_by_text = {str(call["text"]): call["conversation_session_id"] for call in bridge.calls}
+    assert sessions_by_text == {"request-a": "conv-a", "request-b": "conv-b"}
+
+
+@pytest.mark.asyncio
+async def test_runtime_fallback_cognition_keeps_each_explicit_session() -> None:
+    class _BarrierUnhandledBridge:
+        def __init__(self) -> None:
+            self.first_started = threading.Event()
+            self.release_first = threading.Event()
+
+        def handle_text_input(self, text: str, **_kwargs):
+            if text == "巡检 A 区":
+                self.first_started.set()
+                assert self.release_first.wait(timeout=2.0)
+            return {"handled": False}
+
+    class _CapturingCognition:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def plan_from_payload(self, payload: dict) -> dict:
+            self.calls.append(dict(payload))
+            return {
+                "planned": True,
+                "plan": {
+                    "planning_session_id": f"plan-{payload['conversation_session_id']}",
+                    "interaction_state": "awaiting_confirmation",
+                    "next_prompt": f"reply-{payload['conversation_session_id']}",
+                    "handoff_ready": False,
+                },
+            }
+
+    bridge = _BarrierUnhandledBridge()
+    cognition = _CapturingCognition()
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+        voice_runtime_bridge=bridge,
+        cognition_handler=cognition,
+    )
+    first = asyncio.create_task(
+        loop.process_turn(
+            "巡检 A 区",
+            runtime_policy="runtime_first",
+            conversation_session_id="conv-a",
+        )
+    )
+    assert await asyncio.to_thread(bridge.first_started.wait, 1.0)
+    second = asyncio.create_task(
+        loop.process_turn(
+            "巡检 B 区",
+            runtime_policy="runtime_first",
+            conversation_session_id="conv-b",
+        )
+    )
+    assert await second == "reply-conv-b"
+    bridge.release_first.set()
+    assert await first == "reply-conv-a"
+
+    session_by_text = {
+        str(call["text"]): call["conversation_session_id"] for call in cognition.calls
+    }
+    assert session_by_text == {"巡检 A 区": "conv-a", "巡检 B 区": "conv-b"}
+
+
+@pytest.mark.asyncio
+async def test_process_turn_passes_admission_context_to_pipeline_skill() -> None:
+    class _ContextSkillPipeline(_Pipeline):
+        def __init__(self) -> None:
+            super().__init__()
+            self.context: tuple[str | None, str | None] | None = None
+
+        async def execute_skill(
+            self,
+            skill_name: str,
+            user_text: str,
+            source: str = "voice",
+            *,
+            conversation_session_id: str | None = None,
+            voice_turn_id: str | None = None,
+        ) -> str:
+            self.context = (conversation_session_id, voice_turn_id)
+            return "skill"
+
+    pipeline = _ContextSkillPipeline()
+    loop = TextLoop(
+        router=_TraceRouter(),
+        pipeline=pipeline,
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+    )
+
+    assert await loop.process_turn("现在几点了") == "skill"
+    assert pipeline.context is not None
+    assert all(pipeline.context)
+
+
+@pytest.mark.asyncio
+async def test_process_turn_passes_admission_context_to_dispatcher_skill() -> None:
+    class _ContextDispatcher:
+        def __init__(self) -> None:
+            self.context: tuple[str | None, str | None] | None = None
+
+        def get_skill(self, skill_name: str):
+            return None
+
+        async def dispatch(
+            self,
+            skill_name: str,
+            user_text: str,
+            *,
+            source: str = "voice",
+            conversation_session_id: str | None = None,
+            voice_turn_id: str | None = None,
+        ) -> str:
+            self.context = (conversation_session_id, voice_turn_id)
+            return "dispatched"
+
+    dispatcher = _ContextDispatcher()
+    loop = TextLoop(
+        router=_TraceRouter(),
+        pipeline=_Pipeline(),
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+        dispatcher=dispatcher,
+    )
+
+    assert await loop.process_turn("现在几点了") == "dispatched"
+    assert dispatcher.context is not None
+    assert all(dispatcher.context)
 
 
 @pytest.mark.asyncio
@@ -558,6 +904,78 @@ async def test_process_turn_quick_reply_is_silent_when_speak_false() -> None:
     assert audio.started == 0
     assert audio.waited == 0
     assert audio.stopped == 0
+
+
+@pytest.mark.asyncio
+async def test_process_turn_quick_reply_commits_one_text_turn(tmp_path) -> None:
+    ledger = VoiceTurnLedger(tmp_path / "quick-reply.jsonl")
+    pipeline = _LedgerPipeline(ledger)
+    loop = TextLoop(
+        router=_QuickReplyRouter(),
+        pipeline=pipeline,
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+    )
+
+    reply = await loop.process_turn(
+        "hi",
+        conversation_session_id="text-quick-thread",
+    )
+
+    turns = ledger.list_turns(thread_id="text-quick-thread")
+    assert reply == "quick reply"
+    assert len(turns) == 1
+    assert turns[0].source == "text"
+    assert turns[0].turn_id.startswith("text-turn-")
+    assert ledger.get_thread("text-quick-thread").channel == "text"
+    assert pipeline._conversation.user_messages == ["hi"]
+    assert pipeline._conversation.assistant_messages == ["quick reply"]
+
+
+@pytest.mark.asyncio
+async def test_process_turn_spoken_quick_reply_commits_after_playback(tmp_path) -> None:
+    class _BlockingAudio(_Audio):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wait_entered = threading.Event()
+            self.release_wait = threading.Event()
+
+        def wait_speaking_done(self) -> None:
+            self.waited += 1
+            self.wait_entered.set()
+            assert self.release_wait.wait(timeout=2.0)
+
+    ledger = VoiceTurnLedger(tmp_path / "spoken-quick-reply.jsonl")
+    pipeline = _LedgerPipeline(ledger)
+    audio = _BlockingAudio()
+    loop = TextLoop(
+        router=_QuickReplyRouter(),
+        pipeline=pipeline,
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=audio,
+    )
+
+    turn = asyncio.create_task(
+        loop.process_turn(
+            "hi",
+            speak=True,
+            conversation_session_id="spoken-quick-thread",
+        )
+    )
+    assert await asyncio.to_thread(audio.wait_entered.wait, 1.0)
+    try:
+        assert ledger.list_turns(thread_id="spoken-quick-thread") == []
+    finally:
+        audio.release_wait.set()
+
+    assert await turn == "quick reply"
+    assert len(ledger.list_turns(thread_id="spoken-quick-thread")) == 1
+    assert pipeline._conversation.user_messages == ["hi"]
+    assert pipeline._conversation.assistant_messages == ["quick reply"]
 
 
 @pytest.mark.asyncio
@@ -652,6 +1070,130 @@ async def test_process_turn_routes_robot_task_to_cognition_before_llm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_cognition_results_are_task_local() -> None:
+    class _PerRequestCognition:
+        async def plan_from_payload(self, payload: dict) -> dict:
+            text = str(payload["text"])
+            suffix = "a" if "A" in text else "b"
+            return {
+                "planned": True,
+                "plan": {
+                    "planning_session_id": f"plan-{suffix}",
+                    "conversation_session_id": payload["conversation_session_id"],
+                    "interaction_state": "awaiting_confirmation",
+                    "next_prompt": f"reply-{suffix}",
+                    "handoff_ready": False,
+                },
+            }
+
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+        cognition_handler=_PerRequestCognition(),
+    )
+    first_speaking = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def _controlled_speak(reply: str) -> None:
+        if reply == "reply-a":
+            first_speaking.set()
+            await release_first.wait()
+
+    loop._speak_reply = _controlled_speak  # type: ignore[method-assign]
+
+    async def _invoke(text: str, session_id: str) -> tuple[str, dict]:
+        reply = await loop.process_turn(
+            text,
+            speak=True,
+            conversation_session_id=session_id,
+        )
+        return reply, dict(loop.last_cognition_result or {})
+
+    first = asyncio.create_task(_invoke("巡检 A 区", "conv-a"))
+    await asyncio.wait_for(first_speaking.wait(), timeout=1.0)
+    second_result = await _invoke("巡检 B 区", "conv-b")
+    release_first.set()
+    first_result = await first
+
+    assert first_result[0] == "reply-a"
+    assert second_result[0] == "reply-b"
+    assert first_result[1]["plan"]["planning_session_id"] == "plan-a"
+    assert second_result[1]["plan"]["planning_session_id"] == "plan-b"
+    assert first_result[1]["plan"]["conversation_session_id"] == "conv-a"
+    assert second_result[1]["plan"]["conversation_session_id"] == "conv-b"
+
+
+@pytest.mark.asyncio
+async def test_same_thread_cognition_turns_wait_for_prior_plan_state() -> None:
+    class _BlockingCognition:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def plan_from_payload(self, payload: dict) -> dict:
+            self.calls.append(dict(payload))
+            if len(self.calls) == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+                return {
+                    "planned": True,
+                    "plan": {
+                        "planning_session_id": "plan-shared",
+                        "interaction_state": "awaiting_confirmation",
+                        "next_prompt": "confirm shared plan",
+                        "handoff_ready": False,
+                    },
+                }
+            return {
+                "planned": True,
+                "plan": {
+                    "planning_session_id": payload.get("planning_session_id"),
+                    "interaction_state": "ready_for_arbiter",
+                    "next_prompt": "shared plan confirmed",
+                    "handoff_ready": True,
+                },
+            }
+
+    cognition = _BlockingCognition()
+    loop = TextLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=_Audio(),
+        cognition_handler=cognition,
+    )
+    first = asyncio.create_task(
+        loop.process_turn(
+            "巡检 A 区",
+            conversation_session_id="shared-cognition-thread",
+        )
+    )
+    await asyncio.wait_for(cognition.first_started.wait(), timeout=1.0)
+    confirmation = asyncio.create_task(
+        loop.process_turn(
+            "确认",
+            conversation_session_id="shared-cognition-thread",
+        )
+    )
+    await asyncio.sleep(0.02)
+    assert len(cognition.calls) == 1
+
+    cognition.release_first.set()
+    replies = await asyncio.gather(first, confirmation)
+
+    assert replies == ["confirm shared plan", "shared plan confirmed"]
+    assert cognition.calls[1]["planning_session_id"] == "plan-shared"
+    assert cognition.calls[1]["operator_confirmation"] is True
+
+
+@pytest.mark.asyncio
 async def test_process_turn_continues_cognition_session_on_confirmation() -> None:
     cognition = _Cognition()
     loop = TextLoop(
@@ -694,9 +1236,14 @@ async def test_process_turn_passes_conversation_and_planning_sessions_separately
 
     assert cognition.calls[0]["conversation_session_id"]
     assert "planning_session_id" not in cognition.calls[0]
-    assert cognition.calls[1]["conversation_session_id"] == cognition.calls[0]["conversation_session_id"]
+    assert (
+        cognition.calls[1]["conversation_session_id"]
+        == cognition.calls[0]["conversation_session_id"]
+    )
     assert cognition.calls[1]["planning_session_id"] == "session-1"
-    assert cognition.calls[1]["conversation_session_id"] != cognition.calls[1]["planning_session_id"]
+    assert (
+        cognition.calls[1]["conversation_session_id"] != cognition.calls[1]["planning_session_id"]
+    )
 
 
 @pytest.mark.asyncio

@@ -7,54 +7,67 @@
     python -m askme.blueprints.presets.edge_robot
 """
 
-from askme.runtime.core.module import Runtime
-from askme.runtime.modules import (
-    CognitionModule,
-    ControlModule,
-    ExecutorModule,
-    HealthModule,
-    LEDModule,
-    LLMModule,
-    MemoryModule,
-    MissionModule,
-    PerceptionModule,
-    PipelineModule,
-    ProactiveModule,
-    PulseModule,
-    ReactionModule,
-    RuntimeHandoffModule,
-    SafetyModule,
-    SkillModule,
-    TextModule,
-    ToolsModule,
-    VoiceModule,
-)
+from askme.blueprints.catalog.data import EDGE_ROBOT_MODULES
 
-edge_robot = (
-    Runtime.use(LLMModule)
-    + Runtime.use(ToolsModule)
-    + Runtime.use(MemoryModule)
-    + Runtime.use(MissionModule)
-    + Runtime.use(CognitionModule)
-    + Runtime.use(RuntimeHandoffModule)
-    + Runtime.use(PipelineModule)
-    + Runtime.use(SkillModule)
-    + Runtime.use(ExecutorModule)
-    + Runtime.use(VoiceModule)
-    + Runtime.use(TextModule)
-    + Runtime.use(HealthModule)
-    + Runtime.use(PulseModule)
-    + Runtime.use(PerceptionModule)
-    + Runtime.use(SafetyModule)
-    + Runtime.use(ReactionModule)
-    + Runtime.use(ControlModule)
-    + Runtime.use(LEDModule)
-    + Runtime.use(ProactiveModule)
-)
+_LABEL = "园区巡检机器人运行时"
+
+
+def _build_edge_robot():
+    from askme.blueprints.runner.runner import compose_runtime
+    from askme.blueprints.runtime_composition import RuntimeHandoffModule
+    from askme.runtime.modules import (
+        CognitionModule,
+        ControlModule,
+        ExecutorModule,
+        HealthModule,
+        LEDModule,
+        LLMModule,
+        MemoryModule,
+        MissionModule,
+        PerceptionModule,
+        PipelineModule,
+        ProactiveModule,
+        PulseModule,
+        ReactionModule,
+        SafetyModule,
+        SkillModule,
+        TextModule,
+        ToolsModule,
+        VoiceModule,
+        WarmSessionModule,
+    )
+
+    return compose_runtime(
+        (
+            LLMModule,
+            ToolsModule,
+            MemoryModule,
+            MissionModule,
+            CognitionModule,
+            RuntimeHandoffModule,
+            PipelineModule,
+            SkillModule,
+            ExecutorModule,
+            VoiceModule,
+            TextModule,
+            WarmSessionModule,
+            HealthModule,
+            PulseModule,
+            PerceptionModule,
+            SafetyModule,
+            ReactionModule,
+            ControlModule,
+            LEDModule,
+            ProactiveModule,
+        )
+    )
+
 
 __all__ = ["edge_robot"]
 
 if __name__ == "__main__":
     from askme.blueprints.runner.runner import run_blueprint
 
-    run_blueprint(edge_robot, "园区巡检机器人运行时")
+    run_blueprint(_build_edge_robot, _LABEL, module_names=EDGE_ROBOT_MODULES)
+else:
+    edge_robot = _build_edge_robot()

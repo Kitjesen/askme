@@ -553,9 +553,22 @@ class RuntimeApp:
     async def start(self) -> None:
         if self._started:
             return
-        for name in self.start_order:
-            await self.modules[name].start()
-            logger.info("Module started: %s", name)
+        attempted: list[str] = []
+        try:
+            for name in self.start_order:
+                # Include the current module in rollback even when start()
+                # allocates resources and then raises part-way through.
+                attempted.append(name)
+                await self.modules[name].start()
+                logger.info("Module started: %s", name)
+        except BaseException:
+            for name in reversed(attempted):
+                try:
+                    await self.modules[name].stop()
+                except Exception as exc:
+                    logger.warning("Module %s startup rollback error: %s", name, exc)
+            self._started = False
+            raise
         self._started = True
 
     async def stop(self) -> None:

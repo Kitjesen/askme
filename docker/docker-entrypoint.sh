@@ -51,6 +51,13 @@ if [ -n "${ASKME_DATA_DIR:-}" ]; then
     mkdir -p "$ASKME_DATA_DIR" 2>/dev/null || true
 fi
 
+# Fail closed before the edge runtime opens hardware or provider sessions.
+log "验证 edge_robot 模型与音频设备"
+if ! python -m askme.runtime.deployment_preflight; then
+    log "错误: edge_robot 前置检查失败；运行时未启动"
+    exit 78
+fi
+
 # ── exec 主进程 (替换 shell，信号直达 python) ──────────────
 log "启动 askme edge_robot blueprint"
 exec python -m askme.blueprints.presets.edge_robot "$@"

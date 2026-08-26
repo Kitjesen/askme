@@ -78,6 +78,7 @@ def register_product_routes(app: FastAPI, deps: Any) -> None:
         dispatch_runtime=deps.dispatch_runtime,
         cors_options_response=deps.cors_options_response,
         logger=deps.logger,
+        authorize=deps.authorize,
         runtime_voice_turn_timeout_s=deps.runtime_voice_turn_timeout_s,
     )
     register_mission_routes(

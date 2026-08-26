@@ -107,6 +107,26 @@ class TestAskAndListen:
         result = await ask_and_listen("question", audio)
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_uses_shared_async_listener_when_voice_loop_owns_capture(self):
+        audio = MagicMock()
+        audio.listen_loop.side_effect = AssertionError("second microphone consumer")
+        observed_confirmation: list[bool] = []
+
+        async def listen_once() -> str:
+            observed_confirmation.append(bool(audio.awaiting_confirmation))
+            return "shared capture"
+
+        result = await ask_and_listen(
+            "question",
+            audio,
+            listen_once=listen_once,
+        )
+
+        assert result == "shared capture"
+        assert observed_confirmation == [True]
+        audio.listen_loop.assert_not_called()
+
 
 # ── ProactiveOrchestrator ─────────────────────────────────────────────────────
 
@@ -150,6 +170,35 @@ class TestProactiveOrchestrator:
         result = await orch.run("test", "start", audio=MagicMock())
         assert order == ["A", "B"]
         assert "start+A+B" == result.enriched_text
+
+    @pytest.mark.asyncio
+    async def test_shared_listener_is_passed_to_proactive_agents(self):
+        async def listen_once() -> str:
+            return "coordinated"
+
+        class ListeningAgent(ProactiveAgent):
+            def should_activate(self, skill, text, ctx):
+                return True
+
+            async def interact(self, skill, text, audio, ctx):
+                assert ctx.listen_once is listen_once
+                return ProactiveResult(enriched_text=await ctx.listen_once())
+
+        dispatcher = MagicMock()
+        dispatcher.get_skill.return_value = SkillDefinition(name="test")
+        orch = ProactiveOrchestrator(
+            agents=[ListeningAgent()],
+            dispatcher=dispatcher,
+        )
+
+        result = await orch.run(
+            "test",
+            "start",
+            audio=MagicMock(),
+            listen_once=listen_once,
+        )
+
+        assert result.enriched_text == "coordinated"
 
     @pytest.mark.asyncio
     async def test_chain_short_circuits_on_cancel(self):

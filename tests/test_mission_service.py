@@ -40,6 +40,39 @@ def test_draft_chinese_escort_becomes_navigation_mission() -> None:
     assert any(step.target == "梵木咖啡" for step in plan.steps)
 
 
+def test_explicit_inspection_report_does_not_start_a_patrol() -> None:
+    service = MissionService()
+
+    plan = service.draft("请生成巡检状态报告")
+
+    assert plan.mission_type == "status_report"
+    assert plan.risk_tier == "low"
+    assert plan.requires_confirmation is False
+
+
+def test_inspection_target_excludes_evidence_and_report_instructions() -> None:
+    service = MissionService()
+
+    plan = service.draft("巡检A区并拍两张照片，最后生成报告")
+
+    assert plan.mission_type == "inspection_patrol"
+    assert {step.target for step in plan.steps} == {"A区"}
+    assert plan.metadata["task_parameters"] == {
+        "capture_evidence": True,
+        "generate_report": True,
+        "photo_count": 2,
+    }
+
+
+def test_inspection_photo_count_supports_arabic_numerals() -> None:
+    service = MissionService()
+
+    plan = service.draft("巡检B区拍3张照片")
+
+    assert {step.target for step in plan.steps} == {"B区"}
+    assert plan.metadata["task_parameters"]["photo_count"] == 3
+
+
 def test_dry_run_submit_does_not_call_runtime(monkeypatch) -> None:
     service = MissionService({
         "runtime": {

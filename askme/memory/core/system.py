@@ -178,9 +178,17 @@ class MemorySystem:
             self._behavior_admission.discard(clean)
         return saved
 
-    async def save_to_vector(self, user_text: str, assistant_text: str) -> bool:
-        """Compatibility alias for behavior-memory admission and persistence."""
-        return await self.save_behavior_memory(user_text, assistant_text)
+    async def admit_turn(self, user_text: str, **kwargs: Any) -> Any:
+        """Apply governed long-term admission to user-authored text only."""
+        if not self._vector:
+            return None
+        return await self._vector.admit_turn(user_text, **kwargs)
+
+    async def save_to_vector(self, user_text: str, assistant_text: str) -> Any:
+        """Deprecated compatibility alias; assistant text is intentionally ignored."""
+        del assistant_text
+        result = await self.admit_turn(user_text)
+        return False if result is None else result
 
     # -- Retrieve --
 

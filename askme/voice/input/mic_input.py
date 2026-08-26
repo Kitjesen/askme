@@ -27,6 +27,7 @@ import queue
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -54,6 +55,15 @@ _DEFAULT_CHUNK_MS = 100
 # Pre-roll buffer: keep recent chunks so VAD latency doesn't lose speech onset
 _DEFAULT_PRE_ROLL_CHUNKS = 5
 
+# Bound callback backlog to one second at the default 100 ms chunk size.
+_DEFAULT_QUEUE_MAX_CHUNKS = 10
+
+# A healthy callback stream should deliver far more frequently than this.
+# Two missed waits are tolerated for transient scheduler/driver stalls; the
+# third is treated as a disconnected capture path so the owner can reopen it.
+_READ_TIMEOUT_SECONDS = 1.0
+_MAX_CONSECUTIVE_READ_TIMEOUTS = 3
+
 
 class MicInput:
     """Microphone input device wrapper.
@@ -75,6 +85,7 @@ class MicInput:
         mic_channel_select: int         - Which channel to use (default 0)
         mic_highpass_hz: int            - High-pass filter cutoff (default 80)
         mic_agc_target_rms: float       - AGC target RMS (default 0.15, 0=off)
+        mic_queue_max_chunks: int        - Capture backlog bound (default 10)
     """
 
     def __init__(
@@ -90,6 +101,7 @@ class MicInput:
         mic_channel_select: int = 0,
         mic_highpass_hz: int = 80,
         mic_agc_target_rms: float = 0.15,
+        queue_max_chunks: int = _DEFAULT_QUEUE_MAX_CHUNKS,
         input_transport: str = "auto",
         usb_audio_binary: str | None = None,
         usb_audio_source: str | None = None,
@@ -99,6 +111,7 @@ class MicInput:
         self._chunk_ms = chunk_ms
         self._chunk_samples = int(chunk_ms / 1000 * sample_rate)
         self._audio_router = audio_router
+        self._lifecycle_lock = threading.RLock()
         self._stream: sd.InputStream | None = None
         self._input_transport = input_transport.lower()
         if self._input_transport not in {"auto", "sounddevice", "usb_direct"}:
@@ -111,6 +124,8 @@ class MicInput:
             raise ValueError(
                 "mic_channel_select must be within configured mic_channels"
             )
+        if queue_max_chunks < 1:
+            raise ValueError("queue_max_chunks must be at least 1")
 
         # Resampling pipeline config
         self._native_rate = mic_native_rate or sample_rate
@@ -129,7 +144,12 @@ class MicInput:
         self._agc_gain: float = 1.0
 
         # Callback-based audio queue (replaces blocking stream.read)
-        self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()
+        self._audio_queue: queue.Queue[np.ndarray] = queue.Queue(
+            maxsize=queue_max_chunks
+        )
+        self._queue_state_lock = threading.Lock()
+        self._dropped_frames = 0
+        self._consecutive_read_timeouts = 0
         self._usb_audio_binary: str | None = usb_audio_binary
         self._usb_audio_source: str | None = usb_audio_source
         self._usb_audio_build_failed = False
@@ -150,7 +170,19 @@ class MicInput:
 
     @property
     def is_open(self) -> bool:
-        return self._stream is not None or self._usb_audio_proc is not None
+        with self._lifecycle_lock:
+            return self._stream is not None or self._usb_audio_proc is not None
+
+    def status_snapshot(self) -> dict[str, int]:
+        """Return callback-queue backpressure metrics."""
+        with self._queue_state_lock:
+            depth = self._audio_queue.qsize()
+            return {
+                "dropped_frames": self._dropped_frames,
+                "depth": depth,
+                "max_depth": self._audio_queue.maxsize,
+                "queued_audio_ms": depth * self._chunk_ms,
+            }
 
     def _init_pipeline(self) -> None:
         """Initialize the signal processing pipeline for resampling mics."""
@@ -232,7 +264,18 @@ class MicInput:
         """InputStream callback — pushes raw audio chunks to the queue."""
         if status:
             logger.debug("MicInput callback status: %s", status)
-        self._audio_queue.put(indata.copy())
+        audio = indata.copy()
+        with self._queue_state_lock:
+            while True:
+                try:
+                    self._audio_queue.put_nowait(audio)
+                    break
+                except queue.Full:
+                    try:
+                        self._audio_queue.get_nowait()
+                    except queue.Empty:
+                        continue
+                    self._dropped_frames += 1
 
     def start(self) -> None:
         """Open mic stream persistently. Pair with stop().
@@ -240,70 +283,99 @@ class MicInput:
         The mic stays open across listen/speak cycles so VAD can detect
         barge-in during TTS playback and LLM processing.
         """
-        if self.is_open:
-            return  # already open
+        with self._lifecycle_lock:
+            if self._stream is not None or self._usb_audio_proc is not None:
+                return  # already open
 
-        if self._should_use_usb_direct():
-            self._start_usb_direct()
-            self.pre_roll.clear()
             if self._audio_router is not None:
-                self._audio_router.wait_for_input_ready(timeout=10.0)
-            logger.info("MicInput: started MCP01 direct USB capture")
-            return
+                if not self._audio_router.wait_for_input_ready(timeout=10.0):
+                    raise TimeoutError("audio output did not release the input device")
 
-        self._init_pipeline()
+            if self._should_use_usb_direct():
+                self._start_usb_direct()
+                self.pre_roll.clear()
+                logger.info("MicInput: started MCP01 direct USB capture")
+                return
 
-        open_rate = self._native_rate if self._needs_resample else self._sample_rate
-        open_channels = self._native_channels if self._needs_resample else 1
-        blocksize = self._native_chunk if self._needs_resample else self._chunk_samples
+            self._init_pipeline()
 
-        self._flush_queue()
+            open_rate = self._native_rate if self._needs_resample else self._sample_rate
+            open_channels = self._native_channels if self._needs_resample else 1
+            blocksize = (
+                self._native_chunk if self._needs_resample else self._chunk_samples
+            )
 
-        stream = sd.InputStream(
-            device=self._device,
-            channels=open_channels,
-            dtype="float32",
-            samplerate=open_rate,
-            blocksize=blocksize,
-            callback=self._audio_callback,
-        )
-        stream.start()
-        self._stream = stream
-        self.pre_roll.clear()
+            self._flush_queue()
 
-        if self._audio_router is not None:
-            self._audio_router.wait_for_input_ready(timeout=10.0)
+            stream = sd.InputStream(
+                device=self._device,
+                channels=open_channels,
+                dtype="float32",
+                samplerate=open_rate,
+                blocksize=blocksize,
+                callback=self._audio_callback,
+            )
+            try:
+                stream.start()
+            except Exception:
+                try:
+                    stream.close()
+                except Exception as close_exc:
+                    logger.warning(
+                        "MicInput: failed to close partially opened stream: %s",
+                        close_exc,
+                    )
+                raise
+            self._stream = stream
+            self._consecutive_read_timeouts = 0
+            self.pre_roll.clear()
 
-        logger.info("MicInput: started (persistent)")
+            logger.info("MicInput: started (persistent)")
 
     def stop(self) -> None:
         """Close mic stream."""
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
+        with self._lifecycle_lock:
+            stream = self._stream
             self._stream = None
-            logger.info("MicInput: stopped")
-        if self._usb_audio_proc is not None:
-            proc = self._usb_audio_proc
-            self._usb_audio_proc = None
-            try:
-                proc.terminate()
-                proc.wait(timeout=1.0)
-            except Exception:
-                logger.exception("[MicInput] USB proc terminate failed, trying kill")
+            self._consecutive_read_timeouts = 0
+            if stream is not None:
                 try:
-                    proc.kill()
+                    stream.stop()
                 except Exception as exc:
-                    logger.debug("MCP01 USB capture kill failed (ignored): %s", exc)
-            logger.info("MicInput: stopped MCP01 direct USB capture")
+                    logger.warning(
+                        "MicInput: stream stop failed during release: %s",
+                        exc,
+                    )
+                try:
+                    stream.close()
+                except Exception as exc:
+                    logger.warning(
+                        "MicInput: stream close failed during release: %s",
+                        exc,
+                    )
+                logger.info("MicInput: stopped")
+            if self._usb_audio_proc is not None:
+                proc = self._usb_audio_proc
+                self._usb_audio_proc = None
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    logger.exception("[MicInput] USB proc terminate failed, trying kill")
+                    try:
+                        proc.kill()
+                    except Exception as exc:
+                        logger.debug("MCP01 USB capture kill failed (ignored): %s", exc)
+                logger.info("MicInput: stopped MCP01 direct USB capture")
 
     def _flush_queue(self) -> None:
         """Discard stale audio chunks from the callback queue."""
-        while not self._audio_queue.empty():
-            try:
-                self._audio_queue.get_nowait()
-            except queue.Empty:
-                break
+        with self._queue_state_lock:
+            while not self._audio_queue.empty():
+                try:
+                    self._audio_queue.get_nowait()
+                except queue.Empty:
+                    break
 
     @contextmanager
     def open(self) -> Generator[MicInput, None, None]:
@@ -335,14 +407,40 @@ class MicInput:
 
         # Get raw audio from callback queue (blocks until available)
         try:
-            raw = self._audio_queue.get(timeout=2.0)
+            raw = self._audio_queue.get(timeout=_READ_TIMEOUT_SECONDS)
         except queue.Empty:
-            # Return silence if no data (shouldn't happen in normal operation)
-            logger.warning("MicInput: no audio data received (timeout)")
-            if self._needs_resample:
-                return np.zeros(self._chunk_samples, dtype=np.float32)
+            stream = self._stream
+            if stream is None:
+                raise RuntimeError("MicInput not open")
+            try:
+                stream_active = bool(getattr(stream, "active", True))
+            except Exception as exc:
+                raise RuntimeError(
+                    "Microphone input callback stopped: stream state unavailable"
+                ) from exc
+
+            self._consecutive_read_timeouts += 1
+            if (
+                not stream_active
+                or self._consecutive_read_timeouts
+                >= _MAX_CONSECUTIVE_READ_TIMEOUTS
+            ):
+                stalled_seconds = (
+                    self._consecutive_read_timeouts * _READ_TIMEOUT_SECONDS
+                )
+                raise RuntimeError(
+                    "Microphone input callback stopped: "
+                    f"no audio received for {stalled_seconds:.1f}s"
+                )
+
+            logger.warning(
+                "MicInput: no audio data received (timeout %d/%d)",
+                self._consecutive_read_timeouts,
+                _MAX_CONSECUTIVE_READ_TIMEOUTS,
+            )
             return np.zeros(self._chunk_samples, dtype=np.float32)
 
+        self._consecutive_read_timeouts = 0
         if self._needs_resample:
             return self._process_chunk(raw)
         else:
@@ -547,6 +645,7 @@ class MicInput:
         voice_cfg = config.get("voice", {})
 
         raw_input = voice_cfg.get("input_device", None)
+        device: int | str | None
         if raw_input is None:
             device = None
         elif isinstance(raw_input, int):
@@ -566,6 +665,9 @@ class MicInput:
         channel_select = int(voice_cfg.get("mic_channel_select", 0))
         highpass_hz = int(voice_cfg.get("mic_highpass_hz", 80))
         agc_target = float(voice_cfg.get("mic_agc_target_rms", 0.15))
+        queue_max_chunks = int(
+            voice_cfg.get("mic_queue_max_chunks", _DEFAULT_QUEUE_MAX_CHUNKS)
+        )
         input_transport = str(voice_cfg.get("input_transport", "auto"))
         usb_audio_binary = voice_cfg.get("usb_audio_binary")
         usb_audio_source = voice_cfg.get("usb_audio_source")
@@ -579,6 +681,7 @@ class MicInput:
             mic_channel_select=channel_select,
             mic_highpass_hz=highpass_hz,
             mic_agc_target_rms=agc_target,
+            queue_max_chunks=queue_max_chunks,
             input_transport=input_transport,
             usb_audio_binary=usb_audio_binary,
             usb_audio_source=usb_audio_source,

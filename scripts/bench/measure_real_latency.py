@@ -15,7 +15,7 @@ print("=" * 50)
 print("TTS (speech-2.8-turbo, PCM, short sentence)")
 t0 = time.perf_counter()
 resp = requests.post(
-    "https://api.minimax.chat/v1/t2a_v2",
+    "https://api.minimaxi.com/v1/t2a_v2",
     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
     json={
         "model": "speech-2.8-turbo",
@@ -43,7 +43,7 @@ print("=" * 50)
 print("LLM TTFT (MiniMax-M2.7-highspeed, max_tokens=30, stream=True)")
 t0 = time.perf_counter()
 resp = requests.post(
-    "https://api.minimax.chat/v1/chat/completions",
+    "https://api.minimaxi.com/v1/chat/completions",
     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
     json={
         "model": "MiniMax-M2.7-highspeed",

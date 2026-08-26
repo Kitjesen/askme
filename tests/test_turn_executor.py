@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 from askme.pipeline.turn_executor import TurnExecutor
 
+from askme.llm.core.contracts import LLMCallContext
+
 
 def test_internal_tool_protocol_is_detected_before_user_output() -> None:
     assert TurnExecutor._contains_internal_protocol("正常中文回答") is False
@@ -71,15 +73,32 @@ def _make_executor(**kwargs) -> TurnExecutor:
                 return True
         return False
 
+    def _remove_latest_assistant_message(
+        content: str,
+        *,
+        conversation_session_id: str | None = None,
+    ) -> bool:
+        history = _history_for(conversation_session_id)
+        for i in range(len(history) - 1, -1, -1):
+            item = history[i]
+            if item.get("role") == "assistant" and item.get("content") == content:
+                history.pop(i)
+                return True
+        return False
+
     conversation.add_user_message = MagicMock(side_effect=_add_user_message)
     conversation.add_assistant_message = MagicMock(side_effect=_add_assistant_message)
     conversation.get_messages = MagicMock(side_effect=_get_messages)
     conversation.remove_latest_user_message = MagicMock(side_effect=_remove_latest_user_message)
+    conversation.remove_latest_assistant_message = MagicMock(
+        side_effect=_remove_latest_assistant_message
+    )
     conversation.maybe_compress = AsyncMock()
 
     memory = MagicMock()
     memory.retrieve = AsyncMock(return_value="[memory context]")
     memory.save = AsyncMock()
+    memory.admit_turn = AsyncMock()
 
     audio = MagicMock()
     audio.start_playback = MagicMock()
@@ -110,6 +129,29 @@ def _make_executor(**kwargs) -> TurnExecutor:
 
 
 class TestProcessHappyPath:
+    @pytest.mark.asyncio
+    async def test_voice_turn_propagates_model_call_context(self):
+        executor = _make_executor(voice_llm_latency_budget_ms=900)
+
+        await executor.process(
+            "你好",
+            source="voice",
+            conversation_session_id="thread-7",
+            voice_turn_id="turn-9",
+        )
+
+        context = executor._stream_processor.stream_with_tools.call_args.kwargs["llm_call_context"]
+        assert isinstance(context, LLMCallContext)
+        assert context.trace_id
+        assert context.session_id == "thread-7"
+        assert context.turn_id == "turn-9"
+        assert context.purpose == "assistant_response"
+        assert context.channel == "voice"
+        assert context.request_class == "voice_fast"
+        assert 1 <= context.latency_budget_ms <= 900
+        assert context.privacy_class == "conversation"
+        assert context.allow_cache is False
+
     @pytest.mark.asyncio
     async def test_returns_llm_response(self):
         te = _make_executor()
@@ -142,15 +184,15 @@ class TestProcessHappyPath:
         te._memory.retrieve.assert_called_once_with("where is the warehouse?")
 
     @pytest.mark.asyncio
-    async def test_memory_save_called_after_response(self):
+    async def test_turn_executor_never_writes_memory_before_committed_event(self):
         te = _make_executor()
-        await te.process("hello")
-        # save is a background task — wait for it
+        await te.process("hello", voice_turn_id="turn-memory-1")
         await asyncio.gather(*te._pending_tasks, return_exceptions=True)
-        te._memory.save.assert_called_once_with("hello", "robot answer")
+        te._memory.admit_turn.assert_not_awaited()
+        te._memory.save.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_behavior_memory_is_retrieved_and_saved_separately(self):
+    async def test_behavior_memory_is_retrieved_without_precommit_write(self):
         memory_system = MagicMock()
         memory_system.retrieve_behavior = AsyncMock(
             return_value="- \u7528\u6237\u559c\u6b22\u7b80\u77ed\u56de\u7b54"
@@ -167,9 +209,7 @@ class TestProcessHappyPath:
         )
         _, prompt_kwargs = te._prompt_builder.build_system_prompt.call_args
         assert prompt_kwargs["behavior_context"] == "- \u7528\u6237\u559c\u6b22\u7b80\u77ed\u56de\u7b54"
-        memory_system.save_behavior_memory.assert_awaited_once_with(
-            "\u4ee5\u540e\u8bf7\u7b80\u77ed\u56de\u7b54", "robot answer"
-        )
+        memory_system.save_behavior_memory.assert_not_awaited()
         te._memory.save.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -177,6 +217,18 @@ class TestProcessHappyPath:
         te = _make_executor()
         await te.process("hello")
         te._prompt_builder.build_system_prompt.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_legacy_qp_writer_is_not_used_for_new_dialogue_turns(self):
+        qp_memory = MagicMock()
+        te = _make_executor(qp_memory=qp_memory)
+
+        await te.process("remember only what admission accepts")
+        await asyncio.gather(*te._pending_tasks, return_exceptions=True)
+
+        qp_memory.record_observation.assert_not_called()
+        qp_memory.process_turn.assert_not_called()
+        qp_memory.save.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_passes_memory_answer_policy_to_prompt_builder(self):
@@ -196,10 +248,11 @@ class TestProcessHappyPath:
         assert kwargs["rag_policy"]["state"] == "stale"
 
     @pytest.mark.asyncio
-    async def test_forced_rag_reply_skips_llm_and_saves_reply(self):
+    async def test_forced_rag_reply_waits_for_committed_event_admission(self):
         memory = MagicMock()
         memory.retrieve = AsyncMock(return_value="")
         memory.save = AsyncMock()
+        memory.admit_turn = AsyncMock()
         memory.health.return_value = {
             "last_answer_policy": {
                 "state": "conflict",
@@ -209,7 +262,9 @@ class TestProcessHappyPath:
         }
         prompt_builder = MagicMock()
         prompt_builder.build_system_prompt = MagicMock(return_value="sys")
-        prompt_builder.build_forced_rag_reply = MagicMock(return_value="这条路线信息有冲突，请管理员确认。")
+        prompt_builder.build_forced_rag_reply = MagicMock(
+            return_value="这条路线信息有冲突，请管理员确认。"
+        )
         prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs, **kw: msgs)
         stream_processor = MagicMock()
         stream_processor.stream_with_tools = AsyncMock(return_value="错误的自由回答")
@@ -225,7 +280,8 @@ class TestProcessHappyPath:
         stream_processor.stream_with_tools.assert_not_called()
         te._conversation.add_assistant_message.assert_called_once_with(result)
         await asyncio.gather(*te._pending_tasks, return_exceptions=True)
-        memory.save.assert_called_once_with("A 区怎么走？", result)
+        memory.admit_turn.assert_not_awaited()
+        memory.save.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_forced_rag_reply_speaks_in_voice_mode(self):
@@ -283,15 +339,18 @@ class TestProcessHappyPath:
         await te.process("again a", source="text", conversation_session_id="conv-a")
 
         third_messages = stream_processor.stream_with_tools.call_args_list[2].args[0]
-        assert stream_processor.stream_with_tools.call_args_list[0].kwargs[
-            "conversation_session_id"
-        ] == "conv-a"
-        assert stream_processor.stream_with_tools.call_args_list[1].kwargs[
-            "conversation_session_id"
-        ] == "conv-b"
-        assert stream_processor.stream_with_tools.call_args_list[2].kwargs[
-            "conversation_session_id"
-        ] == "conv-a"
+        assert (
+            stream_processor.stream_with_tools.call_args_list[0].kwargs["conversation_session_id"]
+            == "conv-a"
+        )
+        assert (
+            stream_processor.stream_with_tools.call_args_list[1].kwargs["conversation_session_id"]
+            == "conv-b"
+        )
+        assert (
+            stream_processor.stream_with_tools.call_args_list[2].kwargs["conversation_session_id"]
+            == "conv-a"
+        )
         assert {"role": "user", "content": "hello a"} in third_messages
         assert {"role": "assistant", "content": "answer a1"} in third_messages
         assert {"role": "user", "content": "again a"} in third_messages
@@ -339,6 +398,70 @@ class TestProcessHappyPath:
         te._conversation.add_assistant_message.assert_called_once_with("robot answer")
 
 
+class TestVoiceMemoryDeadline:
+    @pytest.mark.asyncio
+    async def test_voice_memory_timeout_does_not_block_llm_or_use_global_policy(self):
+        memory = MagicMock()
+        memory.retrieve = AsyncMock(return_value="unused")
+        memory.save = AsyncMock()
+        memory.health.return_value = {"last_answer_policy": {"state": "stale", "action": "refuse"}}
+        te = _make_executor(memory=memory, voice_memory_retrieval_deadline_s=0.01)
+        memory_task = asyncio.create_task(asyncio.sleep(5, result="late memory"))
+
+        result = await asyncio.wait_for(
+            te.process("你好", source="voice", memory_task=memory_task),
+            timeout=1.0,
+        )
+
+        assert result == "robot answer"
+        memory.health.assert_not_called()
+        assert memory_task.cancelled()
+        _, kwargs = te._prompt_builder.build_system_prompt.call_args
+        assert kwargs["rag_policy"] == {
+            "state": "latency_budget_exhausted",
+            "action": "answer_without_memory",
+            "reason": "memory_retrieval_deadline_exceeded",
+            "deadline_s": 0.01,
+        }
+
+    @pytest.mark.asyncio
+    async def test_text_memory_path_still_waits_for_prefetch(self):
+        te = _make_executor()
+        memory_task = asyncio.create_task(asyncio.sleep(0.02, result="[late context]"))
+
+        result = await te.process("hello", source="text", memory_task=memory_task)
+
+        assert result == "robot answer"
+        te._prompt_builder.build_system_prompt.assert_called_once()
+        assert te._prompt_builder.build_system_prompt.call_args.args[0] == "[late context]"
+
+    @pytest.mark.asyncio
+    async def test_voice_memory_timeout_fails_closed_for_knowledge_dependent_query(self):
+        from askme.pipeline.core.rag_policy import forced_rag_reply
+
+        prompt_builder = MagicMock()
+        prompt_builder.build_system_prompt = MagicMock(return_value="sys")
+        prompt_builder.build_forced_rag_reply = MagicMock(side_effect=forced_rag_reply)
+        prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs, **kw: msgs)
+        te = _make_executor(
+            prompt_builder=prompt_builder,
+            voice_memory_retrieval_deadline_s=0.01,
+        )
+        memory_task = asyncio.create_task(asyncio.sleep(5, result="late memory"))
+
+        result = await asyncio.wait_for(
+            te.process("A区卫生间在哪里", source="voice", memory_task=memory_task),
+            timeout=1.0,
+        )
+
+        assert result == "知识检索当前不可用，我不能在没有依据的情况下回答。请稍后重试。"
+        assert memory_task.cancelled()
+        te._stream_processor.stream_with_tools.assert_not_called()
+        _, kwargs = prompt_builder.build_system_prompt.call_args
+        assert kwargs["rag_policy"]["state"] == "unavailable"
+        assert kwargs["rag_policy"]["reason"] == "memory_retrieval_deadline_exceeded"
+
+
 class TestCancelToken:
     @pytest.mark.asyncio
     async def test_skips_turn_when_token_set(self):
@@ -348,6 +471,165 @@ class TestCancelToken:
         result = await te.process("hello")
         assert result == ""
         te._stream_processor.stream_with_tools.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_turn_cancel_drops_unspoken_assistant_history(self):
+        token = asyncio.Event()
+
+        async def _cancel_during_stream(*args, **kwargs):
+            del args, kwargs
+            token.set()
+            return "generated but never played"
+
+        stream_processor = MagicMock()
+        stream_processor.stream_with_tools = AsyncMock(side_effect=_cancel_during_stream)
+        te = _make_executor(stream_processor=stream_processor)
+
+        result = await te.process(
+            "hello",
+            source="voice",
+            voice_turn_id="voice-turn-1",
+            turn_epoch=1,
+            turn_cancel_token=token,
+        )
+
+        assert result == ""
+        te._conversation.add_assistant_message.assert_not_called()
+        te._memory.save.assert_not_awaited()
+        te._memory.admit_turn.assert_not_awaited()
+        te._audio.drain_buffers.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_turn_cancel_during_playback_drops_full_generated_history(self):
+        token = asyncio.Event()
+        te = _make_executor()
+
+        def _interrupt_playback():
+            token.set()
+            return True
+
+        te._audio.wait_speaking_done.side_effect = _interrupt_playback
+
+        result = await te.process(
+            "hello",
+            source="voice",
+            voice_turn_id="voice-turn-2",
+            turn_epoch=2,
+            turn_cancel_token=token,
+        )
+
+        assert result == ""
+        te._conversation.add_assistant_message.assert_not_called()
+        te._memory.save.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_turn_cancel_during_forced_reply_drops_assistant_history(self):
+        token = asyncio.Event()
+        prompt_builder = MagicMock()
+        prompt_builder.build_system_prompt = MagicMock(return_value="sys")
+        prompt_builder.build_forced_rag_reply = MagicMock(
+            return_value="deterministic but interrupted"
+        )
+        prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs, **kw: msgs)
+        te = _make_executor(prompt_builder=prompt_builder)
+
+        def _interrupt_playback():
+            token.set()
+            return True
+
+        te._audio.wait_speaking_done.side_effect = _interrupt_playback
+
+        result = await te.process(
+            "hello",
+            source="voice",
+            voice_turn_id="voice-turn-forced",
+            turn_epoch=3,
+            turn_cancel_token=token,
+        )
+
+        assert result == ""
+        te._conversation.add_assistant_message.assert_not_called()
+        te._stream_processor.stream_with_tools.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_normal_history_settlement_rolls_back_assistant(self):
+        token = asyncio.Event()
+        te = _make_executor()
+        add_message = te._conversation.add_assistant_message.side_effect
+
+        def _add_then_cancel(*args, **kwargs):
+            add_message(*args, **kwargs)
+            token.set()
+
+        te._conversation.add_assistant_message.side_effect = _add_then_cancel
+
+        result = await te.process(
+            "hello",
+            source="text",
+            conversation_session_id="conv-a",
+            turn_cancel_token=token,
+        )
+
+        assert result == ""
+        assert te._conversation.get_messages("sys", conversation_session_id="conv-a") == [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hello"},
+        ]
+        te._conversation.remove_latest_assistant_message.assert_called_once_with(
+            "robot answer", conversation_session_id="conv-a"
+        )
+        te._memory.save.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_forced_history_settlement_rolls_back_assistant(self):
+        token = asyncio.Event()
+        prompt_builder = MagicMock()
+        prompt_builder.build_system_prompt = MagicMock(return_value="sys")
+        prompt_builder.build_forced_rag_reply = MagicMock(return_value="forced answer")
+        prompt_builder.prepare_messages = MagicMock(side_effect=lambda msgs, **kw: msgs)
+        te = _make_executor(prompt_builder=prompt_builder)
+        add_message = te._conversation.add_assistant_message.side_effect
+
+        def _add_then_cancel(*args, **kwargs):
+            add_message(*args, **kwargs)
+            token.set()
+
+        te._conversation.add_assistant_message.side_effect = _add_then_cancel
+
+        result = await te.process(
+            "hello",
+            source="text",
+            turn_cancel_token=token,
+        )
+
+        assert result == ""
+        assert not any(message.get("role") == "assistant" for message in te._conversation.history)
+        te._memory.save.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_visual_history_settlement_rolls_back_assistant(self):
+        token = asyncio.Event()
+        te = _make_executor()
+        te._is_visual_query = MagicMock(return_value=True)
+        te._start_vision_capture = MagicMock(
+            return_value=asyncio.create_task(asyncio.sleep(0, result="visual answer"))
+        )
+        add_message = te._conversation.add_assistant_message.side_effect
+
+        def _add_then_cancel(*args, **kwargs):
+            add_message(*args, **kwargs)
+            token.set()
+
+        te._conversation.add_assistant_message.side_effect = _add_then_cancel
+
+        result = await te.process(
+            "look",
+            source="text",
+            turn_cancel_token=token,
+        )
+
+        assert result == ""
+        assert not any(message.get("role") == "assistant" for message in te._conversation.history)
 
 
 class TestSilentMarker:
@@ -384,9 +666,7 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_llm_error_speaks_error_via_audio(self):
         stream_processor = MagicMock()
-        stream_processor.stream_with_tools = AsyncMock(
-            side_effect=TimeoutError()
-        )
+        stream_processor.stream_with_tools = AsyncMock(side_effect=TimeoutError())
         te = _make_executor(stream_processor=stream_processor)
         await te.process("hello")
         te._audio.speak.assert_called()
@@ -394,9 +674,7 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_llm_error_stops_playback(self):
         stream_processor = MagicMock()
-        stream_processor.stream_with_tools = AsyncMock(
-            side_effect=RuntimeError("boom")
-        )
+        stream_processor.stream_with_tools = AsyncMock(side_effect=RuntimeError("boom"))
         te = _make_executor(stream_processor=stream_processor)
         await te.process("hello")
         te._audio.stop_playback.assert_called()
@@ -431,6 +709,7 @@ class TestHooks:
     @pytest.mark.asyncio
     async def test_pre_turn_hook_skip_returns_empty(self):
         from askme.pipeline.hooks import PipelineHooks
+
         hooks = PipelineHooks()
 
         async def skip_hook(ctx):
@@ -445,6 +724,7 @@ class TestHooks:
     @pytest.mark.asyncio
     async def test_post_turn_hook_fires_after_response(self):
         from askme.pipeline.hooks import PipelineHooks
+
         fired: list[str] = []
         hooks = PipelineHooks()
 

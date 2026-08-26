@@ -15,6 +15,7 @@ TEXT_MODULES = (
     "skill",
     "executor",
     "text",
+    "warm_sessions",
     "health",
 )
 
@@ -30,6 +31,7 @@ VOICE_MODULES = (
     "executor",
     "voice",
     "text",
+    "warm_sessions",
     "health",
 )
 
@@ -45,6 +47,7 @@ VOICE_PERCEPTION_MODULES = (
     "executor",
     "voice",
     "text",
+    "warm_sessions",
     "health",
     "pulse",
     "perception",
@@ -64,6 +67,7 @@ EDGE_ROBOT_MODULES = (
     "executor",
     "voice",
     "text",
+    "warm_sessions",
     "health",
     "pulse",
     "perception",
@@ -88,6 +92,7 @@ MCP_MODULES = (
     "executor",
     "voice",
     "control",
+    "warm_sessions",
     "health",
 )
 
@@ -98,6 +103,7 @@ LINGTU_VOICE_MODULES = (
     "pipeline",
     "skill",
     "voice",
+    "warm_sessions",
     "text",
     "telegram",
 )

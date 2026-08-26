@@ -13,7 +13,6 @@ wake words for every sentence.
 from __future__ import annotations
 
 import logging
-import re
 import time
 from typing import Any
 
@@ -27,22 +26,10 @@ _DEFAULT_ROBOT_NAMES = frozenset([
 # Direct address pronouns — "你" directed at the robot
 _ADDRESS_PRONOUNS = frozenset(["你", "您"])
 
-# Command verbs — if present, likely a task command for the robot
-_COMMAND_VERBS = frozenset([
-    "检查", "巡检", "导航", "前往", "带我去", "报告", "汇报",
-    "停下", "站起", "坐下", "起来",
-    "抓取", "扫描", "拍照", "记录", "测量",
-    "查一下", "看一下", "帮我", "告诉我", "回答",
-    "几点", "什么时间", "温度", "湿度", "状态",
-    "音量", "语速", "静音", "够了", "别说",
-    "停止", "取消", "继续", "确认", "执行",
-    "导航到", "走到", "去仓库", "去厂房",
-])
-
 # Single-char commands that ARE robot commands (only exact match)
 _SINGLE_CHAR_COMMANDS = frozenset(["停", "站", "坐", "起", "退"])
 
-# Casual chat signals — if these dominate and no command verbs, probably not for us
+# Casual chat signals — if present, probably not for us
 _CASUAL_SIGNALS = frozenset([
     "吃饭", "吃了吗", "吃什么", "下班", "走走", "走吧", "哈哈", "嘿嘿", "呵呵",
     "电影", "游戏", "好玩", "好吃", "无聊", "累死", "中午", "晚上",
@@ -50,10 +37,6 @@ _CASUAL_SIGNALS = frozenset([
     "微信", "手机", "抖音", "快手", "外卖", "咖啡", "奶茶",
     "早上好", "晚安", "拜拜", "再见", "明天见",
 ])
-
-# Question patterns that imply addressing someone nearby (could be robot)
-_QUESTION_TO_ENTITY = re.compile(r"(几点|多少度|什么温度|什么时间|什么状态|怎么样了)")
-
 
 class AddressDetector:
     """Determine if user speech is addressed to the robot.
@@ -162,24 +145,18 @@ class AddressDetector:
             logger.debug("[Address] YES: single-char command '%s'", text_lower)
             return True
 
-        # Rule 4: Command verb present → likely a task command
-        for verb in _COMMAND_VERBS:
-            if verb in text_lower:
-                logger.debug("[Address] YES: command verb '%s' found", verb)
-                return True
+        # Command and question shape alone are not evidence of direct address.
+        # Bystander speech frequently contains phrases such as "帮我查一下" or
+        # "现在几点"; public-mode admission must instead rely on explicit name,
+        # pronoun, wake authorization, or the narrow local-safety commands above.
 
-        # Rule 5: Question pattern implying addressing an entity
-        if _QUESTION_TO_ENTITY.search(text_lower):
-            logger.debug("[Address] YES: question-to-entity pattern found")
-            return True
-
-        # Rule 6: Casual chat signals → likely not for us
+        # Rule 4: Casual chat signals → likely not for us
         casual_count = sum(1 for s in _CASUAL_SIGNALS if s in text_lower)
         if casual_count > 0:
             logger.info("[Address] NO: casual signals (%d) found in '%s'", casual_count, text[:30])
             return False
 
-        # Rule 7: Very short text (<=4 chars) with no signals is ambiguous.
+        # Rule 5: Very short text (<=4 chars) with no signals is ambiguous.
         if len(text_lower) <= 4:
             logger.debug(
                 "[Address] %s: short text, uncertainty policy",
