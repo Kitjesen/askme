@@ -1,7 +1,7 @@
 """Tests for VectorStore — works without sentence-transformers via mocking."""
 
-import threading
 import sys
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 

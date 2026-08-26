@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import types
-import queue
 
 import pytest
 
@@ -1037,7 +1037,6 @@ def test_auto_fallback_when_model_missing():
 
 def test_output_tail_silence_is_queued_for_current_generation():
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     engine = TTSEngine({
@@ -1061,7 +1060,6 @@ def test_aplay_prebuffer_waits_only_while_synthesis_is_active():
     from collections import deque
 
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     engine = object.__new__(TTSEngine)
@@ -1088,7 +1086,6 @@ def test_aplay_complete_utterance_mode_waits_until_synthesis_finishes():
     from collections import deque
 
     import numpy as np
-
     from askme.voice.tts import TTSEngine
 
     engine = object.__new__(TTSEngine)
