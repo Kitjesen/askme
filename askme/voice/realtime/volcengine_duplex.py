@@ -146,6 +146,7 @@ class VolcengineDuplexDialogue:
         self._input_order_lock = threading.Lock()
         self._buffer_lock = threading.Lock()
         self._audio_buffer = bytearray()
+        self._input_muted = False
         audio_frames = max(1, config.audio_queue_ms // max(1, config.chunk_ms))
         self._outbound_media_capacity = audio_frames
         self._outbound_capacity = audio_frames + 8
@@ -206,6 +207,7 @@ class VolcengineDuplexDialogue:
             self._context = context
             self._session_id = context.session_id
             self._dialog_id = context.dialog_id
+            self._input_muted = False
             self._state = "connecting"
             self._last_error = ""
             try:
@@ -233,6 +235,17 @@ class VolcengineDuplexDialogue:
             return False
         packet_bytes = self._config.input_sample_rate * 2 * self._config.chunk_ms // 1000
         with self._input_order_lock:
+            if self._input_muted:
+                unmute_item = _OutboundItem(
+                    event={
+                        "type": "input_audio_unmute.commit",
+                        "event_id": self._new_event_id(),
+                    }
+                )
+                if not self._enqueue_outbound(unmute_item):
+                    self._last_error = "input_audio_unmute_enqueue_failed"
+                    return False
+                self._input_muted = False
             chunks: list[bytes] = []
             with self._buffer_lock:
                 self._audio_buffer.extend(frame.pcm)
@@ -267,11 +280,27 @@ class VolcengineDuplexDialogue:
                     self._last_error = "finish_input_commit_enqueue_failed"
                     return False
                 if not item.sent.wait(timeout=max(0.05, self._config.close_timeout_s)):
-                    self._last_error = "finish_input_commit_timeout"
+                    self._transition_degraded("finish_input_commit_timeout")
                     return False
                 if not item.success:
                     self._last_error = "finish_input_commit_failed"
                     return False
+                mute_item = _OutboundItem(
+                    event={
+                        "type": "input_audio_mute.commit",
+                        "event_id": self._new_event_id(),
+                    }
+                )
+                if not self._enqueue_outbound(mute_item):
+                    self._last_error = "finish_input_mute_enqueue_failed"
+                    return False
+                if not mute_item.sent.wait(timeout=max(0.05, self._config.close_timeout_s)):
+                    self._transition_degraded("finish_input_mute_timeout")
+                    return False
+                if not mute_item.success:
+                    self._last_error = "finish_input_mute_failed"
+                    return False
+                self._input_muted = True
         return True
 
     def interrupt(self, reason: str) -> None:
@@ -387,6 +416,7 @@ class VolcengineDuplexDialogue:
             self._receiver_thread = None
             self._sender_thread = None
             self._connected = False
+            self._input_muted = False
             self._closing = False
             self._state = "closed"
 
@@ -410,6 +440,7 @@ class VolcengineDuplexDialogue:
             "audio_queue_depth": self._outbound_media_count,
             "outbound_queue_depth": len(self._outbound_queue),
             "audio_buffer_bytes": len(self._audio_buffer),
+            "input_muted": self._input_muted,
             "sent_audio_frames": self._sent_audio_frames,
             "dropped_input_frames": self._dropped_input_frames,
             "dropped_stale_audio_frames": self._dropped_stale_audio_frames,
