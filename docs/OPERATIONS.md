@@ -72,7 +72,7 @@ python -m askme.mcp.server
 `config.yaml` 和 `.mcp.json` 保留在项目根目录是有意的：`askme/config.py`
 默认从根目录加载 `config.yaml`，Codex/Claude Desktop 等 MCP 客户端也按项目
 根目录发现 `.mcp.json`。提示词和规划文件不放根目录，分别放在 `prompts/`
-和 `plans/`。
+和 `docs/plans/`。
 
 关键环境变量：
 

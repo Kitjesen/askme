@@ -34,9 +34,8 @@ architecture decisions.
 | `deploy/` | Install files, service units, site profiles, delivery templates. |
 | `docker/` | Dockerfiles, Compose stacks, and container entrypoints. |
 | `config/` | Environment-specific config templates such as production defaults. |
-| `requirements/` | pip-tools dependency input and lock files. |
+| `pyproject.toml` / `uv.lock` | Dependency declarations and the reproducible dependency lock. |
 | `prompts/` | Runtime prompt assets such as `SOUL.md`. |
-| `plans/` | Planning drafts. Keep source-of-truth docs in `docs/`. |
 | `data/` | Local runtime state, customer knowledge, captures, sessions. |
 | `models/` | Local model files for ASR, TTS, VAD, KWS, vision, policy. |
 | `artifacts/` | Generated reports, evidence, screenshots, benchmark output. |

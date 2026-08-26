@@ -8,6 +8,8 @@
 
 让机器人从“听懂”走向安全、可审计、可交付的现场行动。
 
+**机器人方案商/集成商交付中台 · 现场运营交付中台**
+
 [![CI](https://github.com/Kitjesen/askme/actions/workflows/ci.yml/badge.svg)](https://github.com/Kitjesen/askme/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![Version](https://img.shields.io/badge/version-4.1.0-6658D3?style=flat-square)](pyproject.toml)
@@ -77,11 +79,25 @@ python scripts/dev/run_dashboard_only.py --host 127.0.0.1 --port 8766
 
 Dashboard 地址：<http://127.0.0.1:8766/dashboard>。Docker 与 Linux edge 部署见 [docker/README.md](docker/README.md)。
 
+> Docker 边界：runtime 容器当前未挂载 FastMCP；需要 MCP 时请使用独立的 `askme-mcp` 入口。
+
 </details>
 
 ## 系统架构
 
 AskMe 将长期业务事实与短生命周期的供应商连接分开：对话可以持续，Provider Session 可以安全重建。
+
+<details>
+<summary><strong>产品架构事实源</strong></summary>
+
+产品架构以 **Field Delivery Domain**、Product/Admin/Platform/Internal surfaces 和 **Runtime / Safety / Hardware** 为责任边界；`customer signoff != production readiness`。AskMe 不替代底盘控制，也不承诺无人值守生产上线。
+
+- `docs/PRODUCT_REQUIREMENTS.md` — [产品需求](docs/PRODUCT_REQUIREMENTS.md)
+- `docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md` — [软件架构蓝图](docs/SOFTWARE_ARCHITECTURE_BLUEPRINT.md)
+- `docs/PRODUCT_ARCHITECTURE_TRACE.md` — [产品架构追踪](docs/PRODUCT_ARCHITECTURE_TRACE.md)
+- `docs/DEMAND_EVIDENCE_LEDGER.md` — [需求证据账本](docs/DEMAND_EVIDENCE_LEDGER.md)
+
+</details>
 
 ```text
 Person → Interaction Gate → Voice / Text → Conversation

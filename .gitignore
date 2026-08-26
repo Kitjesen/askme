@@ -38,6 +38,7 @@ Thumbs.db
 # Temp / dev artifacts
 archive/
 artifacts/
+/plans/
 /output/
 .codex/
 .tmp/
