@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+
+import scripts.demo.realtime_voice_chat as voice_chat
 from askme.voice.core.media_contracts import VoiceMediaFrame
 from askme.voice.core.realtime_contracts import RealtimeVoiceEvent, RealtimeVoiceEventType
 from scripts.demo.realtime_voice_chat import (
@@ -221,3 +224,233 @@ def test_event_consumer_uses_authoritative_final_text_without_duplication() -> N
     )
 
     assert lines == ["[assistant] 你好。"]
+
+
+def test_provider_failure_requests_reconnect_instead_of_ending_demo() -> None:
+    class _Consumer:
+        failed = threading.Event()
+        failure_error = "provider_connection_closed"
+
+    _Consumer.failed.set()
+
+    assert (
+        voice_chat.run_push_to_talk(
+            object(),
+            object(),
+            object(),
+            _Consumer(),
+            input_device=1,
+            emit=lambda _: None,
+        )
+        == 75
+    )
+
+
+def test_local_audio_failure_does_not_request_provider_reconnect() -> None:
+    class _Consumer:
+        failed = threading.Event()
+        failure_error = "audio_playback_PortAudioError"
+
+    _Consumer.failed.set()
+
+    assert (
+        voice_chat.run_push_to_talk(
+            object(),
+            object(),
+            object(),
+            _Consumer(),
+            input_device=1,
+            emit=lambda _: None,
+        )
+        == 1
+    )
+
+
+def test_only_transport_and_provider_5xx_failures_are_reconnectable() -> None:
+    assert voice_chat.provider_failure_is_reconnectable("provider_connection_closed")
+    assert voice_chat.provider_failure_is_reconnectable("provider_error_50700000")
+    assert voice_chat.provider_failure_is_reconnectable("provider_error_45000003")
+    assert not voice_chat.provider_failure_is_reconnectable("provider_error_45000004")
+    assert not voice_chat.provider_failure_is_reconnectable("provider_receive_error")
+    assert not voice_chat.provider_failure_is_reconnectable("provider_frame_error")
+    assert not voice_chat.provider_failure_is_reconnectable("provider_event_error")
+    assert not voice_chat.provider_failure_is_reconnectable(
+        "audio_playback_PortAudioError"
+    )
+
+
+def test_main_restarts_demo_after_reconnectable_provider_failure(monkeypatch) -> None:
+    outcomes = iter((75, 0))
+    calls = []
+    monkeypatch.setattr(voice_chat, "_load_sounddevice", lambda: object())
+    monkeypatch.setattr(
+        voice_chat,
+        "run_demo",
+        lambda args, sounddevice_module: calls.append(sounddevice_module)
+        or next(outcomes),
+    )
+    monkeypatch.setattr(voice_chat.time, "sleep", lambda _: None)
+
+    assert voice_chat.main([]) == 0
+    assert len(calls) == 2
+
+
+def test_main_cleans_failed_live_session_and_rebuilds_before_next_prompt(
+    monkeypatch,
+    capsys,
+) -> None:
+    class _Session:
+        def __init__(self, *, disconnect: bool) -> None:
+            self.disconnect = disconnect
+            self.allow_error = threading.Event()
+            self.error_delivered = threading.Event()
+            self.error_sent = False
+            self.committed = threading.Event()
+            self.response_sent = False
+            self.offer_calls = 0
+            self.close_calls = 0
+
+        def start(self, context) -> bool:
+            del context
+            return True
+
+        def next_event(self, timeout=None):
+            del timeout
+            if (
+                self.disconnect
+                and not self.error_sent
+                and self.allow_error.wait(timeout=0.01)
+            ):
+                self.error_sent = True
+                self.error_delivered.set()
+                return RealtimeVoiceEvent(
+                    event_type=RealtimeVoiceEventType.ERROR,
+                    error="provider_connection_closed",
+                )
+            if (
+                not self.disconnect
+                and not self.response_sent
+                and self.committed.wait(timeout=0.01)
+            ):
+                self.response_sent = True
+                return RealtimeVoiceEvent(
+                    event_type=RealtimeVoiceEventType.RESPONSE_DONE,
+                    text="recovered",
+                )
+            return None
+
+        def offer_audio(self, frame) -> bool:
+            del frame
+            self.offer_calls += 1
+            return not self.disconnect
+
+        def status_snapshot(self):
+            return {
+                "last_error": (
+                    "provider_connection_closed" if self.disconnect else ""
+                )
+            }
+
+        def finish_input(self) -> bool:
+            self.committed.set()
+            return True
+
+        def close(self, reason) -> None:
+            del reason
+            self.close_calls += 1
+
+    class _OutputStream:
+        def __init__(self) -> None:
+            self.started = False
+            self.stopped = False
+            self.closed = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def write(self, pcm) -> None:
+            del pcm
+
+        def stop(self) -> None:
+            self.stopped = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    first_session = _Session(disconnect=True)
+    second_session = _Session(disconnect=False)
+
+    class _RawInputStream:
+        def __init__(self, *, callback, **kwargs) -> None:
+            del kwargs
+            self.callback = callback
+
+        def __enter__(self):
+            assert first_session.error_delivered.wait(timeout=1.0)
+            self.callback(b"\x01\x00" * 320, 320, None, None)
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            del exc_type, exc, traceback
+
+    class _SoundDevice:
+        def __init__(self) -> None:
+            self.outputs: list[_OutputStream] = []
+            self.RawInputStream = _RawInputStream
+
+        def check_input_settings(self, **kwargs) -> None:
+            del kwargs
+
+        def check_output_settings(self, **kwargs) -> None:
+            del kwargs
+
+        def RawOutputStream(self, **kwargs):
+            del kwargs
+            stream = _OutputStream()
+            self.outputs.append(stream)
+            return stream
+
+    sounddevice = _SoundDevice()
+    sessions = iter((first_session, second_session))
+    prompts = iter(("", "", "", "", "q"))
+    prompt_count = 0
+
+    def answer_prompt(prompt):
+        nonlocal prompt_count
+        del prompt
+        prompt_count += 1
+        if prompt_count == 1:
+            first_session.allow_error.set()
+        return next(prompts)
+
+    monkeypatch.setenv("VOLCENGINE_S2S_API_KEY", "configured")
+    monkeypatch.setattr(voice_chat, "_load_sounddevice", lambda: sounddevice)
+    monkeypatch.setattr(voice_chat, "build_realtime_dialogue", lambda config: next(sessions))
+    monkeypatch.setattr("builtins.input", answer_prompt)
+    monkeypatch.setattr(voice_chat.time, "sleep", lambda _: None)
+
+    assert (
+        voice_chat.main(
+            [
+                "--provider",
+                "volcengine_duplex",
+                "--input-device",
+                "1",
+                "--output-device",
+                "3",
+            ]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert output.count("[error] provider_connection_closed") == 1
+    assert output.count("[reconnect] provider session disconnected") == 1
+    assert "microphone upload failed" not in output
+    assert first_session.offer_calls == 1
+    assert second_session.offer_calls == 1
+    assert second_session.response_sent is True
+    assert first_session.close_calls == 1
+    assert second_session.close_calls == 1
+    assert len(sounddevice.outputs) == 2
+    assert all(stream.started and stream.stopped and stream.closed for stream in sounddevice.outputs)

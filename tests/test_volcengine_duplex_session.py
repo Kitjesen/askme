@@ -65,16 +65,25 @@ class _FakeWebSocket:
 
 
 class _BlockingMuteWebSocket(_FakeWebSocket):
-    def __init__(self, incoming: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        incoming: list[dict[str, Any]],
+        *,
+        block_on_mute: int = 2,
+    ) -> None:
         super().__init__(incoming)
         self.mute_started = threading.Event()
         self.release_mute = threading.Event()
+        self.mute_count = 0
+        self.block_on_mute = block_on_mute
 
     def send(self, payload: str) -> None:
         event = json.loads(payload)
         if event.get("type") == "input_audio_mute.commit":
-            self.mute_started.set()
-            self.release_mute.wait(timeout=1.0)
+            self.mute_count += 1
+            if self.mute_count == self.block_on_mute:
+                self.mute_started.set()
+                self.release_mute.wait(timeout=1.0)
         super().send(payload)
 
 
@@ -299,10 +308,12 @@ def test_audio_commit_mute_and_next_turn_unmute_preserve_order() -> None:
     assert (
         session.offer_audio(VoiceMediaFrame(pcm=b"B" * 640, sample_rate=16_000, channels=1)) is True
     )
-    _wait_until(lambda: len(ws.sent) >= 7)
+    _wait_until(lambda: len(ws.sent) >= 9)
 
-    events = [json.loads(payload) for payload in ws.sent[1:7]]
+    events = [json.loads(payload) for payload in ws.sent[1:9]]
     assert [event["type"] for event in events] == [
+        "input_audio_mute.commit",
+        "input_audio_unmute.commit",
         "input_audio_buffer.append",
         "input_audio_buffer.append",
         "input_audio_buffer.commit",
@@ -311,14 +322,158 @@ def test_audio_commit_mute_and_next_turn_unmute_preserve_order() -> None:
         "input_audio_buffer.append",
     ]
     assert all(event["event_id"].startswith("event_") for event in events)
-    assert base64.b64decode(events[0]["audio"]) == b"A" * 640
-    assert base64.b64decode(events[1]["audio"]) == b"A" * 320
-    assert base64.b64decode(events[5]["audio"]) == b"B" * 640
+    assert base64.b64decode(events[2]["audio"]) == b"A" * 640
+    assert base64.b64decode(events[3]["audio"]) == b"A" * 320
+    assert base64.b64decode(events[7]["audio"]) == b"B" * 640
     snapshot = session.status_snapshot()
     assert snapshot["sent_audio_frames"] == 3
     assert snapshot["input_muted"] is False
     assert snapshot["audio_buffer_bytes"] == 0
     session.close("test")
+
+
+def test_ptt_session_starts_muted_and_unmutes_before_first_audio() -> None:
+    ws = _FakeWebSocket([{"type": "session.created", "session": {"id": "dialog-1"}}])
+    session = VolcengineDuplexDialogue(
+        VolcengineDuplexConfig(enabled=True, api_key="configured"),
+        connection_factory=_ConnectionFactory(ws),
+    )
+    context = RealtimeVoiceSessionContext(session_id="local-1", input_mode="push_to_talk")
+
+    assert session.start(context) is True
+    _wait_until(lambda: len(ws.sent) >= 2)
+    assert json.loads(ws.sent[1])["type"] == "input_audio_mute.commit"
+    assert session.status_snapshot()["input_muted"] is True
+
+    assert session.offer_audio(
+        VoiceMediaFrame(pcm=b"A" * 640, sample_rate=16_000, channels=1)
+    )
+    _wait_until(lambda: len(ws.sent) >= 4)
+    assert [json.loads(payload)["type"] for payload in ws.sent[2:4]] == [
+        "input_audio_unmute.commit",
+        "input_audio_buffer.append",
+    ]
+    session.close("test")
+
+
+def test_first_audio_waits_for_initial_mute_then_unmutes_atomically() -> None:
+    ws = _BlockingMuteWebSocket(
+        [{"type": "session.created", "session": {"id": "dialog-1"}}],
+        block_on_mute=1,
+    )
+    session = VolcengineDuplexDialogue(
+        VolcengineDuplexConfig(enabled=True, api_key="configured"),
+        connection_factory=_ConnectionFactory(ws),
+    )
+    context = RealtimeVoiceSessionContext(session_id="local-1", input_mode="push_to_talk")
+    start_result: list[bool] = []
+    offer_result: list[bool] = []
+    start_thread = threading.Thread(target=lambda: start_result.append(session.start(context)))
+    offer_thread = threading.Thread(
+        target=lambda: offer_result.append(
+            session.offer_audio(
+                VoiceMediaFrame(pcm=b"A" * 640, sample_rate=16_000, channels=1)
+            )
+        )
+    )
+
+    try:
+        start_thread.start()
+        assert ws.mute_started.wait(timeout=1.0)
+        offer_thread.start()
+        time.sleep(0.05)
+        assert offer_thread.is_alive() is True
+
+        ws.release_mute.set()
+        start_thread.join(timeout=1.0)
+        offer_thread.join(timeout=1.0)
+        _wait_until(lambda: len(ws.sent) >= 4)
+
+        assert start_result == [True]
+        assert offer_result == [True]
+        assert [json.loads(payload)["type"] for payload in ws.sent[1:4]] == [
+            "input_audio_mute.commit",
+            "input_audio_unmute.commit",
+            "input_audio_buffer.append",
+        ]
+    finally:
+        ws.release_mute.set()
+        session.close("test")
+
+
+def test_short_first_frame_is_rejected_after_initial_mute_timeout() -> None:
+    ws = _BlockingMuteWebSocket(
+        [{"type": "session.created", "session": {"id": "dialog-1"}}],
+        block_on_mute=1,
+    )
+    session = VolcengineDuplexDialogue(
+        VolcengineDuplexConfig(
+            enabled=True,
+            api_key="configured",
+            close_timeout_s=0.05,
+        ),
+        connection_factory=_ConnectionFactory(ws),
+    )
+    context = RealtimeVoiceSessionContext(session_id="local-1", input_mode="push_to_talk")
+    start_result: list[bool] = []
+    offer_result: list[bool] = []
+    start_thread = threading.Thread(target=lambda: start_result.append(session.start(context)))
+    offer_thread = threading.Thread(
+        target=lambda: offer_result.append(
+            session.offer_audio(
+                VoiceMediaFrame(pcm=b"A" * 320, sample_rate=16_000, channels=1)
+            )
+        )
+    )
+
+    try:
+        start_thread.start()
+        assert ws.mute_started.wait(timeout=1.0)
+        offer_thread.start()
+        start_thread.join(timeout=1.0)
+        offer_thread.join(timeout=1.0)
+
+        assert start_result == [False]
+        assert offer_result == [False]
+        snapshot = session.status_snapshot()
+        assert snapshot["state"] == "degraded"
+        assert snapshot["active"] is False
+        assert snapshot["audio_buffer_bytes"] == 0
+    finally:
+        ws.release_mute.set()
+        session.close("test")
+
+
+def test_provider_close_during_initial_mute_makes_start_fail_closed() -> None:
+    ws = _BlockingMuteWebSocket(
+        [{"type": "session.created", "session": {"id": "dialog-1"}}],
+        block_on_mute=1,
+    )
+    session = VolcengineDuplexDialogue(
+        VolcengineDuplexConfig(enabled=True, api_key="configured"),
+        connection_factory=_ConnectionFactory(ws),
+    )
+    context = RealtimeVoiceSessionContext(session_id="local-1", input_mode="push_to_talk")
+    start_result: list[bool] = []
+    start_thread = threading.Thread(target=lambda: start_result.append(session.start(context)))
+
+    try:
+        start_thread.start()
+        assert ws.mute_started.wait(timeout=1.0)
+        ws.push({"type": "session.closed", "event_id": "provider-close-1"})
+        _wait_until(lambda: session.status_snapshot()["state"] == "closed")
+        ws.release_mute.set()
+        start_thread.join(timeout=1.0)
+
+        assert start_result == [False]
+        snapshot = session.status_snapshot()
+        assert snapshot["state"] == "closed"
+        assert snapshot["active"] is False
+        assert snapshot["connected"] is False
+        assert snapshot["input_muted"] is False
+    finally:
+        ws.release_mute.set()
+        session.close("test")
 
 
 def test_mute_send_timeout_discards_the_unknown_provider_session() -> None:
@@ -424,6 +579,51 @@ def test_close_waits_for_session_closed_before_releasing_the_websocket() -> None
     sent_count = len(ws.sent)
     session.close("again")
     assert len(ws.sent) == sent_count
+
+
+def test_provider_session_closed_stops_receive_loop_without_secondary_error() -> None:
+    ws = _FakeWebSocket(
+        [
+            {"type": "session.created", "session": {"id": "dialog-1"}},
+            {"type": "session.closed", "event_id": "provider-close-1"},
+        ]
+    )
+    ws.incoming.put("")
+    session = VolcengineDuplexDialogue(
+        VolcengineDuplexConfig(enabled=True, api_key="configured"),
+        connection_factory=_ConnectionFactory(ws),
+    )
+
+    assert session.start(RealtimeVoiceSessionContext(session_id="local-1")) is True
+    closed = session.next_event(timeout=1.0)
+    assert closed is not None
+    assert closed.event_type is RealtimeVoiceEventType.SESSION_CLOSED
+    time.sleep(0.05)
+
+    assert session.next_event(timeout=0.05) is None
+    snapshot = session.status_snapshot()
+    assert snapshot["state"] == "closed"
+    assert snapshot["connected"] is False
+    assert snapshot["last_error"] == ""
+    session.close("test")
+
+
+def test_empty_provider_frame_is_classified_as_connection_closed() -> None:
+    ws = _FakeWebSocket([{"type": "session.created", "session": {"id": "dialog-1"}}])
+    ws.incoming.put("")
+    session = VolcengineDuplexDialogue(
+        VolcengineDuplexConfig(enabled=True, api_key="configured"),
+        connection_factory=_ConnectionFactory(ws),
+    )
+
+    assert session.start(RealtimeVoiceSessionContext(session_id="local-1")) is True
+    error = session.next_event(timeout=1.0)
+
+    assert error is not None
+    assert error.event_type is RealtimeVoiceEventType.ERROR
+    assert error.error == "provider_connection_closed"
+    assert session.status_snapshot()["last_error"] == "provider_connection_closed"
+    session.close("test")
 
 
 def test_delete_conversation_turn_waits_for_the_correlated_provider_ack() -> None:

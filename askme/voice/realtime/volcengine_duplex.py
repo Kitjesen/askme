@@ -219,7 +219,31 @@ class VolcengineDuplexDialogue:
                 self._active = False
                 self._close_socket_only()
                 return False
-            self._start_workers()
+            if context.input_mode != "push_to_talk":
+                self._start_workers()
+                return True
+            with self._input_order_lock:
+                self._start_workers()
+                mute_item = _OutboundItem(
+                    event={
+                        "type": "input_audio_mute.commit",
+                        "event_id": self._new_event_id(),
+                    }
+                )
+                if not self._enqueue_outbound(mute_item):
+                    self._transition_degraded("start_input_mute_enqueue_failed")
+                    return False
+                if not mute_item.sent.wait(
+                    timeout=max(0.05, self._config.close_timeout_s)
+                ):
+                    self._transition_degraded("start_input_mute_timeout")
+                    return False
+                if not mute_item.success:
+                    self._transition_degraded("start_input_mute_failed")
+                    return False
+                if not self._active or not self._connected:
+                    return False
+                self._input_muted = True
             return True
 
     def offer_audio(self, frame: VoiceMediaFrame) -> bool:
@@ -235,6 +259,8 @@ class VolcengineDuplexDialogue:
             return False
         packet_bytes = self._config.input_sample_rate * 2 * self._config.chunk_ms // 1000
         with self._input_order_lock:
+            if not self._active or not self._connected:
+                return False
             if self._input_muted:
                 unmute_item = _OutboundItem(
                     event={
@@ -547,6 +573,8 @@ class VolcengineDuplexDialogue:
             frame = frame.decode("utf-8")
         if not isinstance(frame, str):
             raise TypeError("provider_frame_must_be_text")
+        if not frame:
+            raise ConnectionError("provider_connection_closed")
         event = json.loads(frame)
         if not isinstance(event, dict):
             raise TypeError("provider_event_must_be_object")
@@ -590,7 +618,7 @@ class VolcengineDuplexDialogue:
             except Exception:
                 item.success = False
                 item.sent.set()
-                if not self._closing:
+                if not self._closing and self._active:
                     self._transition_degraded("provider_send_error")
                 return
             item.sent.set()
@@ -603,7 +631,7 @@ class VolcengineDuplexDialogue:
                 if self._is_timeout(exc):
                     continue
                 if not self._closing and not self._receiver_stop.is_set():
-                    self._transition_degraded("provider_receive_error")
+                    self._transition_degraded(self._receive_error_name(exc))
                 return
             try:
                 self._handle_provider_event(event)
@@ -617,6 +645,14 @@ class VolcengineDuplexDialogue:
         if event_type == "session.closed":
             self._session_closed.set()
             self._active = False
+            self._connected = False
+            self._input_muted = False
+            self._receiver_stop.set()
+            self._sender_stop.set()
+            self._discard_outbound_queue()
+            with self._outbound_condition:
+                self._outbound_condition.notify_all()
+            self._state = "closed"
             self._put_event(
                 RealtimeVoiceEvent(
                     event_type=RealtimeVoiceEventType.SESSION_CLOSED,
@@ -993,3 +1029,15 @@ class VolcengineDuplexDialogue:
     @staticmethod
     def _is_timeout(exc: BaseException) -> bool:
         return isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower()
+
+    @staticmethod
+    def _receive_error_name(exc: BaseException) -> str:
+        name = type(exc).__name__.lower()
+        if isinstance(exc, (ConnectionError, EOFError)) or any(
+            marker in name
+            for marker in ("connectionclosed", "connectionreset", "brokenpipe")
+        ):
+            return "provider_connection_closed"
+        if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError, TypeError)):
+            return "provider_frame_error"
+        return "provider_receive_error"

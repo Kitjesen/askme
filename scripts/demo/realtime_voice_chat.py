@@ -37,6 +37,8 @@ class _FlushMarker:
 
 
 _STOP = object()
+PROVIDER_RECONNECT_EXIT = 75
+MAX_PROVIDER_RECONNECTS = 3
 
 INPUT_SAMPLE_RATE = 16_000
 OUTPUT_SAMPLE_RATE = 24_000
@@ -283,6 +285,7 @@ class EventConsumer:
         self.turn_done = threading.Event()
         self.turn_done.set()
         self.failed = threading.Event()
+        self.failure_error = ""
 
     def start(self) -> None:
         if self._thread is not None:
@@ -309,6 +312,7 @@ class EventConsumer:
         self._input_printed = False
         self._output_parts.clear()
         self._usage = None
+        self.failure_error = ""
         self.turn_done.clear()
 
     def mark_commit(self, *, now: float | None = None) -> None:
@@ -366,6 +370,7 @@ class EventConsumer:
         if event_type is RealtimeVoiceEventType.ERROR:
             error = " ".join((event.error or "provider_error").splitlines()).strip()
             self._emit(f"[error] {error or 'provider_error'}")
+            self.failure_error = error or "provider_error"
             self.failed.set()
             self.turn_done.set()
             return
@@ -376,6 +381,7 @@ class EventConsumer:
         if event_type is RealtimeVoiceEventType.SESSION_CLOSED:
             if not self._stop.is_set():
                 self._emit("[error] provider session closed")
+                self.failure_error = "provider_session_closed"
                 self.failed.set()
             self.turn_done.set()
             return
@@ -384,6 +390,7 @@ class EventConsumer:
         audio = event.audio
         if audio is None or audio.sample_rate != OUTPUT_SAMPLE_RATE or audio.channels != CHANNELS:
             self._emit("[error] provider returned an unsupported output audio shape")
+            self.failure_error = "unsupported_output_audio_shape"
             self.failed.set()
             self.turn_done.set()
             return
@@ -391,6 +398,7 @@ class EventConsumer:
             self._output_stream.write(audio.pcm)
         except Exception as exc:
             self._emit(f"[error] audio playback failed: {type(exc).__name__}")
+            self.failure_error = f"audio_playback_{type(exc).__name__}"
             self.failed.set()
             self.turn_done.set()
             return
@@ -407,6 +415,7 @@ class EventConsumer:
             except Exception as exc:
                 if not self._stop.is_set():
                     self._emit(f"[error] provider event consumer failed: {type(exc).__name__}")
+                    self.failure_error = f"event_consumer_{type(exc).__name__}"
                     self.failed.set()
                     self.turn_done.set()
                 return
@@ -541,6 +550,29 @@ def _last_session_error(session: Any) -> str:
     return " ".join(error.splitlines()).strip() or "provider_error"
 
 
+def provider_failure_is_reconnectable(error: str) -> bool:
+    """Limit automatic retries to transient provider transport/server failures."""
+
+    if error in {
+        "finish_input_commit_timeout",
+        "finish_input_mute_timeout",
+        "provider_connection_closed",
+        "provider_error_45000003",
+        "provider_send_error",
+        "provider_session_closed",
+    }:
+        return True
+    return error.startswith("provider_error_5")
+
+
+def _consumer_failure_exit(consumer: EventConsumer) -> int:
+    return (
+        PROVIDER_RECONNECT_EXIT
+        if provider_failure_is_reconnectable(consumer.failure_error)
+        else 1
+    )
+
+
 def provider_start_hint(
     provider: str,
     error: str,
@@ -604,6 +636,9 @@ def run_push_to_talk(
             emit("Run --list-devices and select a target-rate-compatible input device.")
             return 1
 
+        if consumer.failed.is_set():
+            return _consumer_failure_exit(consumer)
+
         dropped = sender.dropped_frames - dropped_before
         status_events = sender.callback_status_events - status_before
         if dropped:
@@ -612,6 +647,8 @@ def run_push_to_talk(
             emit(f"[warning] PortAudio reported {status_events} callback status event(s)")
 
         if not sender.flush(timeout=10.0):
+            if consumer.failed.is_set():
+                return _consumer_failure_exit(consumer)
             error = sender.failure or "audio_sender_flush_timeout"
             emit(f"[error] microphone upload failed: {error}")
             return 1
@@ -621,21 +658,28 @@ def run_push_to_talk(
             committed = session.finish_input()
         except Exception as exc:
             consumer.cancel_commit()
+            if consumer.failed.is_set():
+                return _consumer_failure_exit(consumer)
             emit(f"[error] input commit failed: {type(exc).__name__}")
             return 1
         if not committed:
             consumer.cancel_commit()
-            emit(f"[error] input commit failed: {_last_session_error(session)}")
+            session_error = _last_session_error(session)
+            if consumer.failed.is_set():
+                return _consumer_failure_exit(consumer)
+            if provider_failure_is_reconnectable(session_error):
+                return PROVIDER_RECONNECT_EXIT
+            emit(f"[error] input commit failed: {session_error}")
             return 1
 
         emit("[waiting] response...")
         while not consumer.turn_done.wait(timeout=0.1):
             pass
         if consumer.failed.is_set():
-            return 1
+            return _consumer_failure_exit(consumer)
         if quit_after_turn:
             return 0
-    return 1
+    return _consumer_failure_exit(consumer)
 
 
 def run_demo(args: argparse.Namespace, sounddevice_module: Any) -> int:
@@ -760,11 +804,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         return 0
 
-    try:
-        return run_demo(args, sounddevice_module)
-    except KeyboardInterrupt:
-        print("\nStopping realtime voice demo.")
-        return 130
+    reconnects = 0
+    while True:
+        try:
+            outcome = run_demo(args, sounddevice_module)
+        except KeyboardInterrupt:
+            print("\nStopping realtime voice demo.")
+            return 130
+        if outcome != PROVIDER_RECONNECT_EXIT:
+            return outcome
+        reconnects += 1
+        if reconnects > MAX_PROVIDER_RECONNECTS:
+            print("[error] provider disconnected repeatedly; giving up after 3 reconnects")
+            return 1
+        print(
+            f"[reconnect] provider session disconnected; reconnecting "
+            f"({reconnects}/{MAX_PROVIDER_RECONNECTS})..."
+        )
+        time.sleep(min(2.0, 0.5 * reconnects))
 
 
 if __name__ == "__main__":
