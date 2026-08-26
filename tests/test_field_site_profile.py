@@ -2637,11 +2637,17 @@ def test_customer_project_onsite_failed_receipt_blocks_acceptance(tmp_path: Path
 
 
 def test_customer_project_acceptance_dossier_exports_hash_manifest(tmp_path: Path) -> None:
+    smoke_report = tmp_path / "field-ingest-smoke.json"
+    smoke_report.write_text(
+        json.dumps({"status": "passed", "event_count": 1, "local_server": True}),
+        encoding="utf-8",
+    )
     dossier_result = export_customer_project_acceptance_dossier(
         Path("deploy/site-profiles"),
         "demo-field-ops",
         output_root=tmp_path / "dossiers",
         check_env=False,
+        field_evidence_config={"smoke_report_path": str(smoke_report)},
     )
 
     assert dossier_result["accepted"] is True
