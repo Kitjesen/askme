@@ -639,6 +639,72 @@ def test_external_turn_commits_to_ledger_and_keeps_legacy_history() -> None:
     assert ledger.committed[0]["assistant_text"] == "门口检测到一人"
 
 
+def test_external_turn_identity_is_written_only_by_conversation_core() -> None:
+    ledger = _RecordingLedger()
+    pipeline = SimpleNamespace(
+        _turn_ledger=ledger,
+        _conversation=None,
+        _episodic=None,
+    )
+
+    record_external_turn(
+        pipeline,
+        "导航到北门",
+        "准备导航",
+        conversation_session_id="gateway-session",
+        person_id="person-verified",
+        operator_id="operator-verified",
+    )
+
+    assert ledger.resolved == [
+        {
+            "conversation_thread_id": None,
+            "conversation_session_id": "gateway-session",
+            "channel": "voice",
+            "person_id": "person-verified",
+            "operator_id": "operator-verified",
+            "metadata": None,
+        }
+    ]
+
+
+def test_conversation_core_rejects_identity_change_on_existing_gateway_alias(
+    tmp_path: Path,
+) -> None:
+    ledger = VoiceTurnLedger(tmp_path / "turns.jsonl")
+    pipeline = SimpleNamespace(
+        _turn_ledger=ledger,
+        _conversation=None,
+        _episodic=None,
+    )
+    first = begin_external_turn(
+        pipeline,
+        "你好",
+        source="voice",
+        conversation_session_id="gateway-session",
+        person_id="person-a",
+        operator_id="operator-a",
+    )
+    assert first is not None
+    complete_external_turn(
+        pipeline,
+        first,
+        user_text="你好",
+        assistant_text="你好",
+        source="voice",
+    )
+
+    with pytest.raises(DuplicateEntity, match="identity conflict"):
+        begin_external_turn(
+            pipeline,
+            "换人了",
+            source="voice",
+            conversation_session_id="gateway-session",
+            person_id="person-b",
+            operator_id="operator-a",
+        )
+
+
 def test_external_turn_without_ledger_keeps_legacy_history() -> None:
     conversation = _LegacyConversation()
     pipeline = SimpleNamespace(_conversation=conversation, _episodic=None)

@@ -90,6 +90,8 @@ class WarmSessionBinding:
 class _WarmSessionState:
     status: str = "idle"
     attempts: int = 0
+    completed_attempts: int = 0
+    lifecycle_completed_attempts: int = 0
     successes: int = 0
     failures: int = 0
     skips: int = 0
@@ -128,11 +130,13 @@ class WarmSessionManager:
         if shutdown_timeout_seconds <= 0:
             raise ValueError("shutdown_timeout_seconds must be > 0")
         self._bindings = tuple(bindings)
+        self._bindings_by_name = {binding.name: binding for binding in self._bindings}
         self._states = {binding.name: _WarmSessionState() for binding in self._bindings}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._started = False
         self._stop_event = asyncio.Event()
         self._refresh_events: dict[str, asyncio.Event] = {}
+        self._attempt_completion_events: dict[str, asyncio.Event] = {}
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._lifecycle_epoch = 0
         self._lifecycle_lock = asyncio.Lock()
@@ -146,10 +150,14 @@ class WarmSessionManager:
             lifecycle_epoch = self._lifecycle_epoch
             stop_event = asyncio.Event()
             refresh_events = {binding.name: asyncio.Event() for binding in self._bindings}
+            completion_events = {
+                binding.name: asyncio.Event() for binding in self._bindings
+            }
             now = time.monotonic()
             for binding in self._bindings:
                 state = self._states[binding.name]
                 state.status = "scheduled"
+                state.lifecycle_completed_attempts = 0
                 state.consecutive_failures = 0
                 state.last_status = None
                 state.last_reason = None
@@ -162,6 +170,7 @@ class WarmSessionManager:
                 state.next_attempt_at = now + binding.policy.startup_delay_seconds
             self._stop_event = stop_event
             self._refresh_events = refresh_events
+            self._attempt_completion_events = completion_events
             self._event_loop = asyncio.get_running_loop()
             self._started = True
             for binding in self._bindings:
@@ -200,6 +209,39 @@ class WarmSessionManager:
             return False
         return True
 
+    async def wait_for_attempt_completion(
+        self,
+        name: str,
+        *,
+        minimum_completed_attempts: int = 1,
+    ) -> dict[str, Any]:
+        """Wait until a named target has fully accounted for an attempt.
+
+        Provider-side callbacks may fire before ``ensure_warm`` returns. This
+        boundary advances only after the manager has applied the result to its
+        counters and terminal status. The minimum is scoped to the current
+        ``start()`` lifecycle, so an earlier run can never satisfy a wait after
+        restart.
+        """
+
+        binding = self._bindings_by_name.get(name)
+        if binding is None:
+            raise KeyError(f"unknown warm session binding: {name}")
+        if minimum_completed_attempts <= 0:
+            raise ValueError("minimum_completed_attempts must be > 0")
+
+        state = self._states[name]
+        lifecycle_epoch = self._lifecycle_epoch
+        while True:
+            completion_event = self._attempt_completion_events.get(name)
+            if not self._started or completion_event is None:
+                raise RuntimeError("warm session manager is not running")
+            if self._lifecycle_epoch != lifecycle_epoch:
+                raise RuntimeError("warm session lifecycle changed while waiting")
+            if state.lifecycle_completed_attempts >= minimum_completed_attempts:
+                return self._snapshot_state(state, time.monotonic(), binding.policy)
+            await completion_event.wait()
+
     @staticmethod
     def _cancel_target(binding: WarmSessionBinding) -> None:
         cancel = getattr(binding.target, "cancel", None)
@@ -216,6 +258,19 @@ class WarmSessionManager:
                 return
             self._started = False
             self._stop_event.set()
+            for binding in self._bindings:
+                state = self._states[binding.name]
+                if state.status != "warming":
+                    continue
+                state.status = "cancelled"
+                state.last_status = "cancelled"
+                state.last_reason = "manager_stopped"
+                state.active_worker_age_seconds = None
+                state.active_worker_age_recorded_at = None
+                state.stuck_busy_threshold_seconds = None
+                state.next_attempt_at = None
+            for completion_event in self._attempt_completion_events.values():
+                completion_event.set()
             tasks = tuple(self._tasks.values())
             for task in tasks:
                 task.cancel()
@@ -236,6 +291,7 @@ class WarmSessionManager:
                     )
             self._tasks.clear()
             self._refresh_events.clear()
+            self._attempt_completion_events.clear()
             self._event_loop = None
 
     @staticmethod
@@ -355,6 +411,7 @@ class WarmSessionManager:
             state.last_reason = type(exc).__name__
             state.last_latency_ms = (time.perf_counter() - started) * 1000
             logger.debug("WarmSessionManager: %s warm failed: %s", binding.name, exc)
+            self._record_attempt_completion(binding.name, state)
             return
 
         if self._lifecycle_epoch != lifecycle_epoch or stop_event.is_set():
@@ -404,6 +461,20 @@ class WarmSessionManager:
             state.failures += 1
             state.consecutive_failures += 1
             state.status = "degraded"
+        self._record_attempt_completion(binding.name, state)
+
+    def _record_attempt_completion(
+        self,
+        name: str,
+        state: _WarmSessionState,
+    ) -> None:
+        state.completed_attempts += 1
+        state.lifecycle_completed_attempts += 1
+        completion_event = self._attempt_completion_events.get(name)
+        if completion_event is None:
+            return
+        self._attempt_completion_events[name] = asyncio.Event()
+        completion_event.set()
 
     async def _ensure_warm_with_timeout(
         self,
@@ -503,6 +574,9 @@ class WarmSessionManager:
         return {
             "status": state.status,
             "attempts": state.attempts,
+            "completed_attempts": state.completed_attempts,
+            "lifecycle_completed_attempts": state.lifecycle_completed_attempts,
+            "attempt_in_progress": state.status == "warming",
             "successes": state.successes,
             "failures": state.failures,
             "skips": state.skips,

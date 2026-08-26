@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import askme.pipeline.voice_loop as voice_loop_module
@@ -32,6 +33,8 @@ class _Pipeline:
         self.process_calls: list[str] = []
         self.process_conversation_session_ids: list[str | None] = []
         self.process_voice_turn_ids: list[str | None] = []
+        self.process_person_ids: list[str | None] = []
+        self.process_operator_ids: list[str | None] = []
         self.skill_calls: list[tuple[str, str]] = []
         self.memory_calls: list[str] = []
         self.pending_calls: list[str] = []
@@ -59,10 +62,14 @@ class _Pipeline:
         memory_task=None,
         conversation_session_id: str | None = None,
         voice_turn_id: str | None = None,
+        person_id: str | None = None,
+        operator_id: str | None = None,
     ):
         self.process_calls.append(user_text)
         self.process_conversation_session_ids.append(conversation_session_id)
         self.process_voice_turn_ids.append(voice_turn_id)
+        self.process_person_ids.append(person_id)
+        self.process_operator_ids.append(operator_id)
         return "fallback"
 
     async def execute_skill(self, skill_name: str, user_text: str):
@@ -231,7 +238,7 @@ class _UnavailableBridge:
 
     def handle_voice_text(self, text: str):
         self.calls.append(text)
-        return None
+        return {"handled": False, "disposition": "declined", "reason": "disabled"}
 
 
 class _SkillBridge:
@@ -303,6 +310,129 @@ class _Proactive:
         return self.result
 
 
+class _RuntimeTaskLifecycle:
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    async def start(self) -> None:
+        self.calls.append("start")
+
+    async def close(self) -> None:
+        self.calls.append("close")
+
+    def reserve_task(self, user_text: str, session_id: str, turn_id: str):
+        self.calls.append(("reserve", user_text, session_id, turn_id))
+        return SimpleNamespace(
+            reservation_id="reservation-runtime",
+            state="reserved",
+            run_id="run-runtime",
+            turn_id=turn_id,
+            task_type="status_report",
+            target="",
+            confirmation_prompt="",
+            approval_id="",
+        )
+
+    async def commit_ack_and_submit(self, reservation_id: str):
+        self.calls.append(("submit", reservation_id))
+        return SimpleNamespace(
+            run_id="run-runtime",
+            remote_task_id="remote-runtime",
+            correlation_id="run-runtime",
+            state="queued",
+            accepted=True,
+        )
+
+    def abandon(self, reservation_id: str) -> bool:
+        self.calls.append(("abandon", reservation_id))
+        return True
+
+
+class _TwoTurnAudio(_Audio):
+    def __init__(self, first_turn: str) -> None:
+        super().__init__()
+        self._first_turn = first_turn
+
+    def listen_loop(self):
+        self._calls += 1
+        self.last_accepted_voice_turn_id = f"captured-turn-{self._calls}"
+        return self._first_turn if self._calls == 1 else "exit"
+
+
+class _VoiceSequenceAudio(_Audio):
+    def __init__(self, turns: list[str]) -> None:
+        super().__init__()
+        self._turns = list(turns)
+
+    def listen_loop(self):
+        self._calls += 1
+        self.last_accepted_voice_turn_id = f"captured-turn-{self._calls}"
+        return self._turns.pop(0) if self._turns else "exit"
+
+
+class _ClarifyingRuntimeTaskLifecycle(_RuntimeTaskLifecycle):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pending = False
+
+    def reserve_task(self, user_text: str, session_id: str, turn_id: str):
+        self.calls.append(("reserve", user_text, session_id, turn_id))
+        self.pending = True
+        raise ValueError("task_target_required")
+
+    def can_continue_pending_task(self, user_text: str, session_id: str) -> bool:
+        self.calls.append(("can_continue", user_text, session_id))
+        return self.pending and user_text == "北门"
+
+    def continue_pending_task(self, user_text: str, session_id: str, turn_id: str):
+        self.calls.append(("continue", user_text, session_id, turn_id))
+        self.pending = False
+        return SimpleNamespace(
+            reservation_id="reservation-navigation",
+            state="waiting_user",
+            run_id="run-navigation",
+            turn_id=turn_id,
+            task_type="navigate_to",
+            target=user_text,
+            confirmation_prompt="将移动机器人前往北门。请说确认执行或取消任务。",
+            approval_id="approval-navigation",
+        )
+
+
+class _RevisingRuntimeTaskLifecycle(_RuntimeTaskLifecycle):
+    def reserve_task(self, user_text: str, session_id: str, turn_id: str):
+        self.calls.append(("reserve", user_text, session_id, turn_id))
+        return SimpleNamespace(
+            reservation_id="reservation-inspection-v1",
+            state="waiting_user",
+            run_id="run-inspection-v1",
+            turn_id=turn_id,
+            task_type="inspection_patrol",
+            target="A区",
+            confirmation_prompt="将前往A区执行巡检。请说确认执行或取消任务。",
+            approval_id="approval-inspection-v1",
+        )
+
+    def can_revise_pending_task(self, user_text: str, session_id: str) -> bool:
+        self.calls.append(("can_revise", user_text, session_id))
+        return user_text == "改成B区，拍两张"
+
+    def revise_pending_task(self, user_text: str, session_id: str, turn_id: str):
+        self.calls.append(("revise", user_text, session_id, turn_id))
+        return SimpleNamespace(
+            reservation_id="reservation-inspection-v2",
+            state="waiting_user",
+            run_id="run-inspection-v2",
+            turn_id=turn_id,
+            task_type="inspection_patrol",
+            target="B区",
+            confirmation_prompt="将前往B区执行巡检并拍摄两张照片。请说确认执行或取消任务。",
+            approval_id="approval-inspection-v2",
+            revision=2,
+            supersedes_reservation_id="reservation-inspection-v1",
+        )
+
+
 def test_voice_loop_default_gate_fallbacks_do_not_construct_robot_interaction(
     monkeypatch,
 ) -> None:
@@ -346,6 +476,135 @@ async def test_voice_loop_prefers_runtime_bridge_before_llm() -> None:
 
     assert pipeline.process_calls == []
     assert audio.spoken[-1] == "runtime handled"
+
+
+@pytest.mark.asyncio
+async def test_runtime_task_route_reaches_persistent_task_lifecycle() -> None:
+    pipeline = _Pipeline()
+    audio = _TwoTurnAudio("生成状态报告")
+    lifecycle = _RuntimeTaskLifecycle()
+    dispatcher = _Dispatcher()
+    loop = VoiceLoop(
+        router=IntentRouter(),
+        pipeline=pipeline,
+        audio=audio,
+        dispatcher=dispatcher,
+        voice_task_lifecycle=lifecycle,
+    )
+
+    await loop.run()
+
+    assert any(
+        isinstance(call, tuple) and call[:2] == ("reserve", "生成状态报告")
+        for call in lifecycle.calls
+    )
+    assert ("submit", "reservation-runtime") in lifecycle.calls
+    assert dispatcher.dispatch_calls == []
+    assert pipeline.process_calls == []
+
+
+@pytest.mark.asyncio
+async def test_generic_agent_task_stays_on_agent_dispatcher_path() -> None:
+    lifecycle = _RuntimeTaskLifecycle()
+    dispatcher = _Dispatcher()
+    loop = VoiceLoop(
+        router=IntentRouter(voice_triggers={"帮我写代码": "agent_task"}),
+        pipeline=_Pipeline(),
+        audio=_TwoTurnAudio("帮我写代码"),
+        dispatcher=dispatcher,
+        voice_task_lifecycle=lifecycle,
+    )
+    loop._proactive = _Proactive(
+        ProactiveResult(enriched_text="帮我写代码", proceed=True)
+    )
+
+    await loop.run()
+
+    assert dispatcher.dispatch_calls == [("agent_task", "帮我写代码", "voice")]
+    assert not any(
+        isinstance(call, tuple) and call[0] == "reserve" for call in lifecycle.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_general_followup_completes_pending_runtime_task_target() -> None:
+    lifecycle = _ClarifyingRuntimeTaskLifecycle()
+    audio = _VoiceSequenceAudio(["导航到", "北门", "exit"])
+    loop = VoiceLoop(
+        router=IntentRouter(),
+        pipeline=_Pipeline(),
+        audio=audio,
+        voice_task_lifecycle=lifecycle,
+    )
+
+    await loop.run()
+
+    assert any(
+        isinstance(call, tuple) and call[:2] == ("reserve", "导航到")
+        for call in lifecycle.calls
+    )
+    assert any(
+        isinstance(call, tuple) and call[:2] == ("continue", "北门")
+        for call in lifecycle.calls
+    )
+    assert audio.spoken == [
+        "要前往或巡检哪个目标区域，例如 A 区或北门？",
+        "将移动机器人前往北门。请说确认执行或取消任务。",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_general_followup_revises_task_before_confirmation() -> None:
+    lifecycle = _RevisingRuntimeTaskLifecycle()
+    audio = _VoiceSequenceAudio(["巡检A区", "改成B区，拍两张", "exit"])
+    loop = VoiceLoop(
+        router=IntentRouter(),
+        pipeline=_Pipeline(),
+        audio=audio,
+        voice_task_lifecycle=lifecycle,
+    )
+
+    await loop.run()
+
+    assert any(
+        isinstance(call, tuple) and call[:2] == ("revise", "改成B区，拍两张")
+        for call in lifecycle.calls
+    )
+    assert audio.spoken == [
+        "将前往A区执行巡检。请说确认执行或取消任务。",
+        "已修改。将前往B区执行巡检并拍摄两张照片。请说确认执行或取消任务。",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_task_evidence_control_reports_persisted_artifacts() -> None:
+    lifecycle = _RuntimeTaskLifecycle()
+    lifecycle.task_report = lambda _session_id: {  # type: ignore[attr-defined]
+        "run_id": "run-evidence",
+        "status": "completed",
+        "artifacts": [
+            {"artifact_id": "photo-1", "mime_type": "image/jpeg", "uri": "s3://a/1.jpg"},
+            {"artifact_id": "log-1", "mime_type": "application/json", "uri": "s3://a/1.json"},
+        ],
+        "observations": [{"summary": "配电柜温度正常"}],
+    }
+    audio = _Audio()
+    loop = VoiceLoop(
+        router=IntentRouter(),
+        pipeline=_Pipeline(),
+        audio=audio,
+        voice_task_lifecycle=lifecycle,
+    )
+
+    await loop._handle_task_control(
+        "task_evidence",
+        user_text="照片呢",
+        thread_id="session-evidence",
+        turn_id="turn-evidence",
+        interaction_cancel=SimpleNamespace(is_set=lambda: False),
+    )
+
+    assert audio.spoken == ["已找到2个任务证据文件，其中1张图片，已附在任务记录中。"]
 
 
 @pytest.mark.asyncio
@@ -768,12 +1027,42 @@ async def test_voice_loop_falls_back_to_local_pipeline_when_runtime_bridge_unhan
 
 
 @pytest.mark.asyncio
+async def test_trusted_speaker_identity_is_transient_turn_context_for_pipeline() -> None:
+    pipeline = _Pipeline()
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        audio=_Audio(),
+        voice_task_operator_provider=lambda _session_id, _turn_id: {
+            "operator_id": "operator-verified",
+            "person_id": "person-verified",
+            "roles": ["operator"],
+            "authenticated": True,
+            "source": "speaker_verification",
+            "permissions": ["runtime:read"],
+        },
+    )
+
+    await loop._pipeline_process_general(
+        "你好",
+        memory_task=None,
+        conversation_session_id="gateway-session",
+        voice_turn_id="voice-turn",
+        turn_cancel_token=None,
+    )
+
+    assert pipeline.process_conversation_session_ids == ["gateway-session"]
+    assert pipeline.process_person_ids == ["person-verified"]
+    assert pipeline.process_operator_ids == ["operator-verified"]
+
+
+@pytest.mark.asyncio
 async def test_voice_loop_records_local_fallback_turn_in_gateway_session() -> None:
     from askme.voice_gateway import VoiceGatewayService
 
     class Bridge:
         def handle_voice_text(self, text: str, **kwargs):
-            return None
+            return {"handled": False, "disposition": "declined", "reason": "disabled"}
 
     pipeline = _Pipeline()
     audio = _Audio()
@@ -794,6 +1083,25 @@ async def test_voice_loop_records_local_fallback_turn_in_gateway_session() -> No
     assert snapshot.turns[0].user_text == "inspect zone"
     assert snapshot.turns[0].assistant_text == "fallback"
     assert snapshot.turns[0].metadata["local_fallback"] is True
+
+
+@pytest.mark.asyncio
+async def test_voice_loop_does_not_fallback_after_ambiguous_bridge_result() -> None:
+    pipeline = _Pipeline()
+    audio = _Audio()
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=pipeline,
+        audio=audio,
+        voice_runtime_bridge=SimpleNamespace(handle_voice_text=lambda _text: None),
+    )
+
+    await loop.run()
+
+    assert pipeline.process_calls == []
+    assert audio.spoken == [
+        "远端处理状态暂时无法确认。为避免重复处理，本次没有切换到本地执行。"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1630,7 +1938,6 @@ async def test_pending_approval_quick_reply_commits_one_direct_turn(
     [
         ("mute_mic", '好的，已关闭麦克风。说"开麦"来重新打开。'),
         ("unmute_mic", "好的，已重新开启。"),
-        ("stop_speaking", "已取消任务。"),
     ],
 )
 @pytest.mark.asyncio
@@ -1697,6 +2004,34 @@ async def test_kws_safety_reply_commits_one_direct_turn(
     assert len(snapshot.turns) == 1
     assert snapshot.turns[0].assistant_text == expected_reply
     assert pipeline.process_calls == []
+
+
+@pytest.mark.asyncio
+async def test_kws_stop_speaking_stops_playback_without_cancelling_task() -> None:
+    dispatcher = _Dispatcher()
+    audio = _Audio()
+    loop = VoiceLoop(
+        router=_Router(),
+        pipeline=_Pipeline(),
+        audio=audio,
+        dispatcher=dispatcher,
+    )
+    intent = Intent(
+        type=IntentType.VOICE_TRIGGER,
+        skill_name="stop_speaking",
+        raw_text="停止播报",
+    )
+
+    await loop._handle_kws_unavailable_safety_turn(
+        intent,
+        user_text="停止播报",
+        interaction_turn_id="stop-playback-turn",
+        interaction_cancel=None,
+    )
+
+    assert audio._drained == 1
+    assert audio.spoken == []
+    assert dispatcher.cancel_calls == 0
 
 
 @pytest.mark.asyncio

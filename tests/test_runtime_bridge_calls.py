@@ -6,6 +6,7 @@ from askme.conversation import VoiceTurnLedger
 from askme.pipeline.channels.runtime_bridge_calls import (
     call_bridge_turn,
     handle_runtime_bridge_result,
+    runtime_bridge_result_outcome,
     try_runtime_bridge_turn,
 )
 from askme.voice_gateway import VoiceGatewayService
@@ -454,6 +455,66 @@ async def test_handle_runtime_bridge_result_invalid_payload_falls_back() -> None
     )
 
     assert handled is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_bridge_outcome_marks_malformed_handled_payload_ambiguous() -> None:
+    outcome = await runtime_bridge_result_outcome(
+        {"handled": True, "turn": None},
+        user_text="status",
+        pipeline=object(),
+        label="Voice",
+    )
+
+    assert outcome.handled is False
+    assert outcome.ambiguous is True
+    assert outcome.explicitly_declined is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bridge_result", [None, "invalid", {}, {"handled": None}])
+async def test_runtime_bridge_outcome_treats_missing_or_untyped_result_as_ambiguous(
+    bridge_result,
+) -> None:
+    outcome = await runtime_bridge_result_outcome(
+        bridge_result,
+        user_text="status",
+        pipeline=object(),
+        label="Voice",
+    )
+
+    assert outcome.ambiguous is True
+    assert outcome.explicitly_declined is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_bridge_outcome_requires_explicit_handled_false_to_decline() -> None:
+    outcome = await runtime_bridge_result_outcome(
+        {"handled": False, "reason": "not_supported"},
+        user_text="status",
+        pipeline=object(),
+        label="Voice",
+    )
+
+    assert outcome.explicitly_declined is True
+    assert outcome.ambiguous is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_bridge_outcome_fences_untracked_agent_task_dispatch() -> None:
+    dispatcher = AsyncMock()
+
+    outcome = await runtime_bridge_result_outcome(
+        {"handled": True, "turn": {"action_type": "skill", "skill_name": "agent_task"}},
+        user_text="生成状态报告",
+        pipeline=object(),
+        dispatcher=dispatcher,
+        label="Voice",
+        allow_agent_task_dispatch=False,
+    )
+
+    assert outcome.ambiguous is True
+    dispatcher.dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio

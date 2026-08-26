@@ -525,6 +525,7 @@ def test_gateway_forwards_admitted_interaction_context(
         voice_turn_id="turn-context",
         turn_cancel_token=cancel_token,
         person_id="person-context",
+        operator_id="operator-context",
     )
 
     called_method, text, context = bridge.calls[0]
@@ -534,4 +535,8 @@ def test_gateway_forwards_admitted_interaction_context(
     assert context["voice_turn_id"] == "turn-context"
     assert context["turn_cancel_token"] is cancel_token
     assert context["person_id"] == "person-context"
+    assert context["operator_id"] == "operator-context"
     assert context["channel"] == channel
+    snapshot = gateway.conversation_snapshot("conv-context")
+    assert snapshot is not None
+    assert snapshot.operator_id == "operator-context"

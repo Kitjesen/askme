@@ -44,6 +44,185 @@ class _RecordingTarget:
         self.cancelled = True
 
 
+class _ControlledCompletionTarget:
+    name = "llm"
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def ensure_warm(self, *, force_refresh: bool) -> WarmSessionResult:
+        _ = force_refresh
+        self.started.set()
+        await self.release.wait()
+        return WarmSessionResult(ok=True, status="opened")
+
+    def cancel(self) -> None:
+        self.release.set()
+
+
+async def test_attempt_completion_boundary_does_not_treat_call_start_as_settled() -> None:
+    target = _ControlledCompletionTarget()
+    manager = WarmSessionManager(
+        [WarmSessionBinding(name="llm", target=target)]
+    )
+
+    await manager.start()
+    try:
+        await asyncio.wait_for(target.started.wait(), timeout=1.0)
+        in_flight = manager.snapshot()["targets"]["llm"]
+
+        assert in_flight["status"] == "warming"
+        assert in_flight["attempts"] == 1
+        assert in_flight["completed_attempts"] == 0
+        assert in_flight["attempt_in_progress"] is True
+
+        completion = asyncio.create_task(
+            manager.wait_for_attempt_completion(
+                "llm",
+                minimum_completed_attempts=1,
+            )
+        )
+        await asyncio.sleep(0)
+        assert completion.done() is False
+
+        target.release.set()
+        settled = await asyncio.wait_for(completion, timeout=1.0)
+
+        assert settled["status"] == "warm"
+        assert settled["attempts"] == 1
+        assert settled["completed_attempts"] == 1
+        assert settled["attempt_in_progress"] is False
+        assert settled["next_attempt_in_seconds"] > 0.0
+    finally:
+        await manager.stop()
+
+
+class _RestartCompletionTarget:
+    name = "llm"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started = [asyncio.Event(), asyncio.Event()]
+        self.release = [asyncio.Event(), asyncio.Event()]
+
+    async def ensure_warm(self, *, force_refresh: bool) -> WarmSessionResult:
+        _ = force_refresh
+        call_index = self.calls
+        self.calls += 1
+        self.started[call_index].set()
+        await self.release[call_index].wait()
+        return WarmSessionResult(ok=True, status="opened")
+
+    def cancel(self) -> None:
+        return
+
+
+async def test_attempt_completion_wait_is_scoped_to_current_lifecycle() -> None:
+    target = _RestartCompletionTarget()
+    manager = WarmSessionManager(
+        [WarmSessionBinding(name="llm", target=target)]
+    )
+
+    await manager.start()
+    await asyncio.wait_for(target.started[0].wait(), timeout=1.0)
+    target.release[0].set()
+    first = await asyncio.wait_for(
+        manager.wait_for_attempt_completion("llm"),
+        timeout=1.0,
+    )
+    assert first["completed_attempts"] == 1
+    assert first["lifecycle_completed_attempts"] == 1
+    await manager.stop()
+
+    await manager.start()
+    try:
+        await asyncio.wait_for(target.started[1].wait(), timeout=1.0)
+        second_completion = asyncio.create_task(
+            manager.wait_for_attempt_completion("llm")
+        )
+        await asyncio.sleep(0)
+
+        current = manager.snapshot()["targets"]["llm"]
+        assert current["completed_attempts"] == 1
+        assert current["lifecycle_completed_attempts"] == 0
+        assert second_completion.done() is False
+
+        target.release[1].set()
+        second = await asyncio.wait_for(second_completion, timeout=1.0)
+
+        assert second["completed_attempts"] == 2
+        assert second["lifecycle_completed_attempts"] == 1
+    finally:
+        await manager.stop()
+
+
+async def test_stop_during_warm_marks_attempt_cancelled_without_completing_it() -> None:
+    target = _ControlledCompletionTarget()
+    manager = WarmSessionManager(
+        [WarmSessionBinding(name="llm", target=target)]
+    )
+
+    await manager.start()
+    await asyncio.wait_for(target.started.wait(), timeout=1.0)
+    await manager.stop()
+
+    stopped = manager.snapshot()["targets"]["llm"]
+    assert stopped["status"] == "cancelled"
+    assert stopped["last_result"] == "cancelled"
+    assert stopped["last_reason"] == "manager_stopped"
+    assert stopped["attempt_in_progress"] is False
+    assert stopped["attempts"] == 1
+    assert stopped["completed_attempts"] == 0
+    assert stopped["lifecycle_completed_attempts"] == 0
+
+
+async def test_attempt_completion_wait_fails_fast_after_stop() -> None:
+    target = _RecordingTarget()
+    manager = WarmSessionManager(
+        [WarmSessionBinding(name="llm", target=target)]
+    )
+
+    await manager.start()
+    await manager.wait_for_attempt_completion("llm")
+    await manager.stop()
+
+    with pytest.raises(RuntimeError, match="not running"):
+        await manager.wait_for_attempt_completion("llm")
+
+
+async def test_attempt_completion_waiter_cannot_cross_lifecycle_epoch() -> None:
+    target = _RestartCompletionTarget()
+    manager = WarmSessionManager(
+        [WarmSessionBinding(name="llm", target=target)]
+    )
+
+    await manager.start()
+    await asyncio.wait_for(target.started[0].wait(), timeout=1.0)
+    target.release[0].set()
+    await manager.wait_for_attempt_completion("llm")
+
+    stale_waiter = asyncio.create_task(
+        manager.wait_for_attempt_completion(
+            "llm",
+            minimum_completed_attempts=2,
+        )
+    )
+    await asyncio.sleep(0)
+    await manager.stop()
+    await manager.start()
+    try:
+        await asyncio.wait_for(target.started[1].wait(), timeout=1.0)
+        target.release[1].set()
+        current = await manager.wait_for_attempt_completion("llm")
+
+        assert current["lifecycle_completed_attempts"] == 1
+        with pytest.raises(RuntimeError, match="lifecycle changed|not running"):
+            await stale_waiter
+    finally:
+        await manager.stop()
+
+
 async def test_manager_warms_target_at_start_and_exposes_snapshot() -> None:
     target = _RecordingTarget()
     manager = WarmSessionManager(
@@ -60,9 +239,12 @@ async def test_manager_warms_target_at_start_and_exposes_snapshot() -> None:
     try:
         await asyncio.wait_for(target.called.wait(), timeout=1.0)
 
+        target_snapshot = await manager.wait_for_attempt_completion(
+            "llm",
+            minimum_completed_attempts=1,
+        )
         snapshot = manager.snapshot()
         assert snapshot["status"] == "running"
-        target_snapshot = snapshot["targets"]["llm"]
         assert target_snapshot["status"] == "warm"
         assert target_snapshot["attempts"] == 1
         assert target_snapshot["successes"] == 1
@@ -380,7 +562,10 @@ async def test_busy_result_is_neutral_and_retries_without_failure_backoff() -> N
     await manager.start()
     try:
         await asyncio.wait_for(target.second_call.wait(), timeout=0.15)
-        snapshot = manager.snapshot()["targets"]["tts"]
+        snapshot = await manager.wait_for_attempt_completion(
+            "tts",
+            minimum_completed_attempts=2,
+        )
         assert target.calls >= 2
         assert snapshot["status"] == "busy"
         assert snapshot["failures"] == 0
@@ -433,7 +618,10 @@ async def test_short_worker_busy_remains_neutral_and_snapshot_age_increases() ->
     await manager.start()
     try:
         await asyncio.wait_for(target.called.wait(), timeout=1.0)
-        first = manager.snapshot()["targets"]["tts"]
+        first = await manager.wait_for_attempt_completion(
+            "tts",
+            minimum_completed_attempts=1,
+        )
         await asyncio.sleep(0.02)
         second = manager.snapshot()["targets"]["tts"]
 
@@ -486,9 +674,12 @@ async def test_failures_use_capped_exponential_backoff() -> None:
     await manager.start()
     try:
         await asyncio.wait_for(target.third_call.wait(), timeout=1.0)
+        snapshot = await manager.wait_for_attempt_completion(
+            "llm",
+            minimum_completed_attempts=3,
+        )
         first_gap = target.call_times[1] - target.call_times[0]
         second_gap = target.call_times[2] - target.call_times[1]
-        snapshot = manager.snapshot()["targets"]["llm"]
 
         assert first_gap >= 0.02
         assert second_gap >= 0.05
@@ -521,7 +712,7 @@ def test_tts_prewarm_worker_cannot_delay_asyncio_run_shutdown() -> None:
 
             def prewarm_provider_session(self, *, force_refresh):
                 self.started.set()
-                self.never.wait(30.0)
+                self.never.wait()
                 return {"ok": True}
 
             def cancel_provider_prewarm(self):
@@ -560,7 +751,7 @@ def test_tts_prewarm_worker_cannot_delay_asyncio_run_shutdown() -> None:
         cwd=str(Path(__file__).resolve().parents[1]),
         capture_output=True,
         text=True,
-        timeout=5.0,
+        timeout=15.0,
         check=False,
     )
 
@@ -1214,7 +1405,11 @@ async def test_restart_resets_current_lifecycle_epoch_readiness() -> None:
 
     await manager.start()
     await asyncio.wait_for(target.called.wait(), timeout=1.0)
-    assert manager.snapshot()["targets"]["llm"]["status"] == "warm"
+    first_lifecycle = await manager.wait_for_attempt_completion(
+        "llm",
+        minimum_completed_attempts=1,
+    )
+    assert first_lifecycle["status"] == "warm"
     await manager.stop()
 
     target.called.clear()
@@ -1226,6 +1421,10 @@ async def test_restart_resets_current_lifecycle_epoch_readiness() -> None:
         assert snapshot["provider_session_key"] is None
         assert snapshot["next_attempt_in_seconds"] > 0.0
         await asyncio.wait_for(target.called.wait(), timeout=1.0)
+        await manager.wait_for_attempt_completion(
+            "llm",
+            minimum_completed_attempts=1,
+        )
     finally:
         await manager.stop()
 

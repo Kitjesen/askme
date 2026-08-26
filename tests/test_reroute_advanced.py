@@ -236,12 +236,12 @@ class TestMultiLevelReroute:
 class TestRerouteWithRuntimeBridge:
     """Verify reroute logic interaction with the voice_runtime_bridge."""
 
-    async def test_bridge_fails_local_reroute_still_works(self):
+    async def test_ambiguous_bridge_result_blocks_duplicate_local_reroute(self):
         """Bridge raises Exception for original user_text "去那里".
         proactive returns interrupt_payload="去仓库B".
         Router routes "去仓库B" → VOICE_TRIGGER navigate.
         Second proactive returns proceed=True.
-        → dispatcher.dispatch called correctly (bridge failure doesn't block reroute).
+        → local dispatch stays closed because remote submission cannot be ruled out.
         """
         # Bridge that raises for any call
         mock_bridge = MagicMock()
@@ -276,10 +276,8 @@ class TestRerouteWithRuntimeBridge:
 
         await loop.run()
 
-        # Bridge failure doesn't block local reroute — dispatch must be called
-        mock_dispatcher.dispatch.assert_called_once()
-        call_args = mock_dispatcher.dispatch.call_args
-        assert call_args.args[0] == "navigate"
+        mock_bridge.handle_voice_text.assert_called()
+        mock_dispatcher.dispatch.assert_not_called()
 
     async def test_bridge_handles_original_no_reroute(self):
         """Bridge returns handled=True for original user_text "去那里".

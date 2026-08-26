@@ -32,6 +32,8 @@ def begin_external_turn(
     channel: str = "voice",
     conversation_thread_id: str | None = None,
     conversation_session_id: str | None = None,
+    person_id: str | None = None,
+    operator_id: str | None = None,
     turn_id: str | None = None,
     provider: str | None = None,
     provider_session_id: str | None = None,
@@ -52,6 +54,8 @@ def begin_external_turn(
             # Provider/runtime path changes normally share the voice
             # Thread channel; text adapters can opt into their own channel.
             channel=channel,
+            person_id=person_id,
+            operator_id=operator_id,
             metadata=metadata,
         )
         turn = ledger.start_turn(
@@ -288,6 +292,8 @@ def record_external_turn(
     channel: str = "voice",
     conversation_thread_id: str | None = None,
     conversation_session_id: str | None = None,
+    person_id: str | None = None,
+    operator_id: str | None = None,
     turn_id: str | None = None,
     provider: str | None = None,
     provider_session_id: str | None = None,
@@ -311,6 +317,8 @@ def record_external_turn(
         channel=channel,
         conversation_thread_id=conversation_thread_id,
         conversation_session_id=conversation_session_id,
+        person_id=person_id,
+        operator_id=operator_id,
         turn_id=turn_id,
         provider=provider,
         provider_session_id=provider_session_id,

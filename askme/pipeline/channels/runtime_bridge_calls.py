@@ -12,7 +12,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from inspect import Parameter, isawaitable, signature
-from typing import Any
+from typing import Any, Literal
 
 from askme.pipeline.channels.external_turns import (
     begin_external_turn,
@@ -23,12 +23,26 @@ from askme.pipeline.channels.external_turns import (
 logger = logging.getLogger(__name__)
 
 ReplyHandler = Callable[[str], Awaitable[None] | None]
+RuntimeBridgeDisposition = Literal["declined", "handled", "ambiguous"]
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeBridgeOutcome:
     handled: bool = False
     reply: str = ""
+    disposition: RuntimeBridgeDisposition = "declined"
+
+    @property
+    def ambiguous(self) -> bool:
+        """Return whether remote execution cannot be ruled in or out."""
+
+        return self.disposition == "ambiguous"
+
+    @property
+    def explicitly_declined(self) -> bool:
+        """Return whether it is safe for a caller to choose another executor."""
+
+        return self.disposition == "declined"
 
 
 def call_bridge_turn(
@@ -115,6 +129,7 @@ async def try_runtime_bridge_turn(
     dispatcher: Any | None = None,
     on_spoken_reply: ReplyHandler | None = None,
     label: str,
+    allow_agent_task_dispatch: bool = True,
 ) -> RuntimeBridgeOutcome:
     """Call a bridge method and return the handled outcome."""
     downstream_metadata = dict(metadata) if metadata is not None else None
@@ -149,6 +164,7 @@ async def try_runtime_bridge_turn(
         dispatcher=dispatcher,
         on_spoken_reply=on_spoken_reply,
         label=label,
+        allow_agent_task_dispatch=allow_agent_task_dispatch,
     )
     if (
         outcome.handled
@@ -193,6 +209,7 @@ async def handle_runtime_bridge_result(
     dispatcher: Any | None = None,
     on_spoken_reply: ReplyHandler | None = None,
     label: str,
+    allow_agent_task_dispatch: bool = True,
 ) -> bool:
     """Dispatch a handled runtime bridge turn or request local fallback."""
     outcome = await runtime_bridge_result_outcome(
@@ -210,6 +227,7 @@ async def handle_runtime_bridge_result(
         dispatcher=dispatcher,
         on_spoken_reply=on_spoken_reply,
         label=label,
+        allow_agent_task_dispatch=allow_agent_task_dispatch,
     )
     return outcome.handled
 
@@ -230,10 +248,20 @@ async def runtime_bridge_result_outcome(
     dispatcher: Any | None = None,
     on_spoken_reply: ReplyHandler | None = None,
     label: str,
+    allow_agent_task_dispatch: bool = True,
 ) -> RuntimeBridgeOutcome:
     """Dispatch a handled runtime bridge turn and return reply metadata."""
-    if not isinstance(bridge_result, dict) or not bridge_result.get("handled"):
+    if not isinstance(bridge_result, dict):
+        return RuntimeBridgeOutcome(disposition="ambiguous")
+    disposition = str(bridge_result.get("disposition") or "").strip().lower()
+    if disposition == "ambiguous":
+        return RuntimeBridgeOutcome(disposition="ambiguous")
+    if disposition == "declined" and bridge_result.get("handled") is False:
         return RuntimeBridgeOutcome()
+    if bridge_result.get("handled") is False:
+        return RuntimeBridgeOutcome()
+    if bridge_result.get("handled") is not True:
+        return RuntimeBridgeOutcome(disposition="ambiguous")
 
     turn = bridge_result.get("turn")
     if not isinstance(turn, dict):
@@ -242,10 +270,18 @@ async def runtime_bridge_result_outcome(
             "falling back to local pipeline.",
             label,
         )
-        return RuntimeBridgeOutcome()
+        return RuntimeBridgeOutcome(disposition="ambiguous")
 
     action_type = turn.get("action_type")
     skill_name = turn.get("skill_name")
+
+    if skill_name == "agent_task" and not allow_agent_task_dispatch:
+        logger.warning(
+            "%s runtime bridge returned agent_task without a trackable voice "
+            "task result; refusing a second dispatcher path.",
+            label,
+        )
+        return RuntimeBridgeOutcome(disposition="ambiguous")
 
     if (
         isinstance(skill_name, str)
@@ -274,6 +310,7 @@ async def runtime_bridge_result_outcome(
         return RuntimeBridgeOutcome(
             handled=True,
             reply=result if isinstance(result, str) else "",
+            disposition="handled",
         )
 
     spoken_reply = turn.get("spoken_reply")
@@ -314,7 +351,7 @@ async def runtime_bridge_result_outcome(
             conversation_session_id=conversation_session_id,
             metadata=metadata,
         )
-        return RuntimeBridgeOutcome(handled=True, reply=reply)
+        return RuntimeBridgeOutcome(handled=True, reply=reply, disposition="handled")
 
     logger.warning(
         "%s runtime bridge marked the turn handled but returned no usable "
@@ -323,7 +360,7 @@ async def runtime_bridge_result_outcome(
         action_type,
         skill_name,
     )
-    return RuntimeBridgeOutcome()
+    return RuntimeBridgeOutcome(disposition="ambiguous")
 
 
 def _supported_kwargs(

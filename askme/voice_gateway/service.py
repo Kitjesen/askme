@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import deepcopy
 from inspect import Parameter, signature
-from typing import Any
+from typing import Any, TypeAlias
 
 from askme.conversation import canonical_thread_id
 from askme.ports import VoiceTurnBridgePort
@@ -14,7 +14,7 @@ from askme.voice_gateway.session import (
     SessionSnapshot,
 )
 
-VoiceTurnBridge = VoiceTurnBridgePort
+VoiceTurnBridge: TypeAlias = VoiceTurnBridgePort
 
 
 class VoiceGatewayService:
@@ -225,7 +225,11 @@ class VoiceGatewayService:
         defer_recording: bool,
     ) -> dict[str, Any] | None:
         if self._bridge is None:
-            return None
+            return {
+                "handled": False,
+                "disposition": "declined",
+                "reason": "runtime_bridge_unavailable",
+            }
 
         session = self._session_manager.get_or_create(
             channel=channel,

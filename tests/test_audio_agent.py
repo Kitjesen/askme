@@ -655,6 +655,31 @@ def test_accepted_asr_result_exposes_confidence_to_voice_loop() -> None:
     assert agent.last_turn_asr_confidence == 0.62
 
 
+def test_voice_task_operator_context_is_consumed_once_for_its_bound_turn() -> None:
+    agent = object.__new__(AudioAgent)
+    agent._voice_turn_identity_lock = threading.RLock()
+    agent._active_capture_voice_turn_id = "voice-turn-1"
+    agent.last_accepted_voice_turn_id = None
+    agent.last_turn_operator_context = None
+
+    assert agent.bind_voice_turn_operator_context(
+        "voice-turn-1",
+        {
+            "operator_id": "operator-1",
+            "person_id": "person-1",
+            "authenticated": True,
+        },
+    ) is True
+
+    first = agent.voice_task_operator_context_for_turn("thread-1", "voice-turn-1")
+    second = agent.voice_task_operator_context_for_turn("thread-1", "voice-turn-1")
+
+    assert first is not None
+    assert first["operator_id"] == "operator-1"
+    assert second is None
+    assert agent.last_turn_operator_context is None
+
+
 def test_accepted_asr_result_logs_only_non_content_metadata(caplog) -> None:
     agent = object.__new__(AudioAgent)
     agent._turn_traces = MagicMock()

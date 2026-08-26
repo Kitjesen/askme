@@ -164,6 +164,8 @@ class AudioAgent:
         self.last_turn_wake_source: str = "none"
         self.last_accepted_voice_turn_id: str | None = None
         self._active_capture_voice_turn_id: str | None = None
+        self.last_turn_operator_context: dict[str, Any] | None = None
+        self._voice_turn_identity_lock = threading.RLock()
         self._init_output_ownership_state()
         self._muted: bool = False  # software mute — still listens, VoiceLoop filters results
         self._agent_state: AgentState = AgentState.IDLE
@@ -2273,7 +2275,48 @@ class AudioAgent:
         )
         self._active_capture_voice_turn_id = trace.voice_turn_id
         self.last_accepted_voice_turn_id = None
+        with self._voice_turn_identity_lock:
+            self.last_turn_operator_context = None
         return trace.voice_turn_id
+
+    def bind_voice_turn_operator_context(
+        self,
+        voice_turn_id: str,
+        context: dict[str, Any],
+    ) -> bool:
+        """Bind trusted verifier output to exactly one captured microphone turn."""
+
+        normalized_turn_id = str(voice_turn_id or "").strip()
+        if not normalized_turn_id or not isinstance(context, dict):
+            return False
+        with self._voice_turn_identity_lock:
+            if normalized_turn_id not in {
+                self._active_capture_voice_turn_id,
+                self.last_accepted_voice_turn_id,
+            }:
+                return False
+            self.last_turn_operator_context = {
+                **dict(context),
+                "voice_turn_id": normalized_turn_id,
+            }
+        return True
+
+    def voice_task_operator_context_for_turn(
+        self,
+        _session_id: str,
+        voice_turn_id: str,
+    ) -> dict[str, Any] | None:
+        """Return verifier output only when it is bound to the requested turn."""
+
+        normalized_turn_id = str(voice_turn_id or "").strip()
+        with self._voice_turn_identity_lock:
+            context = self.last_turn_operator_context
+            if not isinstance(context, dict):
+                return None
+            if str(context.get("voice_turn_id") or "").strip() != normalized_turn_id:
+                return None
+            self.last_turn_operator_context = None
+            return dict(context)
 
     def _record_output_voice_trace_for_token(
         self,

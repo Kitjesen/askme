@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 import re
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from inspect import Parameter, isawaitable, signature
 from time import monotonic
@@ -26,7 +27,10 @@ from askme.pipeline.channels.external_turns import (
     complete_external_turn,
     discard_external_generation,
 )
-from askme.pipeline.channels.runtime_bridge_calls import try_runtime_bridge_turn
+from askme.pipeline.channels.runtime_bridge_calls import (
+    RuntimeBridgeOutcome,
+    try_runtime_bridge_turn,
+)
 from askme.pipeline.core.protocols import CancellationToken
 from askme.pipeline.core.trace import get_tracer
 from askme.pipeline.core.turn_control import AtomicCancellationToken
@@ -52,6 +56,10 @@ from askme.robot_interaction.interaction_gate import (
     contains_tool_route_intent,
 )
 from askme.robot_interaction.perception_context import InteractionPerceptionSnapshot
+from askme.runtime.task.voice_lifecycle import (
+    VoiceTaskLifecycleService,
+    VoiceTaskOperatorContext,
+)
 from askme.voice.diagnostics.status_privacy import sanitize_voice_status
 from askme.voice.realtime.config import SUPPORTED_REALTIME_PROVIDERS
 from askme.voice.realtime.policy import decide_realtime_route
@@ -60,6 +68,7 @@ if TYPE_CHECKING:
     from askme.pipeline.core.brain_pipeline import BrainPipeline
     from askme.pipeline.skills.skill_dispatcher import SkillDispatcher
     from askme.robot_interaction import IntentRouter
+    from askme.runtime.task.voice_lifecycle import DeliveryState, TaskLifecycleEvent
     from askme.skills.core.skill_model import SkillDefinition
 
 logger = logging.getLogger(__name__)
@@ -75,6 +84,8 @@ def _validated_voice_turn_id(value: object) -> str | None:
 
 def _validated_asr_confidence(value: object) -> float | None:
     if value is None:
+        return None
+    if not isinstance(value, (str, int, float)):
         return None
     try:
         confidence = float(value)
@@ -165,6 +176,71 @@ _KWS_UNAVAILABLE_SAFETY_SOURCE = "kws_unavailable_safety_only"
 _KWS_UNAVAILABLE_LOCAL_SKILLS: frozenset[str] = frozenset(
     {"stop_speaking", "mute_mic", "unmute_mic"}
 )
+_EXTERNAL_STATUS_REPORT_MARKERS: tuple[str, ...] = (
+    "状态报告",
+    "进度报告",
+    "巡检报告",
+    "情况报告",
+    "生成报告",
+    "整理报告",
+    "输出报告",
+    "汇报状态",
+    "汇报进度",
+)
+
+
+def _task_prepare_message(task_type: str, *, confirmed: bool = False) -> str:
+    prefix = "确认收到，" if confirmed else "好的，"
+    labels = {
+        "status_report": "状态报告任务",
+        "inspection_patrol": "区域巡检任务",
+        "navigate_to": "导航任务",
+    }
+    return f"{prefix}我准备提交{labels.get(task_type, '外部任务')}。"
+
+
+def _is_image_artifact(artifact: Mapping[str, Any]) -> bool:
+    media_type = str(
+        artifact.get("mime_type")
+        or artifact.get("content_type")
+        or artifact.get("type")
+        or artifact.get("kind")
+        or ""
+    ).lower()
+    return media_type.startswith("image/") or media_type in {"image", "photo", "picture"}
+
+
+def _task_observation_summary(observation: Mapping[str, Any]) -> str:
+    value = (
+        observation.get("summary")
+        or observation.get("message")
+        or observation.get("description")
+        or observation.get("value")
+        or ""
+    )
+    text = str(value).strip()
+    return text if len(text) <= 120 else f"{text[:117]}..."
+
+
+def _call_lifecycle_with_operator(
+    method: Callable[..., Any],
+    *args: Any,
+    operator_context: VoiceTaskOperatorContext,
+    **kwargs: Any,
+) -> Any:
+    """Pass per-turn identity while preserving narrow test/adapter protocols."""
+
+    try:
+        parameters = tuple(signature(method).parameters.values())
+    except (TypeError, ValueError):
+        parameters = ()
+    supports_context = any(
+        parameter.kind == Parameter.VAR_KEYWORD or parameter.name == "operator_context"
+        for parameter in parameters
+    )
+    if supports_context:
+        kwargs["operator_context"] = operator_context
+    return method(*args, **kwargs)
 
 
 class VoiceLoop:
@@ -183,6 +259,10 @@ class VoiceLoop:
         pipeline: BrainPipeline,
         audio: AudioFrontendPort,
         voice_runtime_bridge: VoiceTurnBridgePort | None = None,
+        voice_task_lifecycle: VoiceTaskLifecycleService | None = None,
+        voice_task_operator_provider: (
+            Callable[[str, str], VoiceTaskOperatorContext | Mapping[str, Any] | None] | None
+        ) = None,
         dispatcher: SkillDispatcher | None = None,
         audio_router: AudioRouterPort | None = None,
         anonymous_encounter_idle_seconds: float = 25.0,
@@ -192,6 +272,10 @@ class VoiceLoop:
         self._pipeline = pipeline
         self._audio = audio
         self._voice_runtime_bridge = voice_runtime_bridge
+        self._voice_task_lifecycle = voice_task_lifecycle
+        self._voice_task_operator_provider = voice_task_operator_provider
+        self._voice_task_operator_by_session: dict[str, VoiceTaskOperatorContext] = {}
+        self._voice_task_operator_by_turn: dict[str, VoiceTaskOperatorContext] = {}
         self._dispatcher = dispatcher
         self._audio_router = audio_router
 
@@ -224,6 +308,7 @@ class VoiceLoop:
         self._closing = False
         self._active_interaction_cancel: AtomicCancellationToken | None = None
         self._solicited_response_active = False
+        self._task_notification_active = False
         self._active_realtime_generation = 0
         self._active_realtime_baseline_generation = 0
         self._input_recovery_lock = threading.Lock()
@@ -257,16 +342,23 @@ class VoiceLoop:
         interaction: str,
         speaker: Callable[[str], Awaitable[Any]] | None = None,
         before_playback: Callable[[], None] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> bool:
         """Open, deliver, settle, then project one deterministic voice reply."""
 
-        metadata = {"interaction": interaction}
+        metadata = {"interaction": interaction, **dict(metadata or {})}
+        trusted_operator = self._trusted_operator_for_turn(
+            conversation_session_id,
+            interaction_turn_id,
+        )
         external_turn = begin_external_turn(
             self._pipeline,
             user_text,
             source="voice",
             channel="voice",
             conversation_session_id=conversation_session_id,
+            person_id=(trusted_operator.person_id or None) if trusted_operator else None,
+            operator_id=(trusted_operator.operator_id or None) if trusted_operator else None,
             turn_id=interaction_turn_id,
             metadata=metadata,
         )
@@ -332,7 +424,14 @@ class VoiceLoop:
                     "voice_turn_id": interaction_turn_id,
                     "turn_cancel_token": interaction_cancel,
                     "metadata": metadata,
+                    "person_id": (
+                        trusted_operator.person_id or None if trusted_operator else None
+                    ),
+                    "operator_id": (
+                        trusted_operator.operator_id or None if trusted_operator else None
+                    ),
                 }
+                parameters: Mapping[str, Parameter]
                 try:
                     parameters = signature(callback).parameters
                     accepts_kwargs = any(
@@ -438,6 +537,7 @@ class VoiceLoop:
             user_text,
             reply_text,
             interaction_turn_id=interaction_turn_id,
+            metadata=metadata,
         )
         return True
 
@@ -616,16 +716,6 @@ class VoiceLoop:
         self._discard_realtime_turn(_KWS_UNAVAILABLE_SAFETY_SOURCE)
         self._audio.drain_buffers()
         if skill_name == "stop_speaking":
-            cancelled = bool(self._dispatcher and self._dispatcher.cancel_active_agent_task())
-            if cancelled:
-                await self._deliver_direct_reply(
-                    user_text,
-                    "已取消任务。",
-                    conversation_session_id=self._conversation_session_for(),
-                    interaction_turn_id=interaction_turn_id,
-                    interaction_cancel=interaction_cancel,
-                    interaction="kws_stop_speaking",
-                )
             return
         if skill_name == "mute_mic":
             await self._deliver_direct_reply(
@@ -868,19 +958,17 @@ class VoiceLoop:
         if observed_provider != provider_selector:
             self._discard_realtime_turn("realtime_provider_identity_changed")
             return False
-        ledger_provider = (
-            "qwen" if provider_selector == "qwen3_5_omni" else "volcengine"
-        )
+        ledger_provider = "qwen" if provider_selector == "qwen3_5_omni" else "volcengine"
         realtime_source = f"{ledger_provider}_realtime"
-        provider_session_id = str(
-            provider_context.get("provider_session_id")
-            or ""
-        ).strip() or None
-        provider_dialog_id = str(
-            provider_context.get("provider_dialog_id")
-            or provider_context.get("dialog_id")
-            or ""
-        ).strip() or None
+        provider_session_id = str(provider_context.get("provider_session_id") or "").strip() or None
+        provider_dialog_id = (
+            str(
+                provider_context.get("provider_dialog_id")
+                or provider_context.get("dialog_id")
+                or ""
+            ).strip()
+            or None
+        )
         turn_metadata: dict[str, Any] = {
             "realtime_generation": int(expected_generation or 0),
             "realtime_provider": provider_selector,
@@ -896,11 +984,17 @@ class VoiceLoop:
             else None
         )
         try:
+            trusted_operator = self._trusted_operator_for_turn(
+                conversation_session_id,
+                voice_turn_id,
+            )
             external_turn = begin_external_turn(
                 self._pipeline,
                 user_text,
                 source=realtime_source,
                 conversation_session_id=conversation_session_id,
+                person_id=(trusted_operator.person_id or None) if trusted_operator else None,
+                operator_id=(trusted_operator.operator_id or None) if trusted_operator else None,
                 turn_id=voice_turn_id,
                 provider=ledger_provider,
                 provider_session_id=provider_session_id,
@@ -1101,6 +1195,8 @@ class VoiceLoop:
         self._full_duplex_active = getattr(self._audio, "full_duplex_enabled", False) is True
         if self._full_duplex_active:
             self._install_barge_in_callback()
+        if self._voice_task_lifecycle is not None:
+            await self._voice_task_lifecycle.start()
         try:
             await self._run_session()
         finally:
@@ -1145,6 +1241,8 @@ class VoiceLoop:
         await asyncio.to_thread(self._finalize_input_recovery)
         self._full_duplex_active = False
         self._close_anonymous_encounter("voice_loop_stopped")
+        if self._voice_task_lifecycle is not None:
+            await self._voice_task_lifecycle.close()
 
     def _install_barge_in_callback(self) -> None:
         setter = getattr(self._audio, "set_barge_in_callback", None)
@@ -1169,7 +1267,8 @@ class VoiceLoop:
         # interaction token.  This records the controller epoch/reason; the
         # direct event set below also covers planner/proactive gaps where no
         # BrainPipeline lease exists yet.
-        self._cancel_active_turn_for_barge_in()
+        if not self._task_notification_active:
+            self._cancel_active_turn_for_barge_in()
         interaction_cancel = self._active_interaction_cancel
         if interaction_cancel is not None:
             interaction_cancel.set()
@@ -1358,6 +1457,182 @@ class VoiceLoop:
         self._start_next_listen()
         return utterance
 
+    async def _next_voice_activity(
+        self,
+    ) -> tuple[_CapturedUtterance | None, bool]:
+        """Wait for one capture or one task event without duplicating capture."""
+
+        lifecycle = self._voice_task_lifecycle
+        if lifecycle is None or not self._refresh_full_duplex_state():
+            return await self._next_utterance(), False
+
+        self._start_next_listen()
+        listen_task = self._listen_task
+        if listen_task is None:
+            raise RuntimeError("full-duplex listener was not started")
+        thread_id = self._conversation_session_for()
+        if not thread_id:
+            return await self._next_utterance(), False
+
+        operator = self._voice_task_operator_for_session(thread_id)
+        event_task = asyncio.create_task(
+            _call_lifecycle_with_operator(
+                lifecycle.wait_ready,
+                thread_id,
+                operator_context=operator,
+            ),
+            name="voice-task-event-ready",
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {listen_task, event_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # User input wins a same-loop tie.  The event remains pending in
+            # the lifecycle inbox and will be claimed on the next wait.
+            if listen_task in done:
+                event_task.cancel()
+                await asyncio.gather(event_task, return_exceptions=True)
+                try:
+                    utterance = await listen_task
+                finally:
+                    if self._listen_task is listen_task:
+                        self._listen_task = None
+                self._start_next_listen()
+                return utterance, False
+            if await event_task:
+                # Never cancel or replace the single microphone capture owner.
+                return None, True
+            try:
+                utterance = await listen_task
+            finally:
+                if self._listen_task is listen_task:
+                    self._listen_task = None
+            self._start_next_listen()
+            return utterance, False
+        finally:
+            if not event_task.done():
+                event_task.cancel()
+                await asyncio.gather(event_task, return_exceptions=True)
+
+    async def _deliver_next_task_event(self, thread_id: str) -> None:
+        lifecycle = self._voice_task_lifecycle
+        if lifecycle is None:
+            return
+        event = _call_lifecycle_with_operator(
+            lifecycle.claim_next,
+            thread_id,
+            operator_context=self._voice_task_operator_for_session(thread_id),
+        )
+        if event is None:
+            return
+        if event.kind == "reserved":
+            self._settle_task_delivery(event.event_id, "suppressed")
+            return
+
+        reply = self._task_event_reply(event)
+        if not reply:
+            self._settle_task_delivery(event.event_id, "suppressed")
+            return
+        turn_id = self._task_event_turn_id(event.event_id)
+        cancel = AtomicCancellationToken()
+        self._active_interaction_cancel = cancel
+        self._task_notification_active = True
+        try:
+            delivered = await self._deliver_direct_reply(
+                "",
+                reply,
+                conversation_session_id=thread_id,
+                interaction_turn_id=turn_id,
+                interaction_cancel=cancel,
+                interaction="external_task_notification",
+                metadata={
+                    "task_event_id": event.event_id,
+                    "task_event_kind": event.kind,
+                    "task_state": event.state,
+                    "task_reservation_id": event.reservation_id,
+                    "task_run_correlation_id": str(
+                        getattr(event, "correlation_id", "") or event.run_id
+                    ),
+                    "runtime_run_id": event.run_id,
+                    "remote_task_id": str(getattr(event, "remote_task_id", "") or ""),
+                    "task_turn_id": event.turn_id,
+                    "task_originating_thread_id": str(
+                        getattr(event, "originating_thread_id", "") or ""
+                    ),
+                },
+            )
+            self._settle_task_delivery(
+                event.event_id,
+                "delivered" if delivered else "interrupted",
+            )
+            if delivered:
+                self._remember_spoken_text(reply)
+        except asyncio.CancelledError:
+            self._settle_task_delivery(event.event_id, "interrupted")
+            raise
+        except Exception as exc:
+            logger.warning("VoiceLoop: task notification delivery failed: %s", exc)
+            retry_delivery = getattr(lifecycle, "retry_delivery", None)
+            retried = False
+            if callable(retry_delivery):
+                try:
+                    retried = bool(
+                        retry_delivery(
+                            event.event_id,
+                            error_code="voice_notification_delivery_failed",
+                        )
+                    )
+                except Exception as retry_exc:
+                    logger.warning(
+                        "VoiceLoop: task notification retry scheduling failed: %s",
+                        retry_exc,
+                    )
+            if not retried:
+                self._settle_task_delivery(event.event_id, "interrupted")
+        finally:
+            self._task_notification_active = False
+            if self._active_interaction_cancel is cancel:
+                self._active_interaction_cancel = None
+
+    def _settle_task_delivery(self, event_id: str, state: DeliveryState) -> bool:
+        """Best-effort bounded receipt settlement that cannot crash the voice loop."""
+
+        lifecycle = self._voice_task_lifecycle
+        if lifecycle is None:
+            return False
+        for attempt in range(2):
+            try:
+                lifecycle.settle_delivery(event_id, state)
+                return True
+            except Exception as exc:
+                logger.warning(
+                    "VoiceLoop: task delivery receipt settlement failed "
+                    "(event=%s state=%s attempt=%d): %s",
+                    event_id,
+                    state,
+                    attempt + 1,
+                    exc,
+                )
+        return False
+
+    @staticmethod
+    def _task_event_turn_id(event_id: str) -> str:
+        digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:24]
+        return f"voice-task-event-{digest}"
+
+    @staticmethod
+    def _task_event_reply(event: TaskLifecycleEvent) -> str:
+        if event.kind == "completed":
+            return event.result_summary or event.message or "任务已完成。"
+        if event.kind == "failed":
+            return event.message or "任务执行失败。"
+        if event.kind == "cancelled":
+            return event.message or "任务已取消。"
+        if event.kind in {"started", "progress"}:
+            return event.message or "任务正在处理中。"
+        return ""
+
     async def _next_utterance_text(self) -> str | None:
         """Share the single capture owner with proactive confirmation turns."""
 
@@ -1403,12 +1678,18 @@ class VoiceLoop:
         kwargs: dict[str, Any] = {
             "memory_task": memory_task,
         }
+        trusted_operator = self._trusted_operator_for_turn(
+            conversation_session_id,
+            voice_turn_id,
+        )
         kwargs.update(
             self._supported_turn_context_kwargs(
                 self._pipeline.process,
                 conversation_session_id=conversation_session_id,
                 voice_turn_id=voice_turn_id,
                 turn_cancel_token=turn_cancel_token,
+                person_id=(trusted_operator.person_id or None) if trusted_operator else None,
+                operator_id=(trusted_operator.operator_id or None) if trusted_operator else None,
             )
         )
         return await self._pipeline.process(user_text, **kwargs)
@@ -1440,6 +1721,8 @@ class VoiceLoop:
         conversation_session_id: str | None,
         voice_turn_id: str | None,
         turn_cancel_token: CancellationToken | None,
+        person_id: str | None = None,
+        operator_id: str | None = None,
     ) -> dict[str, Any]:
         """Return only turn-context keywords accepted by a legacy callable."""
 
@@ -1447,6 +1730,8 @@ class VoiceLoop:
             "conversation_session_id": conversation_session_id,
             "voice_turn_id": voice_turn_id,
             "turn_cancel_token": turn_cancel_token,
+            "person_id": person_id,
+            "operator_id": operator_id,
         }
         try:
             parameters = signature(callback).parameters
@@ -1491,6 +1776,782 @@ class VoiceLoop:
             )
             return False
 
+    def _voice_task_operator_for_turn(
+        self,
+        thread_id: str,
+        turn_id: str,
+    ) -> VoiceTaskOperatorContext:
+        cached = self._voice_task_operator_by_turn.get(turn_id)
+        if cached is not None:
+            if cached.allows("runtime:read"):
+                self._voice_task_operator_by_session[thread_id] = cached
+            else:
+                self._voice_task_operator_by_session.pop(thread_id, None)
+            return cached
+        provider = self._voice_task_operator_provider
+        payload: VoiceTaskOperatorContext | Mapping[str, Any] | None = None
+        if provider is not None:
+            try:
+                payload = provider(thread_id, turn_id)
+            except Exception as exc:
+                logger.warning(
+                    "VoiceLoop: trusted turn identity provider failed: %s",
+                    type(exc).__name__,
+                )
+        context = VoiceTaskOperatorContext.from_mapping(
+            dict(payload) if isinstance(payload, Mapping) else payload
+        )
+        if context is not None and context.allows("runtime:read"):
+            self._voice_task_operator_by_turn[turn_id] = context
+            while len(self._voice_task_operator_by_turn) > 64:
+                self._voice_task_operator_by_turn.pop(next(iter(self._voice_task_operator_by_turn)))
+            self._voice_task_operator_by_session[thread_id] = context
+            return context
+        self._voice_task_operator_by_session.pop(thread_id, None)
+        unverified = VoiceTaskOperatorContext(
+            operator_id="",
+            roles=(),
+            authenticated=False,
+            source="voice_turn_unverified",
+            permissions=(),
+        )
+        self._voice_task_operator_by_turn[turn_id] = unverified
+        while len(self._voice_task_operator_by_turn) > 64:
+            self._voice_task_operator_by_turn.pop(next(iter(self._voice_task_operator_by_turn)))
+        return unverified
+
+    def _voice_task_operator_for_session(
+        self,
+        thread_id: str,
+    ) -> VoiceTaskOperatorContext:
+        context = self._voice_task_operator_by_session.get(thread_id)
+        if context is not None:
+            return context
+        return VoiceTaskOperatorContext(
+            operator_id="",
+            roles=(),
+            authenticated=False,
+            source="voice_session_unverified",
+            permissions=(),
+        )
+
+    def _trusted_operator_for_turn(
+        self,
+        thread_id: str | None,
+        turn_id: str | None,
+    ) -> VoiceTaskOperatorContext | None:
+        """Return trusted identity for this turn without mutating gateway session state."""
+
+        if not thread_id or not turn_id:
+            return None
+        operator = self._voice_task_operator_for_turn(thread_id, turn_id)
+        return operator if operator.allows("runtime:read") else None
+
+    def _can_continue_pending_runtime_task(
+        self,
+        user_text: str,
+        thread_id: str,
+        turn_id: str,
+    ) -> bool:
+        lifecycle = self._voice_task_lifecycle
+        checker = getattr(lifecycle, "can_continue_pending_task", None)
+        if not callable(checker):
+            return False
+        operator = self._voice_task_operator_for_turn(thread_id, turn_id)
+        try:
+            return bool(
+                _call_lifecycle_with_operator(
+                    checker,
+                    user_text,
+                    thread_id,
+                    operator_context=operator,
+                )
+            )
+        except (LookupError, PermissionError, ValueError):
+            return False
+
+    def _can_revise_pending_runtime_task(
+        self,
+        user_text: str,
+        thread_id: str,
+        turn_id: str,
+    ) -> bool:
+        lifecycle = self._voice_task_lifecycle
+        checker = getattr(lifecycle, "can_revise_pending_task", None)
+        if not callable(checker):
+            return False
+        operator = self._voice_task_operator_for_turn(thread_id, turn_id)
+        try:
+            return bool(
+                _call_lifecycle_with_operator(
+                    checker,
+                    user_text,
+                    thread_id,
+                    operator_context=operator,
+                )
+            )
+        except (LookupError, PermissionError, ValueError):
+            return False
+
+    async def _handle_task_control(
+        self,
+        skill_name: str,
+        *,
+        user_text: str,
+        thread_id: str,
+        turn_id: str,
+        interaction_cancel: CancellationToken,
+    ) -> None:
+        lifecycle = self._voice_task_lifecycle
+        if lifecycle is None:
+            reply = "当前没有接入外部任务服务。"
+            metadata: dict[str, Any] = {"task_state": "unavailable"}
+        elif skill_name == "task_confirm":
+            operator = self._voice_task_operator_for_turn(thread_id, turn_id)
+            try:
+                reservation = _call_lifecycle_with_operator(
+                    lifecycle.confirm_pending,
+                    thread_id,
+                    turn_id,
+                    operator_context=operator,
+                )
+            except PermissionError:
+                reply = "当前语音操作者未通过任务确认授权。"
+                metadata = {"task_state": "unauthorized"}
+            except TimeoutError:
+                reply = "任务确认已过期，请重新发起任务。"
+                metadata = {"task_state": "expired"}
+            except LookupError:
+                reply = "当前没有等待确认的外部任务。"
+                metadata = {"task_state": "idle"}
+            except RuntimeError as exc:
+                reply = "任务确认上下文已失效，请重新发起任务。"
+                metadata = {"task_state": "invalid", "reason": str(exc)}
+            else:
+                await self._submit_reserved_task(
+                    reservation,
+                    user_text=user_text,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    interaction_cancel=interaction_cancel,
+                    operator_context=operator,
+                    acknowledgement=_task_prepare_message(
+                        reservation.task_type,
+                        confirmed=True,
+                    ),
+                )
+                return
+        elif skill_name == "task_evidence":
+            operator = self._voice_task_operator_for_turn(thread_id, turn_id)
+            try:
+                report = _call_lifecycle_with_operator(
+                    lifecycle.task_report,
+                    thread_id,
+                    operator_context=operator,
+                )
+            except PermissionError:
+                reply = "当前语音操作者未通过任务证据查询授权。"
+                metadata = {"task_state": "unauthorized"}
+            else:
+                artifacts = [
+                    dict(item)
+                    for item in report.get("artifacts", [])
+                    if isinstance(item, dict)
+                ]
+                observations = [
+                    dict(item)
+                    for item in report.get("observations", [])
+                    if isinstance(item, dict)
+                ]
+                status = str(report.get("status") or "idle")
+                metadata = {
+                    "task_state": status,
+                    "runtime_run_id": str(report.get("run_id") or ""),
+                    "task_artifact_count": len(artifacts),
+                    "task_observation_count": len(observations),
+                    "task_artifacts": artifacts[:20],
+                    "task_observations": observations[:20],
+                }
+                if artifacts:
+                    image_count = sum(1 for item in artifacts if _is_image_artifact(item))
+                    detail = f"，其中{image_count}张图片" if image_count else ""
+                    reply = f"已找到{len(artifacts)}个任务证据文件{detail}，已附在任务记录中。"
+                elif observations:
+                    summary = _task_observation_summary(observations[0])
+                    reply = f"任务返回了{len(observations)}条结构化观察。{summary}".rstrip()
+                elif status in {"queued", "executing", "cancelling", "submission_unknown"}:
+                    reply = "任务还在进行，暂未返回照片或结构化证据。"
+                elif report:
+                    reply = "任务报告已生成，但执行器没有返回照片或结构化证据。"
+                else:
+                    reply = "当前没有可查询的任务报告。"
+        elif skill_name == "task_cancel":
+            operator = self._voice_task_operator_for_turn(thread_id, turn_id)
+            clarification_cancelled = False
+            cancel_clarification = getattr(lifecycle, "cancel_pending_clarification", None)
+            if callable(cancel_clarification):
+                try:
+                    clarification_cancelled = bool(
+                        _call_lifecycle_with_operator(
+                            cancel_clarification,
+                            thread_id,
+                            operator_context=operator,
+                        )
+                    )
+                except PermissionError:
+                    clarification_cancelled = False
+            if clarification_cancelled:
+                reply = "已取消等待补充目标的任务，没有提交外部执行器。"
+                metadata = {
+                    "task_state": "cancelled",
+                    "task_cancel_error_code": "pending_clarification_cancelled",
+                    "remote_cancel_acknowledged": False,
+                }
+            else:
+                result = await _call_lifecycle_with_operator(
+                    lifecycle.cancel_active,
+                    thread_id,
+                    operator_context=operator,
+                )
+                snapshot = result.snapshot
+                metadata = {
+                    "task_state": snapshot.state,
+                    "task_reservation_id": snapshot.reservation_id,
+                    "runtime_run_id": snapshot.run_id,
+                    "remote_task_id": snapshot.remote_task_id,
+                    "task_turn_id": snapshot.turn_id,
+                    "remote_cancel_acknowledged": result.remote_acknowledged,
+                    "task_cancel_error_code": result.error_code,
+                }
+                if result.error_code == "no_active_external_task":
+                    reply = "当前没有正在执行的外部任务。"
+                elif result.error_code == "operator_not_authorized":
+                    reply = "当前语音操作者未通过任务取消授权。"
+                elif result.error_code == "cancel_deferred_until_reconciled":
+                    reply = "已记录取消请求；提交对账完成后会立即取消，不会重复提交。"
+                elif result.error_code == "pending_task_cancelled":
+                    reply = "已取消待确认任务，没有提交外部执行器。"
+                elif result.remote_acknowledged:
+                    reply = "已向外部任务发送取消请求，我会继续同步最终状态。"
+                else:
+                    reply = "取消请求暂未被外部执行器确认，我会继续同步任务状态。"
+        else:
+            operator = self._voice_task_operator_for_turn(thread_id, turn_id)
+            try:
+                snapshot = _call_lifecycle_with_operator(
+                    lifecycle.status_snapshot,
+                    thread_id,
+                    operator_context=operator,
+                )
+            except PermissionError:
+                reply = "当前语音操作者未通过任务状态查询授权。"
+                metadata = {"task_state": "unauthorized"}
+                self._audio.drain_buffers()
+                await self._deliver_direct_reply(
+                    user_text,
+                    reply,
+                    conversation_session_id=thread_id,
+                    interaction_turn_id=turn_id,
+                    interaction_cancel=interaction_cancel,
+                    interaction=skill_name,
+                    metadata=metadata,
+                )
+                return
+            metadata = {
+                "task_state": snapshot.state,
+                "task_reservation_id": snapshot.reservation_id,
+                "runtime_run_id": snapshot.run_id,
+                "remote_task_id": snapshot.remote_task_id,
+                "task_turn_id": snapshot.turn_id,
+            }
+            if not snapshot.reservation_id:
+                pending = None
+                pending_lookup = getattr(lifecycle, "pending_clarification", None)
+                if callable(pending_lookup):
+                    try:
+                        pending = _call_lifecycle_with_operator(
+                            pending_lookup,
+                            thread_id,
+                            operator_context=operator,
+                        )
+                    except PermissionError:
+                        pending = None
+                if pending is not None:
+                    metadata.update(
+                        {
+                            "task_state": "collecting_parameters",
+                            "task_clarification_id": pending.clarification_id,
+                            "task_type": pending.task_type,
+                            "missing_parameter": pending.missing_parameter,
+                        }
+                    )
+                    reply = "任务正在等待目标区域，请告诉我要前往或巡检哪里。"
+                else:
+                    reply = "当前没有外部任务记录。"
+            elif snapshot.active:
+                reply = f"当前任务状态是{snapshot.state}。"
+            elif snapshot.result_summary:
+                reply = f"任务状态是{snapshot.state}。{snapshot.result_summary}"
+            else:
+                reply = f"最近任务状态是{snapshot.state}。"
+        self._audio.drain_buffers()
+        await self._deliver_direct_reply(
+            user_text,
+            reply,
+            conversation_session_id=thread_id,
+            interaction_turn_id=turn_id,
+            interaction_cancel=interaction_cancel,
+            interaction=skill_name,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _is_bounded_external_status_report(user_text: str) -> bool:
+        normalized = re.sub(r"\s+", "", user_text)
+        return any(marker in normalized for marker in _EXTERNAL_STATUS_REPORT_MARKERS)
+
+    async def _handle_pending_runtime_task_revision(
+        self,
+        *,
+        user_text: str,
+        thread_id: str,
+        turn_id: str,
+        interaction_cancel: CancellationToken,
+    ) -> None:
+        lifecycle = self._voice_task_lifecycle
+        revise = getattr(lifecycle, "revise_pending_task", None)
+        if lifecycle is None or not callable(revise):
+            return
+        operator = self._voice_task_operator_for_turn(thread_id, turn_id)
+        try:
+            reservation = _call_lifecycle_with_operator(
+                revise,
+                user_text,
+                thread_id,
+                turn_id,
+                operator_context=operator,
+            )
+        except PermissionError:
+            reply = "当前语音操作者未通过任务修改授权。"
+            metadata: dict[str, Any] = {"task_state": "unauthorized", "submitted": False}
+        except LookupError:
+            reply = "当前没有等待确认、可以修改的任务。"
+            metadata = {"task_state": "idle", "submitted": False}
+        except (RuntimeError, ValueError) as exc:
+            reply = "任务修改失败，请重新说完整任务。"
+            metadata = {
+                "task_state": "revision_failed",
+                "submitted": False,
+                "reason": str(exc),
+            }
+        else:
+            reply = f"已修改。{reservation.confirmation_prompt}"
+            metadata = {
+                "task_state": reservation.state,
+                "task_type": reservation.task_type,
+                "task_target": reservation.target,
+                "task_reservation_id": reservation.reservation_id,
+                "runtime_run_id": reservation.run_id,
+                "approval_id": reservation.approval_id,
+                "task_revision": reservation.revision,
+                "supersedes_reservation_id": reservation.supersedes_reservation_id,
+                "submitted": False,
+            }
+        self._audio.drain_buffers()
+        await self._deliver_direct_reply(
+            user_text,
+            reply,
+            conversation_session_id=thread_id,
+            interaction_turn_id=turn_id,
+            interaction_cancel=interaction_cancel,
+            interaction="external_task_revised",
+            metadata=metadata,
+        )
+
+    async def _handle_local_external_task_start(
+        self,
+        *,
+        user_text: str,
+        thread_id: str,
+        turn_id: str,
+        interaction_cancel: CancellationToken,
+        continue_pending: bool = False,
+    ) -> None:
+        lifecycle = self._voice_task_lifecycle
+        if lifecycle is None:
+            self._audio.drain_buffers()
+            await self._deliver_direct_reply(
+                user_text,
+                "当前没有接入可跟踪的外部任务服务。",
+                conversation_session_id=thread_id,
+                interaction_turn_id=turn_id,
+                interaction_cancel=interaction_cancel,
+                interaction="external_task_rejected",
+                metadata={"task_state": "unsupported", "submitted": False},
+            )
+            return
+
+        operator = self._voice_task_operator_for_turn(thread_id, turn_id)
+        try:
+            reserve_task = (
+                getattr(lifecycle, "continue_pending_task")
+                if continue_pending
+                else lifecycle.reserve_task
+            )
+            reservation = _call_lifecycle_with_operator(
+                reserve_task,
+                user_text,
+                thread_id,
+                turn_id,
+                operator_context=operator,
+            )
+        except PermissionError as exc:
+            reason = str(exc)
+            reply = (
+                "当前没有可信说话人身份，巡检和导航任务未提交。"
+                if "physical_task_speaker_identity_required" in reason
+                else "当前语音操作者未通过外部任务授权，任务未提交。"
+            )
+            self._audio.drain_buffers()
+            await self._deliver_direct_reply(
+                user_text,
+                reply,
+                conversation_session_id=thread_id,
+                interaction_turn_id=turn_id,
+                interaction_cancel=interaction_cancel,
+                interaction="external_task_unauthorized",
+                metadata={"task_state": "unauthorized", "submitted": False},
+            )
+            return
+        except LookupError:
+            self._audio.drain_buffers()
+            await self._deliver_direct_reply(
+                user_text,
+                "上一次任务补充已经过期，请重新说完整任务。",
+                conversation_session_id=thread_id,
+                interaction_turn_id=turn_id,
+                interaction_cancel=interaction_cancel,
+                interaction="external_task_clarification_expired",
+                metadata={"task_state": "expired", "submitted": False},
+            )
+            return
+        except (RuntimeError, ValueError) as exc:
+            reason = str(exc)
+            if "task_target_required" in reason:
+                reply = "要前往或巡检哪个目标区域，例如 A 区或北门？"
+                task_state = "collecting_parameters"
+            elif "voice_task_already_active" in reason:
+                reply = "当前已有任务，请先查询任务状态、取消任务或等待任务完成。"
+                task_state = "unsupported"
+            elif "mission_service_unavailable" in reason:
+                reply = "当前任务规划服务不可用，任务没有提交。"
+                task_state = "unsupported"
+            else:
+                reply = "当前语音任务只支持状态报告、区域巡检和导航，任务没有提交。"
+                task_state = "unsupported"
+            self._audio.drain_buffers()
+            await self._deliver_direct_reply(
+                user_text,
+                reply,
+                conversation_session_id=thread_id,
+                interaction_turn_id=turn_id,
+                interaction_cancel=interaction_cancel,
+                interaction="external_task_rejected",
+                metadata={
+                    "task_state": task_state,
+                    "submitted": False,
+                    "reason": reason,
+                },
+            )
+            return
+        if reservation.state == "waiting_user":
+            self._audio.drain_buffers()
+            try:
+                delivered = await self._deliver_direct_reply(
+                    user_text,
+                    reservation.confirmation_prompt,
+                    conversation_session_id=thread_id,
+                    interaction_turn_id=turn_id,
+                    interaction_cancel=interaction_cancel,
+                    interaction="external_task_confirmation_required",
+                    metadata={
+                        "task_state": reservation.state,
+                        "task_type": reservation.task_type,
+                        "task_target": reservation.target,
+                        "task_reservation_id": reservation.reservation_id,
+                        "runtime_run_id": reservation.run_id,
+                        "approval_id": reservation.approval_id,
+                        "submitted": False,
+                    },
+                )
+            except asyncio.CancelledError:
+                cleanup = _call_lifecycle_with_operator(
+                    lifecycle.cancel_active,
+                    thread_id,
+                    reason="voice_confirmation_prompt_cancelled",
+                    operator_context=operator,
+                )
+                try:
+                    await asyncio.shield(cleanup)
+                except Exception as exc:
+                    logger.warning(
+                        "VoiceLoop: cancelled confirmation cleanup failed: %s",
+                        exc,
+                    )
+                raise
+            except Exception:
+                await _call_lifecycle_with_operator(
+                    lifecycle.cancel_active,
+                    thread_id,
+                    reason="voice_confirmation_prompt_failed",
+                    operator_context=operator,
+                )
+                raise
+            if not delivered:
+                await _call_lifecycle_with_operator(
+                    lifecycle.cancel_active,
+                    thread_id,
+                    reason="voice_confirmation_prompt_interrupted",
+                    operator_context=operator,
+                )
+            return
+        await self._submit_reserved_task(
+            reservation,
+            user_text=user_text,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            interaction_cancel=interaction_cancel,
+            operator_context=operator,
+            acknowledgement=_task_prepare_message(reservation.task_type),
+        )
+        return
+
+    async def _submit_reserved_task(
+        self,
+        reservation: Any,
+        *,
+        user_text: str,
+        thread_id: str,
+        turn_id: str,
+        interaction_cancel: CancellationToken,
+        operator_context: VoiceTaskOperatorContext,
+        acknowledgement: str,
+    ) -> None:
+        lifecycle = self._voice_task_lifecycle
+        if lifecycle is None:
+            return
+        ack_metadata = {
+            "task_state": reservation.state,
+            "task_reservation_id": reservation.reservation_id,
+            "task_run_correlation_id": reservation.reservation_id,
+            "runtime_run_id": reservation.run_id,
+            "task_turn_id": reservation.turn_id,
+        }
+        self._audio.drain_buffers()
+        try:
+            delivered = await self._deliver_direct_reply(
+                user_text,
+                acknowledgement,
+                conversation_session_id=thread_id,
+                interaction_turn_id=turn_id,
+                interaction_cancel=interaction_cancel,
+                interaction="external_task_ack",
+                metadata=ack_metadata,
+            )
+        except asyncio.CancelledError:
+            if not lifecycle.abandon(reservation.reservation_id):
+                cleanup = _call_lifecycle_with_operator(
+                    lifecycle.cancel_active,
+                    thread_id,
+                    reason="voice_submission_ack_cancelled",
+                    operator_context=operator_context,
+                )
+                try:
+                    await asyncio.shield(cleanup)
+                except Exception as exc:
+                    logger.warning(
+                        "VoiceLoop: cancelled submission acknowledgement cleanup failed: %s",
+                        exc,
+                    )
+            raise
+        except Exception:
+            if not lifecycle.abandon(reservation.reservation_id):
+                await _call_lifecycle_with_operator(
+                    lifecycle.cancel_active,
+                    thread_id,
+                    reason="voice_submission_ack_failed",
+                    operator_context=operator_context,
+                )
+            raise
+        if not delivered:
+            if not lifecycle.abandon(reservation.reservation_id):
+                await _call_lifecycle_with_operator(
+                    lifecycle.cancel_active,
+                    thread_id,
+                    reason="voice_submission_ack_interrupted",
+                    operator_context=operator_context,
+                )
+            return
+        try:
+            handle = await _call_lifecycle_with_operator(
+                lifecycle.commit_ack_and_submit,
+                reservation.reservation_id,
+                operator_context=operator_context,
+            )
+        except Exception as exc:
+            logger.error("VoiceLoop: acknowledged external task submission failed: %s", exc)
+            snapshot = None
+            try:
+                snapshot = _call_lifecycle_with_operator(
+                    lifecycle.status_snapshot,
+                    thread_id,
+                    operator_context=operator_context,
+                )
+            except Exception:
+                pass
+            remote_may_be_running = bool(
+                snapshot is not None
+                and (
+                    snapshot.remote_task_id
+                    or snapshot.state
+                    in {"queued", "submission_unknown", "cancel_requested", "executing"}
+                )
+            )
+            failure_reply = (
+                "任务可能已进入外部执行器，但本地提交记录暂时无法确认；"
+                "我会使用同一任务标识继续对账，请不要重复提交。"
+                if remote_may_be_running
+                else "任务提交失败，没有进入外部执行器，请稍后重试。"
+            )
+            await self._deliver_direct_reply(
+                "",
+                failure_reply,
+                conversation_session_id=thread_id,
+                interaction_turn_id=self._task_event_turn_id(
+                    f"{reservation.reservation_id}:submit-failed"
+                ),
+                interaction_cancel=interaction_cancel,
+                interaction="external_task_submit_failed",
+                metadata={
+                    "task_state": (
+                        snapshot.state if remote_may_be_running and snapshot is not None else "failed"
+                    ),
+                    "task_reservation_id": reservation.reservation_id,
+                    "task_run_correlation_id": reservation.reservation_id,
+                    "runtime_run_id": reservation.run_id,
+                    "task_turn_id": reservation.turn_id,
+                    "submitted": "unknown" if remote_may_be_running else False,
+                    "remote_may_be_running": remote_may_be_running,
+                },
+            )
+            return
+        if handle.state == "submission_unknown":
+            acceptance = "提交结果暂时无法确认，我正在使用同一任务标识对账，请不要重复提交。"
+            interaction = "external_task_submission_unknown"
+            submitted: bool | str = "unknown"
+        elif not handle.accepted:
+            acceptance = f"任务没有被外部执行器接受，当前状态是{handle.state}。"
+            interaction = "external_task_not_accepted"
+            submitted = False
+        else:
+            acceptance = (
+                "任务已受理，完成后我会播报结果。"
+                if self._refresh_full_duplex_state()
+                else "任务已受理。当前是半双工模式，请稍后问我任务状态。"
+            )
+            interaction = "external_task_accepted"
+            submitted = True
+        await self._deliver_direct_reply(
+            "",
+            acceptance,
+            conversation_session_id=thread_id,
+            interaction_turn_id=self._task_event_turn_id(
+                f"{reservation.reservation_id}:accepted"
+            ),
+            interaction_cancel=interaction_cancel,
+            interaction=interaction,
+            metadata={
+                "task_state": handle.state,
+                "task_reservation_id": reservation.reservation_id,
+                "task_run_correlation_id": handle.correlation_id,
+                "runtime_run_id": handle.run_id,
+                "remote_task_id": handle.remote_task_id,
+                "task_turn_id": reservation.turn_id,
+                "submitted": submitted,
+            },
+        )
+
+    async def _handle_runtime_task_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None,
+        turn_id: str,
+        interaction_cancel: CancellationToken,
+        continue_pending: bool = False,
+    ) -> RuntimeBridgeOutcome:
+        """Choose exactly one execution authority for robot-runtime work."""
+
+        if self._voice_task_lifecycle is not None:
+            self._last_runtime_bridge_status = {
+                **self._runtime_bridge_snapshot(),
+                "handled": False,
+                "local_fallback": False,
+                "disposition": "bypassed_for_taskrun",
+                "execution_authority": "local_taskrun",
+            }
+            if not thread_id:
+                self._audio.drain_buffers()
+                await self._deliver_direct_reply(
+                    user_text,
+                    "当前无法建立可恢复的任务会话，任务没有提交。",
+                    conversation_session_id=None,
+                    interaction_turn_id=turn_id,
+                    interaction_cancel=interaction_cancel,
+                    interaction="external_task_rejected",
+                    metadata={"task_state": "session_unavailable", "submitted": False},
+                )
+                return RuntimeBridgeOutcome(handled=True, disposition="handled")
+            await self._handle_local_external_task_start(
+                user_text=user_text,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                interaction_cancel=interaction_cancel,
+                continue_pending=continue_pending,
+            )
+            return RuntimeBridgeOutcome(handled=True, disposition="handled")
+
+        outcome = await self._runtime_bridge_outcome(
+            user_text,
+            conversation_session_id=thread_id,
+            interaction_turn_id=turn_id,
+            interaction_cancel=interaction_cancel,
+            allow_agent_task_dispatch=False,
+        )
+        if outcome.explicitly_declined and thread_id:
+            await self._handle_local_external_task_start(
+                user_text=user_text,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                interaction_cancel=interaction_cancel,
+            )
+        elif outcome.ambiguous:
+            self._audio.drain_buffers()
+            await self._deliver_direct_reply(
+                user_text,
+                "远端执行状态暂时无法确认。为避免重复执行，我没有在本地再次提交，请稍后询问任务状态。",
+                conversation_session_id=thread_id,
+                interaction_turn_id=turn_id,
+                interaction_cancel=interaction_cancel,
+                interaction="external_task_reconciliation_required",
+                metadata={
+                    "task_state": "reconciliation_required",
+                    "submitted_locally": False,
+                    "runtime_bridge_disposition": outcome.disposition,
+                },
+            )
+        return outcome
+
     async def _run_session(self) -> None:
         """Block until Ctrl+C or too many consecutive errors."""
         from askme.robot_interaction import IntentType
@@ -1517,7 +2578,14 @@ class VoiceLoop:
                     self._pipeline.has_pending_tool_approval() or _ends_with_question
                 )
 
-                utterance = await self._next_utterance()
+                utterance, task_event_ready = await self._next_voice_activity()
+                if task_event_ready:
+                    session_id = self._conversation_session_for()
+                    if session_id:
+                        await self._deliver_next_task_event(session_id)
+                    continue
+                if utterance is None:
+                    continue
                 user_text = utterance.text
                 if not user_text:
                     continue
@@ -1532,6 +2600,12 @@ class VoiceLoop:
                 interaction_cancel = AtomicCancellationToken()
                 interaction_turn_id = utterance.voice_turn_id or uuid4().hex
                 self._active_interaction_cancel = interaction_cancel
+                identity_session_id = self._conversation_session_for()
+                if identity_session_id:
+                    self._voice_task_operator_for_turn(
+                        identity_session_id,
+                        interaction_turn_id,
+                    )
 
                 normalize_text = getattr(self._address_detector, "normalize_text", None)
                 if callable(normalize_text):
@@ -1754,18 +2828,44 @@ class VoiceLoop:
                     continue
 
                 pending_approval = self._pipeline.has_pending_tool_approval()
+                clarification_session_id = self._conversation_session_for()
+                pending_task_clarification = bool(
+                    not pending_approval
+                    and intent.type == IntentType.GENERAL
+                    and clarification_session_id
+                    and self._can_continue_pending_runtime_task(
+                        user_text,
+                        clarification_session_id,
+                        interaction_turn_id,
+                    )
+                )
+                pending_task_revision = bool(
+                    not pending_approval
+                    and not pending_task_clarification
+                    and intent.type == IntentType.GENERAL
+                    and clarification_session_id
+                    and self._can_revise_pending_runtime_task(
+                        user_text,
+                        clarification_session_id,
+                        interaction_turn_id,
+                    )
+                )
                 realtime_capture_active = self._realtime_capture_active()
                 realtime_general_ready = self._realtime_general_chat_ready()
                 realtime_mode = self._realtime_mode()
                 realtime_provider = self._realtime_provider()
                 realtime_robot_task = bool(
-                    contains_robot_task_intent(user_text)
+                    pending_task_clarification
+                    or pending_task_revision
+                    or contains_robot_task_intent(user_text)
                     or str(gate_decision.reason or "").startswith("robot_task")
                     or gate_decision.reason == "unaddressed_robot_task"
                 )
                 realtime_emergency = contains_emergency_intent(user_text)
                 realtime_tool_route = bool(
-                    intent.type != IntentType.GENERAL
+                    pending_task_clarification
+                    or pending_task_revision
+                    or intent.type != IntentType.GENERAL
                     or contains_tool_route_intent(user_text)
                     or getattr(intent, "skill_name", None)
                     or getattr(intent, "command", None)
@@ -1811,6 +2911,69 @@ class VoiceLoop:
                     else:
                         discard_reason = "realtime_generation_unavailable"
                     self._discard_realtime_turn(discard_reason)
+
+                task_control = (
+                    intent.skill_name
+                    if intent.type == IntentType.VOICE_TRIGGER
+                    and intent.skill_name
+                    in {"task_status", "task_cancel", "task_confirm", "task_evidence"}
+                    else None
+                )
+                if task_control is not None:
+                    if idle_task and not idle_task.done():
+                        idle_task.cancel()
+                    session_id = self._conversation_session_for()
+                    if session_id:
+                        await self._handle_task_control(
+                            task_control,
+                            user_text=user_text,
+                            thread_id=session_id,
+                            turn_id=interaction_turn_id,
+                            interaction_cancel=interaction_cancel,
+                        )
+                    idle_task = self._pipeline.start_idle_reflection()
+                    continue
+
+                if pending_task_clarification and clarification_session_id:
+                    await self._handle_runtime_task_turn(
+                        user_text=user_text,
+                        thread_id=clarification_session_id,
+                        turn_id=interaction_turn_id,
+                        interaction_cancel=interaction_cancel,
+                        continue_pending=True,
+                    )
+                    if idle_task and not idle_task.done():
+                        idle_task.cancel()
+                    idle_task = self._pipeline.start_idle_reflection()
+                    continue
+
+                if pending_task_revision and clarification_session_id:
+                    await self._handle_pending_runtime_task_revision(
+                        user_text=user_text,
+                        thread_id=clarification_session_id,
+                        turn_id=interaction_turn_id,
+                        interaction_cancel=interaction_cancel,
+                    )
+                    if idle_task and not idle_task.done():
+                        idle_task.cancel()
+                    idle_task = self._pipeline.start_idle_reflection()
+                    continue
+
+                # Supported robot-runtime tasks use the persistent local TaskRun owner.
+                # The handler consults the bridge only when that owner is absent,
+                # so one turn cannot be submitted through two execution paths.
+                if intent.type == IntentType.VOICE_TRIGGER and intent.skill_name == "runtime_task":
+                    session_id = self._conversation_session_for()
+                    await self._handle_runtime_task_turn(
+                        user_text=user_text,
+                        thread_id=session_id,
+                        turn_id=interaction_turn_id,
+                        interaction_cancel=interaction_cancel,
+                    )
+                    if idle_task and not idle_task.done():
+                        idle_task.cancel()
+                    idle_task = self._pipeline.start_idle_reflection()
+                    continue
 
                 # Deterministic cached replies run before the ACK chime,
                 # memory retrieval, LLM and online TTS. Pending tool approval
@@ -1898,23 +3061,13 @@ class VoiceLoop:
                     idle_task = self._pipeline.start_idle_reflection()
                     continue
 
-                # Stop speaking -also cancels any active agent task
+                # Stop speaking controls playback only.  Task cancellation is
+                # a separate explicit lifecycle command.
                 if intent.type == IntentType.VOICE_TRIGGER and intent.skill_name == "stop_speaking":
                     if memory_task and not memory_task.done():
                         memory_task.cancel()
                         memory_task = None
-                    if self._dispatcher and self._dispatcher.cancel_active_agent_task():
-                        self._audio.drain_buffers()
-                        await self._deliver_direct_reply(
-                            user_text,
-                            "\u5df2\u53d6\u6d88\u4efb\u52a1\u3002",
-                            conversation_session_id=conversation_session_id,
-                            interaction_turn_id=interaction_turn_id,
-                            interaction_cancel=interaction_cancel,
-                            interaction="stop_speaking",
-                        )
-                    else:
-                        self._audio.drain_buffers()
+                    self._audio.drain_buffers()
                     # acknowledge already fired -no extra chime needed
                     continue
 
@@ -2447,10 +3600,55 @@ class VoiceLoop:
         interaction_turn_id: str | None,
         interaction_cancel: CancellationToken | None,
     ) -> bool:
-        """Try the runtime bridge first and fall back locally on bridge failures."""
-        if self._voice_runtime_bridge is None:
-            return False
+        """Consume handled/ambiguous bridge turns; fall back only on explicit decline."""
+        outcome = await self._runtime_bridge_outcome(
+            user_text,
+            conversation_session_id=conversation_session_id,
+            interaction_turn_id=interaction_turn_id,
+            interaction_cancel=interaction_cancel,
+        )
+        if outcome.ambiguous:
+            self._audio.drain_buffers()
+            await self._deliver_direct_reply(
+                user_text,
+                "远端处理状态暂时无法确认。为避免重复处理，本次没有切换到本地执行。",
+                conversation_session_id=conversation_session_id,
+                interaction_turn_id=interaction_turn_id,
+                interaction_cancel=interaction_cancel,
+                interaction="runtime_bridge_reconciliation_required",
+                metadata={
+                    "runtime_bridge_disposition": outcome.disposition,
+                    "local_fallback": False,
+                },
+            )
+            return True
+        return outcome.handled
 
+    async def _runtime_bridge_outcome(
+        self,
+        user_text: str,
+        *,
+        conversation_session_id: str | None,
+        interaction_turn_id: str | None,
+        interaction_cancel: CancellationToken | None,
+        allow_agent_task_dispatch: bool = True,
+    ) -> RuntimeBridgeOutcome:
+        """Return a three-state bridge result for execution-authority decisions."""
+
+        if self._voice_runtime_bridge is None:
+            return RuntimeBridgeOutcome()
+
+        operator = (
+            self._voice_task_operator_for_turn(
+                conversation_session_id,
+                interaction_turn_id,
+            )
+            if conversation_session_id and interaction_turn_id
+            else None
+        )
+        trusted_context = (
+            operator if operator is not None and operator.allows("runtime:read") else None
+        )
         try:
             outcome = await try_runtime_bridge_turn(
                 self._voice_runtime_bridge.handle_voice_text,
@@ -2458,30 +3656,46 @@ class VoiceLoop:
                 conversation_session_id=conversation_session_id,
                 voice_turn_id=interaction_turn_id,
                 turn_cancel_token=interaction_cancel,
+                person_id=(trusted_context.person_id or None) if trusted_context else None,
+                operator_id=(trusted_context.operator_id or None) if trusted_context else None,
+                metadata=(
+                    {
+                        "operator_authenticated": True,
+                        "operator_source": trusted_context.source,
+                    }
+                    if trusted_context is not None
+                    else None
+                ),
                 pipeline=self._pipeline,
                 dispatcher=self._dispatcher,
                 on_spoken_reply=self._safe_runtime_spoken_reply,
                 label="Voice",
+                allow_agent_task_dispatch=allow_agent_task_dispatch,
             )
             status = self._runtime_bridge_snapshot()
             status.update(
                 {
                     "handled": outcome.handled,
-                    "local_fallback": not outcome.handled,
+                    "local_fallback": outcome.explicitly_declined,
+                    "disposition": outcome.disposition,
                 }
             )
             self._last_runtime_bridge_status = status
-            return outcome.handled
+            return outcome
         except Exception as exc:
-            logger.warning("VoiceLoop: runtime bridge failed, falling back locally: %s", exc)
+            logger.warning(
+                "VoiceLoop: runtime bridge outcome is ambiguous: %s",
+                exc,
+            )
             self._last_runtime_bridge_status = {
                 **self._runtime_bridge_snapshot(),
                 "handled": False,
-                "local_fallback": True,
+                "local_fallback": False,
+                "disposition": "ambiguous",
                 "last_status": "exception",
                 "last_error_type": type(exc).__name__,
             }
-            return False
+            return RuntimeBridgeOutcome(disposition="ambiguous")
 
     def _runtime_bridge_snapshot(self) -> dict[str, Any]:
         status = getattr(self._voice_runtime_bridge, "status_snapshot", None)
@@ -2593,6 +3807,7 @@ class VoiceLoop:
         assistant_reply: Any,
         *,
         interaction_turn_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         if not conversation_session_id or self._voice_runtime_bridge is None:
             return
@@ -2620,6 +3835,7 @@ class VoiceLoop:
                 channel="voice",
                 metadata={
                     "runtime_bridge": dict(self._last_runtime_bridge_status or {}),
+                    **dict(metadata or {}),
                     **({"interaction_turn_id": interaction_turn_id} if interaction_turn_id else {}),
                 },
             )

@@ -341,6 +341,7 @@ class TestVoiceModule:
         assert VoiceModule.name == "voice"
         assert "pipeline" in VoiceModule.depends_on
         assert "skill" in VoiceModule.depends_on
+        assert "mission" in VoiceModule.depends_on
 
 
 # ══════════════════════════════════════════════════════════════════════

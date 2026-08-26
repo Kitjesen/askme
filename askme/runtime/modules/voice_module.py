@@ -15,6 +15,7 @@ import importlib.util
 import inspect
 import logging
 import threading
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -27,6 +28,10 @@ from askme.pipeline.skills.skill_dispatcher import SkillDispatcher
 from askme.ports import AudioFrontendPort, AudioRouterPort
 from askme.runtime.core.module import In, Module, ModuleRegistry, Out
 from askme.runtime.modules.voice_stack import build_runtime_voice_stack
+from askme.runtime.task.voice_lifecycle import (
+    VoiceTaskLifecycleService,
+    VoiceTaskOperatorContext,
+)
 from askme.runtime.voice_control import VoiceControlStateStore, deep_merge
 from askme.tools.core.tool_registry import ToolRegistry
 from askme.voice.output.phrase_prime import (
@@ -72,7 +77,7 @@ class VoiceModule(Module):
     """Provides audio frontend, voice gateway, router, loop, and gates."""
 
     name = "voice"
-    depends_on = ("llm", "tools", "skill", "pipeline")
+    depends_on = ("llm", "tools", "skill", "mission", "pipeline", "runtime_handoff")
     provides = ("voice", "tts", "asr")
 
     # In ports (auto-wired from provider modules)
@@ -162,6 +167,12 @@ class VoiceModule(Module):
             "anonymous_encounter_idle_seconds", 25.0
         )
         self._interaction_service = RobotInteractionService(self._router)
+        self._voice_task_lifecycle = _build_voice_task_lifecycle(effective_cfg, registry)
+        voice_task_operator_provider = _build_voice_task_operator_provider(
+            effective_cfg,
+            self._audio,
+            self._voice_task_lifecycle,
+        )
 
         # VoiceLoop
         self._voice_loop = VoiceLoop(
@@ -171,6 +182,8 @@ class VoiceModule(Module):
             voice_runtime_bridge=self._voice_gateway,
             dispatcher=dispatcher,
             audio_router=self._audio_router,
+            voice_task_lifecycle=self._voice_task_lifecycle,
+            voice_task_operator_provider=voice_task_operator_provider,
             anonymous_encounter_idle_seconds=anonymous_encounter_idle_seconds,
         )
 
@@ -350,6 +363,11 @@ class VoiceModule(Module):
     def voice_gateway(self) -> Any:
         """The VoiceGatewayService instance."""
         return self._voice_gateway
+
+    @property
+    def voice_task_lifecycle(self) -> VoiceTaskLifecycleService | None:
+        """External task lifecycle used by the voice session, when configured."""
+        return self._voice_task_lifecycle
 
     @property
     def interaction_service(self) -> Any:
@@ -1379,6 +1397,119 @@ def _build_interaction_perception_provider(registry: ModuleRegistry) -> Any:
                     "objects": scene.get("objects", []) if isinstance(scene, dict) else [],
                 }
 
+        return None
+
+    return _provider
+
+
+def _build_voice_task_lifecycle(
+    cfg: dict[str, Any],
+    registry: ModuleRegistry,
+) -> VoiceTaskLifecycleService | None:
+    runtime_module = registry.get("runtime_handoff")
+    if runtime_module is None or not bool(getattr(runtime_module, "enabled", True)):
+        return None
+    handoff_service = getattr(runtime_module, "runtime_handoff_service", None)
+    supervisor = getattr(runtime_module, "external_task_supervisor", None)
+    if handoff_service is None or supervisor is None:
+        return None
+
+    handoff_cfg = cfg.get("runtime_handoff", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(handoff_cfg, dict):
+        handoff_cfg = {}
+    lifecycle_cfg = handoff_cfg.get("voice_task", {})
+    if not isinstance(lifecycle_cfg, dict):
+        lifecycle_cfg = {}
+    if not bool(lifecycle_cfg.get("enabled", True)):
+        return None
+    run_service = getattr(handoff_service, "run_service", None)
+    if not bool(getattr(run_service, "durable_store_ready", False)):
+        raise ValueError(
+            "runtime_handoff.voice_task requires a durable TaskRun store with "
+            "swallow_errors=false"
+        )
+    operator_cfg = lifecycle_cfg.get("operator", {})
+    if not isinstance(operator_cfg, dict):
+        operator_cfg = {}
+    roles_cfg = operator_cfg.get("roles", [])
+    if isinstance(roles_cfg, str):
+        roles_cfg = [roles_cfg]
+    if not isinstance(roles_cfg, (list, tuple, set)):
+        roles_cfg = []
+    roles = tuple(
+        dict.fromkeys(str(role).strip().lower() for role in roles_cfg if str(role).strip())
+    )
+    permissions_cfg = operator_cfg.get("permissions", [])
+    if isinstance(permissions_cfg, str):
+        permissions_cfg = [permissions_cfg]
+    if not isinstance(permissions_cfg, (list, tuple, set)):
+        permissions_cfg = []
+    permissions = tuple(
+        dict.fromkeys(
+            str(permission).strip().lower()
+            for permission in permissions_cfg
+            if str(permission).strip()
+        )
+    )
+    operator_context = None
+    session_scope = str(operator_cfg.get("session_scope") or "per_turn").strip().lower()
+    if operator_cfg and session_scope == "single_operator":
+        operator_context = VoiceTaskOperatorContext(
+            operator_id=str(operator_cfg.get("operator_id") or "").strip(),
+            roles=roles,
+            authenticated=operator_cfg.get("authenticated") is True,
+            source=str(operator_cfg.get("source") or "").strip(),
+            person_id=str(operator_cfg.get("person_id") or "").strip(),
+            permissions=permissions,
+        )
+    mission_module = registry.get("mission")
+    mission_service = getattr(mission_module, "mission_service", None)
+    return VoiceTaskLifecycleService(
+        handoff_service=handoff_service,
+        supervisor=supervisor,
+        mission_service=mission_service,
+        operator_context=operator_context,
+        approval_ttl_s=float(lifecycle_cfg.get("approval_ttl_seconds", 60.0)),
+        clarification_ttl_s=float(lifecycle_cfg.get("clarification_ttl_seconds", 45.0)),
+        delivery_ttl_s=float(lifecycle_cfg.get("delivery_ttl_seconds", 120.0)),
+        delivery_retry_delay_s=float(lifecycle_cfg.get("delivery_retry_delay_seconds", 0.25)),
+        max_delivery_attempts=int(lifecycle_cfg.get("max_delivery_attempts", 3)),
+    )
+
+
+def _build_voice_task_operator_provider(
+    cfg: dict[str, Any],
+    audio: AudioFrontendPort,
+    lifecycle: VoiceTaskLifecycleService | None,
+) -> Callable[[str, str], VoiceTaskOperatorContext | None] | None:
+    """Resolve identity per captured turn; static identity needs explicit session scope."""
+
+    if lifecycle is None:
+        return None
+    handoff_cfg = cfg.get("runtime_handoff", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(handoff_cfg, dict):
+        handoff_cfg = {}
+    lifecycle_cfg = handoff_cfg.get("voice_task", {})
+    if not isinstance(lifecycle_cfg, dict):
+        lifecycle_cfg = {}
+    operator_cfg = lifecycle_cfg.get("operator", {})
+    if not isinstance(operator_cfg, dict):
+        operator_cfg = {}
+    static_context = lifecycle.default_operator_context
+    single_operator_session = (
+        str(operator_cfg.get("session_scope") or "").strip().lower()
+        == "single_operator"
+    )
+    resolver = getattr(audio, "voice_task_operator_context_for_turn", None)
+
+    def _provider(session_id: str, turn_id: str) -> VoiceTaskOperatorContext | None:
+        if callable(resolver):
+            payload = resolver(session_id, turn_id)
+            context = VoiceTaskOperatorContext.from_mapping(payload)
+            if context is not None:
+                return context
+        if single_operator_session:
+            return static_context
         return None
 
     return _provider

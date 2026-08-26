@@ -563,6 +563,8 @@ class BrainPipeline:
         conversation_session_id: str | None = None,
         voice_turn_id: str | None = None,
         turn_cancel_token: CancellationToken | None = None,
+        person_id: str | None = None,
+        operator_id: str | None = None,
     ) -> str:
         """Serialize a full local turn per canonical Thread, while other Threads run."""
 
@@ -582,6 +584,8 @@ class BrainPipeline:
                     conversation_session_id=conversation_session_id,
                     voice_turn_id=voice_turn_id,
                     turn_cancel_token=turn_cancel_token,
+                    person_id=person_id,
+                    operator_id=operator_id,
                 )
         finally:
             remaining = self._thread_turn_lock_users.get(thread_key, 1) - 1
@@ -601,6 +605,8 @@ class BrainPipeline:
         conversation_session_id: str | None = None,
         voice_turn_id: str | None = None,
         turn_cancel_token: CancellationToken | None = None,
+        person_id: str | None = None,
+        operator_id: str | None = None,
     ) -> str:
         """Run the full brain pipeline. Returns assistant reply."""
         if source == "voice" and turn_cancel_token is not None and turn_cancel_token.is_set():
@@ -623,6 +629,8 @@ class BrainPipeline:
                     # Thread channel is stable across text/cascade/realtime
                     # paths; the actual path belongs to Turn.source below.
                     channel="voice",
+                    person_id=person_id,
+                    operator_id=operator_id,
                 )
                 ledger_turn = turn_ledger.start_turn(
                     thread.thread_id,
@@ -936,6 +944,7 @@ class BrainPipeline:
         voice_turn_id: str | None = None,
         turn_cancel_token: CancellationToken | None = None,
         metadata: dict[str, Any] | None = None,
+        person_id: str | None = None,
         operator_id: str | None = None,
     ) -> str:
         """Commit a deterministic direct reply without touching legacy history."""
@@ -947,6 +956,7 @@ class BrainPipeline:
             voice_turn_id=voice_turn_id,
             turn_cancel_token=turn_cancel_token,
             metadata=metadata,
+            person_id=person_id,
             operator_id=operator_id,
         )
         if interaction is not None:
@@ -1051,6 +1061,7 @@ class BrainPipeline:
         voice_turn_id: str | None,
         turn_cancel_token: CancellationToken | None,
         metadata: dict[str, Any] | None,
+        person_id: str | None = None,
         operator_id: str | None = None,
     ) -> InteractionTurnContext | None:
         manager = self._interaction_turns
@@ -1064,6 +1075,7 @@ class BrainPipeline:
                     thread_id=conversation_session_id,
                     turn_id=voice_turn_id,
                     channel=source,
+                    person_id=person_id,
                     operator_id=operator_id,
                     metadata=dict(metadata or {}),
                     cancel_token=turn_cancel_token,

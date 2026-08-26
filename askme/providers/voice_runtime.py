@@ -154,13 +154,18 @@ class VoiceRuntimeBridge:
     ) -> dict[str, Any] | None:
         active = self.enabled if enabled is None else bool(enabled)
         if not active or not self._base_url:
-            self._record_bypass("disabled" if not active else "missing_base_url")
-            return None
+            reason = "disabled" if not active else "missing_base_url"
+            self._record_bypass(reason)
+            return {"handled": False, "disposition": "declined", "reason": reason}
         recovery_probe = self._begin_request()
         if recovery_probe is None:
-            return None
+            return {
+                "handled": False,
+                "disposition": "declined",
+                "reason": "circuit_open",
+            }
 
-        payload = {
+        payload: dict[str, Any] = {
             "text": text,
             "operator_id": operator_id or self._operator_id,
             "session_id": session_id or self._session_id,
@@ -206,7 +211,12 @@ class VoiceRuntimeBridge:
             return response_payload
         except (requests.RequestException, ValueError) as exc:
             self._record_failure(exc, recovery_probe=recovery_probe)
-            return None
+            return {
+                "handled": False,
+                "disposition": "ambiguous",
+                "reason": "bridge_request_outcome_unknown",
+                "error_type": type(exc).__name__,
+            }
         except Exception as exc:
             self._record_failure(exc, recovery_probe=recovery_probe)
             raise

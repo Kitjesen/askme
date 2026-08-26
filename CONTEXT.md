@@ -2,7 +2,7 @@
 
 Conversation Core 定义机器人跨语音、文本和多模态渠道的对话连续性。它提供统一的交互语言，使连接恢复、轮次提交、长期记忆、视觉证据和任务执行不会被混为同一个概念。
 
-本文是目标领域语言，不等于所有对象都已落地。Phase 1 已实现 Thread、Turn、Generation 和 Provider Session 关联；Person 聚合、Conversation Summary、跨日期 Session Window，以及 Memory/Vision/Task 事件消费者仍是后续能力。
+本文是目标领域语言，不等于所有对象都已落地。Phase 1 已实现 Thread、Turn、Generation 和 Provider Session 关联；外部任务的关联与状态通知也复用 canonical Thread/Turn 写入路径。Person 聚合、Conversation Summary、跨日期 Session Window，以及通用 Memory/Vision/Task committed-event 消费者仍是后续能力。
 
 ## Language
 

@@ -12,6 +12,8 @@ from askme.runtime.core.module import ModuleRegistry
 from askme.runtime.modules.voice_module import (
     VoiceModule,
     _build_mission_context_provider,
+    _build_voice_task_lifecycle,
+    _build_voice_task_operator_provider,
     _voice_product_readiness,
 )
 from askme.runtime.modules.voice_stack import (
@@ -47,6 +49,60 @@ def test_voice_module_resolves_volcengine_tts_control_payload() -> None:
     assert resolved["volcengine_tts_resource_id"] == "seed-tts-2.0-metadata"
     assert resolved["volcengine_tts_speaker"] == "speaker-b"
     assert resolved["volcengine_tts_api_key"] == "secret"
+
+
+def test_voice_task_operator_provider_requires_turn_bound_or_explicit_single_operator() -> None:
+    verified = {
+        "operator_id": "shared-device",
+        "roles": ["operator"],
+        "authenticated": True,
+        "source": "speaker_verification",
+        "person_id": "person-turn-a",
+        "permissions": ["runtime:read", "runtime:submit", "runtime:cancel"],
+    }
+    lifecycle = MagicMock()
+    lifecycle.default_operator_context = SimpleNamespace(person_id="static-person")
+    dynamic_audio = MagicMock()
+    dynamic_audio.voice_task_operator_context_for_turn.return_value = verified
+
+    dynamic = _build_voice_task_operator_provider(
+        {"runtime_handoff": {"voice_task": {"operator": {}}}},
+        dynamic_audio,
+        lifecycle,
+    )
+
+    assert dynamic is not None
+    assert dynamic("session-a", "turn-a").person_id == "person-turn-a"
+
+    no_dynamic_audio = SimpleNamespace()
+    static_denied = _build_voice_task_operator_provider(
+        {
+            "runtime_handoff": {
+                "voice_task": {"operator": {"source": "speaker_verification"}}
+            }
+        },
+        no_dynamic_audio,
+        lifecycle,
+    )
+    assert static_denied is not None
+    assert static_denied("session-a", "turn-a") is None
+
+    static_allowed = _build_voice_task_operator_provider(
+        {
+            "runtime_handoff": {
+                "voice_task": {
+                    "operator": {
+                        "source": "authenticated_gateway",
+                        "session_scope": "single_operator",
+                    }
+                }
+            }
+        },
+        no_dynamic_audio,
+        lifecycle,
+    )
+    assert static_allowed is not None
+    assert static_allowed("session-a", "turn-a").person_id == "static-person"
 
 
 @pytest.mark.asyncio
@@ -405,6 +461,8 @@ def test_voice_module_injects_runtime_stack_gate_components(monkeypatch) -> None
         "voice_runtime_bridge": stack.voice_gateway,
         "dispatcher": None,
         "audio_router": stack.audio_router,
+        "voice_task_lifecycle": None,
+        "voice_task_operator_provider": None,
         "anonymous_encounter_idle_seconds": 25.0,
     }
 
@@ -503,3 +561,119 @@ def test_runtime_voice_stack_wraps_legacy_raw_bridge_with_gateway() -> None:
     assert stack.voice_runtime_bridge is raw_bridge
     assert isinstance(stack.voice_gateway, VoiceGatewayService)
     assert stack.voice_gateway.bridge is raw_bridge
+
+
+def test_voice_task_lifecycle_uses_only_explicit_trusted_operator_config() -> None:
+    registry = ModuleRegistry()
+    runtime_module = SimpleNamespace(
+        name="runtime_handoff",
+        enabled=True,
+        runtime_handoff_service=SimpleNamespace(
+            run_service=SimpleNamespace(durable_store_ready=True)
+        ),
+        external_task_supervisor=object(),
+    )
+    registry.register(runtime_module)
+
+    untrusted = _build_voice_task_lifecycle(
+        {"runtime_handoff": {"voice_task": {"enabled": True}}},
+        registry,
+    )
+    assert untrusted is not None
+    assert untrusted._operator_context is None
+
+    per_turn = _build_voice_task_lifecycle(
+        {
+            "runtime_handoff": {
+                "voice_task": {
+                    "enabled": True,
+                    "approval_ttl_seconds": 45,
+                    "operator": {
+                        "operator_id": "robot-device-7",
+                        "roles": ["operator"],
+                        "authenticated": True,
+                        "source": "speaker_verification",
+                        "person_id": "operator-person-7",
+                        "permissions": ["runtime:read", "runtime:submit", "runtime:cancel"],
+                    },
+                }
+            }
+        },
+        registry,
+    )
+
+    assert per_turn is not None
+    assert per_turn.default_operator_context is None
+    with pytest.raises(PermissionError, match="runtime:read"):
+        per_turn.status_snapshot("session-without-turn")
+
+    trusted = _build_voice_task_lifecycle(
+        {
+            "runtime_handoff": {
+                "voice_task": {
+                    "enabled": True,
+                    "approval_ttl_seconds": 45,
+                    "operator": {
+                        "operator_id": "robot-device-7",
+                        "roles": ["operator"],
+                        "authenticated": True,
+                        "source": "authenticated_gateway",
+                        "session_scope": "single_operator",
+                        "person_id": "operator-person-7",
+                        "permissions": ["runtime:read", "runtime:submit", "runtime:cancel"],
+                    },
+                }
+            }
+        },
+        registry,
+    )
+
+    assert trusted is not None
+    assert trusted._approval_ttl_s == 45.0
+    assert trusted._operator_context.operator_id == "robot-device-7"
+    assert trusted._operator_context.person_id == "operator-person-7"
+    assert trusted._operator_context.allows("runtime:read") is True
+    assert trusted._operator_context.allows("runtime:submit") is True
+    assert trusted._operator_context.allows("runtime:cancel") is True
+
+    string_false = _build_voice_task_lifecycle(
+        {
+            "runtime_handoff": {
+                "voice_task": {
+                    "enabled": True,
+                    "operator": {
+                        "operator_id": "robot-device-7",
+                        "roles": ["operator"],
+                        "authenticated": "false",
+                        "source": "device_certificate",
+                        "session_scope": "single_operator",
+                        "permissions": ["runtime:read", "runtime:submit"],
+                    },
+                }
+            }
+        },
+        registry,
+    )
+    assert string_false is not None
+    assert string_false._operator_context.authenticated is False
+    assert string_false._operator_context.allows("runtime:submit") is False
+
+
+def test_voice_task_lifecycle_rejects_non_durable_runtime_store() -> None:
+    registry = ModuleRegistry()
+    registry.register(
+        SimpleNamespace(
+            name="runtime_handoff",
+            enabled=True,
+            runtime_handoff_service=SimpleNamespace(
+                run_service=SimpleNamespace(durable_store_ready=False)
+            ),
+            external_task_supervisor=object(),
+        )
+    )
+
+    with pytest.raises(ValueError, match="durable TaskRun store"):
+        _build_voice_task_lifecycle(
+            {"runtime_handoff": {"voice_task": {"enabled": True}}},
+            registry,
+        )
