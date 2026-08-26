@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">AskMe</title>
+  <defs>
+    <linearGradient id="background" x1="8" y1="4" x2="58" y2="62">
+      <stop stop-color="#17152f"/>
+      <stop offset="1" stop-color="#0b1025"/>
+    </linearGradient>
+    <radialGradient id="star" cx="50%" cy="42%" r="58%">
+      <stop stop-color="#fff8dc"/>
+      <stop offset=".35" stop-color="#f7c76f"/>
+      <stop offset="1" stop-color="#c27a2d"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#background)"/>
+  <ellipse cx="32" cy="32" rx="23" ry="12" fill="none" stroke="#b99af5" stroke-width="2" transform="rotate(-24 32 32)"/>
+  <ellipse cx="32" cy="32" rx="23" ry="12" fill="none" stroke="#7ee7ff" stroke-width="1.6" opacity=".72" transform="rotate(36 32 32)"/>
+  <circle cx="15" cy="24" r="3" fill="#b99af5"/>
+  <circle cx="51" cy="41" r="2.6" fill="#7ee7ff"/>
+  <path d="m32 18 3.4 10.6L46 32l-10.6 3.4L32 46l-3.4-10.6L18 32l10.6-3.4Z" fill="url(#star)" stroke="#fff1b8" stroke-width="1.2"/>
+  <circle cx="32" cy="32" r="4" fill="#fff8dc"/>
+</svg>

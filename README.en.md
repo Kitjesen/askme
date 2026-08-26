@@ -1,6 +1,6 @@
 # Askme
 
-[![CI](https://github.com/inovxio/askme/actions/workflows/ci.yml/badge.svg)](https://github.com/inovxio/askme/actions/workflows/ci.yml)
+[![CI](https://github.com/Kitjesen/askme/actions/workflows/ci.yml/badge.svg)](https://github.com/Kitjesen/askme/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-4.1.0-green.svg)](pyproject.toml)
 

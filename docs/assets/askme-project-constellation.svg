@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">AskMe project constellation</title>
+  <desc id="desc">AskMe sits at the center of voice, conversation, knowledge, cognition, tasks, safety, runtime, and audit modules.</desc>
+  <defs>
+    <linearGradient id="space" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070c1b"/>
+      <stop offset=".5" stop-color="#0b1025"/>
+      <stop offset="1" stop-color="#060a17"/>
+    </linearGradient>
+    <radialGradient id="core" cx="50%" cy="45%" r="62%">
+      <stop offset="0" stop-color="#fff6d5"/>
+      <stop offset=".12" stop-color="#f7c76f"/>
+      <stop offset=".35" stop-color="#bd7b31" stop-opacity=".78"/>
+      <stop offset="1" stop-color="#35224d" stop-opacity=".2"/>
+    </radialGradient>
+    <radialGradient id="node" cx="50%" cy="38%" r="70%">
+      <stop offset="0" stop-color="#7456bd" stop-opacity=".88"/>
+      <stop offset=".48" stop-color="#382760" stop-opacity=".88"/>
+      <stop offset="1" stop-color="#17152f" stop-opacity=".92"/>
+    </radialGradient>
+    <pattern id="stars" width="120" height="120" patternUnits="userSpaceOnUse">
+      <circle cx="14" cy="22" r="1.4" fill="#ffffff" opacity=".62"/>
+      <circle cx="78" cy="12" r="1" fill="#b99af5" opacity=".7"/>
+      <circle cx="103" cy="66" r="1.5" fill="#ffffff" opacity=".45"/>
+      <circle cx="42" cy="93" r="1" fill="#7ee7ff" opacity=".58"/>
+      <circle cx="114" cy="112" r=".7" fill="#f7c76f" opacity=".72"/>
+    </pattern>
+    <filter id="violet-glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="gold-glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0 10 5 0 10Z" fill="#7ee7ff"/>
+    </marker>
+    <marker id="audit-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0 10 5 0 10Z" fill="#b99af5"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="900" rx="28" fill="url(#space)"/>
+  <rect width="1600" height="900" rx="28" fill="url(#stars)" opacity=".78"/>
+  <g fill="none" stroke="#7456bd" opacity=".14">
+    <circle cx="705" cy="420" r="265"/>
+    <circle cx="705" cy="420" r="350" stroke-dasharray="3 10"/>
+    <circle cx="705" cy="420" r="445" stroke-dasharray="2 15"/>
+  </g>
+  <g fill="#f7c76f" opacity=".9">
+    <circle cx="95" cy="86" r="3"/>
+    <circle cx="1512" cy="130" r="3"/>
+    <circle cx="1385" cy="815" r="2.5"/>
+    <circle cx="1090" cy="74" r="2"/>
+  </g>
+
+  <g fill="none" stroke="#7ee7ff" stroke-width="4" stroke-linecap="round" opacity=".92" marker-end="url(#arrow)">
+    <path d="M355 178 C470 178 485 305 575 350"/>
+    <path d="M350 412 C445 412 505 412 562 412"/>
+    <path d="M950 165 C855 180 866 302 826 348"/>
+    <path d="M963 382 C905 382 874 402 837 410"/>
+    <path d="M816 491 C850 548 875 590 915 612"/>
+    <path d="M1082 615 H1130"/>
+    <path d="M1322 615 H1376"/>
+  </g>
+  <g fill="none" stroke="#b99af5" stroke-width="3" stroke-linecap="round" stroke-dasharray="10 10" opacity=".9" marker-end="url(#audit-arrow)">
+    <path d="M265 500 V760 H608"/>
+    <path d="M1465 700 V760 H812"/>
+  </g>
+
+  <g transform="translate(705 420)">
+    <circle r="160" fill="#f7c76f" opacity=".08" filter="url(#gold-glow)"/>
+    <circle r="146" fill="url(#core)" stroke="#f7c76f" stroke-width="2.5"/>
+    <circle r="128" fill="none" stroke="#ffe4a4" stroke-width="1.4" opacity=".62"/>
+    <circle r="106" fill="none" stroke="#f7c76f" stroke-width="1" stroke-dasharray="3 9" opacity=".68"/>
+    <path d="M0-164V164M-164 0H164" stroke="#f7c76f" stroke-width="1.2" opacity=".4"/>
+    <circle r="9" fill="#fff6d5" filter="url(#gold-glow)"/>
+    <text y="18" fill="#fff8e7" font-family="Inter,Segoe UI,sans-serif" font-size="58" font-weight="800" text-anchor="middle" letter-spacing="3">ASKME</text>
+  </g>
+
+  <g transform="translate(270 175)">
+    <circle r="96" fill="#7456bd" opacity=".16" filter="url(#violet-glow)"/>
+    <circle r="84" fill="url(#node)" stroke="#b99af5" stroke-width="2.5"/>
+    <circle r="70" fill="none" stroke="#b99af5" opacity=".45"/>
+    <g transform="translate(-30 -35)" fill="none" stroke="#e8dcff" stroke-width="5" stroke-linecap="round">
+      <path d="M2 31h7m7-13v26m8-35v44m8-36v28m8-20v12m8-6h9"/>
+    </g>
+    <text y="55" fill="#ffffff" font-family="Inter,Segoe UI,sans-serif" font-size="23" font-weight="700" text-anchor="middle">VOICE</text>
+  </g>
+
+  <g transform="translate(255 410)">
+    <circle r="96" fill="#7456bd" opacity=".15" filter="url(#violet-glow)"/>
+    <circle r="84" fill="url(#node)" stroke="#b99af5" stroke-width="2.5"/>
+    <circle r="70" fill="none" stroke="#b99af5" opacity=".45"/>
+    <path d="M-34-34h68a16 16 0 0 1 16 16v22a16 16 0 0 1-16 16h-26l-22 18v-18h-20a16 16 0 0 1-16-16v-22a16 16 0 0 1 16-16Z" fill="#7456bd" stroke="#e8dcff" stroke-width="3"/>
+    <g fill="#ffffff"><circle cx="-19" cy="-7" r="4"/><circle cy="-7" r="4"/><circle cx="19" cy="-7" r="4"/></g>
+    <text y="57" fill="#ffffff" font-family="Inter,Segoe UI,sans-serif" font-size="20" font-weight="700" text-anchor="middle">CONVERSATION</text>
+  </g>
+
+  <g transform="translate(1035 155)">
+    <circle r="96" fill="#7456bd" opacity=".15" filter="url(#violet-glow)"/>
+    <circle r="84" fill="url(#node)" stroke="#b99af5" stroke-width="2.5"/>
+    <circle r="70" fill="none" stroke="#b99af5" opacity=".45"/>
+    <path d="M-42-38c19-5 33 1 42 10v54c-11-9-25-13-42-8Zm84 0c-19-5-33 1-42 10v54c11-9 25-13 42-8Z" fill="#7456bd" stroke="#e8dcff" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M-30-23h18m-18 12h18M30-23H12m18 12H12" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"/>
+    <text y="58" fill="#ffffff" font-family="Inter,Segoe UI,sans-serif" font-size="21" font-weight="700" text-anchor="middle">KNOWLEDGE</text>
+  </g>
+
+  <g transform="translate(1050 375)">
+    <circle r="96" fill="#7456bd" opacity=".15" filter="url(#violet-glow)"/>
+    <circle r="84" fill="url(#node)" stroke="#b99af5" stroke-width="2.5"/>
+    <circle r="70" fill="none" stroke="#b99af5" opacity=".45"/>
+    <path d="M0-42c-16-14-37-4-36 15-13 7-11 29 3 34-6 17 11 31 25 22 5 11 21 11 26-1 17 5 29-14 19-27 13-11 4-34-11-34-3-13-18-18-26-9Z" fill="#7456bd" stroke="#e8dcff" stroke-width="3"/>
+    <path d="M0-35v65M-21-20c18 2 20 14 21 25m20-26C6-17 6-6 0 1m-24 8c15-4 22 5 24 17" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"/>
+    <text y="58" fill="#ffffff" font-family="Inter,Segoe UI,sans-serif" font-size="21" font-weight="700" text-anchor="middle">COGNITION</text>
+  </g>
+
+  <g transform="translate(995 615)">
+    <circle r="93" fill="#7456bd" opacity=".15" filter="url(#violet-glow)"/>
+    <circle r="82" fill="url(#node)" stroke="#b99af5" stroke-width="2.5"/>
+    <circle r="68" fill="none" stroke="#b99af5" opacity=".45"/>
+    <rect x="-34" y="-43" width="68" height="72" rx="7" fill="#7456bd" stroke="#e8dcff" stroke-width="3"/>
+    <rect x="-14" y="-51" width="28" height="14" rx="5" fill="#e8dcff" stroke="#ffffff" stroke-width="2"/>
+    <path d="m-22-18 6 6 10-11m-16 28 6 6 10-11M5-16h17M5 7h17" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text y="57" fill="#ffffff" font-family="Inter,Segoe UI,sans-serif" font-size="22" font-weight="700" text-anchor="middle">TASKS</text>
+  </g>
+
+  <g transform="translate(1235 615)">
+    <circle r="93" fill="#7456bd" opacity=".15" filter="url(#violet-glow)"/>
+    <circle r="82" fill="url(#node)" stroke="#b99af5" stroke-width="2.5"/>
+    <circle r="68" fill="none" stroke="#b99af5" opacity=".45"/>
+    <path d="M0-45c14 12 28 17 43 18v28c0 25-17 40-43 50-26-10-43-25-43-50v-28c15-1 29-6 43-18Z" fill="#7456bd" stroke="#e8dcff" stroke-width="3"/>
+    <path d="m-18 1 12 12 25-28" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text y="58" fill="#ffffff" font-family="Inter,Segoe UI,sans-serif" font-size="22" font-weight="700" text-anchor="middle">SAFETY</text>
+  </g>
+
+  <g transform="translate(1470 615)">
+    <circle r="93" fill="#1b8ed1" opacity=".18" filter="url(#violet-glow)"/>
+    <circle r="82" fill="#102f57" stroke="#7ee7ff" stroke-width="2.5"/>
+    <circle r="68" fill="none" stroke="#7ee7ff" opacity=".42"/>
+    <rect x="-39" y="-31" width="78" height="60" rx="15" fill="#16629d" stroke="#d9f8ff" stroke-width="3"/>
+    <path d="M0-48v17m-58 8h19m78 0h19M-20 7h40" fill="none" stroke="#d9f8ff" stroke-width="3" stroke-linecap="round"/>
+    <circle cy="-50" r="5" fill="#7ee7ff"/>
+    <circle cx="-18" cy="-7" r="5" fill="#ffffff"/><circle cx="18" cy="-7" r="5" fill="#ffffff"/>
+    <text y="58" fill="#ffffff" font-family="Inter,Segoe UI,sans-serif" font-size="21" font-weight="700" text-anchor="middle">RUNTIME</text>
+  </g>
+
+  <g transform="translate(710 760)">
+    <circle r="93" fill="#7456bd" opacity=".15" filter="url(#violet-glow)"/>
+    <circle r="82" fill="url(#node)" stroke="#b99af5" stroke-width="2.5"/>
+    <circle r="68" fill="none" stroke="#b99af5" opacity=".45"/>
+    <circle cx="-7" cy="-13" r="27" fill="#7456bd" stroke="#e8dcff" stroke-width="3"/>
+    <path d="m14 7 24 24M-7-29l5 11 12 2-9 8 3 12-11-6-11 6 3-12-9-8 12-2Z" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text y="58" fill="#ffffff" font-family="Inter,Segoe UI,sans-serif" font-size="22" font-weight="700" text-anchor="middle">AUDIT</text>
+  </g>
+
+  <g fill="#ffffff" opacity=".9" filter="url(#violet-glow)">
+    <circle cx="355" cy="178" r="4"/><circle cx="350" cy="412" r="4"/><circle cx="950" cy="165" r="4"/><circle cx="963" cy="382" r="4"/>
+    <circle cx="1082" cy="615" r="4"/><circle cx="1322" cy="615" r="4"/><circle cx="265" cy="500" r="4"/><circle cx="1465" cy="700" r="4"/>
+  </g>
+</svg>
