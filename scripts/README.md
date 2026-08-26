@@ -18,7 +18,6 @@ documented buckets below instead of beside this README.
 | `scripts/bench/` | Benchmarks, latency probes, audio readiness checks, and benchmark helper scripts. | Pytest unit tests. | `pytest tests/test_performance_benchmarks.py tests/test_generated_voice_capability_check.py -q` for supported benchmark code. |
 | `scripts/e2e/` | Provider-backed or hardware-backed end-to-end probes. | Automatic pytest collection. | Manual execution only; document required keys, models, devices, and network. |
 | `scripts/audit/` | Secret scanning, key rotation guides, and security audit helpers. | Product APIs and runtime services. | Script-specific `--help` when present. |
-| `scripts/artifacts/` | Media, fixtures, and sample files used by scripts. | Executable scripts. | Static structure checks only. |
 | `scripts/tools/` | Low-level maintenance helpers used by scripts or manual flows. | Product APIs and runtime services. | Static tests, plus script-specific `--help` when present. |
 
 ## Root Files
@@ -47,7 +46,7 @@ Assign script work by runtime risk, not by filename alone:
 | Dev Tools | `scripts/dev`, root `check_text_encoding.py` | Owns local development commands and repository hygiene checks. |
 | Performance | root `benchmark_*.py`, `check_perf_thresholds.py`, benchmark-only files in `scripts/bench` | Owns quick/full performance runs and thresholds. |
 | Voice/Hardware Manual | hardware and voice probes in `scripts/bench`, `scripts/e2e`, `scripts/demo` | Manual only unless a script has a mock/dry-run path. |
-| Demo/Enablement | `scripts/demo`, `scripts/artifacts` | Owns customer demos and presentation/artifact utilities. |
+| Demo/Enablement | `scripts/demo`, repository `artifacts/` | Owns customer demos and presentation/artifact utilities. |
 
 Shared rule: if a script starts a service, touches hardware, uses cloud keys,
 or waits for live audio/video, do not add it to automatic CI execution.
@@ -71,7 +70,7 @@ cameras, model files, API keys, network access, or a robot runtime.
 6. Hardware, audio, camera, cloud, and real provider probes must document their
    external requirements and remain manual by default.
 7. Do not add binaries, captured audio, generated reports, images, or videos to
-   executable script directories; use `scripts/artifacts/` or `artifacts/`.
+   executable script directories; use the repository-level `artifacts/` directory.
 
 ## Verification
 

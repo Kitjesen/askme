@@ -128,6 +128,8 @@ Thread → Turn → Generation → replaceable Provider Session
 
 实时语音供应商、全双工声学门禁和公网验收口径见[实时语音文档](docs/REALTIME_VOICE_PROVIDERS.md)。
 
+> 当前交付状态：板卡 profile 只启用本地摄像头/YOLO 感知，云端 VLM 保持 fail-closed。ZeroClaw v0.1.7 容器尚未接通 AskMe MCP；启动 ZeroClaw 进程不等于 MCP 集成可用。
+
 ## 开发与验证
 
 ```powershell
@@ -168,6 +170,7 @@ python -m pytest tests/test_six_layer_package_boundaries.py tests/test_package_m
 | [API](docs/API.md) | HTTP API 参考 |
 | [部署](docs/DEPLOYMENT.md) | 环境、凭据、Docker 与运维 |
 | [实时语音](docs/REALTIME_VOICE_PROVIDERS.md) | Qwen、豆包 S2S 与验收口径 |
+| [语音外部任务](docs/VOICE_EXTERNAL_TASKS.md) | 任务确认、幂等提交、恢复、取消与证据交付 |
 | [运维手册](docs/OPERATIONS.md) | 健康检查、交付和故障处理 |
 | [贡献指南](CONTRIBUTING.md) | 开发流程与协作约定 |
 
