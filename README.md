@@ -18,7 +18,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/assets/askme-project-constellation.svg" width="100%" alt="AskMe 系统星图：Voice、Conversation、Knowledge 与 Cognition 汇入 AskMe，任务经过 Safety 进入 Runtime，并沉淀 Audit Evidence" />
+  <img src="docs/assets/askme-project-constellation-imagegen-v2.png" width="100%" alt="AskMe 系统星图：Voice、Conversation、Knowledge 与 Cognition 汇入 AskMe，任务经过 Safety 进入 Runtime，并沉淀 Audit Evidence" />
 </p>
 
 <p align="center">
