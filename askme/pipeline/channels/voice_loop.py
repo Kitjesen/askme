@@ -143,6 +143,36 @@ class VoiceLoop:
         """Wire the runtime-owned mission and actor state for voice admission."""
         self._mission_context_provider = provider
 
+    async def _speak_cached_or_fallback(
+        self,
+        text: str,
+        *,
+        cache_key: str | None,
+        fallback_to_tts: bool,
+    ) -> bool:
+        """Prefer persisted PCM while keeping older audio frontends compatible."""
+
+        cached_speaker = getattr(self._audio, "speak_cached_and_wait", None)
+        if cache_key and callable(cached_speaker):
+            try:
+                if await cached_speaker(text, cache_key=cache_key):
+                    return True
+            except Exception as exc:
+                logger.warning("Cached voice reply failed: %s", exc)
+        if fallback_to_tts:
+            await self._audio.speak_and_wait(text)
+        return False
+
+    def _remember_spoken_text(self, text: str) -> None:
+        executor = getattr(self._pipeline, "_turn_executor", None)
+        if executor is not None:
+            executor._last_spoken_text = text
+            return
+        try:
+            self._pipeline.last_spoken_text = text
+        except (AttributeError, TypeError):
+            pass
+
     async def run(self) -> None:
         """Block until Ctrl+C or too many consecutive errors."""
         from askme.robot_interaction import IntentType
@@ -304,9 +334,51 @@ class VoiceLoop:
                         await self._audio.speak_and_wait(gate_decision.reply)
                     continue
 
+                with _tracer.span("intent_route") as _route_span:
+                    intent = self._router.route(user_text)
+                    _route_span.metadata.update(
+                        attach_intent_route_trace(_trace, intent, source="voice")
+                    )
+                _trace.metadata["voice_fast_path"] = bool(intent.fast_path)
+
+                pending_approval = self._pipeline.has_pending_tool_approval()
+
+                # Safety and deterministic cached replies run before the ACK
+                # chime, memory retrieval, LLM and online TTS.  Pending tool
+                # approval still takes precedence over ordinary quick replies.
+                if not pending_approval and intent.type == IntentType.ESTOP:
+                    if self._dispatcher:
+                        self._dispatcher.cancel_active_agent_task()
+                    self._pipeline.handle_estop()
+                    self._audio.drain_buffers()
+                    await self._audio.speak_and_wait(
+                        "\u5df2\u7ecf\u7d27\u6025\u505c\u6b62\u3002"
+                    )
+                    continue
+
+                if not pending_approval and intent.type == IntentType.QUICK_REPLY:
+                    if idle_task and not idle_task.done():
+                        idle_task.cancel()
+                    _quick_text = (
+                        intent.reply_text
+                        or intent.skill_name
+                        or "\u597d\u7684\u3002"
+                    )
+                    self._audio.drain_buffers()
+                    cache_hit = await self._speak_cached_or_fallback(
+                        _quick_text,
+                        cache_key=intent.cached_audio_key,
+                        fallback_to_tts=True,
+                    )
+                    _trace.metadata["voice_phrase_cache_hit"] = cache_hit
+                    self._remember_spoken_text(_quick_text)
+                    idle_task = self._pipeline.start_idle_reflection()
+                    continue
+
                 # Immediate audio feedback -user knows we heard them
                 # Fires before LLM call to fill the latency gap
-                self._audio.acknowledge()
+                if not intent.fast_path:
+                    self._audio.acknowledge()
 
                 # Cancel idle reflection on user activity
                 if idle_task and not idle_task.done():
@@ -319,14 +391,10 @@ class VoiceLoop:
                     idle_task = self._pipeline.start_idle_reflection()
                     continue
 
-                # Start memory prefetch ASAP (overlaps with routing)
-                memory_task = self._pipeline.start_memory_prefetch(user_text)
-
-                with _tracer.span("intent_route") as _route_span:
-                    intent = self._router.route(user_text)
-                    _route_span.metadata.update(
-                        attach_intent_route_trace(_trace, intent, source="voice")
-                    )
+                # Start memory prefetch only after deterministic paths have
+                # exited.  This avoids needless retrieval work on fast replies.
+                if not intent.fast_path:
+                    memory_task = self._pipeline.start_memory_prefetch(user_text)
 
                 if intent.type == IntentType.ESTOP:
                     # Cancel any background agent task before hard stop
@@ -345,7 +413,7 @@ class VoiceLoop:
                     _quick_text = intent.reply_text or intent.skill_name or "好的。"
                     self._audio.drain_buffers()
                     await self._audio.speak_and_wait(_quick_text)
-                    self._pipeline._turn_executor._last_spoken_text = _quick_text
+                    self._remember_spoken_text(_quick_text)
                     if idle_task and not idle_task.done():
                         idle_task.cancel()
                     idle_task = self._pipeline.start_idle_reflection()
@@ -455,6 +523,15 @@ class VoiceLoop:
                     if memory_task and not memory_task.done():
                         memory_task.cancel()
                     memory_task = None
+                    if intent.preface_text:
+                        cache_hit = await self._speak_cached_or_fallback(
+                            intent.preface_text,
+                            cache_key=intent.preface_audio_key,
+                            fallback_to_tts=False,
+                        )
+                        _trace.metadata["voice_preface_cache_hit"] = cache_hit
+                        if not cache_hit:
+                            self._audio.acknowledge()
                     # Try runtime bridge first -edge service may route to arbiter
                     bridge_handled = await self._maybe_handle_runtime_bridge(user_text)
                     if bridge_handled:
@@ -562,6 +639,7 @@ class VoiceLoop:
                             user_text,
                             memory_task=memory_task,
                             conversation_session_id=conversation_session_id,
+                            turn_owner="voice",
                         )
                 self._record_local_gateway_turn(
                     conversation_session_id,

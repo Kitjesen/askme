@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from askme.llm.core.client import LLMClient
+from askme.memory.backends.mempalace_backend import MemPalaceBackend
 from askme.memory.core.conversation import ConversationManager
 from askme.memory.core.episodic_memory import EpisodicMemory
 from askme.memory.core.session import SessionMemory
@@ -136,6 +137,24 @@ class MemoryModule(Module):
             config=cfg,
             knowledge_catalog=self._knowledge_catalog,
         )
+        self._behavior_memory: MemPalaceBackend | None = None
+        behavior_backend = str(
+            self._memory_cfg.get("robot_behavior_memory_backend") or ""
+        ).strip().lower()
+        if (
+            self._memory_cfg.get("robot_behavior_memory_enabled", False)
+            and behavior_backend == "mempalace"
+        ):
+            behavior_cfg = dict(self._memory_cfg)
+            behavior_cfg["mempalace_wing"] = self._memory_cfg.get(
+                "mempalace_behavior_wing", behavior_cfg.get("mempalace_wing")
+            )
+            behavior_cfg["mempalace_room"] = self._memory_cfg.get(
+                "mempalace_behavior_room", behavior_cfg.get("mempalace_room")
+            )
+            self._behavior_memory = MemPalaceBackend(
+                behavior_cfg, cfg.get("brain", {})
+            )
         self._episodic = EpisodicMemory(llm=llm)
         self._memory_system = MemorySystem(
             llm=llm,
@@ -143,6 +162,8 @@ class MemoryModule(Module):
             session_memory=self._session_memory,
             episodic=self._episodic,
             vector_memory=self._memory_bridge,
+            behavior_memory=self._behavior_memory,
+            config=cfg,
         )
         self._knowledge_job_store = KnowledgeIndexJobStore(config=cfg)
         self._warmup_task: asyncio.Task[None] | None = None
@@ -181,16 +202,32 @@ class MemoryModule(Module):
         self._episodic._llm = llm
         self._memory_system._llm = llm
 
+    async def _warm_memory_backends(self) -> None:
+        warmups = [self._memory_bridge.warmup()]
+        behavior = getattr(self, "_behavior_memory", None)
+        if behavior is not None:
+            warmups.append(self._warm_behavior_memory(behavior))
+        await asyncio.gather(*warmups)
+
+    @staticmethod
+    async def _warm_behavior_memory(behavior: MemPalaceBackend) -> None:
+        await behavior.warmup()
+        stats = getattr(behavior, "stats", None)
+        if callable(stats):
+            result = stats()
+            if inspect.isawaitable(result):
+                await result
+
     async def start(self) -> None:
         """Warm memory backends after runtime start without delaying readiness."""
         if self._warmup_task is None or self._warmup_task.done():
             self._warmup_task = asyncio.create_task(
-                self._memory_bridge.warmup(),
+                self._warm_memory_backends(),
                 name="memory_warmup",
             )
 
     async def stop(self) -> None:
-        """Consolidate memories on shutdown (best-effort, non-blocking)."""
+        """Consolidate and close memory backends on shutdown."""
         warmup_task = getattr(self, "_warmup_task", None)
         if warmup_task is not None and not warmup_task.done():
             warmup_task.cancel()
@@ -206,6 +243,23 @@ class MemoryModule(Module):
                         logger.info("MemoryModule: consolidated %d facts on shutdown.", n)
         except Exception as exc:
             logger.debug("MemoryModule: consolidation on shutdown failed: %s", exc)
+        await self._close_memory_backend(self._memory_bridge)
+        behavior = getattr(self, "_behavior_memory", None)
+        if behavior is not None:
+            await self._close_memory_backend(behavior)
+
+    @staticmethod
+    async def _close_memory_backend(backend: Any) -> None:
+        close = getattr(backend, "close", None)
+        if not callable(close):
+            return
+        try:
+            if inspect.iscoroutinefunction(close):
+                await close()
+            else:
+                await asyncio.to_thread(close)
+        except Exception as exc:
+            logger.debug("MemoryModule: backend close failed: %s", exc)
 
     def health(self) -> dict[str, Any]:
         bridge_health = self._memory_bridge.health()
@@ -317,6 +371,20 @@ class MemoryModule(Module):
         ).strip().lower()
         robot_backend = str(cfg.get("robot_behavior_memory_backend") or "robotmem").strip().lower()
         robot_enabled = bool(cfg.get("robot_behavior_memory_enabled", False))
+        behavior_health = self._behavior_memory_health()
+        if robot_backend == "mempalace":
+            robot_ready = bool(
+                robot_enabled and behavior_health.get("available", False)
+            )
+            robot_count = int(behavior_health.get("count", 0) or 0)
+        elif robot_backend == "robotmem":
+            robot_ready = bool(
+                robot_enabled and bridge_health.get("robotmem_ready")
+            )
+            robot_count = int(bridge_health.get("robotmem_count", 0) or 0)
+        else:
+            robot_ready = False
+            robot_count = 0
         return {
             "product_default": "customer_knowledge_first",
             "customer_knowledge": {
@@ -332,13 +400,25 @@ class MemoryModule(Module):
                 "purpose": "long_term_robot_behavior",
                 "backend": robot_backend,
                 "enabled": robot_enabled,
-                "ready": bool(bridge_health.get("robotmem_ready"))
-                if robot_backend == "robotmem"
-                else False,
-                "enters_prompt": False,
+                "ready": robot_ready,
+                "count": robot_count,
+                "health": behavior_health if robot_backend == "mempalace" else {},
+                "enters_prompt": robot_enabled,
+                "enters_customer_evidence": False,
                 "notes": "Keep robot behavior memory separate from customer RAG evidence.",
             },
         }
+
+    def _behavior_memory_health(self) -> dict[str, Any]:
+        behavior = getattr(self, "_behavior_memory", None)
+        if behavior is None:
+            return {}
+        snapshot = getattr(behavior, "health_snapshot", {})
+        if callable(snapshot):
+            snapshot = snapshot()
+        if not isinstance(snapshot, dict):
+            return {}
+        return dict(snapshot)
 
     @staticmethod
     def _memory_health_warnings(
@@ -1183,7 +1263,11 @@ class MemoryModule(Module):
                 skipped += 1
                 continue
             try:
-                await self._memory_bridge.save_fact(text, metadata)
+                saved = await self._memory_bridge.save_fact(text, metadata)
+                if not saved:
+                    skipped += 1
+                    errors.append(f"catalog sync record {index}: backend_write_failed")
+                    continue
                 if record_id:
                     self._knowledge_catalog.mark_indexed(record_id)
                 indexed += 1

@@ -104,7 +104,7 @@ class TestMemPalaceBackend:
         )
 
         with _patch_mempalace(collection):
-            await backend.save_fact(
+            saved = await backend.save_fact(
                 "三号设备在A区东侧",
                 {"source": "sop.md", "tags": ["巡检"], "approval_status": "published"},
             )
@@ -115,6 +115,7 @@ class TestMemPalaceBackend:
         assert call["ids"][0].startswith("drawer_askme_")
         assert call["metadatas"][0]["source"] == "sop.md"
         assert call["metadatas"][0]["tags"] == "['巡检']"
+        assert saved is True
 
     @pytest.mark.asyncio
     async def test_catalog_record_id_produces_stable_drawer_id(self, tmp_path):
@@ -165,6 +166,172 @@ class TestMemPalaceBackend:
             assert backend._ensure_mempalace() is False
 
         assert backend.available is False
+
+    @pytest.mark.asyncio
+    async def test_save_fact_reports_local_write_failure(self, tmp_path):
+        collection = _FakeCollection()
+        collection.upsert = MagicMock(side_effect=RuntimeError("disk full"))
+        backend = MemPalaceBackend(
+            {"mempalace_palace_path": str(tmp_path / "palace")}
+        )
+
+        with _patch_mempalace(collection):
+            saved = await backend.save_fact("cannot persist", {"source": "test"})
+
+        assert saved is False
+
+    @pytest.mark.asyncio
+    async def test_http_transport_routes_search_to_configured_lane(self):
+        backend = MemPalaceBackend(
+            {
+                "mempalace_transport": "http",
+                "mempalace_url": "http://127.0.0.1:8766/",
+                "mempalace_wing": "askme",
+                "mempalace_room": "customer_knowledge",
+                "mempalace_n_results": 3,
+                "mempalace_min_similarity": 0.3,
+            }
+        )
+        backend._http_healthy = True
+        response = {
+            "ok": True,
+            "items": [
+                {
+                    "text": "Visitor registration is at reception.",
+                    "metadata": {"source": "faq.md", "room": "customer_knowledge"},
+                    "distance": 0.08,
+                }
+            ],
+            "count": 7,
+        }
+
+        with patch.object(
+            backend,
+            "_request_http_sync",
+            return_value=response,
+        ) as request:
+            items = await backend.retrieve_items("visitor registration")
+
+        assert items[0]["text"] == "Visitor registration is at reception."
+        assert items[0]["score"] == 0.92
+        request.assert_called_once_with(
+            "POST",
+            "/v1/search",
+            {
+                "query": "visitor registration",
+                "wing": "askme",
+                "room": "customer_knowledge",
+                "n_results": 6,
+            },
+        )
+        assert backend.health_snapshot["count"] == 7
+
+    @pytest.mark.asyncio
+    async def test_http_transport_upsert_forces_configured_lane_and_returns_status(self):
+        backend = MemPalaceBackend(
+            {
+                "mempalace_transport": "http",
+                "mempalace_url": "http://127.0.0.1:8766",
+                "mempalace_wing": "askme",
+                "mempalace_room": "robot_behavior",
+            }
+        )
+        backend._http_healthy = True
+
+        with patch.object(
+            backend,
+            "_request_http_sync",
+            return_value={"ok": True, "count": 4},
+        ) as request:
+            saved = await backend.save_fact(
+                "The user prefers concise answers.",
+                {"wing": "other", "room": "customer_knowledge", "source": "admission"},
+            )
+
+        assert saved is True
+        payload = request.call_args.args[2]
+        assert request.call_args.args[:2] == ("POST", "/v1/upsert")
+        assert payload["wing"] == "askme"
+        assert payload["room"] == "robot_behavior"
+        assert payload["metadata"]["wing"] == "askme"
+        assert payload["metadata"]["room"] == "robot_behavior"
+        assert backend.health_snapshot["count"] == 4
+
+    def test_http_transport_health_probe_reports_count_and_error(self):
+        backend = MemPalaceBackend(
+            {
+                "mempalace_transport": "http",
+                "mempalace_url": "http://127.0.0.1:8766",
+                "mempalace_wing": "askme",
+                "mempalace_room": "customer_knowledge",
+            }
+        )
+
+        with patch.object(
+            backend,
+            "_request_http_sync",
+            return_value={
+                "ok": True,
+                "ready": True,
+                "count": 9,
+                "mempalace_version": "3.5.0",
+            },
+        ):
+            assert backend._ensure_mempalace() is True
+
+        assert backend.available is True
+        assert backend.health_snapshot["count"] == 9
+        assert backend.health_snapshot["last_error"] == ""
+        assert backend.health_snapshot["mempalace_version"] == "3.5.0"
+
+        failed = MemPalaceBackend(
+            {
+                "mempalace_transport": "http",
+                "mempalace_url": "http://127.0.0.1:8766",
+            }
+        )
+        with patch.object(
+            failed,
+            "_request_http_sync",
+            side_effect=ConnectionError("connection refused"),
+        ):
+            assert failed._ensure_mempalace() is False
+
+        assert failed.available is False
+        assert "connection refused" in failed.health_snapshot["last_error"]
+
+    @pytest.mark.asyncio
+    async def test_http_transport_updates_metadata_with_lane_scope(self):
+        backend = MemPalaceBackend(
+            {
+                "mempalace_transport": "http",
+                "mempalace_url": "http://127.0.0.1:8766",
+                "mempalace_wing": "askme",
+                "mempalace_room": "robot_behavior",
+            }
+        )
+        backend._http_healthy = True
+
+        with patch.object(
+            backend,
+            "_request_http_sync",
+            return_value={"ok": True, "count": 2},
+        ) as request:
+            updated = await backend.update_metadata(
+                "know_123",
+                {"wing": "other", "room": "customer_knowledge", "status": "active"},
+            )
+
+        assert updated is True
+        assert request.call_args.args[:2] == ("POST", "/v1/update")
+        payload = request.call_args.args[2]
+        assert payload["id"] == backend._drawer_id(
+            "", {"record_id": "know_123"}
+        )
+        assert payload["wing"] == "askme"
+        assert payload["room"] == "robot_behavior"
+        assert payload["metadata"]["wing"] == "askme"
+        assert payload["metadata"]["room"] == "robot_behavior"
 
 
 class TestMemoryBridgeMemPalace:

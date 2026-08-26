@@ -39,6 +39,7 @@ class StreamSplitter:
         first_sentence_min_len: int = 5,
         normal_comma_min_len: int = 15,
         emergency_max_len: int = 60,
+        early_first_chunk_min_len: int = 8,
     ) -> None:
         self._buffer: str = ""
         self._total_chars: int = 0
@@ -48,6 +49,13 @@ class StreamSplitter:
         self._first_min = first_sentence_min_len
         self._comma_min = normal_comma_min_len
         self._emergency_max = emergency_max_len
+        # Start the first TTS request promptly even when the model has not
+        # emitted punctuation yet. Later chunks still use normal boundaries.
+        self._early_first_min = max(0, int(early_first_chunk_min_len))
+        self._first_chunk_emitted = False
+        # The low-latency prefix has left ``_buffer`` but still belongs to the
+        # same clause until punctuation arrives.
+        self._pending_punctuation_chars = 0
 
     def feed(self, content: str) -> list[str]:
         """Feed a new token/chunk and return a list of complete sentences to speak.
@@ -59,12 +67,14 @@ class StreamSplitter:
         split at the **last** occurrence of the relevant punctuation so that
         text after it stays in the buffer for the next sentence.
         """
+        buffer_len_before = len(self._buffer)
         self._buffer += content
         self._total_chars += len(content)
 
         has_strong = any(p in content for p in _STRONG_PUNCT)
         has_medium = any(p in content for p in _MEDIUM_PUNCT)
         has_comma = any(c in content for c in _COMMAS)
+        punctuation_span_len = len(self._buffer) + self._pending_punctuation_chars
 
         split_pos = -1
 
@@ -73,28 +83,46 @@ class StreamSplitter:
             split_pos = self._rfind_any(self._buffer, _STRONG_PUNCT) + 1
 
         # Rule 2: Medium punctuation (;:) after 8+ chars
-        elif has_medium and len(self._buffer) > 8:
+        elif has_medium and punctuation_span_len > 8:
             split_pos = self._rfind_any(self._buffer, _MEDIUM_PUNCT) + 1
 
         # Rule 3: First sentence — aggressive comma split
         elif (
             has_comma
             and self._total_chars < self._first_threshold
-            and len(self._buffer) > self._first_min
+            and punctuation_span_len > self._first_min
         ):
             split_pos = self._rfind_any(self._buffer, _COMMAS) + 1
 
         # Rule 4: Normal comma split after 15 chars
-        elif has_comma and len(self._buffer) > self._comma_min:
+        elif has_comma and punctuation_span_len > self._comma_min:
             split_pos = self._rfind_any(self._buffer, _COMMAS) + 1
 
         # Rule 5: Emergency split — prevent infinite buffering
         if split_pos <= 0 and len(self._buffer) > self._emergency_max:
             split_pos = self._find_split_point(self._buffer)
 
+        # Low-latency first audio: send a short initial fragment as soon as
+        # enough model text is available, instead of waiting for punctuation.
+        early_split = False
+        if (
+            split_pos <= 0
+            and not self._first_chunk_emitted
+            and self._early_first_min > 0
+            and buffer_len_before > 0
+            and len(self._buffer) >= self._early_first_min
+        ):
+            split_pos = self._early_first_min
+            early_split = True
+
         if split_pos > 0:
             head = self._buffer[:split_pos].strip()
             self._buffer = self._buffer[split_pos:]
+            self._first_chunk_emitted = True
+            if early_split:
+                self._pending_punctuation_chars += split_pos
+            else:
+                self._pending_punctuation_chars = 0
             return [head] if head else []
 
         return []
@@ -130,12 +158,16 @@ class StreamSplitter:
         leftover = self._buffer.strip()
         self._buffer = ""
         self._total_chars = 0
+        self._first_chunk_emitted = False
+        self._pending_punctuation_chars = 0
         return leftover if leftover else None
 
     def reset(self) -> None:
         """Clear all internal state."""
         self._buffer = ""
         self._total_chars = 0
+        self._first_chunk_emitted = False
+        self._pending_punctuation_chars = 0
 
     def configure(
         self,

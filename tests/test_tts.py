@@ -10,6 +10,38 @@ import types
 import pytest
 
 
+def test_stop_playback_clears_stale_stop_request() -> None:
+    from askme.voice.tts import TTSEngine
+
+    engine = object.__new__(TTSEngine)
+    engine._playback_lock = threading.Lock()
+    engine._is_playing = False
+    engine._playback_thread = None
+    engine._stop_requested = threading.Event()
+    engine._stop_requested.set()
+    engine._kill_aplay = lambda: None
+    engine._kill_usb_audio = lambda: None
+
+    engine.stop_playback()
+
+    assert engine._stop_requested.is_set() is False
+
+
+def test_interrupted_tts_drops_late_streamed_text_until_next_playback() -> None:
+    from askme.voice.tts import TTSEngine
+
+    engine = object.__new__(TTSEngine)
+    engine._discard_text_until_restart = threading.Event()
+    engine._discard_text_until_restart.set()
+    engine.tts_text_queue = queue.Queue()
+    engine._generation = 4
+    engine._generation_lock = threading.Lock()
+
+    engine.speak("旧回答的后续分片")
+
+    assert engine.tts_text_queue.empty()
+
+
 def test_cloud_tts_coalesces_adjacent_response_fragments() -> None:
     from askme.voice.tts import TTSEngine
 
@@ -1124,3 +1156,98 @@ def test_aplay_drain_uses_configured_timeout_without_killing():
     assert engine._wait_for_aplay_drain(process) is True
     assert process.timeout == 30.0
     assert process.killed is False
+
+
+def test_queue_cached_pcm_resamples_into_normal_playback_buffer():
+    import numpy as np
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "sample_rate": 16000,
+            "output_tail_silence_seconds": 0.1,
+        }
+    )
+    try:
+        assert engine.queue_cached_pcm(
+            np.ones(800, dtype=np.float32) * 0.2,
+            8000,
+            cache_key="greeting",
+        )
+        with engine._buffer_lock:
+            speech, tail = list(engine.tts_buffer)
+    finally:
+        engine.shutdown()
+
+    assert len(speech) == 1600
+    assert np.allclose(speech, 0.2)
+    assert len(tail) == 1600
+    assert np.count_nonzero(tail) == 0
+
+
+def test_queue_cached_pcm_rejects_invalid_audio():
+    import numpy as np
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine({"backend": "edge"})
+    try:
+        assert engine.queue_cached_pcm(np.empty(0, dtype=np.float32), 16000) is False
+        assert engine.queue_cached_pcm(np.zeros((2, 2), dtype=np.float32), 16000) is False
+        assert engine.queue_cached_pcm(np.asarray([np.nan], dtype=np.float32), 16000) is False
+        assert not engine._has_buffered_audio()
+    finally:
+        engine.shutdown()
+
+
+def test_cached_phrase_queues_pcm_without_tts_provider(monkeypatch, tmp_path):
+    import numpy as np
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine(
+        {
+            "backend": "edge",
+            "sample_rate": 16000,
+            "output_tail_silence_seconds": 0.0,
+            "phrase_cache_dir": str(tmp_path),
+        }
+    )
+    text = "\u4f60\u597d\uff0c\u6709\u4ec0\u4e48\u53ef\u4ee5\u5e2e\u60a8\uff1f"
+    storage_key = engine._phrase_cache_storage_key(text, "greeting")
+    assert engine._phrase_cache.put(
+        storage_key,
+        np.ones(320, dtype=np.float32) * 0.1,
+        16000,
+    )
+    monkeypatch.setattr(
+        engine,
+        "_generate_audio",
+        lambda *_args, **_kwargs: pytest.fail(
+            "cached phrase must not call a TTS provider"
+        ),
+    )
+    try:
+        assert engine.queue_cached_phrase(text, cache_key="greeting") is True
+        with engine._buffer_lock:
+            queued = engine.tts_buffer.popleft()
+    finally:
+        engine.shutdown()
+
+    assert len(queued) == 320
+    assert np.allclose(queued, 0.1)
+
+
+def test_drain_buffers_clears_cached_pcm_and_advances_generation():
+    import numpy as np
+    from askme.voice.tts import TTSEngine
+
+    engine = TTSEngine({"backend": "edge"})
+    try:
+        generation = engine._get_generation()
+        assert engine.queue_cached_pcm(np.ones(32, dtype=np.float32), 24000)
+        engine.drain_buffers()
+
+        assert engine._get_generation() > generation
+        assert not engine._has_buffered_audio()
+    finally:
+        engine.shutdown()

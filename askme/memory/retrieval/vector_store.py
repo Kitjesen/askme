@@ -2,8 +2,11 @@
 
 Uses ``fastembed.TextEmbedding`` (ONNX Runtime, no PyTorch) instead of the
 heavy ``sentence_transformers`` (which pulls in torch/transformers — ~17 s
-import alone).  FastEmbed loads the same ``paraphrase-multilingual-MiniLM-L12-v2``
-model via ONNX in under a second after the initial model download.
+import alone). Runtime loading is strict ``local_files_only``: deployments must
+pre-populate the ``Qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q``
+snapshot in ``FASTEMBED_CACHE_PATH`` or the system temporary directory's
+``fastembed_cache``. The snapshot must contain the ONNX model plus its config
+and tokenizer artifacts; startup and retrieval never download them.
 
 Graceful degradation: works without fastembed installed —
 ``available`` returns False and all queries return empty results.
@@ -17,6 +20,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -36,9 +41,17 @@ _MODEL_LOCK = threading.Lock()
 
 # fastembed canonical model name for the same architecture.
 _FASTEMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+_FASTEMBED_HF_REPO = "qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q"
+_FASTEMBED_REQUIRED_ARTIFACTS = (
+    "config.json",
+    "model_optimized.onnx",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+)
 
 
-def _check_st_available() -> bool:
+def _check_fastembed_available() -> bool:
     """Check if fastembed is importable (cached after first call)."""
     global _FE_AVAILABLE
     if _FE_AVAILABLE is not None:
@@ -50,6 +63,85 @@ def _check_st_available() -> bool:
     except ImportError:
         _FE_AVAILABLE = False
     return _FE_AVAILABLE
+
+
+def _fastembed_model_status(
+    *,
+    cache_dir: str | Path | None = None,
+    dependency_installed: bool | None = None,
+) -> dict[str, Any]:
+    """Return a network-free snapshot of local FastEmbed model readiness.
+
+    FastEmbed stores this model in the Hugging Face cache rooted at its own
+    cache directory. Resolve the standard cache layout directly so readiness
+    checks do not depend on a particular ``huggingface_hub`` API version.
+    Requiring every artifact consumed by FastEmbed's ONNX text loader avoids
+    treating an installed wheel as a runnable embedding backend.
+    """
+
+    installed = (
+        _check_fastembed_available()
+        if dependency_installed is None
+        else bool(dependency_installed)
+    )
+    resolved_cache = Path(
+        cache_dir
+        or os.getenv("FASTEMBED_CACHE_PATH")
+        or (Path(tempfile.gettempdir()) / "fastembed_cache")
+    ).expanduser()
+    status: dict[str, Any] = {
+        "dependency_installed": installed,
+        "model": _FASTEMBED_MODEL,
+        "source_repo": _FASTEMBED_HF_REPO,
+        "cache_dir": str(resolved_cache),
+        "ready": False,
+        "cached": False,
+        "model_path": "",
+        "missing_artifacts": list(_FASTEMBED_REQUIRED_ARTIFACTS),
+        "reason": "dependency_missing" if not installed else "model_artifacts_missing",
+        "check_mode": "huggingface_local_cache",
+        "network_checked": False,
+    }
+    if not installed:
+        return status
+    if _FASTEMBED_MODEL in _MODEL_CACHE:
+        status.update(
+            ready=True,
+            cached=True,
+            missing_artifacts=[],
+            reason="model_loaded",
+        )
+        return status
+
+    resolved: dict[str, Path] = {}
+    try:
+        repo_cache = resolved_cache / f"models--{_FASTEMBED_HF_REPO.replace('/', '--')}"
+        revision = (repo_cache / "refs" / "main").read_text(encoding="utf-8").strip()
+        if revision and Path(revision).name == revision and revision not in {".", ".."}:
+            snapshot = repo_cache / "snapshots" / revision
+            for filename in _FASTEMBED_REQUIRED_ARTIFACTS:
+                artifact = snapshot / filename
+                if artifact.is_file() and artifact.stat().st_size > 0:
+                    resolved[filename] = artifact
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        status["reason"] = f"local_cache_error:{type(exc).__name__}"
+        return status
+
+    missing = [
+        name for name in _FASTEMBED_REQUIRED_ARTIFACTS if name not in resolved
+    ]
+    status["missing_artifacts"] = missing
+    if missing:
+        return status
+    status.update(
+        ready=True,
+        cached=True,
+        model_path=str(resolved["model_optimized.onnx"].parent),
+        reason="local_model_ready",
+    )
+    return status
 
 
 def _top_score_indices(scores: np.ndarray, top_k: int) -> np.ndarray:
@@ -100,9 +192,21 @@ class VectorStore:
     # -- Properties -----------------------------------------------------------
 
     @property
+    def dependency_installed(self) -> bool:
+        """Whether the FastEmbed Python dependency is installed."""
+        return _check_fastembed_available()
+
+    @property
+    def model_status(self) -> dict[str, Any]:
+        """Return network-free local model readiness evidence."""
+        return _fastembed_model_status(
+            dependency_installed=self.dependency_installed,
+        )
+
+    @property
     def available(self) -> bool:
-        """Whether the ONNX embedding backend is installed and usable."""
-        return _check_st_available()
+        """Whether FastEmbed and its required local model are usable."""
+        return bool(self.model_status["ready"])
 
     @property
     def size(self) -> int:
@@ -121,7 +225,7 @@ class VectorStore:
         if self._model is not None:
             return self._model
 
-        if not _check_st_available():
+        if not _check_fastembed_available():
             raise RuntimeError("fastembed is not installed (pip install fastembed)")
 
         cache_key = _FASTEMBED_MODEL
@@ -139,6 +243,7 @@ class VectorStore:
                     cache_key,
                     providers=["CPUExecutionProvider"],
                     cuda=False,
+                    local_files_only=True,
                 )
                 elapsed = (time.perf_counter() - t0) * 1000
                 logger.info(
@@ -163,7 +268,7 @@ class VectorStore:
 
         No-ops when the embedding backend is unavailable.
         """
-        if not _check_st_available():
+        if not _check_fastembed_available():
             return
         if not text.strip():
             return
@@ -188,7 +293,7 @@ class VectorStore:
         Returns a list of dicts: ``{"text": ..., "score": ..., "metadata": ...}``.
         Returns empty list when unavailable or empty.
         """
-        if not _check_st_available() or self._embeddings is None or not query.strip():
+        if not _check_fastembed_available() or self._embeddings is None or not query.strip():
             return []
 
         try:

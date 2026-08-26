@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from .audio_filter import AudioFilter
+from .echo_canceller import SpeexEchoCanceller
 from .noise_reduction import NoiseGateCalibrator, SpectralSubtractor
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,9 @@ class AudioProcessor:
             calibration_frames: int (default 20)
         noise_gate_peak: int | "auto"  (default 0, 0=disabled)
         echo_gate_peak: int            (default 0, 0=disabled)
+        echo_cancellation:
+            enabled: bool              (default False)
+            backend: str               (currently "speexdsp")
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -67,6 +71,19 @@ class AudioProcessor:
         # --- Echo gate ---
         self._echo_gate_peak: int = int(cfg.get("echo_gate_peak", 0))
 
+        # --- Software acoustic echo cancellation ---
+        sample_rate = int(cfg.get("asr", {}).get("sample_rate", 16000))
+        aec_cfg = cfg.get("echo_cancellation") or {}
+        if str(aec_cfg.get("backend", "speexdsp")).lower() != "speexdsp":
+            logger.warning("Unsupported software AEC backend=%s; disabling", aec_cfg.get("backend"))
+            aec_cfg = {**aec_cfg, "enabled": False}
+        self._aec = SpeexEchoCanceller(aec_cfg, sample_rate)
+
+    @property
+    def echo_reference(self) -> Any | None:
+        """Shared playback reference used by the TTS output path."""
+        return self._aec.reference
+
     # ------------------------------------------------------------------
     # Main processing entry point
     # ------------------------------------------------------------------
@@ -96,15 +113,21 @@ class AudioProcessor:
         if self._filter is not None:
             samples = self._filter.process(samples)
 
-        # Step 2: float32 -> int16 + peak
+        # Step 2: float32 -> int16
         samples_int16 = (samples * 32767).clip(-32768, 32767).astype(np.int16)
-        peak = int(np.max(np.abs(samples_int16)))
 
-        # Step 3: Spectral subtraction (operates on int16, returns int16)
+        # Step 3: remove the speaker signal before VAD/ASR.  The reference is
+        # published by TTS immediately before/while it feeds the speaker.
+        if self._aec.enabled:
+            samples_int16 = self._aec.process(samples_int16)
+            samples = samples_int16.astype(np.float32) / 32767.0
+        peak = int(np.max(np.abs(samples_int16))) if len(samples_int16) else 0
+
+        # Step 4: Spectral subtraction (operates on int16, returns int16)
         if self._subtractor is not None and self._subtractor.calibrated:
             samples_int16 = self._subtractor.process(samples_int16)
 
-        # Step 4: Echo gate — suppress low-energy mic during TTS playback.
+        # Step 5: Echo gate — legacy fallback for boards without AEC.
         # Do NOT gate once speech_active=True (barge-in already confirmed).
         echo_gated = (
             tts_active

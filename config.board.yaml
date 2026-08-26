@@ -33,7 +33,7 @@ brain:
   persona:
     robot_name: 小算
     product_name: 巨龙科创e谷智能服务系统
-    customer_name: 巨龙科创e谷
+    customer_name: 聚龙科创e谷
     operator_audience: 巨龙科创e谷的园区访客、物业运营和巡检人员
     role: 大算机器人公司生产的导览与巡检机器狗
     ownership_label: 生产方是大算机器人公司；服务单位是巨龙科创e谷；方总是巨龙科创e谷的老板，也是小算的老板；方总不是大算机器人公司的老板，绝不能混淆
@@ -43,7 +43,7 @@ brain:
   # Text/admin turns can use up to this cap; voice turns use voice_max_tokens below.
   max_tokens: 200
   # Voice turns need short replies — cap tokens tightly to keep TTFT low.
-  voice_max_tokens: 50
+  voice_max_tokens: 32
   temperature: 0.7
   # Resilience: timeout, retry, model fallback.
   # Voice turns need fast-fail; keep timeout tight and retries low.
@@ -84,19 +84,13 @@ brain:
 # Memory: MemU / Embedding
 # ----------------------------------------------------------
 memory:
-  # Product default:
-  # - customer knowledge RAG uses a locally inspectable backend first.
-  # - robot long-term behavior memory is a separate RobotMem lane.
-  # Do not mix customer evidence with robot behavior memory.
+  # MemPalace is the persistent store for both product roles. The rooms stay
+  # separate so behavior preferences can never become customer RAG evidence.
   enabled: true
-  # Customer knowledge backend: "vector" or "mempalace".
-  # Keep the inspectable local vector backend as the production default.
-  # MemPalace remains available as an optional backend from the control plane.
-  backend: vector
-  customer_knowledge_backend: vector
-  # RobotMem is reserved for robot long-term behavior memory, not customer RAG evidence.
-  robot_behavior_memory_backend: robotmem
-  robot_behavior_memory_enabled: false
+  backend: mempalace
+  customer_knowledge_backend: mempalace
+  robot_behavior_memory_backend: mempalace
+  robot_behavior_memory_enabled: true
   auto_backend_order: [mempalace, vector, robotmem, mem0]
   robotmem_fallback_backend: vector
   mempalace_fallback_backend: vector
@@ -121,10 +115,17 @@ memory:
   # RobotMem settings (used when backend: robotmem)
   robotmem_collection: askme
   # robotmem_db_path: null  # default: ~/.robotmem/memory.db
-  # MemPalace settings (used when backend: mempalace)
-  mempalace_palace_path: data/memory/mempalace
+  # MemPalace runs in an isolated local sidecar so its native dependencies do
+  # not change the latency-sensitive AskMe environment.
+  mempalace_transport: http
+  mempalace_url: http://127.0.0.1:8766
+  mempalace_palace_path: data/memory/mempalace/palace
+  mempalace_collection_name: askme
   mempalace_wing: askme
-  mempalace_room: robot
+  mempalace_room: customer_knowledge
+  mempalace_behavior_wing: askme
+  mempalace_behavior_room: robot_behavior
+  mempalace_embedding_model: embeddinggemma
   mempalace_n_results: 5
   mempalace_min_similarity: 0.3
   knowledge_index_jobs:
@@ -161,6 +162,19 @@ conversation:
 voice:
   # Non-secret live selections persisted by the management console.
   control_state_path: data/voice/system_control.json
+  playback:
+    enabled: true
+    robot_id: xiaosuan-1
+    device_id: xiaosuan-1
+    site_id: julong-tech-e-valley
+    max_queue_size: 32
+    max_text_chars: 500
+    artifact_dir: artifacts/voice/playback
+    ledger_path: data/voice/playback_ledger.json
+    max_history: 500
+    mcp_enabled: true
+    mcp_operator_id: askme.mcp
+    mcp_roles: [operator]
   product_readiness:
     # Unattended product deployments must not treat ambient speech as a turn.
     require_wake_word: true
@@ -170,6 +184,13 @@ voice:
   # KWS can be skipped briefly for a natural answer to the assistant's last
   # question. This is a weak listening window, not permission to reply.
   wake_timeout: 30.0
+  # Product-safe default: speech heard during playback is treated as ambient
+  # until the wake word authorizes the interruption. Switch to "speech" only
+  # after full-duplex capture, AEC, and false-trigger field tests pass.
+  barge_in_mode: keyword
+  # During TTS, only a detected "小算" may interrupt playback. Retain
+  # enough AEC-cleaned audio to preserve a command attached to the keyword.
+  barge_in_pre_roll_s: 1.2
   # Host-specific device routing. These values are applied only on Windows;
   # Linux robot deployments continue to use the generic settings below.
   platform_overrides:
@@ -226,6 +247,14 @@ voice:
     sample_rate: 16000
     buffer_size_seconds: 30
 
+  # Exact safe phrases may close from a stable streaming partial after a
+  # short low-energy tail. Physical-action commands stay on the normal path.
+  fast_path:
+    enabled: true
+    candidate_silence_ms: 300
+    stable_partial_ms: 160
+    quiet_peak_threshold: 500
+
   # Noise gate: skip VAD when mic peak is below threshold (not in active speech).
   # Prevents USB mic noise floor from triggering Silero VAD continuously.
   # On sunrise MCP01: noise floor ~100-200, speech ~1000+. Set 0 to disable.
@@ -235,18 +264,25 @@ voice:
 
   # MCP01 direct capture hears playback tail/noise for a few seconds after TTS.
   # Discard that tail so Sunrise does not recognize its own answer as a user turn.
-  post_tts_input_cooldown_s: 3.0
+  # Keep a short guard against speaker loopback without delaying the ready cue.
+  post_tts_input_cooldown_s: 1.0
   # Audible turn-taking cues: the existing acknowledge chime plays after an
   # admitted utterance; this distinct ready tone plays when follow-up input opens.
   ready_chime_enabled: true
   ready_chime_min_interval_s: 0.0
 
-  # Echo gate: suppress mic during TTS playback when peak < threshold.
-  # Sunrise currently has no separate ALSA/HKMIC input; the MCP01 direct
-  # capture sees the speaker loopback itself, often peaking above 20k. Gate
-  # that echo during playback so the assistant's own answer is not treated as
-  # user barge-in. Set lower only after a real separate user mic is verified.
-  echo_gate_peak: 65535
+  # Software AEC: use the speaker PCM as a reference and remove its acoustic
+  # return from the microphone before VAD/ASR.
+  echo_cancellation:
+    enabled: true
+    backend: speexdsp
+    frame_ms: 10
+    filter_length_ms: 500
+    playback_delay_ms: 250
+
+  # Legacy amplitude gate. Disabled when software AEC is active so barge-in
+  # remains possible while the robot is speaking.
+  echo_gate_peak: 0
 
   # Cloud ASR primary with local sherpa-onnx fallback.
   cloud_asr:
@@ -373,8 +409,10 @@ voice:
     backend: minimax
     # Merge punctuation-split LLM fragments before one cloud TTS request.
     # This trades about one second of initial latency for continuous speech.
-    text_coalesce_seconds: 0.35
+    text_coalesce_seconds: 0.12
     text_coalesce_max_chars: 120
+    phrase_cache_enabled: true
+    phrase_cache_dir: ~/.cache/askme/voice_phrases
     # Keep speech available when a cloud provider is out of balance or offline.
     fallback_backend: local
     # Local backend settings (MeloTTS: 44100Hz, natural Chinese)
@@ -394,7 +432,7 @@ voice:
     # WebSocket uses the Speech 2.8 T2A task_start/task_continue/task_finish flow.
     minimax_api_key: ${MINIMAX_API_KEY}
     minimax_tts_url: https://api.minimax.chat/v1
-    minimax_tts_transport: websocket
+    minimax_tts_transport: sse
     # China account/key uses minimaxi.com; global accounts can use api.minimax.io.
     minimax_tts_ws_url: wss://api.minimaxi.com/ws/v1/t2a_v2
     minimax_tts_model: speech-2.8-turbo
@@ -459,7 +497,7 @@ voice:
     output_tail_silence_seconds: 0.25
     # Buffer enough streamed speech before opening aplay to absorb provider
     # jitter. Short replies play as soon as synthesis completes.
-    aplay_start_buffer_seconds: 1.5
+    aplay_start_buffer_seconds: 0.25
     # The board's USB speaker still truncates streamed utterances after ALSA
     # underruns, so prioritize complete playback over lowest possible latency.
     aplay_wait_for_synthesis_complete: false
@@ -480,6 +518,24 @@ voice:
     # direct USB playback if Sunrise exposes no ALSA card; "usb_direct" forces
     # the fallback path for the Lenovo MCP01 USB Audio speaker.
     output_transport: aplay
+    # Resident low-latency output is deployed behind an explicit hardware gate.
+    # It reuses one native 48 kHz stereo stream and supports generation-scoped
+    # cancellation, but must not hold the output device until simultaneous
+    # capture/playback and AEC have been verified on this board.
+    resident_output_enabled: false
+    resident_output_full_duplex_verified: false
+    resident_output_sample_rate: 48000
+    resident_output_channels: 2
+    resident_output_period_ms: 10
+    resident_output_buffer_ms: 80
+    resident_output_idle_keepalive: false
+    resident_output_warm_hold_seconds: 45.0
+    resident_output_idle_dither_lsb: 0
+    # Cold open pays a short guard once; verified hot turns retain only the
+    # anti-clipping lead-in. These replace the legacy 1.5 s guard after field
+    # acceptance, rather than silently changing hardware behavior today.
+    resident_output_cold_preroll_ms: 250
+    resident_output_warm_leadin_ms: 80
     # MCP01 wakes slowly when opened through direct USB. Keep one userland USB
     # playback helper alive for the response so the first word does not sit on a
     # fresh stream boundary.
@@ -802,6 +858,10 @@ field_operations:
         - runtime:resume
         - skill:read
         - voice:profile:read
+        - voice:playback:create
+        - voice:playback:read
+        - voice:playback:cancel
+        - voice:synthesis:create
       supervisor:
         - audit:read
         - audit:export
@@ -829,8 +889,13 @@ field_operations:
         - skill:read
         - skill:review
         - voice:profile:read
+        - voice:playback:create
+        - voice:playback:read
+        - voice:playback:cancel
+        - voice:synthesis:create
         - voice:profile:update
         - voice:system:update
+        - voice:playback:override
       product_owner:
         - audit:read
         - field:project:read
@@ -1021,6 +1086,10 @@ runtime_handoff:
 # Runtime: NOVA Dog runtime bridge
 # ----------------------------------------------------------
 runtime:
+  navigation:
+    # Read-only LingTu status/position queries. This does not enable motion.
+    base_url: http://127.0.0.1:5050
+
   voice_bridge:
     # Requires askme-edge-service running locally
     # Set true when connected to NOVA Dog runtime stack

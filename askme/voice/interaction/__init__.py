@@ -6,6 +6,26 @@ from importlib import import_module
 from typing import Any
 
 _LAZY_EXPORTS = {
+    "FastVoiceIntent": (
+        "askme.robot_interaction.fast_path.voice_intents",
+        "FastVoiceIntent",
+    ),
+    "FastVoiceIntentKind": (
+        "askme.robot_interaction.fast_path.voice_intents",
+        "FastVoiceIntentKind",
+    ),
+    "default_cached_phrases": (
+        "askme.robot_interaction.fast_path.voice_intents",
+        "default_cached_phrases",
+    ),
+    "match_fast_voice_intent": (
+        "askme.robot_interaction.fast_path.voice_intents",
+        "match_fast_voice_intent",
+    ),
+    "normalize_fast_voice_text": (
+        "askme.robot_interaction.fast_path.voice_intents",
+        "normalize_fast_voice_text",
+    ),
     "InteractionAction": ("askme.robot_interaction.interaction_gate", "InteractionAction"),
     "InteractionDecision": ("askme.robot_interaction.interaction_gate", "InteractionDecision"),
     "InteractionGate": ("askme.robot_interaction.interaction_gate", "InteractionGate"),

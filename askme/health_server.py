@@ -1117,6 +1117,48 @@ class AskmeHealthServer:
     async def update_prompt_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._dispatch_voice_handler("update_prompt_payload", payload)
 
+    async def speak_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._dispatch_voice_handler("speak_payload", payload)
+
+    async def synthesize_speech_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._dispatch_voice_handler("synthesize_speech_payload", payload)
+
+    async def speech_playback_audio_payload(
+        self,
+        playback_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._dispatch_voice_handler(
+            "speech_playback_audio_payload",
+            playback_id,
+            payload or {},
+        )
+
+    async def speech_playback_status_payload(
+        self,
+        playback_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._dispatch_voice_handler(
+            "speech_playback_status_payload",
+            playback_id,
+            payload or {},
+        )
+
+    async def cancel_speech_playback_payload(
+        self,
+        playback_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._dispatch_voice_handler(
+            "cancel_speech_playback_payload",
+            playback_id,
+            payload,
+        )
+
     async def runtime_context_payload(self) -> dict[str, Any]:
         return await self._dispatch_runtime_handler("context_payload")
 

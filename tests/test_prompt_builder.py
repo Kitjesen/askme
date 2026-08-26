@@ -108,6 +108,18 @@ class TestBuildSystemPrompt:
         assert "Some memory context" in result
         assert "Relevant memory" in result
 
+    def test_behavior_context_is_personalization_not_customer_evidence(self):
+        pb = _make_builder()
+        result = pb.build_system_prompt(
+            "[route] lobby is on level one",
+            behavior_context="\u7528\u6237\u559c\u6b22\u88ab\u79f0\u4e3a\u8001\u5f20",
+        )
+
+        assert "[\u957f\u671f\u4ea4\u4e92\u8bb0\u5fc6]" in result
+        assert "\u7528\u6237\u559c\u6b22\u88ab\u79f0\u4e3a\u8001\u5f20" in result
+        assert "\u4e0d\u5f97\u4f5c\u4e3a\u8def\u7ebf" in result
+        assert result.index("Relevant memory:") < result.index("[\u957f\u671f\u4ea4\u4e92\u8bb0\u5fc6]")
+
     def test_rag_policy_conflict_adds_answer_guard(self):
         pb = _make_builder()
         result = pb.build_system_prompt(

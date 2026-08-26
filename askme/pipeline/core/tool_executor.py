@@ -51,6 +51,7 @@ class ToolExecutor:
         prompt_builder: PromptBuilder,
         stream_and_speak: _StreamAndSpeakFn,
         hooks: PipelineHooks | None = None,
+        cancel_token: Any | None = None,
     ) -> None:
         self._tools = tools
         self._conversation = conversation
@@ -59,6 +60,10 @@ class ToolExecutor:
         self._prompt_builder = prompt_builder
         self._stream_and_speak = stream_and_speak
         self._hooks = hooks
+        self._cancel_token = cancel_token
+
+    def _is_cancelled(self) -> bool:
+        return bool(self._cancel_token is not None and self._cancel_token.is_set())
 
     async def execute_tools(
         self,
@@ -79,6 +84,10 @@ class ToolExecutor:
              enters the conversation (like Claude Code's PostToolUse hook).
           4. Produce an immutable ``ToolCallRecord`` for hook context.
         """
+        if self._is_cancelled():
+            logger.info("Turn cancelled before tool execution")
+            return ""
+
         logger.info("Tool calls: %d detected", len(tool_calls_acc))
 
         tool_call_objs = []
@@ -111,17 +120,25 @@ class ToolExecutor:
                         "  [pre_tool hook] %s intercepted by hook, result overridden", tool_name
                     )
 
+            if self._is_cancelled():
+                logger.info("Turn cancelled during pre-tool processing; skipping tool")
+                return ""
+
             if hook_override is not None:
                 result = hook_override
                 elapsed_ms = 0.0
             else:
                 t0 = _time.perf_counter()
                 try:
+                    execution_control = {}
+                    if self._cancel_token is not None:
+                        execution_control["cancel_token"] = self._cancel_token
                     result = await asyncio.to_thread(
                         self._tools.execute,
                         tool_name,
                         tool_args,
                         max_safety_level=self._general_tool_max_safety_level,
+                        **execution_control,
                     )
                 except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041
                     logger.error(
@@ -133,6 +150,10 @@ class ToolExecutor:
                     )
                     timed_out = True
                 elapsed_ms = (_time.perf_counter() - t0) * 1000
+
+            if self._is_cancelled():
+                logger.info("Turn cancelled after tool '%s'; discarding its result", tool_name)
+                return ""
 
             logger.info("  <- %s", result)
             if self._episodic:
@@ -147,6 +168,10 @@ class ToolExecutor:
                 )
                 result = await self._hooks.fire_post_tool(record)
 
+            if self._is_cancelled():
+                logger.info("Turn cancelled after post-tool processing; dropping result")
+                return ""
+
             tool_call_objs.append({
                 "id": call_id,
                 "type": "function",
@@ -156,6 +181,10 @@ class ToolExecutor:
             if self._tools.has_pending_approval():
                 approval_response = str(result)
                 break
+
+        if self._is_cancelled():
+            logger.info("Turn cancelled before recording tool exchange")
+            return ""
 
         if approval_response is not None:
             # Do NOT record to history when approval is pending;
@@ -180,6 +209,9 @@ class ToolExecutor:
             conversation_messages,
             source=source,
         )
+        if self._is_cancelled():
+            logger.info("Turn cancelled before follow-up LLM")
+            return ""
         return await self._stream_and_speak(follow_msgs, model=model, source=source)
 
     async def respond_without_llm(
@@ -212,7 +244,12 @@ class ToolExecutor:
         source: str = "voice",
     ) -> str | None:
         """Resolve or restate the pending dangerous tool based on user input."""
-        result = self._tools.handle_pending_input(user_text)
+        execution_control = {}
+        if self._cancel_token is not None:
+            execution_control["cancel_token"] = self._cancel_token
+        result = self._tools.handle_pending_input(user_text, **execution_control)
+        if self._is_cancelled():
+            return ""
         if result is None:
             return None
         return await self.respond_without_llm(

@@ -69,6 +69,7 @@ def bind_runtime_app_to_context(ctx: AppContext, runtime_app: Any) -> AppContext
     ctx.robot_enabled = ctx.arm_controller is not None
 
     _bind_voice(ctx, voice_mod)
+    ctx.speech_playback = _pick(voice_mod, "speech_playback")
     return ctx
 
 

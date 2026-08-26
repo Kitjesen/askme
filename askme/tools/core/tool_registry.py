@@ -73,6 +73,7 @@ _DEFAULT_JOB_HISTORY_LIMIT = 100
 _DEFAULT_RATE_LIMIT_PER_MINUTE = 0.0
 _DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
 _DEFAULT_CIRCUIT_COOLDOWN_SECONDS = 30.0
+_CANCEL_POLL_SECONDS = 0.02
 _DEFAULT_PRIORITY_BY_SAFETY = {
     "critical": 0,
     "dangerous": 50,
@@ -116,6 +117,24 @@ class ToolExecutionTimeoutError(TimeoutError):
     """Raised when a tool exceeds its configured execution timeout."""
 
 
+class ToolExecutionCancelledError(RuntimeError):
+    """Raised after a turn interruption isolates a running tool result."""
+
+    def __init__(
+        self,
+        tool_name: str,
+        *,
+        cooperative_cancel_requested: bool,
+        side_effect_class: str,
+        cancelled_before_start: bool = False,
+    ) -> None:
+        super().__init__(tool_name)
+        self.tool_name = tool_name
+        self.cooperative_cancel_requested = cooperative_cancel_requested
+        self.side_effect_class = side_effect_class
+        self.cancelled_before_start = cancelled_before_start
+
+
 @dataclass
 class PendingToolApproval:
     """A dangerous tool invocation waiting for explicit operator approval."""
@@ -149,10 +168,14 @@ class BaseTool(ABC):
     safety_level: str = "normal"  # normal | dangerous | critical
     dev_only: bool = False  # if True, excluded when production_mode=True
     agent_allowed: bool = False  # if True, available in ThunderAgentShell
+    read_only: bool = False  # if True, direct status-query skills may call it without an LLM
     voice_label: str = ""  # Chinese TTS label (e.g. "观察环境"), empty = no announce
     queue_priority: int | None = None
     rate_limit_per_minute: float | None = None
     backgroundable: bool = False
+    cancelable: bool = False
+    cancel_on_turn_interrupt: bool = False
+    side_effect_class: str = "none"
 
     @abstractmethod
     def execute(self, **kwargs: Any) -> str:
@@ -173,6 +196,15 @@ class BaseTool(ABC):
                 "parameters": self.parameters or {"type": "object", "properties": {}},
             },
         }
+
+    def request_cancel(self, reason: str) -> bool:
+        """Request a graceful stop of work already started by this tool.
+
+        Tools must explicitly set ``cancelable`` and implement this method.
+        Returning ``True`` means the downstream stop request was accepted; it
+        does not claim that hardware has already reached a stopped state.
+        """
+        return False
 
 
 class ToolRegistry:
@@ -422,7 +454,12 @@ class ToolRegistry:
             return False
         return self._phrase_set_matches(text, self._rejection_phrases)
 
-    def handle_pending_input(self, text: str) -> str | None:
+    def handle_pending_input(
+        self,
+        text: str,
+        *,
+        cancel_token: Any | None = None,
+    ) -> str | None:
         """Resolve or restate the pending high-risk action for arbitrary operator input."""
         expired = self._expire_pending_approval()
         if expired is not None:
@@ -433,12 +470,12 @@ class ToolRegistry:
             return None
 
         if self._phrase_set_matches(text, self._confirmation_phrases):
-            return self.approve_pending()
+            return self.approve_pending(cancel_token=cancel_token)
         if self._phrase_set_matches(text, self._rejection_phrases):
             return self.reject_pending()
         return self._format_approval_pending(pending)
 
-    def approve_pending(self) -> str:
+    def approve_pending(self, *, cancel_token: Any | None = None) -> str:
         """Execute the currently pending dangerous tool invocation."""
         expired = self._expire_pending_approval()
         if expired is not None:
@@ -463,7 +500,12 @@ class ToolRegistry:
         guard_error = self._get_operational_guard_error(tool, consume_rate=True)
         if guard_error:
             return guard_error
-        return self._execute_tool(tool, pending.kwargs, timeout=self._resolve_timeout(tool, None))
+        return self._execute_tool(
+            tool,
+            pending.kwargs,
+            timeout=self._resolve_timeout(tool, None),
+            cancel_token=cancel_token,
+        )
 
     def reject_pending(self) -> str:
         """Cancel the currently pending dangerous tool invocation."""
@@ -489,6 +531,7 @@ class ToolRegistry:
         allowed_names: Iterable[str] | None = None,
         max_safety_level: str = "critical",
         timeout: float | None = None,
+        cancel_token: Any | None = None,
     ) -> str:
         """Execute a tool by name with JSON-encoded arguments."""
         tool = self._tools.get(name)
@@ -503,6 +546,8 @@ class ToolRegistry:
         )
         if access_error:
             return access_error
+        if self._is_cancelled(cancel_token):
+            return f"[Cancelled] Tool '{name}' was not started."
 
         try:
             kwargs = json.loads(args_json) if args_json else {}
@@ -550,6 +595,24 @@ class ToolRegistry:
             tool,
             kwargs,
             timeout=self._resolve_timeout(tool, timeout),
+            cancel_token=cancel_token,
+        )
+
+    def request_cancel(
+        self,
+        name: str,
+        *,
+        reason: str = "operator_cancelled",
+        turn_interrupt: bool = False,
+    ) -> bool:
+        """Request graceful cancellation only for explicitly opted-in tools."""
+        tool = self._tools.get(name)
+        if tool is None:
+            return False
+        return self._request_tool_cancel(
+            tool,
+            reason=reason,
+            turn_interrupt=turn_interrupt,
         )
 
     def submit_background(
@@ -670,6 +733,7 @@ class ToolRegistry:
         kwargs: dict[str, Any],
         *,
         timeout: float,
+        cancel_token: Any | None = None,
     ) -> str:
         safety = _normalize_safety_level(tool.safety_level)
         try:
@@ -680,7 +744,14 @@ class ToolRegistry:
                 safety,
                 timeout,
             )
-            raw_result = str(self._run_with_timeout(tool, kwargs, timeout=timeout))
+            raw_result = str(
+                self._run_with_timeout(
+                    tool,
+                    kwargs,
+                    timeout=timeout,
+                    cancel_token=cancel_token,
+                )
+            )
             result = self._format_tool_result(raw_result)
             self._audit_tool_result(tool, kwargs, result)
             self._circuit_breaker.record_success(tool.name)
@@ -698,6 +769,23 @@ class ToolRegistry:
                     f"is unavailable for {self._timeout_cooldown:.0f}s."
                 )
             return f"[Timeout] Tool '{tool.name}' exceeded {timeout:.1f}s."
+        except ToolExecutionCancelledError as exc:
+            logger.warning(
+                "Tool turn interrupted: %s [side_effect=%s cooperative_cancel=%s]",
+                tool.name,
+                exc.side_effect_class,
+                exc.cooperative_cancel_requested,
+            )
+            continuation = (
+                "cancelled before start"
+                if exc.cancelled_before_start
+                else (
+                    "graceful stop requested"
+                    if exc.cooperative_cancel_requested
+                    else "underlying work may continue"
+                )
+            )
+            return f"[Cancelled] Tool '{tool.name}' result isolated; {continuation}."
         except Exception as exc:
             self._circuit_breaker.record_failure(tool.name)
             logger.exception("Tool execution failed: %s", tool.name)
@@ -989,8 +1077,9 @@ class ToolRegistry:
         kwargs: dict[str, Any],
         *,
         timeout: float,
+        cancel_token: Any | None = None,
     ) -> str:
-        if timeout <= 0:
+        if timeout <= 0 and cancel_token is None:
             return str(tool.execute(**kwargs))
 
         # Use concurrent.futures so the result and exception live in the
@@ -1002,11 +1091,72 @@ class ToolRegistry:
             kwargs,
             priority=self._resolve_priority(tool),
         )
+        deadline = time.monotonic() + timeout if timeout > 0 else None
+        while True:
+            if self._is_cancelled(cancel_token):
+                cancelled_before_start = future.cancel()
+                requested = False
+                if not cancelled_before_start:
+                    requested = self._request_tool_cancel(
+                        tool,
+                        reason="turn_interrupted",
+                        turn_interrupt=True,
+                    )
+                raise ToolExecutionCancelledError(
+                    tool.name,
+                    cooperative_cancel_requested=requested,
+                    side_effect_class=str(getattr(tool, "side_effect_class", "none")),
+                    cancelled_before_start=cancelled_before_start,
+                )
+
+            wait_seconds = _CANCEL_POLL_SECONDS
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    future.cancel()
+                    raise ToolExecutionTimeoutError(tool.name)
+                wait_seconds = min(wait_seconds, remaining)
+
+            try:
+                result = str(future.result(timeout=wait_seconds))
+            except _FuturesTimeoutError:
+                continue
+
+            if self._is_cancelled(cancel_token):
+                requested = self._request_tool_cancel(
+                    tool,
+                    reason="turn_interrupted",
+                    turn_interrupt=True,
+                )
+                raise ToolExecutionCancelledError(
+                    tool.name,
+                    cooperative_cancel_requested=requested,
+                    side_effect_class=str(getattr(tool, "side_effect_class", "none")),
+                )
+            return result
+
+    @staticmethod
+    def _is_cancelled(cancel_token: Any | None) -> bool:
+        return bool(cancel_token is not None and cancel_token.is_set())
+
+    @staticmethod
+    def _request_tool_cancel(
+        tool: BaseTool,
+        *,
+        reason: str,
+        turn_interrupt: bool,
+    ) -> bool:
+        if not bool(getattr(tool, "cancelable", False)):
+            return False
+        if turn_interrupt and not bool(
+            getattr(tool, "cancel_on_turn_interrupt", False)
+        ):
+            return False
         try:
-            return str(future.result(timeout=timeout))
-        except _FuturesTimeoutError:
-            future.cancel()
-            raise ToolExecutionTimeoutError(tool.name)
+            return bool(tool.request_cancel(reason))
+        except Exception:
+            logger.exception("Graceful cancellation callback failed: %s", tool.name)
+            return False
 
     def _submit_tool_execution(
         self,

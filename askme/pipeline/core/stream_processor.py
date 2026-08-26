@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_STREAM_CANCELLED = object()
+
 
 class _ThinkFilter:
     """Strip ``<think>...</think>`` blocks from incremental streaming text.
@@ -86,7 +88,7 @@ class StreamProcessor:
         max_response_chars: int,
         voice_tts_coalesce: bool = False,
         voice_model: str | None = None,
-        cancel_token: asyncio.Event | None = None,
+        cancel_token: Any | None = None,
     ) -> None:
         self._llm = llm
         self._audio = audio
@@ -102,6 +104,65 @@ class StreamProcessor:
 
     def set_audio(self, audio: AudioFrontendPort) -> None:
         self._audio = audio
+
+    def _is_cancelled(self) -> bool:
+        return bool(self._cancel_token is not None and self._cancel_token.is_set())
+
+    async def _wait_until_cancelled(self) -> None:
+        token = self._cancel_token
+        if token is None:
+            await asyncio.Future()
+            return
+        if isinstance(token, asyncio.Event):
+            await token.wait()
+            return
+        while not token.is_set():
+            # Combined per-turn/global tokens only promise ``is_set``.  A
+            # sleeping watcher keeps that duck-typed interface cancellable
+            # without spinning the event loop.
+            await asyncio.sleep(0.01)
+
+    async def _next_chunk_or_cancel(self, iterator):
+        if self._is_cancelled():
+            return _STREAM_CANCELLED
+        if self._cancel_token is None:
+            return await iterator.__anext__()
+
+        next_task = asyncio.ensure_future(iterator.__anext__())
+        cancel_task = asyncio.create_task(self._wait_until_cancelled())
+        try:
+            done, _ = await asyncio.wait(
+                (next_task, cancel_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_task in done and self._is_cancelled():
+                return _STREAM_CANCELLED
+            return await next_task
+        finally:
+            for task in (next_task, cancel_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(next_task, cancel_task, return_exceptions=True)
+
+    async def _chunks_until_cancelled(self, stream):
+        iterator = stream.__aiter__()
+        try:
+            while True:
+                try:
+                    chunk = await self._next_chunk_or_cancel(iterator)
+                except StopAsyncIteration:
+                    return
+                if chunk is _STREAM_CANCELLED:
+                    return
+                yield chunk
+        finally:
+            await self._close_async_iterator(iterator)
+
+    @staticmethod
+    async def _close_async_iterator(iterator) -> None:
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            await close()
 
     def _create_thinking_task(
         self, include_slow_network: bool = False,
@@ -145,7 +206,7 @@ class StreamProcessor:
 
         def _queue_voice(text: str) -> None:
             nonlocal spoke_any
-            if not text or suppress_voice_output:
+            if not text or suppress_voice_output or self._is_cancelled():
                 return
             if coalesce_voice:
                 voice_chunks.append(text)
@@ -153,7 +214,7 @@ class StreamProcessor:
                 self._audio.speak(text)
             spoke_any = True
 
-        async for chunk in stream:
+        async for chunk in self._chunks_until_cancelled(stream):
             delta = chunk.choices[0].delta
 
             if delta.tool_calls:
@@ -195,6 +256,9 @@ class StreamProcessor:
                                 break
                             _queue_voice(sentence)
                             chars_spoken += len(sentence)
+
+        if self._is_cancelled():
+            return full_response, {}
 
         think_tail = self._think_filter.flush()
         if think_tail:
@@ -254,23 +318,30 @@ class StreamProcessor:
         try:
             async def _ttft_stream():
                 nonlocal ttft_logged, thinking_task, slow_network_task
-                async for chunk in self._llm.chat_stream(
+                upstream = self._llm.chat_stream(
                     messages, tools=tool_definitions, tool_choice="auto", model=model,
                     max_tokens=per_call_max_tokens,
                     cancel_token=self._cancel_token,
-                ):
-                    if not ttft_logged:
-                        ttft_logged = True
-                        elapsed = _time.perf_counter() - t_start
-                        logger.info("TTFT: %.2fs", elapsed)
-                        get_tracer().record_span("ttft", elapsed * 1000, model=model or "default")
-                        if thinking_task is not None:
-                            thinking_task.cancel()
-                            thinking_task = None
-                        if slow_network_task is not None:
-                            slow_network_task.cancel()
-                            slow_network_task = None
-                    yield chunk
+                )
+                upstream_iterator = upstream.__aiter__()
+                try:
+                    async for chunk in upstream_iterator:
+                        if not ttft_logged:
+                            ttft_logged = True
+                            elapsed = _time.perf_counter() - t_start
+                            logger.info("TTFT: %.2fs", elapsed)
+                            get_tracer().record_span(
+                                "ttft", elapsed * 1000, model=model or "default"
+                            )
+                            if thinking_task is not None:
+                                thinking_task.cancel()
+                                thinking_task = None
+                            if slow_network_task is not None:
+                                slow_network_task.cancel()
+                                slow_network_task = None
+                        yield chunk
+                finally:
+                    await self._close_async_iterator(upstream_iterator)
 
             full_response, tool_calls_acc = await self.consume_llm_stream(
                 _ttft_stream(), source=source,
@@ -281,11 +352,16 @@ class StreamProcessor:
             if slow_network_task is not None:
                 slow_network_task.cancel()
 
-        if tool_calls_acc:
+        if tool_calls_acc and not self._is_cancelled():
             self._audio.drain_buffers()
             full_response = await self._tool_executor.execute_tools(
                 tool_calls_acc, system_prompt, model=model, source=source,
                 conversation_session_id=conversation_session_id,
+            )
+        elif tool_calls_acc:
+            logger.info(
+                "Turn cancelled before tool execution; dropping %d call(s)",
+                len(tool_calls_acc),
             )
 
         return full_response

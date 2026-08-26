@@ -14,6 +14,19 @@ from askme.ports.perception import (
 from askme.ports.robot_control import RobotControlPort
 from askme.ports.safety import SafetyPort
 from askme.ports.spatial_memory import TemporalMemoryPort
+from askme.ports.speech_playback import (
+    PlaybackTarget,
+    SpeechActor,
+    SpeechAudioArtifactFile,
+    SpeechDelivery,
+    SpeechPlaybackError,
+    SpeechPlaybackJob,
+    SpeechPlaybackPort,
+    SpeechPlaybackRequest,
+    SpeechPlaybackState,
+    SpeechPlaybackTimestamps,
+    SpeechPriority,
+)
 from askme.ports.voice import (
     ASRProviderPort,
     AudioFrontendPort,
@@ -33,9 +46,20 @@ __all__ = [
     "LedBridgePort",
     "LedControllerPort",
     "NavigationPort",
+    "PlaybackTarget",
+    "SpeechAudioArtifactFile",
     "RobotControlPort",
     "SafetyPort",
     "SceneIntelligencePort",
+    "SpeechActor",
+    "SpeechDelivery",
+    "SpeechPlaybackError",
+    "SpeechPlaybackJob",
+    "SpeechPlaybackPort",
+    "SpeechPlaybackRequest",
+    "SpeechPlaybackState",
+    "SpeechPlaybackTimestamps",
+    "SpeechPriority",
     "TemporalMemoryPort",
     "TTSProviderPort",
     "VisionPort",

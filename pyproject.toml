@@ -46,8 +46,9 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.1.0",
-    "ruff>=0.15.21",
+    "ruff>=0.16.4,<0.17",
     "mypy>=1.0.0",
+    "tomli>=2.0.0; python_version < '3.11'",
 ]
 robot = [
     "pyserial>=3.5",
@@ -55,12 +56,13 @@ robot = [
 ]
 memory = [
     "mem0ai>=0.1.0",
+    "fastembed>=0.4.0",
 ]
 robotmem = [
     "robotmem[cjk]>=0.1.3,<0.2",
 ]
 mempalace = [
-    "mempalace>=3.3.5,<4",
+    "mempalace==3.5.0",
 ]
 vision = [
     "qp-perception>=0.1.0",
@@ -104,6 +106,7 @@ ignore = [
 # Conditional imports for backend availability detection (cyclonedds/telegram/numpy)
 "askme/robot/telemetry/pulse.py" = ["F401"]
 "askme/runtime/modules/telegram_module.py" = ["F401"]
+"askme/ports/speech_playback.py" = ["UP042"]  # preserve existing string-enum wire behavior
 
 [tool.ruff.format]
 quote-style = "double"

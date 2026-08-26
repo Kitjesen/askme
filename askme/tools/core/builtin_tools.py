@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -473,12 +474,39 @@ class NavStatusTool(BaseTool):
     description = "查询机器人当前导航状态（当前任务、位置、运行状态）"
     parameters: dict[str, Any] = {"type": "object", "properties": {}}
     safety_level = "normal"
+    read_only = True
 
     def __init__(self, navigation_client: Any | None = None) -> None:
         self._navigation_client = navigation_client
 
     def set_navigation_client(self, navigation_client: Any) -> None:
         self._navigation_client = navigation_client
+
+    @staticmethod
+    def _format_status(result: dict[str, Any]) -> str:
+        reason_codes = result.get("reason_codes") or []
+        readiness = result.get("readiness") or {}
+        blockers = readiness.get("blockers") or [] if isinstance(readiness, dict) else []
+        if (
+            result.get("has_odometry") is False
+            or "odometry_missing" in reason_codes
+            or "odometry_missing" in blockers
+        ):
+            return "定位未就绪，暂时无法获取当前位置。"
+        odometry = result.get("odometry") or result.get("position")
+        if isinstance(odometry, dict):
+            try:
+                x = float(odometry["x"])
+                y = float(odometry["y"])
+            except (KeyError, TypeError, ValueError):
+                pass
+            else:
+                frame = str(odometry.get("frame_id") or "地图")
+                return (
+                    f"当前位置：{frame} 坐标系，横坐标 {x:.2f} 米，"
+                    f"纵坐标 {y:.2f} 米。"
+                )
+        return json.dumps(result, ensure_ascii=False, indent=2)
 
     def execute(self, **kwargs: Any) -> str:
         import json as _json
@@ -488,7 +516,7 @@ class NavStatusTool(BaseTool):
             result = self._navigation_client.status()
             if "error" in result:
                 return f"[导航状态] 查询失败: {result['error']}"
-            return _json.dumps(result, ensure_ascii=False, indent=2)
+            return self._format_status(result)
 
         url = os.environ.get("NAV_GATEWAY_URL", "").rstrip("/")
         if not url:
@@ -496,7 +524,7 @@ class NavStatusTool(BaseTool):
         try:
             with urllib.request.urlopen(url + "/api/v1/navigation/status", timeout=3) as resp:
                 data = _json.loads(resp.read())
-                return _json.dumps(data, ensure_ascii=False, indent=2)
+                return self._format_status(data)
         except Exception as exc:
             return f"[导航状态] 查询失败: {exc}"
 
@@ -544,12 +572,58 @@ class NavDispatchTool(BaseTool):
         "required": ["destination"],
     }
     safety_level = "dangerous"
+    cancelable = True
+    cancel_on_turn_interrupt = True
+    side_effect_class = "physical_motion"
 
     def __init__(self, navigation_client: Any | None = None) -> None:
         self._navigation_client = navigation_client
+        self._dispatch_done = threading.Event()
+        self._dispatch_done.set()
 
     def set_navigation_client(self, navigation_client: Any) -> None:
         self._navigation_client = navigation_client
+
+    def request_cancel(self, reason: str) -> bool:
+        """Gracefully cancel navigation without invoking the E-STOP route."""
+        dispatch_was_running = not self._dispatch_done.is_set()
+        accepted = self._send_graceful_cancel(reason)
+        if dispatch_was_running and self._dispatch_done.wait(timeout=5.5):
+            # Cancellation can race a dispatch acknowledgement. Repeating the
+            # idempotent graceful-cancel route after the acknowledgement keeps
+            # a late-created mission from escaping the interrupted turn.
+            accepted = self._send_graceful_cancel(reason) or accepted
+        return accepted
+
+    def _send_graceful_cancel(self, reason: str) -> bool:
+        cancel_navigation = getattr(self._navigation_client, "cancel_navigation", None)
+        if callable(cancel_navigation):
+            try:
+                result = cancel_navigation(reason=reason)
+                return not isinstance(result, dict) or "error" not in result
+            except Exception:
+                return False
+
+        url = os.environ.get("NAV_GATEWAY_URL", "").rstrip("/")
+        if not url:
+            return False
+        data = json.dumps({"reason": str(reason or "turn_interrupted")}).encode(
+            "utf-8"
+        )
+        request = urllib.request.Request(
+            url + "/api/v1/navigation/cancel",
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=3):
+                return True
+        except Exception:
+            return False
 
     def _build_parameters(
         self, task_type: str, destination: str, params: dict[str, Any] | None
@@ -563,6 +637,25 @@ class NavDispatchTool(BaseTool):
         return {}
 
     def execute(
+        self,
+        *,
+        destination: str = "",
+        task_type: str = "navigate",
+        params: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> str:
+        self._dispatch_done.clear()
+        try:
+            return self._execute_dispatch(
+                destination=destination,
+                task_type=task_type,
+                params=params,
+                **kwargs,
+            )
+        finally:
+            self._dispatch_done.set()
+
+    def _execute_dispatch(
         self,
         *,
         destination: str = "",

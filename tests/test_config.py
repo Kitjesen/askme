@@ -32,6 +32,13 @@ class TestGetConfig:
         sr = cfg.get("voice", {}).get("tts", {}).get("sample_rate")
         assert isinstance(sr, (int, float))
 
+    def test_phrase_cache_dir_is_expanded_to_an_absolute_path(self):
+        cfg = get_config(reload=True)
+        cache_dir = Path(cfg["voice"]["tts"]["phrase_cache_dir"])
+
+        assert cache_dir.is_absolute()
+        assert cache_dir == Path.home() / ".cache" / "askme" / "voice_phrases"
+
     @pytest.mark.skipif(os.name != "nt", reason="Windows audio override")
     def test_windows_audio_profile_uses_verified_realtek_route(self):
         cfg = get_config(reload=True)
@@ -50,7 +57,7 @@ class TestGetConfig:
         assert cfg["brain"]["persona"]["robot_name"] == "小算"
         assert cfg["brain"]["persona"]["customer_name"] == "聚龙科创e谷"
         assert cfg["voice"]["address_detection"]["names"] == ["小算"]
-        assert cfg["voice"]["interaction_gate"]["wake_terms"] == ["小算", "机器人"]
+        assert cfg["voice"]["interaction_gate"]["wake_terms"] == ["小算"]
         assert cfg["voice"]["kws"]["keywords"] == [
             "x iǎo s uàn :2.0 #0.20 @小算"
         ]
@@ -64,17 +71,19 @@ class TestGetConfig:
         assert cfg["space_cognition"]["park_id"] == "julong-tech-e-valley"
         assert cfg["space_cognition"]["routes"] == []
 
-    def test_customer_knowledge_uses_inspectable_vector_backend_by_default(self):
-        """Product default stays local and inspectable; optional memory SDKs are not blockers."""
+    def test_mempalace_is_enabled_with_separate_customer_and_behavior_rooms(self):
         cfg = get_config(reload=True)
         memory = cfg.get("memory", {})
 
-        assert memory["backend"] == "vector"
-        assert memory["customer_knowledge_backend"] == "vector"
+        assert memory["backend"] == "mempalace"
+        assert memory["customer_knowledge_backend"] == "mempalace"
         assert memory["mempalace_fallback_backend"] == "vector"
         assert memory["auto_backend_order"][:2] == ["mempalace", "vector"]
-        assert memory["robot_behavior_memory_backend"] == "robotmem"
-        assert memory["robot_behavior_memory_enabled"] is False
+        assert memory["robot_behavior_memory_backend"] == "mempalace"
+        assert memory["robot_behavior_memory_enabled"] is True
+        assert memory["mempalace_transport"] == "http"
+        assert memory["mempalace_room"] == "customer_knowledge"
+        assert memory["mempalace_behavior_room"] == "robot_behavior"
 
     def test_customer_editable_config_sections_are_readable(self):
         """High-touch deployment config must not contain mojibake text."""

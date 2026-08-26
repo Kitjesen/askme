@@ -86,6 +86,7 @@ class PromptBuilder:
         self,
         context_str: str | None,
         *,
+        behavior_context: str = "",
         scene_desc: str = "",
         user_text: str = "",
         rag_policy: dict[str, Any] | None = None,
@@ -134,6 +135,13 @@ class PromptBuilder:
 
         if context_str:
             prompt += f"\nRelevant memory:\n{context_str}"
+
+        if behavior_context:
+            prompt += (
+                "\n[\u957f\u671f\u4ea4\u4e92\u8bb0\u5fc6]\n"
+                "\u4ec5\u7528\u4e8e\u79f0\u547c\u3001\u504f\u597d\u548c\u4ea4\u4e92\u65b9\u5f0f\uff1b\u4e0d\u5f97\u4f5c\u4e3a\u8def\u7ebf\u3001SOP\u3001\u8bbe\u5907\u6216 FAQ \u4e8b\u5b9e\u4f9d\u636e\u3002\n"
+                f"{behavior_context}"
+            )
 
         policy_block = self._format_rag_policy_block(rag_policy)
         if policy_block:
@@ -230,6 +238,23 @@ class PromptBuilder:
                 result.append({
                     "role": "assistant",
                     "content": "明白，我会使用当前回合提供的记忆证据回答，不会忽略这些记录。",
+                })
+
+            behavior_block = self._extract_system_section(
+                system_prompt,
+                "[\u957f\u671f\u4ea4\u4e92\u8bb0\u5fc6]",
+            )
+            if behavior_block:
+                result.append({
+                    "role": "user",
+                    "content": (
+                        "\u4e0b\u5217\u662f\u4ea4\u4e92\u504f\u597d\u8bb0\u5fc6\uff0c\u53ea\u7528\u4e8e\u79f0\u547c\u548c\u4ea4\u4e92\u65b9\u5f0f\uff0c"
+                        f"\u4e0d\u5f97\u5f53\u4f5c\u5ba2\u6237\u77e5\u8bc6\u8bc1\u636e\uff1a\n{behavior_block}"
+                    ),
+                })
+                result.append({
+                    "role": "assistant",
+                    "content": "\u660e\u767d\uff0c\u6211\u53ea\u4f1a\u5c06\u5b83\u7528\u4e8e\u4e2a\u6027\u5316\u4ea4\u4e92\u3002",
                 })
 
             rag_policy_block = self._extract_system_section(system_prompt, "[知识回答策略]")

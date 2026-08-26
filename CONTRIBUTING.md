@@ -26,11 +26,32 @@ pip install -e ".[dev,embed]"
 |------|------|
 | `dev` | 测试、lint、类型检查（pytest, ruff, mypy） |
 | `robot` | 机器人硬件控制（pyserial, onnxruntime） |
-| `memory` | Mem0 记忆后端 |
+| `memory` | Mem0 记忆后端与本地 fastembed/ONNX 向量后端 |
 | `robotmem` | RobotMem 记忆后端（CJK 支持） |
 | `mempalace` | MemPalace 记忆后端 |
 | `vision` | 视觉感知（qp-perception） |
-| `embed` | 文本嵌入（sentence-transformers） |
+| `embed` | 文本嵌入（fastembed/ONNX） |
+
+### FastEmbed 离线模型就绪 / Offline Model Readiness
+
+生产运行严格使用 `local_files_only=True`，不会在启动或查询时下载模型。
+请预先把 Hugging Face 仓库
+`Qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q` 放入 FastEmbed 缓存。
+默认缓存是系统临时目录下的 `fastembed_cache`（Linux 通常为
+`/tmp/fastembed_cache`）；可用 `FASTEMBED_CACHE_PATH` 显式指定持久化目录。
+对应 snapshot 必须包含：
+
+- `config.json`
+- `model_optimized.onnx`
+- `special_tokens_map.json`
+- `tokenizer.json`
+- `tokenizer_config.json`
+
+在 memory 健康信息中，`vector_model_status.reason=model_artifacts_missing`
+且 `selected_backend_dependency.runtime_ready=false` 表示 Python 依赖可能已安装，
+但本地模型仍不完整；`vector_model_status.reason=local_model_ready`、
+`selected_backend_dependency.runtime_ready=true` 且
+`selected_backend_ready=true` 才表示向量检索可运行。
 
 ---
 

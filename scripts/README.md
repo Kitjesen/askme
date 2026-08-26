@@ -18,8 +18,6 @@ documented buckets below instead of beside this README.
 | `scripts/bench/` | Benchmarks, latency probes, audio readiness checks, and benchmark helper scripts. | Pytest unit tests. | `pytest tests/test_performance_benchmarks.py tests/test_generated_voice_capability_check.py -q` for supported benchmark code. |
 | `scripts/e2e/` | Provider-backed or hardware-backed end-to-end probes. | Automatic pytest collection. | Manual execution only; document required keys, models, devices, and network. |
 | `scripts/audit/` | Secret scanning, key rotation guides, and security audit helpers. | Product APIs and runtime services. | Script-specific `--help` when present. |
-| `scripts/artifacts/` | Media, fixtures, and sample files used by scripts. | Executable scripts. | Static structure checks only. |
-| `scripts/tools/` | Low-level maintenance helpers used by scripts or manual flows. | Product APIs and runtime services. | Static tests, plus script-specific `--help` when present. |
 
 ## Root Files
 
@@ -33,6 +31,26 @@ Root scripts are reserved for cross-cutting CI or performance entrypoints:
 - `check_text_encoding.py`: legacy-compatible text encoding checker entrypoint.
 
 Do not add new root scripts without updating `tests/test_scripts_structure.py`.
+
+## Voice Performance and Cache Commands
+
+- `scripts/bench/evaluate_voice_fast_path.py` runs the deterministic voice
+  latency benchmark and writes its threshold report to `--output`.
+- `scripts/dev/prime_voice_phrase_cache.py` is a manual operator command that
+  invokes the configured real TTS backend. MiniMax requires `MINIMAX_API_KEY`
+  and network access; any configured local fallback requires its local model
+  assets and runtime dependencies. The command writes generated PCM to the
+  configured phrase cache and must not run in automatic CI.
+
+## KWS Model Deployment
+
+- `python scripts/dev/install_kws_model.py --check` verifies the configured
+  Sunrise KWS model files without network access or filesystem changes.
+- `python scripts/dev/install_kws_model.py` installs the pinned official
+  sherpa-onnx model from GitHub Releases. Installation requires outbound HTTPS;
+  the archive must match the SHA-256 embedded in the script before it is
+  extracted and atomically published. An existing valid model is reused without
+  downloading, while an incomplete existing directory is never overwritten.
 
 ## Multi-Agent Lanes
 
@@ -71,7 +89,7 @@ cameras, model files, API keys, network access, or a robot runtime.
 6. Hardware, audio, camera, cloud, and real provider probes must document their
    external requirements and remain manual by default.
 7. Do not add binaries, captured audio, generated reports, images, or videos to
-   executable script directories; use `scripts/artifacts/` or `artifacts/`.
+   executable script directories; use the repository-level `artifacts/` directory.
 
 ## Verification
 

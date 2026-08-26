@@ -29,20 +29,20 @@ def build_parser() -> argparse.ArgumentParser:
     # Legacy compatibility flags.
     parser.add_argument(
         "--transport",
-        choices=["stdio", "sse"],
+        choices=["stdio", "sse", "streamable-http"],
         default="stdio",
         help="MCP transport mode (default: stdio)",
     )
     parser.add_argument(
         "--host",
         default="localhost",
-        help="Host for SSE transport (default: localhost)",
+        help="Host for HTTP transport (default: localhost)",
     )
     parser.add_argument(
         "--port",
         type=int,
         default=8080,
-        help="Port for SSE transport (default: 8080)",
+        help="Port for HTTP transport (default: 8080)",
     )
     parser.add_argument(
         "--legacy",
@@ -1201,20 +1201,20 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_serve = mcp_subparsers.add_parser("serve", help="Run the MCP server")
     mcp_serve.add_argument(
         "--transport",
-        choices=["stdio", "sse"],
+        choices=["stdio", "sse", "streamable-http"],
         default="stdio",
         help="MCP transport mode (default: stdio)",
     )
     mcp_serve.add_argument(
         "--host",
         default="localhost",
-        help="Host for SSE transport (default: localhost)",
+        help="Host for HTTP transport (default: localhost)",
     )
     mcp_serve.add_argument(
         "--port",
         type=int,
         default=8080,
-        help="Port for SSE transport (default: 8080)",
+        help="Port for HTTP transport (default: 8080)",
     )
 
     return parser

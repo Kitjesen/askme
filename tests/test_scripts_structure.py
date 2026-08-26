@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import re
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility
+    import tomli as tomllib
 
 SCRIPTS_ROOT = Path("scripts")
 
@@ -21,6 +25,11 @@ def test_scripts_root_stays_quiet() -> None:
     root_files = {path.name for path in SCRIPTS_ROOT.iterdir() if path.is_file()}
 
     assert root_files == ALLOWED_ROOT_FILES
+
+
+def test_voice_fast_path_evaluator_lives_in_benchmark_bucket() -> None:
+    assert (SCRIPTS_ROOT / "bench" / "evaluate_voice_fast_path.py").is_file()
+    assert not (SCRIPTS_ROOT / "eval" / "evaluate_voice_fast_path.py").exists()
 
 
 def test_scripts_readme_documents_every_top_level_bucket() -> None:

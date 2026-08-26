@@ -16,6 +16,7 @@ from askme.ports import (
     ASRProviderPort,
     AudioFrontendPort,
     AudioRouterPort,
+    SpeechPlaybackPort,
     TTSProviderPort,
     VoiceIOPort,
     VoiceTurnBridgePort,
@@ -141,3 +142,70 @@ def resolve_voice_profile_id(profile_id: str) -> str:
     from askme.voice.output.voice_profiles import resolve_voice_profile_id as resolve
 
     return resolve(profile_id)
+
+
+def build_speech_playback(
+    config: dict[str, Any],
+    *,
+    audio: AudioFrontendPort,
+) -> SpeechPlaybackPort:
+    """Build the product playback coordinator for this edge robot only."""
+    from askme.voice.playback.service import SpeechPlaybackService
+
+    cfg = config if isinstance(config, dict) else {}
+    voice_cfg = cfg.get("voice") if isinstance(cfg.get("voice"), dict) else {}
+    playback_cfg = (
+        voice_cfg.get("playback")
+        if isinstance(voice_cfg.get("playback"), dict)
+        else {}
+    )
+    ota_cfg = cfg.get("ota") if isinstance(cfg.get("ota"), dict) else {}
+    ota_device = (
+        ota_cfg.get("device")
+        if isinstance(ota_cfg.get("device"), dict)
+        else {}
+    )
+    field_cfg = (
+        cfg.get("field_operations")
+        if isinstance(cfg.get("field_operations"), dict)
+        else {}
+    )
+    cloud_asr = (
+        voice_cfg.get("cloud_asr")
+        if isinstance(voice_cfg.get("cloud_asr"), dict)
+        else {}
+    )
+    robot_id = str(
+        playback_cfg.get("robot_id")
+        or field_cfg.get("robot_id")
+        or ota_device.get("robot_id")
+        or ""
+    ).strip()
+    device_id = str(
+        playback_cfg.get("device_id")
+        or ota_device.get("robot_id")
+        or cloud_asr.get("device_id")
+        or robot_id
+    ).strip()
+    site_id = str(
+        playback_cfg.get("site_id")
+        or ota_device.get("site_id")
+        or ""
+    ).strip()
+    tts_cfg = voice_cfg.get("tts")
+    if not isinstance(tts_cfg, dict):
+        tts_cfg = {}
+    raw_profiles = tts_cfg.get("voice_profiles")
+    allowed_profiles = set(raw_profiles) if isinstance(raw_profiles, dict) else set()
+    return SpeechPlaybackService(
+        audio=audio,
+        robot_id=robot_id,
+        device_id=device_id,
+        site_id=site_id,
+        max_queue_size=int(playback_cfg.get("max_queue_size", 32)),
+        max_text_chars=int(playback_cfg.get("max_text_chars", 500)),
+        artifact_dir=str(playback_cfg.get("artifact_dir") or "artifacts/voice/playback"),
+        allowed_voice_profiles=allowed_profiles,
+        ledger_path=str(playback_cfg.get("ledger_path") or "data/voice/playback_ledger.json"),
+        max_history=int(playback_cfg.get("max_history", 500)),
+    )

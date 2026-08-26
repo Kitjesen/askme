@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from askme.memory.bridge import MemoryBridge
@@ -28,6 +28,14 @@ def _patch_vector_store():
     mock_instance = MagicMock()
     mock_instance.available = False
     mock_instance.size = 0
+    mock_instance.model_status = {
+        "dependency_installed": False,
+        "ready": False,
+        "cached": False,
+        "reason": "dependency_missing",
+        "missing_artifacts": [],
+        "network_checked": False,
+    }
     mock_cls.return_value = mock_instance
     return patch("askme.memory.bridge.VectorStore", mock_cls), mock_instance
 
@@ -76,6 +84,87 @@ class TestInit:
         # No Mem0, but VectorStore works
         assert bridge.available is True
 
+    def test_health_separates_installed_dependency_from_missing_vector_model(self):
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "backend": "vector",
+                "embed_model": "test-model",
+                "retrieve_timeout": 2.0,
+            },
+            "app": {"data_dir": "data"},
+            "brain": {},
+        }
+        vs_patch, vs_mock = _patch_vector_store()
+        vs_mock.model_status = {
+            "dependency_installed": True,
+            "ready": False,
+            "cached": False,
+            "reason": "model_artifacts_missing",
+            "missing_artifacts": ["model_optimized.onnx"],
+            "network_checked": False,
+        }
+
+        with (
+            patch("askme.memory.bridge.get_config", return_value=cfg),
+            patch(
+                "askme.memory.bridge.importlib.util.find_spec",
+                return_value=object(),
+            ),
+            vs_patch,
+        ):
+            bridge = MemoryBridge()
+        bridge._store = vs_mock
+        health = bridge.health()
+
+        assert health["selected_backend_installed"] is True
+        assert health["selected_backend_dependency"]["installed"] is True
+        assert health["selected_backend_dependency"]["runtime_ready"] is False
+        assert health["selected_backend_ready"] is False
+        assert health["available"] is False
+        assert health["vector_ready"] is False
+        assert health["vector_model_status"]["reason"] == "model_artifacts_missing"
+
+    def test_health_reports_cached_vector_model_ready(self):
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "backend": "vector",
+                "embed_model": "test-model",
+                "retrieve_timeout": 2.0,
+            },
+            "app": {"data_dir": "data"},
+            "brain": {},
+        }
+        vs_patch, vs = _patch_vector_store()
+        with (
+            patch("askme.memory.bridge.get_config", return_value=cfg),
+            vs_patch,
+        ):
+            bridge = MemoryBridge()
+        bridge._store = vs
+        vs.available = True
+        vs.model_status = {
+            "dependency_installed": True,
+            "ready": True,
+            "cached": True,
+            "reason": "local_model_ready",
+            "missing_artifacts": [],
+            "network_checked": False,
+        }
+        with patch(
+            "askme.memory.bridge.importlib.util.find_spec",
+            return_value=object(),
+        ):
+            health = bridge.health()
+
+        assert health["selected_backend_dependency"]["installed"] is True
+        assert health["selected_backend_dependency"]["runtime_ready"] is True
+        assert health["selected_backend_ready"] is True
+        assert health["available"] is True
+        assert health["vector_ready"] is True
+        assert health["vector_model_status"]["reason"] == "local_model_ready"
+
     def test_auto_backend_selects_first_available_candidate(self):
         cfg = {
             "memory": {
@@ -90,7 +179,7 @@ class TestInit:
         }
 
         def fake_find_spec(name):
-            return object() if name == "sentence_transformers" else None
+            return object() if name == "fastembed" else None
 
         vs_patch, vs_mock = _patch_vector_store()
         with patch("askme.memory.bridge.get_config", return_value=cfg), \
@@ -152,12 +241,12 @@ class TestInit:
         }
 
         def fake_find_spec(name):
-            return object() if name in {"mempalace", "sentence_transformers"} else None
+            return object() if name in {"mempalace", "fastembed"} else None
 
         def fake_version(package):
             versions = {
                 "mempalace": "3.3.5",
-                "sentence-transformers": "5.2.3",
+                "fastembed": "0.7.3",
             }
             if package not in versions:
                 from importlib.metadata import PackageNotFoundError
@@ -171,19 +260,70 @@ class TestInit:
              patch("askme.memory.bridge.importlib_metadata.version", side_effect=fake_version), \
              vs_patch:
             bridge = MemoryBridge()
-        bridge._store = vs_mock
-        health = bridge.health()
+            bridge._store = vs_mock
+            health = bridge.health()
 
         assert health["selected_backend_dependency"]["backend"] == "mempalace"
         assert health["selected_backend_dependency"]["installed"] is True
         assert health["selected_backend_dependency"]["version"] == "3.3.5"
         assert health["fallback_backend_dependency"]["backend"] == "vector"
-        assert health["fallback_backend_dependency"]["version"] == "5.2.3"
+        assert health["fallback_backend_dependency"]["module"] == "fastembed"
+        assert health["fallback_backend_dependency"]["package"] == "fastembed"
+        assert health["fallback_backend_dependency"]["version"] == "0.7.3"
         assert health["backend_dependencies"]["robotmem"]["installed"] is False
         assert (
             health["product_memory_roles"]["customer_knowledge"]["dependency"]["backend"]
             == "mempalace"
         )
+
+    def test_http_sidecar_reports_isolated_mempalace_as_installed(self):
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "backend": "mempalace",
+                "customer_knowledge_backend": "mempalace",
+                "mempalace_transport": "http",
+                "mempalace_fallback_backend": "vector",
+                "embed_model": "test-model",
+                "retrieve_timeout": 2.0,
+            },
+            "app": {"data_dir": "data"},
+            "brain": {},
+        }
+
+        def fake_find_spec(name):
+            return object() if name == "fastembed" else None
+
+        vs_patch, vs_mock = _patch_vector_store()
+        with (
+            patch("askme.memory.bridge.get_config", return_value=cfg),
+            patch(
+                "askme.memory.bridge.importlib.util.find_spec",
+                side_effect=fake_find_spec,
+            ),
+            vs_patch,
+        ):
+            bridge = MemoryBridge()
+        bridge._store = vs_mock
+        backend = MagicMock()
+        backend.available = True
+        backend.palace_path = "/srv/askme/mempalace"
+        backend.health_snapshot = {
+            "transport": "http",
+            "available": True,
+            "mempalace_version": "3.5.0",
+        }
+        bridge._mempalace = backend
+
+        health = bridge.health()
+
+        assert health["selected_backend_ready"] is True
+        assert health["selected_backend_installed"] is True
+        assert health["selected_backend_dependency"]["installed"] is True
+        assert health["selected_backend_dependency"]["version"] == "3.5.0"
+        assert health["selected_backend_dependency"]["install_scope"] == "isolated_sidecar"
+        candidates = {item["backend"]: item for item in health["backend_selection"]["candidates"]}
+        assert candidates["mempalace"]["available"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -868,6 +1008,52 @@ class TestSave:
         vs.save.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("backend_result", "expected"),
+        [(True, True), (False, False)],
+    )
+    async def test_save_fact_returns_mempalace_write_result(
+        self,
+        backend_result,
+        expected,
+    ):
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "backend": "mempalace",
+                "customer_knowledge_backend": "mempalace",
+                "mempalace_fallback_backend": "vector",
+            },
+            "app": {"data_dir": "data"},
+            "brain": {},
+        }
+        bridge = MemoryBridge(config=cfg)
+        backend = MagicMock()
+        backend.available = True
+        backend.save_fact = AsyncMock(return_value=backend_result)
+        bridge._mempalace = backend
+
+        result = await bridge.save_fact(
+            "Service desk is on floor one.",
+            {"record_id": "know_service_desk"},
+        )
+
+        assert result is expected
+        backend.save_fact.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_save_fact_returns_true_when_mem0_add_succeeds(self):
+        bridge, _ = _make_bridge()
+        bridge._mem0 = _make_mem0_mock()
+
+        result = await bridge.save_fact(
+            "Service desk is on floor one.",
+            {"record_id": "know_service_desk"},
+        )
+
+        assert result is True
+
+    @pytest.mark.asyncio
     async def test_list_knowledge_reads_vector_catalog(self):
         bridge, vs = _make_bridge()
         vs.size = 1
@@ -904,6 +1090,40 @@ class TestSave:
         vs.update_metadata.assert_called_once_with("know_1", {"approval_status": "deleted"})
         vs.save.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_update_knowledge_metadata_uses_mempalace_backend(self):
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "backend": "mempalace",
+                "customer_knowledge_backend": "mempalace",
+                "mempalace_fallback_backend": "vector",
+            },
+            "app": {"data_dir": "data"},
+            "brain": {},
+        }
+        bridge = MemoryBridge(config=cfg)
+        backend = MagicMock()
+        backend.available = True
+        backend.update_metadata = AsyncMock(return_value=True)
+        bridge._mempalace = backend
+
+        payload = await bridge.update_knowledge_metadata(
+            "know_1",
+            {
+                "approval_status": "deleted",
+                "quality_status": "verified",
+                "ignored": True,
+            },
+        )
+
+        assert payload["updated"] is True
+        assert payload["patch"] == {
+            "approval_status": "deleted",
+            "quality_status": "verified",
+        }
+        backend.update_metadata.assert_awaited_once_with("know_1", payload["patch"])
+
 
 # ---------------------------------------------------------------------------
 # Tests: warmup
@@ -914,6 +1134,18 @@ class TestWarmup:
     async def test_warmup_disabled_noop(self):
         bridge, _ = _make_bridge(enabled=False)
         await bridge.warmup()  # should not raise
+
+    @pytest.mark.asyncio
+    async def test_close_closes_initialized_mempalace_backend(self):
+        bridge, _ = _make_bridge()
+        backend = MagicMock()
+        backend.available = True
+        backend.close = MagicMock()
+        bridge._mempalace = backend
+
+        await bridge.close()
+
+        backend.close.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_warmup_with_mem0(self):

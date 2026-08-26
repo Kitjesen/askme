@@ -1,0 +1,45 @@
+[Unit]
+Description=AskMe MemPalace single-writer memory sidecar
+After=network.target
+Before=askme.service
+
+[Service]
+Type=simple
+User=sunrise
+Group=sunrise
+WorkingDirectory=/home/sunrise/data/inovxio/askme
+Environment=HOME=/home/sunrise/data/inovxio/askme/data/memory/mempalace/runtime-home
+Environment=PYTHONUNBUFFERED=1
+Environment=MEMPALACE_EMBEDDING_MODEL=embeddinggemma
+Environment=MEMPALACE_EMBEDDING_DEVICE=cpu
+Environment=MEMPALACE_EMBEDDING_THREADS=2
+Environment=MEMPALACE_PALACE_PATH=/home/sunrise/data/inovxio/askme/data/memory/mempalace/palace
+Environment=MEMPALACE_COLLECTION=askme
+Environment=HF_HOME=/home/sunrise/data/inovxio/askme/data/memory/mempalace/hf-cache
+Environment=HF_HUB_CACHE=/home/sunrise/data/inovxio/askme/data/memory/mempalace/hf-cache/hub
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=ANONYMIZED_TELEMETRY=False
+ExecStartPre=/usr/bin/test -x /home/sunrise/data/inovxio/askme/.venv-mempalace/bin/python
+ExecStartPre=/usr/bin/mkdir -p /home/sunrise/data/inovxio/askme/data/memory/mempalace/runtime-home/.mempalace/locks
+ExecStart=/home/sunrise/data/inovxio/askme/.venv-mempalace/bin/python /home/sunrise/data/inovxio/askme/scripts/runtime/mempalace_sidecar.py --host 127.0.0.1 --port 8766 --palace-path /home/sunrise/data/inovxio/askme/data/memory/mempalace/palace --collection-name askme
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=180
+KillSignal=SIGINT
+UMask=0077
+
+# Keep the embedding runtime bounded on the edge device.
+MemoryHigh=1536M
+MemoryMax=2G
+LimitNOFILE=4096
+
+# The sidecar only needs read access to the checkout and write access to its palace.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/sunrise/data/inovxio/askme/data/memory/mempalace
+
+[Install]
+WantedBy=multi-user.target

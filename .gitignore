@@ -11,6 +11,7 @@ build/
 # Environment
 .env
 .venv/
+.venv-mempalace/
 venv/
 
 # Models (large binary files)
@@ -38,6 +39,11 @@ Thumbs.db
 archive/
 artifacts/
 output/
+# Host-local recovery snapshots are retained outside version control.
+.backup_*/
+*.bak-open-voice-*
+!askme/voice/output/
+!askme/voice/output/phrase_cache.py
 .codex/
 .tmp/
 .omc/

@@ -21,6 +21,16 @@ class _QuickReplyRouter:
         return Intent(type=IntentType.QUICK_REPLY, skill_name="quick reply", raw_text=text)
 
 
+class _CachedQuickReplyRouter:
+    def route(self, text: str) -> Intent:
+        return Intent(
+            type=IntentType.QUICK_REPLY,
+            reply_text="cached quick reply",
+            cached_audio_key="quick-hi",
+            raw_text=text,
+        )
+
+
 class _TraceRouter:
     def route(self, text: str) -> Intent:
         return Intent(
@@ -37,6 +47,7 @@ class _Pipeline:
         self.process_calls: list[str] = []
         self.process_source_calls: list[str] = []
         self.process_conversation_session_ids: list[str | None] = []
+        self.process_turn_owners: list[str | None] = []
         self.skill_calls: list[tuple[str, str]] = []
         self.pending_calls: list[str] = []
         self.pending_reply_map: dict[str, str] = {}
@@ -58,10 +69,12 @@ class _Pipeline:
         memory_task=None,
         source: str = "voice",
         conversation_session_id: str | None = None,
+        turn_owner: str | None = None,
     ):
         self.process_calls.append(user_text)
         self.process_source_calls.append(source)
         self.process_conversation_session_ids.append(conversation_session_id)
+        self.process_turn_owners.append(turn_owner)
         return "fallback"
 
     async def execute_skill(self, skill_name: str, user_text: str, source: str = "voice"):
@@ -86,12 +99,18 @@ class _Skills:
 class _Audio:
     def __init__(self) -> None:
         self.spoken: list[str] = []
+        self.cached: list[tuple[str, str]] = []
+        self.cached_result = True
         self.started = 0
         self.stopped = 0
         self.waited = 0
 
     def speak(self, text: str) -> None:
         self.spoken.append(text)
+
+    async def speak_cached_and_wait(self, text: str, *, cache_key: str) -> bool:
+        self.cached.append((text, cache_key))
+        return self.cached_result
 
     def start_playback(self) -> None:
         self.started += 1
@@ -385,6 +404,7 @@ async def test_text_loop_falls_back_to_local_pipeline_when_runtime_bridge_fails(
     assert [call["text"] for call in bridge.calls] == ["status?"]
     assert pipeline.process_calls == ["status?"]
     assert pipeline.process_conversation_session_ids == [None]
+    assert pipeline.process_turn_owners == ["text"]
 
 
 @pytest.mark.asyncio
@@ -557,6 +577,53 @@ async def test_process_turn_quick_reply_speaks_when_speak_true() -> None:
 
     assert reply == "quick reply"
     assert audio.spoken == ["quick reply"]
+    assert audio.started == 1
+    assert audio.waited == 1
+    assert audio.stopped == 1
+
+
+@pytest.mark.asyncio
+async def test_process_turn_quick_reply_uses_cached_audio_when_available() -> None:
+    pipeline = _Pipeline()
+    audio = _Audio()
+    loop = TextLoop(
+        router=_CachedQuickReplyRouter(),
+        pipeline=pipeline,
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=audio,
+    )
+
+    reply = await loop.process_turn("hi", speak=True)
+
+    assert reply == "cached quick reply"
+    assert audio.cached == [("cached quick reply", "quick-hi")]
+    assert audio.spoken == []
+    assert audio.started == 0
+    assert audio.waited == 0
+    assert audio.stopped == 0
+
+
+@pytest.mark.asyncio
+async def test_process_turn_quick_reply_falls_back_when_cache_misses() -> None:
+    pipeline = _Pipeline()
+    audio = _Audio()
+    audio.cached_result = False
+    loop = TextLoop(
+        router=_CachedQuickReplyRouter(),
+        pipeline=pipeline,
+        commands=_Commands(),
+        conversation=_Conversation(),
+        skill_manager=_Skills(),
+        audio=audio,
+    )
+
+    reply = await loop.process_turn("hi", speak=True)
+
+    assert reply == "cached quick reply"
+    assert audio.cached == [("cached quick reply", "quick-hi")]
+    assert audio.spoken == ["cached quick reply"]
     assert audio.started == 1
     assert audio.waited == 1
     assert audio.stopped == 1

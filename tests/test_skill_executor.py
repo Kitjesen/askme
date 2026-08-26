@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from askme.skills.skill_executor import SkillExecutor
@@ -28,6 +29,10 @@ class EchoTool(BaseTool):
 
     def execute(self, **kwargs):
         return "echo result"
+
+
+class ReadOnlyEchoTool(EchoTool):
+    read_only = True
 
 
 def _tool_call_response(name: str, arguments: str = "{}"):
@@ -68,6 +73,47 @@ class _FakeResilientLLM:
     async def chat_completion(self, messages, **kwargs):
         self.calls.append({"messages": messages, **kwargs})
         return self._responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_read_only_tool_skill_executes_directly_without_llm():
+    registry = ToolRegistry(config={"default_timeout": 1.0, "timeout_cooldown": 0.0})
+    registry.register(ReadOnlyEchoTool())
+    llm = _FakeResilientLLM([])
+    executor = SkillExecutor(llm, registry)
+    skill = SkillDefinition(
+        name="status_query",
+        execution="read_only_tool",
+        safety_level="normal",
+        tools_section="echo_tool",
+    )
+
+    result = await executor.execute(skill, {"user_input": "status"})
+
+    assert result == "echo result"
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_read_only_tool_skill_rejects_unmarked_tool_without_execution():
+    registry = ToolRegistry(config={"default_timeout": 1.0, "timeout_cooldown": 0.0})
+    tool = EchoTool()
+    tool.execute = MagicMock(return_value="must not run")
+    registry.register(tool)
+    llm = _FakeResilientLLM([])
+    executor = SkillExecutor(llm, registry)
+    skill = SkillDefinition(
+        name="unsafe_direct_query",
+        execution="read_only_tool",
+        safety_level="normal",
+        tools_section="echo_tool",
+    )
+
+    result = await executor.execute(skill, {"user_input": "status"})
+
+    assert result == "[Error] Tool 'echo_tool' is not approved for read-only execution."
+    tool.execute.assert_not_called()
+    assert llm.calls == []
 
 
 @pytest.mark.asyncio

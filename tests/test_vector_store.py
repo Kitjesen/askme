@@ -1,18 +1,23 @@
-"""Tests for VectorStore — works without sentence-transformers via mocking."""
+"""Tests for VectorStore — works without fastembed via mocking."""
 
 import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-from askme.memory.vector_store import VectorStore, _top_score_indices
+from askme.memory.vector_store import (
+    VectorStore,
+    _fastembed_model_status,
+    _top_score_indices,
+)
 
 # -- Helpers ------------------------------------------------------------------
 
 def _patch_available(val):
-    """Patch _check_st_available to return a fixed value."""
-    return patch("askme.memory.vector_store._check_st_available", return_value=val)
+    """Patch _check_fastembed_available to return a fixed value."""
+    return patch("askme.memory.vector_store._check_fastembed_available", return_value=val)
 
 
 def _make_store(tmp_path=None, available=True):
@@ -20,7 +25,7 @@ def _make_store(tmp_path=None, available=True):
     store_path = tmp_path / "store.json" if tmp_path else None
     with _patch_available(available):
         store = VectorStore(store_path=store_path)
-    # Mock the encoder so we never import sentence_transformers
+    # Mock the encoder so we never import fastembed
     store._encode = MagicMock(side_effect=_mock_encode)
     # Patch available check on the instance's method calls too
     store._check = available
@@ -42,16 +47,73 @@ def _mock_encode(texts):
 
 
 # -- Tests: basic operations -------------------------------------------------
+class TestPackaging:
+    def test_memory_extra_installs_local_vector_backend(self):
+        pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+        memory_extra = pyproject.split("memory = [", 1)[1].split("]", 1)[0]
+
+        assert '"fastembed>=0.4.0"' in memory_extra
+
 
 class TestAvailability:
-    def test_available_when_st_installed(self):
-        with _patch_available(True):
+    def test_dependency_installed_without_cached_model_is_not_runtime_ready(
+        self,
+        tmp_path,
+    ):
+        status = _fastembed_model_status(
+            cache_dir=tmp_path,
+            dependency_installed=True,
+        )
+        with (
+            _patch_available(True),
+            patch(
+                "askme.memory.vector_store._fastembed_model_status",
+                return_value=status,
+            ),
+        ):
             store = VectorStore()
-            assert store.available is True
+            assert store.dependency_installed is True
+            assert store.available is False
+            assert store.model_status["reason"] == "model_artifacts_missing"
+            assert store.model_status["network_checked"] is False
 
-    def test_unavailable_when_st_missing(self):
+    def test_complete_local_model_artifacts_are_runtime_ready(self, tmp_path):
+        snapshot = (
+            tmp_path
+            / "models--qdrant--paraphrase-multilingual-MiniLM-L12-v2-onnx-Q"
+            / "snapshots"
+            / "local-revision"
+        )
+        snapshot.mkdir(parents=True)
+        refs = snapshot.parents[1] / "refs"
+        refs.mkdir()
+        (refs / "main").write_text("local-revision", encoding="utf-8")
+        for filename in (
+            "config.json",
+            "model_optimized.onnx",
+            "special_tokens_map.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ):
+            (snapshot / filename).write_bytes(b"local-artifact")
+
+        status = _fastembed_model_status(
+            cache_dir=tmp_path,
+            dependency_installed=True,
+        )
+
+        assert status["ready"] is True
+        assert status["cached"] is True
+        assert status["model_path"] == str(snapshot)
+        assert status["missing_artifacts"] == []
+        assert status["network_checked"] is False
+
+    def test_unavailable_when_fastembed_missing(self):
         with _patch_available(False):
             store = VectorStore()
+            assert store.dependency_installed is False
             assert store.available is False
 
     def test_add_noop_when_unavailable(self):
@@ -80,6 +142,7 @@ class TestAvailability:
             "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
             providers=["CPUExecutionProvider"],
             cuda=False,
+            local_files_only=True,
         )
 
 

@@ -6,8 +6,8 @@ Public API is unchanged: process(), execute_skill(), shutdown().
 Decoupling improvements:
   - Constructor accepts StreamProcessorProtocol / SkillGateProtocol /
     TurnExecutorProtocol -tests pass mocks directly, no private-attr access.
-  - cancel_token (asyncio.Event) is injected externally; handle_estop() calls
-    cancel_token.set() and each sub-component stops autonomously.
+  - TurnCancellationController combines sticky E-STOP state with a fresh
+    interruption lease for each conversational turn.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any
 
 from askme.pipeline.core.hooks import PipelineHooks
@@ -26,6 +27,7 @@ from askme.pipeline.core.protocols import (
 )
 from askme.pipeline.core.stream_processor import StreamProcessor
 from askme.pipeline.core.tool_executor import ToolExecutor
+from askme.pipeline.core.turn_control import TurnCancellationController
 from askme.pipeline.core.turn_executor import TurnExecutor
 from askme.pipeline.core.utils import (
     classify_skill_error,
@@ -230,7 +232,11 @@ class BrainPipeline:
 
         # cancel_token -shared across all sub-components.
         # handle_estop() calls cancel_token.set(); each component stops autonomously.
-        self._cancel_token: asyncio.Event = cancel_token if cancel_token is not None else asyncio.Event()
+        self._cancel_token: asyncio.Event = (
+            cancel_token if cancel_token is not None else asyncio.Event()
+        )
+        self._turn_control = TurnCancellationController(self._cancel_token)
+        self._pipeline_cancel_token = self._turn_control.token
         self._hooks = hooks
 
         if stream_processor is not None and skill_gate is not None and turn_executor is not None:
@@ -271,6 +277,7 @@ class BrainPipeline:
                 prompt_builder=self._prompt_builder,
                 stream_and_speak=None,  # patched below
                 hooks=hooks,
+                cancel_token=self._pipeline_cancel_token,
             )
             self._stream_processor = (
                 stream_processor
@@ -285,7 +292,7 @@ class BrainPipeline:
                     max_response_chars=max_chars,
                     voice_tts_coalesce=voice_tts_coalesce,
                     voice_model=voice_model,
-                    cancel_token=self._cancel_token,
+                    cancel_token=self._pipeline_cancel_token,
                 )
             )
             # Patch ToolExecutor callback to StreamProcessor
@@ -313,7 +320,7 @@ class BrainPipeline:
                     memory_system=memory_system,
                     qp_memory=qp_memory,
                     voice_model=voice_model,
-                    cancel_token=self._cancel_token,
+                    cancel_token=self._pipeline_cancel_token,
                     hooks=hooks,
                 )
             )
@@ -333,7 +340,7 @@ class BrainPipeline:
             "agent_shell": agent_shell,
             "prompt_seed": prompt_seed,
             "max_response_chars": max_chars,
-            "cancel_token": self._cancel_token,
+            "cancel_token": self._pipeline_cancel_token,
             "hooks": hooks,
         }
 
@@ -379,28 +386,68 @@ class BrainPipeline:
         self, user_text: str, *, memory_task: asyncio.Task[Any] | None = None,
         source: str = "voice",
         conversation_session_id: str | None = None,
+        turn_owner: str | None = None,
     ) -> str:
         """Run the full brain pipeline. Returns assistant reply."""
         if conversation_session_id is None:
-            return await self._turn_executor.process(
+            operation = self._turn_executor.process(
                 user_text,
                 memory_task=memory_task,
                 source=source,
             )
-        return await self._turn_executor.process(
-            user_text,
-            memory_task=memory_task,
-            source=source,
-            conversation_session_id=conversation_session_id,
+        else:
+            operation = self._turn_executor.process(
+                user_text,
+                memory_task=memory_task,
+                source=source,
+                conversation_session_id=conversation_session_id,
+            )
+        return await self._run_controlled_turn(
+            operation,
+            owner=turn_owner or "generic",
         )
+
+    async def _run_controlled_turn(
+        self,
+        operation: Awaitable[str],
+        *,
+        owner: str = "generic",
+    ) -> str:
+        """Run one operation under a fresh conversational cancellation lease."""
+        lease = self._turn_control.begin_turn(owner=owner)
+        try:
+            result = await operation
+            return "" if lease.cancelled else result
+        except asyncio.CancelledError:
+            if not lease.cancelled:
+                raise
+            logger.info(
+                "Conversation turn cancelled: %s",
+                lease.reason or "barge_in",
+            )
+            return ""
+        finally:
+            self._turn_control.end_turn(lease)
+
+    def cancel_current_turn(
+        self,
+        reason: str = "barge_in",
+        *,
+        owner: str | None = None,
+    ) -> bool:
+        """Interrupt one channel's active turn without latching E-STOP."""
+        return self._turn_control.cancel_current_turn(reason=reason, owner=owner)
 
     async def execute_skill(
         self, skill_name: str, user_text: str, extra_context: str = "",
         source: str = "voice",
     ) -> str:
         """Execute a named skill and speak the result."""
-        return await self._skill_gate.execute_skill(
-            skill_name, user_text, extra_context, source,
+        return await self._run_controlled_turn(
+            self._skill_gate.execute_skill(
+                skill_name, user_text, extra_context, source,
+            ),
+            owner=source or "generic",
         )
 
     def start_idle_reflection(self, idle_seconds: float = 300.0) -> asyncio.Task[None] | None:

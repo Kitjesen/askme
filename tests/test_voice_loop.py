@@ -8,7 +8,7 @@ from askme.pipeline.voice_loop import VoiceLoop
 from askme.voice.interaction_gate import InteractionGate
 
 from askme.pipeline.proactive.base import ProactiveResult
-from askme.robot_interaction import Intent, IntentType
+from askme.robot_interaction import Intent, IntentRouter, IntentType
 
 
 class _Router:
@@ -24,7 +24,9 @@ class _Pipeline:
     def __init__(self) -> None:
         self.process_calls: list[str] = []
         self.process_conversation_session_ids: list[str | None] = []
+        self.process_turn_owners: list[str | None] = []
         self.skill_calls: list[tuple[str, str]] = []
+        self.memory_calls: list[str] = []
         self.pending_calls: list[str] = []
         self.pending_reply_map: dict[str, str] = {}
         self._episodic = _Episodic()
@@ -36,6 +38,7 @@ class _Pipeline:
         return None
 
     def start_memory_prefetch(self, user_text: str):
+        self.memory_calls.append(user_text)
         return asyncio.create_task(asyncio.sleep(0, result=""))
 
     async def handle_pending_tool_response(self, user_text: str):
@@ -48,9 +51,11 @@ class _Pipeline:
         *,
         memory_task=None,
         conversation_session_id: str | None = None,
+        turn_owner: str | None = None,
     ):
         self.process_calls.append(user_text)
         self.process_conversation_session_ids.append(conversation_session_id)
+        self.process_turn_owners.append(turn_owner)
         return "fallback"
 
     async def execute_skill(self, skill_name: str, user_text: str):
@@ -70,9 +75,11 @@ class _SpeakingPipeline(_Pipeline):
         *,
         memory_task=None,
         conversation_session_id: str | None = None,
+        turn_owner: str | None = None,
     ):
         self.process_calls.append(user_text)
         self.process_conversation_session_ids.append(conversation_session_id)
+        self.process_turn_owners.append(turn_owner)
         if memory_task is not None:
             self.memory_results.append(await memory_task)
         reply = f"pipeline reply: {user_text}"
@@ -87,6 +94,7 @@ class _Audio:
     def __init__(self) -> None:
         self._calls = 0
         self.spoken: list[str] = []
+        self.cached_spoken: list[tuple[str, str]] = []
         self._muted = False
         self._drained = 0
         self.ack_count = 0
@@ -120,6 +128,10 @@ class _Audio:
 
     async def speak_and_wait(self, text: str) -> None:
         self.spoken.append(text)
+
+    async def speak_cached_and_wait(self, text: str, *, cache_key: str) -> bool:
+        self.cached_spoken.append((text, cache_key))
+        return True
 
     def drain_buffers(self) -> None:
         self._drained += 1
@@ -471,6 +483,7 @@ async def test_voice_loop_falls_back_to_local_pipeline_when_runtime_bridge_unhan
     assert bridge.calls == ["inspect zone"]
     assert pipeline.process_calls == ["inspect zone"]
     assert pipeline.process_conversation_session_ids == [None]
+    assert pipeline.process_turn_owners == ["voice"]
 
 
 @pytest.mark.asyncio
@@ -539,6 +552,87 @@ async def test_general_voice_turn_flows_through_pipeline_to_tts() -> None:
     assert pipeline.memory_results == [""]
     assert audio.ack_count >= 1
     assert audio.spoken == ["pipeline reply: inspect zone"]
+
+
+@pytest.mark.asyncio
+async def test_quick_reply_uses_cached_audio_before_ack_memory_or_llm() -> None:
+    audio = _Audio()
+    pipeline = _Pipeline()
+    texts = ["\u4f60\u662f\u8c01", "exit"]
+    call_idx = 0
+
+    def _listen():
+        nonlocal call_idx
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(router=IntentRouter(), pipeline=pipeline, audio=audio)
+
+    await loop.run()
+
+    assert pipeline.process_calls == []
+    assert "\u4f60\u662f\u8c01" not in pipeline.memory_calls
+    assert len(audio.cached_spoken) == 1
+    assert "\u5c0f\u7b97" in audio.cached_spoken[0][0]
+    assert audio.spoken == []
+    assert audio.ack_count == 1  # exit only
+
+
+@pytest.mark.asyncio
+async def test_yield_request_consumes_system_phrase_cache_without_llm() -> None:
+    audio = _Audio()
+    pipeline = _Pipeline()
+    texts = ["\u8bf7\u8ba9\u4e00\u4e0b", "exit"]
+    call_idx = 0
+
+    def _listen():
+        nonlocal call_idx
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(router=IntentRouter(), pipeline=pipeline, audio=audio)
+
+    await loop.run()
+
+    assert pipeline.process_calls == []
+    assert "\u8bf7\u8ba9\u4e00\u4e0b" not in pipeline.memory_calls
+    assert audio.cached_spoken == [
+        (
+            "\u60a8\u597d\uff0c\u8bf7\u8ba9\u4e00\u4e0b\uff0c\u8c22\u8c22\u3002",
+            "system-please-yield",
+        )
+    ]
+    assert audio.spoken == []
+    assert audio.ack_count == 1  # exit only
+
+
+@pytest.mark.asyncio
+async def test_location_fast_path_prefaces_then_runs_read_only_skill() -> None:
+    audio = _Audio()
+    pipeline = _Pipeline()
+    texts = ["\u5f53\u524d\u4f4d\u7f6e", "exit"]
+    call_idx = 0
+
+    def _listen():
+        nonlocal call_idx
+        text = texts[call_idx]
+        call_idx += 1
+        return text
+
+    audio.listen_loop = _listen  # type: ignore[method-assign]
+    loop = VoiceLoop(router=IntentRouter(), pipeline=pipeline, audio=audio)
+
+    await loop.run()
+
+    assert pipeline.skill_calls == [("nav_query", "\u5f53\u524d\u4f4d\u7f6e")]
+    assert "\u5f53\u524d\u4f4d\u7f6e" not in pipeline.memory_calls
+    assert len(audio.cached_spoken) == 1
+    assert "\u4f4d\u7f6e" in audio.cached_spoken[0][0]
+    assert audio.ack_count == 1  # exit only; cached preface replaces ACK
 
 
 @pytest.mark.asyncio

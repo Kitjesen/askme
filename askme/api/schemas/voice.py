@@ -62,3 +62,49 @@ class VoiceSystemUpdateResponse(BaseModel):
     state: str = ""
     reason: str = ""
     runtime: dict[str, Any] = Field(default_factory=dict)
+
+
+class VoiceSpeakRequest(BaseModel):
+    """Literal text-to-robot speech; this contract never invokes an LLM."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=500)
+    robot_id: str = Field(min_length=1, max_length=128)
+    device_id: str = Field(min_length=1, max_length=128)
+    site_id: str = Field(default="", max_length=128)
+    semantics: str = "verbatim"
+    priority: str = "normal"
+    queue_policy: str = "enqueue"
+    voice_profile_id: str = Field(default="", max_length=128)
+    speed: float | None = Field(default=None, ge=0.75, le=1.5)
+    pitch: float | None = Field(default=None, ge=-12.0, le=12.0)
+    volume: float | None = Field(default=None, ge=0.05, le=1.0)
+    ttl_s: float = Field(default=60.0, ge=1.0, le=300.0)
+
+
+class VoicePlaybackCancelRequest(BaseModel):
+    """Operator reason for cancelling one playback job."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="operator_cancelled", min_length=1, max_length=160)
+
+
+class VoicePlaybackResponse(BaseModel):
+    """Public lifecycle view for one speech playback job."""
+
+    model_config = ConfigDict(extra="allow")
+
+    playback_id: str
+    state: str
+    target: dict[str, Any]
+    delivery: str = "playback"
+    priority: str = "normal"
+    text_chars: int = 0
+    idempotency_key: str = ""
+    timestamps: dict[str, Any] = Field(default_factory=dict)
+    cache_hit: bool = False
+    artifact: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    customer_message: str = ""
