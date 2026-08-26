@@ -13,6 +13,7 @@ _LABEL = "MCP 工具服务"
 
 def _build_mcp():
     from askme.blueprints.runner.runner import compose_runtime
+    from askme.blueprints.runtime_composition import RuntimeHandoffModule
     from askme.runtime.modules import (
         CognitionModule,
         ControlModule,
@@ -23,7 +24,6 @@ def _build_mcp():
         MissionModule,
         PipelineModule,
         PulseModule,
-        RuntimeHandoffModule,
         SafetyModule,
         SkillModule,
         ToolsModule,

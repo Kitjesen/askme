@@ -46,8 +46,10 @@ Important constraints:
 - `conversation` is provider-neutral and must not import pipeline, runtime,
   memory, perception, voice, provider SDKs, or hardware code.
 - Pipeline and gateway code may command Conversation Core. Memory, perception,
-  and task systems must not own the thread or turn lifecycle. Their committed-
-  event consumers are a target boundary and are not implemented in Phase 1.
+  and task systems must not own the thread or turn lifecycle. External task
+  correlation and task-status notifications already settle through canonical
+  Conversation Core turns; generic committed-event consumers for memory,
+  perception, and tasks remain a target boundary after Phase 1.
 - A realtime provider session is replaceable transport state. Reconnects create
   a new generation under the same conversation thread, never a new product
   conversation by themselves.
@@ -79,6 +81,7 @@ Important constraints:
 | Audio frontend / ASR / TTS | `ports/voice.py` | `providers/voice.py` | `voice/orchestration`, `voice/input`, `voice/output` |
 | Edge voice I/O | `ports/voice.py` | `providers/voice.py` | `voice/input`, `voice/output` |
 | Voice runtime bridge | `ports/voice.py` | `providers/voice.py` / `providers/voice_runtime.py` | external askme-edge-service HTTP API |
+| External runtime executor | `ports/runtime_executor/` | `providers/runtime_executor/` | external runtime HTTP API |
 
 ## How To Read A Flow
 

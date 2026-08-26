@@ -8,17 +8,29 @@ service APIs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import threading
 import time
-from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, replace
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 from uuid import uuid4
 
+from askme.ports.runtime_executor import (
+    AmbiguousRuntimeSubmissionError,
+    RuntimeExecutorSubmitRequest,
+    RuntimeExecutorSubmitResult,
+    RuntimeExecutorTransport,
+    RuntimeExecutorTransportError,
+)
 from askme.runtime.control_intent import (
     runtime_control_intent,
     runtime_control_permission,
@@ -28,6 +40,205 @@ from askme.runtime.task.audit import RuntimeAuditConfig, RuntimeAuditLog
 
 _TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "blocked", "shadowed"})
 _SUPPORTED_RUNTIME_PROFILES = ("fake", "shadow", "sim", "external", "lab")
+_REMOTE_UPDATE_ID_LIMIT = 64
+_NOTIFICATION_DELIVERY_RECEIPT_LIMIT = 64
+_NOTIFICATION_DELIVERY_STATES = frozenset({"delivered", "interrupted", "suppressed", "expired"})
+_REMOTE_STATUS_ALIASES = {
+    "accepted": "submitted",
+    "pending": "queued",
+    "running": "executing",
+    "working": "executing",
+    "in_progress": "executing",
+    "succeeded": "completed",
+    "success": "completed",
+    "error": "failed",
+    "canceled": "cancelled",
+}
+_REMOTE_STATUS_TRANSITIONS = {
+    "": frozenset(
+        {
+            "submitted",
+            "created",
+            "validating",
+            "preflight",
+            "queued",
+            "executing",
+            "paused",
+            "resuming",
+            "input_required",
+            "auth_required",
+            "blocked",
+            "cancelling",
+            "cancelled",
+            "completed",
+            "failed",
+            "rejected",
+            "shadowed",
+        }
+    ),
+    "submitted": frozenset(
+        {
+            "submitted",
+            "created",
+            "validating",
+            "preflight",
+            "queued",
+            "executing",
+            "paused",
+            "input_required",
+            "auth_required",
+            "blocked",
+            "cancelling",
+            "cancelled",
+            "completed",
+            "failed",
+            "rejected",
+        }
+    ),
+    "created": frozenset(
+        {
+            "created",
+            "validating",
+            "preflight",
+            "queued",
+            "executing",
+            "blocked",
+            "cancelled",
+            "completed",
+            "failed",
+            "rejected",
+        }
+    ),
+    "validating": frozenset(
+        {
+            "validating",
+            "preflight",
+            "queued",
+            "executing",
+            "blocked",
+            "cancelled",
+            "completed",
+            "failed",
+            "rejected",
+        }
+    ),
+    "preflight": frozenset(
+        {
+            "preflight",
+            "queued",
+            "executing",
+            "blocked",
+            "cancelled",
+            "completed",
+            "failed",
+            "rejected",
+        }
+    ),
+    "queued": frozenset(
+        {
+            "queued",
+            "executing",
+            "paused",
+            "input_required",
+            "auth_required",
+            "blocked",
+            "cancelling",
+            "cancelled",
+            "completed",
+            "failed",
+            "rejected",
+        }
+    ),
+    "executing": frozenset(
+        {
+            "executing",
+            "paused",
+            "resuming",
+            "input_required",
+            "auth_required",
+            "blocked",
+            "cancelling",
+            "cancelled",
+            "completed",
+            "failed",
+        }
+    ),
+    "paused": frozenset(
+        {"paused", "resuming", "executing", "cancelling", "cancelled", "completed", "failed"}
+    ),
+    "input_required": frozenset(
+        {"input_required", "resuming", "executing", "cancelling", "cancelled", "failed"}
+    ),
+    "auth_required": frozenset(
+        {"auth_required", "resuming", "executing", "cancelling", "cancelled", "failed"}
+    ),
+    "resuming": frozenset(
+        {"resuming", "executing", "paused", "cancelling", "cancelled", "completed", "failed"}
+    ),
+    "cancelling": frozenset({"cancelling", "cancelled", "completed", "failed"}),
+    "completed": frozenset({"completed"}),
+    "failed": frozenset({"failed"}),
+    "cancelled": frozenset({"cancelled"}),
+    "blocked": frozenset({"blocked"}),
+    "rejected": frozenset({"rejected"}),
+    "shadowed": frozenset({"shadowed"}),
+}
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+_TASK_RUN_STORE_LOCKS_GUARD = threading.Lock()
+_TASK_RUN_STORE_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _task_run_service_locked(
+    method: Callable[_P, _R],
+) -> Callable[_P, _R]:
+    @wraps(method)
+    def _wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        service = args[0]
+        with service._lock:  # type: ignore[attr-defined]
+            return method(*args, **kwargs)
+
+    return _wrapped
+
+
+def _task_run_store_lock(path: Path | None) -> threading.RLock:
+    if path is None:
+        return threading.RLock()
+    key = str(path.resolve())
+    with _TASK_RUN_STORE_LOCKS_GUARD:
+        return _TASK_RUN_STORE_LOCKS.setdefault(key, threading.RLock())
+
+
+def _runtime_handoff_task_run_transaction(
+    method: Callable[_P, _R],
+) -> Callable[_P, _R]:
+    @wraps(method)
+    def _wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        service = args[0]
+        with service.run_service.transaction():  # type: ignore[attr-defined]
+            return method(*args, **kwargs)
+
+    return _wrapped
+_REMOTE_TO_LOCAL_STATE = {
+    "submitted": "queued",
+    "created": "queued",
+    "validating": "queued",
+    "preflight": "queued",
+    "queued": "queued",
+    "executing": "executing",
+    "paused": "paused",
+    "resuming": "executing",
+    "input_required": "paused",
+    "auth_required": "paused",
+    "blocked": "blocked",
+    "cancelling": "cancel_requested",
+    "completed": "completed",
+    "failed": "failed",
+    "rejected": "blocked",
+    "cancelled": "cancelled",
+    "shadowed": "shadowed",
+}
 _UTC_TS_SCALE = 1000
 logger = logging.getLogger(__name__)
 
@@ -233,8 +444,8 @@ class TaskHandoff:
             created_at=current,
             expires_at=current + max(1.0, float(ttl_s)),
             planner_version=planner_version,
-            source_plan=dict(plan),
-            world_state_snapshot=dict(world_state_snapshot),
+            source_plan=deepcopy(plan),
+            world_state_snapshot=deepcopy(world_state_snapshot),
             operator_roles=_operator_roles(plan),
         )
 
@@ -397,6 +608,16 @@ class TaskRun:
     report: dict[str, Any] | None = None
     shadow_plan: dict[str, Any] | None = None
     sim_state: dict[str, Any] | None = None
+    remote_task_id: str | None = None
+    remote_status: str = ""
+    remote_status_cursor: str = ""
+    external_idempotency_key: str = ""
+    remote_observed_at: float | None = None
+    last_poll_error_code: str = ""
+    processed_remote_update_ids: list[str] = field(default_factory=list)
+    notification_delivery_receipts: dict[str, str] = field(default_factory=dict)
+    approval_request: dict[str, Any] = field(default_factory=dict)
+    deferred_cancel_request: dict[str, Any] = field(default_factory=dict)
 
     @property
     def terminal(self) -> bool:
@@ -428,6 +649,16 @@ class TaskRun:
             "report": self.report,
             "shadow_plan": self.shadow_plan,
             "sim_state": self.sim_state,
+            "remote_task_id": self.remote_task_id,
+            "remote_status": self.remote_status,
+            "remote_status_cursor": self.remote_status_cursor,
+            "external_idempotency_key": self.external_idempotency_key,
+            "remote_observed_at": self.remote_observed_at,
+            "last_poll_error_code": self.last_poll_error_code,
+            "processed_remote_update_ids": list(self.processed_remote_update_ids),
+            "notification_delivery_receipts": dict(self.notification_delivery_receipts),
+            "approval_request": dict(self.approval_request),
+            "deferred_cancel_request": dict(self.deferred_cancel_request),
             "terminal": self.terminal,
         }
 
@@ -464,6 +695,7 @@ class TaskRunStore:
         else:
             self.config = TaskRunStoreConfig.from_mapping(config)
         self.path = Path(self.config.path).expanduser() if self.config.path else None
+        self._lock = _task_run_store_lock(self.path)
 
     @property
     def enabled(self) -> bool:
@@ -473,8 +705,9 @@ class TaskRunStore:
         if not self.enabled or self.path is None or not self.path.exists():
             return []
         try:
-            with self.path.open("r", encoding="utf-8") as handle:
-                payload = json.load(handle)
+            with self._lock:
+                with self.path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
             raw_runs = payload.get("runs", payload) if isinstance(payload, dict) else payload
             if not isinstance(raw_runs, list):
                 return []
@@ -492,28 +725,40 @@ class TaskRunStore:
     def save_runs(self, runs: list[TaskRun]) -> None:
         if not self.enabled or self.path is None:
             return
+        tmp_path: Path | None = None
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "version": 1,
-                "updated_at": time.time(),
-                "runs": [run.to_dict() for run in runs],
-            }
-            tmp_path = self.path.with_name(f"{self.path.name}.tmp")
-            with tmp_path.open("w", encoding="utf-8", newline="\n") as handle:
-                json.dump(
-                    payload,
-                    handle,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
+            with self._lock:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                payload = {
+                    "version": 1,
+                    "updated_at": time.time(),
+                    "runs": [run.to_dict() for run in runs],
+                }
+                tmp_path = self.path.with_name(
+                    f".{self.path.name}.{uuid4().hex}.tmp"
                 )
-                handle.write("\n")
-            os.replace(tmp_path, self.path)
+                with tmp_path.open("w", encoding="utf-8", newline="\n") as handle:
+                    json.dump(
+                        payload,
+                        handle,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, self.path)
         except OSError:
             if not self.config.swallow_errors:
                 raise
             logger.exception("TaskRun store save failed for %s", self.path)
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    logger.warning("TaskRun temp cleanup failed for %s", tmp_path)
 
 
 def _task_run_from_dict(payload: dict[str, Any]) -> TaskRun:
@@ -557,8 +802,50 @@ def _task_run_from_dict(payload: dict[str, Any]) -> TaskRun:
         sim_state=dict(payload["sim_state"])
         if isinstance(payload.get("sim_state"), dict)
         else None,
+        remote_task_id=(
+            str(payload.get("remote_task_id"))
+            if payload.get("remote_task_id") is not None
+            else None
+        ),
+        remote_status=str(payload.get("remote_status") or ""),
+        remote_status_cursor=str(payload.get("remote_status_cursor") or ""),
+        external_idempotency_key=str(payload.get("external_idempotency_key") or ""),
+        remote_observed_at=_optional_float(payload.get("remote_observed_at")),
+        last_poll_error_code=str(payload.get("last_poll_error_code") or ""),
+        processed_remote_update_ids=[
+            str(item)
+            for item in payload.get("processed_remote_update_ids", [])
+            if str(item).strip()
+        ][-_REMOTE_UPDATE_ID_LIMIT:],
+        notification_delivery_receipts=_notification_delivery_receipts_from_dict(
+            payload.get("notification_delivery_receipts")
+        ),
+        approval_request=(
+            dict(payload["approval_request"])
+            if isinstance(payload.get("approval_request"), dict)
+            else {}
+        ),
+        deferred_cancel_request=(
+            dict(payload["deferred_cancel_request"])
+            if isinstance(payload.get("deferred_cancel_request"), dict)
+            else {}
+        ),
     )
     return run
+
+
+def _notification_delivery_receipts_from_dict(payload: Any) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        return {}
+    receipts: dict[str, str] = {}
+    for event_id, status in payload.items():
+        normalized_event_id = str(event_id or "").strip()
+        normalized_status = str(status or "").strip().lower()
+        if normalized_event_id and normalized_status in _NOTIFICATION_DELIVERY_STATES:
+            receipts[normalized_event_id] = normalized_status
+    if len(receipts) <= _NOTIFICATION_DELIVERY_RECEIPT_LIMIT:
+        return receipts
+    return dict(list(receipts.items())[-_NOTIFICATION_DELIVERY_RECEIPT_LIMIT:])
 
 
 def _task_handoff_from_dict(payload: dict[str, Any]) -> TaskHandoff:
@@ -696,6 +983,153 @@ def _dict_items(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, list):
         return []
     return [item for item in payload if isinstance(item, dict)]
+
+
+def _external_evidence_result(
+    run: TaskRun,
+    payload: dict[str, Any] | None,
+    *,
+    update_id: str,
+    cursor: str,
+    remote_status: str,
+    observed_at: float,
+) -> tuple[SkillResult | None, bool]:
+    """Normalize one executor evidence payload into a durable SkillResult."""
+    if not isinstance(payload, dict):
+        return None, False
+
+    observations = _external_evidence_items(payload, "observation", "observations")
+    artifacts = _external_evidence_items(payload, "artifact", "artifacts")
+    if not observations and not artifacts:
+        return None, False
+
+    observations, observations_updated = _upsert_existing_evidence(
+        run,
+        observations,
+        field_name="observations",
+    )
+    artifacts, artifacts_updated = _upsert_existing_evidence(
+        run,
+        artifacts,
+        field_name="artifacts",
+    )
+    evidence_changed = observations_updated or artifacts_updated
+    if not observations and not artifacts:
+        return None, evidence_changed
+
+    evidence_source = update_id or cursor or uuid4().hex[:12]
+    evidence_key = hashlib.sha256(f"{run.run_id}:{evidence_source}".encode()).hexdigest()[:16]
+    ended_at = (
+        observed_at if _REMOTE_TO_LOCAL_STATE.get(remote_status) in _TERMINAL_STATES else None
+    )
+    return (
+        SkillResult(
+            result_id=f"external-result-{evidence_key}",
+            run_id=run.run_id,
+            step_id=str(payload.get("step_id") or f"external:{evidence_key}"),
+            sequence=_external_evidence_sequence(payload.get("sequence"), run),
+            skill_name=str(payload.get("skill_name") or "external_executor"),
+            status=remote_status,
+            observations=observations,
+            artifacts=artifacts,
+            started_at=observed_at,
+            ended_at=ended_at,
+        ),
+        True,
+    )
+
+
+def _external_evidence_items(
+    payload: dict[str, Any], singular_key: str, plural_key: str
+) -> list[dict[str, Any]]:
+    candidates: list[Any] = [payload.get(singular_key)]
+    plural = payload.get(plural_key)
+    if isinstance(plural, Sequence) and not isinstance(plural, (str, bytes, bytearray)):
+        candidates.extend(plural)
+    elif plural is not None:
+        candidates.append(plural)
+
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        item = _external_evidence_copy(candidate)
+        identity = _evidence_identity(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        items.append(item)
+    return items
+
+
+def _evidence_identity(item: dict[str, Any]) -> str:
+    for key in ("artifact_id", "evidence_id", "observation_id"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return f"{key}:{value}"
+    return "content:" + json.dumps(
+        item,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _upsert_existing_evidence(
+    run: TaskRun,
+    items: list[dict[str, Any]],
+    *,
+    field_name: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    new_items: list[dict[str, Any]] = []
+    changed = False
+    for item in items:
+        identity = _evidence_identity(item)
+        matched = False
+        for result_index, result in enumerate(run.skill_results):
+            existing_items = (
+                result.observations if field_name == "observations" else result.artifacts
+            )
+            for item_index, existing in enumerate(existing_items):
+                if _evidence_identity(existing) != identity:
+                    continue
+                matched = True
+                if existing != item:
+                    updated_items = list(existing_items)
+                    updated_items[item_index] = item
+                    run.skill_results[result_index] = (
+                        replace(result, observations=updated_items)
+                        if field_name == "observations"
+                        else replace(result, artifacts=updated_items)
+                    )
+                    changed = True
+                break
+            if matched:
+                break
+        if not matched:
+            new_items.append(item)
+    return new_items, changed
+
+
+def _external_evidence_copy(value: Mapping[Any, Any]) -> dict[str, Any]:
+    return {str(key): _external_evidence_value(item) for key, item in value.items()}
+
+
+def _external_evidence_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _external_evidence_copy(value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_external_evidence_value(item) for item in value]
+    return deepcopy(value)
+
+
+def _external_evidence_sequence(value: Any, run: TaskRun) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return len(run.skill_results) + 1
 
 
 def _optional_float(value: Any) -> float | None:
@@ -998,9 +1432,11 @@ class TaskRunService:
         store: TaskRunStore | TaskRunStoreConfig | dict[str, Any] | None = None,
         max_runs: int = 50,
     ) -> None:
+        self._lock = threading.RLock()
         self._runs: dict[str, TaskRun] = {}
         self._report_service = report_service or TaskReportService()
         self._event_sink = event_sink
+        self._event_observers: list[Callable[[RuntimeEvent], None]] = []
         self._audit_log = audit_log or RuntimeAuditLog()
         self._store = store if isinstance(store, TaskRunStore) else TaskRunStore(store)
         self.max_runs = max(1, int(max_runs))
@@ -1008,6 +1444,32 @@ class TaskRunService:
             self._runs[run.run_id] = run
         self._trim_runs(persist=False)
 
+    @property
+    def durable_store_ready(self) -> bool:
+        """Return whether TaskRun writes are configured to fail closed."""
+
+        return bool(self._store.enabled and not self._store.config.swallow_errors)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Serialize one TaskRun read-modify-persist sequence in this process."""
+
+        with self._lock:
+            yield
+
+    @_task_run_service_locked
+    def get_or_build_report(self, run_id: str) -> dict[str, Any] | None:
+        """Return one report without allowing a newer run state to be overwritten."""
+
+        run = self._runs.get(run_id)
+        if run is None:
+            return None
+        if run.report is None:
+            run.report = self._report_service.build_report(run)
+            self._persist_runs()
+        return run.report
+
+    @_task_run_service_locked
     def create(self, handoff: TaskHandoff, *, profile: str = "fake") -> TaskRun:
         run = TaskRun(
             run_id=f"run-{uuid4().hex[:12]}",
@@ -1026,6 +1488,28 @@ class TaskRunService:
         )
         return run
 
+    @_task_run_service_locked
+    def subscribe_events(self, observer: Callable[[RuntimeEvent], None]) -> Callable[[], None]:
+        """Observe committed events without joining the authoritative write path."""
+        if not callable(observer):
+            raise TypeError("observer must be callable")
+        self._event_observers.append(observer)
+        subscribed = True
+
+        def unsubscribe() -> None:
+            nonlocal subscribed
+            with self._lock:
+                if not subscribed:
+                    return
+                subscribed = False
+                try:
+                    self._event_observers.remove(observer)
+                except ValueError:
+                    pass
+
+        return unsubscribe
+
+    @_task_run_service_locked
     def add_safety_assessment(self, run: TaskRun, assessment: SafetyAssessment) -> None:
         run.safety_assessments.append(assessment)
         self.emit(
@@ -1044,6 +1528,7 @@ class TaskRunService:
                 {"perception_request": request.to_dict()},
             )
 
+    @_task_run_service_locked
     def record_skill_result(
         self,
         run: TaskRun,
@@ -1082,6 +1567,7 @@ class TaskRunService:
         )
         return result
 
+    @_task_run_service_locked
     def record_replan_proposal(
         self,
         run: TaskRun,
@@ -1100,6 +1586,7 @@ class TaskRunService:
         )
         return proposal
 
+    @_task_run_service_locked
     def transition(
         self,
         run: TaskRun,
@@ -1115,14 +1602,24 @@ class TaskRunService:
             run.started_at = time.time()
         if state in _TERMINAL_STATES:
             run.ended_at = time.time()
-        event = self.emit(run, event_type, state, message, payload or {})
+        terminal_transition = state in _TERMINAL_STATES
+        event = self.emit(
+            run,
+            event_type,
+            state,
+            message,
+            payload or {},
+            _notify_observers=not terminal_transition,
+        )
         if state in _TERMINAL_STATES:
-            run.result_summary = _run_summary(run)
+            run.result_summary = run.result_summary or _run_summary(run)
             run.report = self._report_service.build_report(run)
             self._audit_log.append_terminal_snapshot(run)
             self._persist_runs()
+            self._notify_event_observers(event)
         return event
 
+    @_task_run_service_locked
     def emit(
         self,
         run: TaskRun,
@@ -1130,6 +1627,8 @@ class TaskRunService:
         state: str,
         message: str,
         payload: dict[str, Any] | None = None,
+        *,
+        _notify_observers: bool = True,
     ) -> RuntimeEvent:
         event = RuntimeEvent(
             event_id=f"evt-{uuid4().hex[:12]}",
@@ -1144,8 +1643,297 @@ class TaskRunService:
             self._event_sink(event)
         self._audit_log.append_event(event)
         self._persist_runs()
+        if _notify_observers:
+            self._notify_event_observers(event)
         return event
 
+    def _notify_event_observers(self, event: RuntimeEvent) -> None:
+        for observer in tuple(self._event_observers):
+            try:
+                observer(event)
+            except Exception:
+                logger.exception("TaskRun event observer failed for %s", event.event_id)
+
+    @_task_run_service_locked
+    def bind_external_submission(
+        self,
+        run_id: str,
+        *,
+        remote_task_id: str,
+        external_idempotency_key: str = "",
+        remote_status: str = "submitted",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Bind one accepted external submission to its local TaskRun."""
+        run = self.require(run_id)
+        if run.profile not in EXTERNAL_RUNTIME_PROFILES:
+            return self._remote_update_rejected(run, "external_profile_required")
+        if run.terminal:
+            return self._remote_update_rejected(run, "run_already_terminal")
+        normalized_remote_id = str(remote_task_id or "").strip()
+        if not normalized_remote_id:
+            return self._remote_update_rejected(run, "remote_task_id_required")
+        if run.remote_task_id and run.remote_task_id != normalized_remote_id:
+            return self._remote_update_rejected(run, "remote_task_id_mismatch")
+        normalized_idempotency_key = str(
+            external_idempotency_key or run.external_idempotency_key or run.run_id
+        ).strip()
+        if (
+            run.external_idempotency_key
+            and run.external_idempotency_key != normalized_idempotency_key
+        ):
+            return self._remote_update_rejected(run, "external_idempotency_key_mismatch")
+        normalized_status = _normalize_remote_status(remote_status)
+        if normalized_status not in _REMOTE_STATUS_TRANSITIONS[""]:
+            return self._remote_update_rejected(run, "remote_status_invalid")
+        run.remote_task_id = normalized_remote_id
+        run.external_idempotency_key = normalized_idempotency_key
+        run.remote_status = normalized_status
+        run.remote_observed_at = float(observed_at if observed_at is not None else time.time())
+        run.last_poll_error_code = ""
+        local_state = "queued" if run.current_state == "submission_unknown" else run.current_state
+        event = self.transition(
+            run,
+            local_state,
+            "external_submission_bound",
+            "External runtime submission accepted.",
+            {
+                "remote_task_id": run.remote_task_id,
+                "remote_status": run.remote_status,
+                "external_idempotency_key": run.external_idempotency_key,
+            },
+        )
+        return {"handled": True, "event": event.to_dict(), "run": run.to_dict()}
+
+    @_task_run_service_locked
+    def prepare_external_submission(
+        self,
+        run_id: str,
+        *,
+        external_idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Persist the replay key before the first external side effect."""
+
+        run = self.require(run_id)
+        normalized = str(external_idempotency_key or "").strip()
+        if not normalized:
+            raise ValueError("external_idempotency_key is required")
+        if run.external_idempotency_key and run.external_idempotency_key != normalized:
+            return self._remote_update_rejected(run, "external_idempotency_key_mismatch")
+        run.external_idempotency_key = normalized
+        self._persist_runs()
+        return {"handled": True, "run": run.to_dict()}
+
+    @_task_run_service_locked
+    def refresh_prepared_handoff_snapshot(
+        self,
+        run_id: str,
+        *,
+        world_state_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        run = self.require(run_id)
+        if run.current_state != "confirmed":
+            return self._remote_update_rejected(run, "prepared_run_not_confirmed")
+        if run.profile not in EXTERNAL_RUNTIME_PROFILES:
+            return self._remote_update_rejected(run, "external_profile_required")
+        snapshot = deepcopy(world_state_snapshot)
+        run.handoff = replace(
+            run.handoff,
+            world_state_snapshot_id=_world_snapshot_id(snapshot),
+            world_state_snapshot=snapshot,
+        )
+        self._persist_runs()
+        return {"handled": True, "run": run.to_dict()}
+
+    @_task_run_service_locked
+    def set_deferred_cancel_request(
+        self,
+        run_id: str,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        run = self.require(run_id)
+        run.deferred_cancel_request = deepcopy(request)
+        event = self.emit(
+            run,
+            "external_cancel_deferred",
+            run.current_state,
+            "External cancellation deferred until submission identity is reconciled.",
+        )
+        return {"handled": True, "event": event.to_dict(), "run": run.to_dict()}
+
+    @_task_run_service_locked
+    def clear_deferred_cancel_request(self, run_id: str) -> dict[str, Any]:
+        run = self.require(run_id)
+        if run.deferred_cancel_request:
+            run.deferred_cancel_request = {}
+            self._persist_runs()
+        return {"handled": True, "run": run.to_dict()}
+
+    @_task_run_service_locked
+    def mark_external_projection_unknown(
+        self,
+        run_id: str,
+        *,
+        remote_task_id: str,
+        external_idempotency_key: str,
+        error_code: str,
+    ) -> dict[str, Any]:
+        """Keep a remotely accepted task reconcilable after local commit failure."""
+
+        run = self.require(run_id)
+        if run.terminal:
+            return {"handled": True, "run": run.to_dict()}
+        remote_id = str(remote_task_id or "").strip()
+        if remote_id and (not run.remote_task_id or run.remote_task_id == remote_id):
+            run.remote_task_id = remote_id
+        run.external_idempotency_key = str(
+            external_idempotency_key or run.external_idempotency_key or run.run_id
+        ).strip()
+        if not run.remote_status:
+            run.remote_status = "submitted"
+        run.current_state = "submission_unknown"
+        run.last_poll_error_code = str(error_code or "external_projection_commit_unknown")
+        try:
+            event = self.emit(
+                run,
+                "external_projection_commit_unknown",
+                run.current_state,
+                "External submission was accepted but local projection commit is uncertain.",
+                {
+                    "error_code": run.last_poll_error_code,
+                    "remote_task_id": run.remote_task_id,
+                    "external_idempotency_key": run.external_idempotency_key,
+                },
+            )
+        except OSError:
+            logger.exception(
+                "TaskRun projection uncertainty could not be persisted for %s",
+                run.run_id,
+            )
+            return {"handled": False, "run": run.to_dict()}
+        return {"handled": True, "event": event.to_dict(), "run": run.to_dict()}
+
+    @_task_run_service_locked
+    def apply_external_update(
+        self,
+        run_id: str,
+        *,
+        remote_task_id: str,
+        remote_status: str,
+        update_id: str = "",
+        cursor: str | int = "",
+        payload: dict[str, Any] | None = None,
+        result_summary: str = "",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Project one deduplicated, monotonic external status update locally."""
+        run = self.require(run_id)
+        if run.profile not in EXTERNAL_RUNTIME_PROFILES:
+            return self._remote_update_rejected(run, "external_profile_required")
+        normalized_remote_id = str(remote_task_id or "").strip()
+        if not run.remote_task_id or normalized_remote_id != run.remote_task_id:
+            return self._remote_update_rejected(run, "remote_task_id_mismatch")
+        normalized_update_id = str(update_id or "").strip()
+        if normalized_update_id and normalized_update_id in run.processed_remote_update_ids:
+            return self._remote_update_rejected(run, "remote_update_duplicate")
+        normalized_cursor = str(cursor or "").strip()
+        if _remote_cursor_is_out_of_order(normalized_cursor, run.remote_status_cursor):
+            return self._remote_update_rejected(run, "remote_update_out_of_order")
+        normalized_status = _normalize_remote_status(remote_status)
+        allowed = _REMOTE_STATUS_TRANSITIONS.get(run.remote_status, frozenset())
+        if normalized_status not in allowed:
+            return self._remote_update_rejected(run, "remote_status_transition_invalid")
+        if run.terminal:
+            return self._remote_update_rejected(run, "run_already_terminal")
+
+        run.remote_status = normalized_status
+        if normalized_cursor:
+            run.remote_status_cursor = normalized_cursor
+        run.remote_observed_at = float(observed_at if observed_at is not None else time.time())
+        run.last_poll_error_code = ""
+        if normalized_update_id:
+            run.processed_remote_update_ids.append(normalized_update_id)
+            del run.processed_remote_update_ids[:-_REMOTE_UPDATE_ID_LIMIT]
+        if result_summary:
+            run.result_summary = str(result_summary).strip()
+
+        skill_result, evidence_changed = _external_evidence_result(
+            run,
+            payload,
+            update_id=normalized_update_id,
+            cursor=normalized_cursor,
+            remote_status=normalized_status,
+            observed_at=run.remote_observed_at,
+        )
+        if skill_result is not None:
+            run.skill_results.append(skill_result)
+        if evidence_changed:
+            run.report = None
+
+        local_state = _REMOTE_TO_LOCAL_STATE[normalized_status]
+        if run.current_state == "cancel_requested" and local_state not in _TERMINAL_STATES:
+            local_state = "cancel_requested"
+        event = self.transition(
+            run,
+            local_state,
+            f"external_{normalized_status}",
+            f"External TaskRun is {normalized_status}.",
+            {
+                "remote_task_id": run.remote_task_id,
+                "remote_status": normalized_status,
+                "update_id": normalized_update_id,
+                "cursor": normalized_cursor,
+                "skill_result_id": skill_result.result_id if skill_result is not None else "",
+            },
+        )
+        return {"handled": True, "event": event.to_dict(), "run": run.to_dict()}
+
+    @_task_run_service_locked
+    def record_external_poll_error(self, run_id: str, *, error_code: str) -> dict[str, Any]:
+        """Persist a transport observation failure without changing task state."""
+        run = self.require(run_id)
+        if run.profile not in EXTERNAL_RUNTIME_PROFILES:
+            return self._remote_update_rejected(run, "external_profile_required")
+        run.last_poll_error_code = str(error_code or "external_poll_failed").strip()
+        event = self.emit(
+            run,
+            "external_poll_failed",
+            run.current_state,
+            "External TaskRun status poll failed.",
+            {"error_code": run.last_poll_error_code},
+        )
+        return {"handled": True, "event": event.to_dict(), "run": run.to_dict()}
+
+    @_task_run_service_locked
+    def request_external_cancel(
+        self,
+        run_id: str,
+        *,
+        operator_id: str = "askme.operator",
+        reason: str = "",
+        risk_acknowledgement: bool = False,
+        operator_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record cancel intent; only a later remote update may confirm termination."""
+        run = self.require(run_id)
+        if run.profile not in EXTERNAL_RUNTIME_PROFILES:
+            return self._control_rejected(run, "cancel", "external_profile_required")
+        if run.terminal:
+            return self._control_rejected(run, "cancel", "run_already_terminal")
+        if run.current_state == "cancel_requested":
+            return {"handled": True, "run": run.to_dict(), "reply": "TaskRun cancel pending."}
+        self._record_operator_action(
+            run,
+            "cancel",
+            operator_id,
+            reason=reason,
+            risk_acknowledgement=risk_acknowledgement,
+            operator_context=operator_context,
+        )
+        self.transition(run, "cancel_requested", "cancel_requested", "TaskRun cancel requested.")
+        return {"handled": True, "run": run.to_dict(), "reply": "TaskRun cancel requested."}
+
+    @_task_run_service_locked
     def pause(
         self,
         run_id: str,
@@ -1169,6 +1957,7 @@ class TaskRunService:
         self.transition(run, "paused", "task_paused", "TaskRun paused by operator.")
         return {"handled": True, "run": run.to_dict(), "reply": "TaskRun paused."}
 
+    @_task_run_service_locked
     def resume(
         self,
         run_id: str,
@@ -1192,6 +1981,7 @@ class TaskRunService:
         self.transition(run, "executing", "execution_resumed", "TaskRun resumed by operator.")
         return {"handled": True, "run": run.to_dict(), "reply": "TaskRun resumed."}
 
+    @_task_run_service_locked
     def cancel(
         self,
         run_id: str,
@@ -1202,6 +1992,14 @@ class TaskRunService:
         operator_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         run = self.require(run_id)
+        if run.profile in EXTERNAL_RUNTIME_PROFILES:
+            return self.request_external_cancel(
+                run_id,
+                operator_id=operator_id,
+                reason=reason,
+                risk_acknowledgement=risk_acknowledgement,
+                operator_context=operator_context,
+            )
         if run.terminal:
             return self._control_rejected(run, "cancel", "run_already_terminal")
         self._record_operator_action(
@@ -1216,6 +2014,15 @@ class TaskRunService:
         self.transition(run, "cancelled", "task_cancelled", "TaskRun cancelled by operator.")
         return {"handled": True, "run": run.to_dict(), "reply": "TaskRun cancelled."}
 
+    def _remote_update_rejected(self, run: TaskRun, reason: str) -> dict[str, Any]:
+        return {
+            "handled": False,
+            "reason": reason,
+            "run": run.to_dict(),
+            "reply": f"External TaskRun update rejected: {reason}.",
+        }
+
+    @_task_run_service_locked
     def advance(
         self,
         run_id: str,
@@ -1282,15 +2089,18 @@ class TaskRunService:
             return {"handled": True, "run": run.to_dict(), "reply": "Sim TaskRun completed."}
         return {"handled": True, "run": run.to_dict(), "reply": f"Advanced to step {next_index}."}
 
+    @_task_run_service_locked
     def get(self, run_id: str) -> TaskRun | None:
         return self._runs.get(str(run_id or "").strip())
 
+    @_task_run_service_locked
     def require(self, run_id: str) -> TaskRun:
         run = self.get(run_id)
         if run is None:
             raise KeyError(run_id)
         return run
 
+    @_task_run_service_locked
     def runs(self) -> list[TaskRun]:
         return sorted(
             self._runs.values(),
@@ -1304,6 +2114,7 @@ class TaskRunService:
                 return run
         return None
 
+    @_task_run_service_locked
     def recent_events(self, *, limit: int = 20) -> list[dict[str, Any]]:
         events: list[RuntimeEvent] = []
         for run in self._runs.values():
@@ -1327,6 +2138,7 @@ class TaskRunService:
             "reply": f"TaskRun {action} rejected: {reason}.",
         }
 
+    @_task_run_service_locked
     def _record_operator_action(
         self,
         run: TaskRun,
@@ -1348,12 +2160,15 @@ class TaskRunService:
         self._audit_log.append_operator_action(run, record)
         self._persist_runs()
 
+    @_task_run_service_locked
     def persist(self) -> None:
         self._persist_runs()
 
+    @_task_run_service_locked
     def _persist_runs(self) -> None:
         self._store.save_runs(self.runs())
 
+    @_task_run_service_locked
     def _trim_runs(self, *, persist: bool = True) -> None:
         if len(self._runs) <= self.max_runs:
             return
@@ -1566,15 +2381,34 @@ class ExternalRuntimeArbiter(RuntimeArbiter):
         safety_preflight: SafetyPreflightService,
         skill_registry: SkillRegistry,
         client: RuntimeArbiterClient,
+        transport: RuntimeExecutorTransport | None = None,
     ) -> None:
         self.profile = client.profile
         self.run_service = run_service
         self.safety_preflight = safety_preflight
         self.skill_registry = skill_registry
         self.client = client
+        self.transport = transport
 
     def submit(self, handoff: TaskHandoff) -> dict[str, Any]:
         run = self.run_service.create(handoff, profile=self.profile)
+        return self.submit_existing(run)
+
+    def submit_existing(self, run: TaskRun) -> dict[str, Any]:
+        """Submit a persisted external run without changing its identity."""
+
+        if run.profile != self.profile:
+            raise ValueError("prepared TaskRun profile does not match external arbiter")
+        if run.terminal:
+            return {
+                "accepted": False,
+                "status": run.current_state,
+                "reason": "run_already_terminal",
+                "run": run.to_dict(),
+                "handoff": run.handoff.to_dict(),
+                "hardware_dispatch": False,
+            }
+        handoff = run.handoff
         self.run_service.transition(run, "submitted", "plan_submitted", "TaskHandoff submitted.")
         self.run_service.transition(
             run, "validating", "plan_validated", "TaskHandoff schema validated."
@@ -1615,6 +2449,18 @@ class ExternalRuntimeArbiter(RuntimeArbiter):
             return _blocked_submission_payload(self.run_service, run, handoff, assessment)
 
         envelope = self.client.submission_envelope(handoff.to_dict())
+        if self.transport is None:
+            return self._submission_failure(
+                run,
+                handoff,
+                assessment,
+                code="external_transport_unavailable",
+                event_type="external_transport_unavailable",
+                message="External runtime transport is unavailable.",
+                state="blocked",
+                envelope=envelope,
+            )
+
         self.run_service.transition(
             run,
             "queued",
@@ -1622,9 +2468,286 @@ class ExternalRuntimeArbiter(RuntimeArbiter):
             "External runtime contract envelope is ready.",
             {"runtime_client": envelope},
         )
+        idempotency_key = _external_submission_idempotency_key(handoff)
+        prepared = self.run_service.prepare_external_submission(
+            run.run_id,
+            external_idempotency_key=idempotency_key,
+        )
+        if not prepared.get("handled", False):
+            return self._submission_failure(
+                run,
+                handoff,
+                assessment,
+                code=str(prepared.get("reason") or "external_idempotency_checkpoint_failed"),
+                event_type="external_idempotency_checkpoint_failed",
+                message="External submission replay checkpoint failed.",
+                state="failed",
+                envelope=envelope,
+            )
+        voice_context = _voice_context_from_handoff(handoff)
+        request = RuntimeExecutorSubmitRequest(
+            handoff=handoff.to_dict(),
+            idempotency_key=idempotency_key,
+            correlation_id=run.run_id,
+            thread_id=str(
+                voice_context.get("thread_id")
+                or voice_context.get("conversation_session_id")
+                or handoff.session_id
+            ),
+            turn_id=str(
+                voice_context.get("turn_id") or voice_context.get("originating_turn_id") or ""
+            ),
+        )
+        try:
+            remote = self.transport.submit(request)
+        except AmbiguousRuntimeSubmissionError as exc:
+            result = self._submission_failure(
+                run,
+                handoff,
+                assessment,
+                code="external_submission_unknown",
+                event_type="external_submission_unknown",
+                message="External runtime submission outcome is unknown.",
+                state="submission_unknown",
+                envelope=envelope,
+                transport_error=exc,
+            )
+            self._commit_supervision(run)
+            return result
+        except RuntimeExecutorTransportError as exc:
+            return self._submission_failure(
+                run,
+                handoff,
+                assessment,
+                code="external_submission_failed",
+                event_type="external_submission_failed",
+                message="External runtime submission failed.",
+                state="failed",
+                envelope=envelope,
+                transport_error=exc,
+            )
+        except Exception:
+            return self._submission_failure(
+                run,
+                handoff,
+                assessment,
+                code="external_submission_failed",
+                event_type="external_submission_failed",
+                message="External runtime submission failed.",
+                state="failed",
+                envelope=envelope,
+            )
+
+        if (
+            not isinstance(remote, RuntimeExecutorSubmitResult)
+            or not str(remote.remote_task_id or "").strip()
+            or remote.correlation_id != run.run_id
+            or remote.idempotency_key != idempotency_key
+        ):
+            result = self._submission_failure(
+                run,
+                handoff,
+                assessment,
+                code="external_submission_unknown",
+                event_type="external_submission_unknown",
+                message="External runtime response could not prove submission identity.",
+                state="submission_unknown",
+                envelope=envelope,
+            )
+            self._commit_supervision(run)
+            return result
+
+        try:
+            bound = self.run_service.bind_external_submission(
+                run.run_id,
+                remote_task_id=remote.remote_task_id,
+                external_idempotency_key=idempotency_key,
+                remote_status="submitted",
+                observed_at=remote.observed_at,
+            )
+            if not bound.get("handled", False):
+                raise RuntimeError(
+                    str(bound.get("reason") or "external_submission_bind_rejected")
+                )
+            for update in remote.updates:
+                applied = self.run_service.apply_external_update(
+                    run.run_id,
+                    remote_task_id=remote.remote_task_id,
+                    remote_status=update.status,
+                    update_id=update.event_id,
+                    cursor=update.cursor,
+                    payload=dict(update.payload),
+                    observed_at=update.observed_at,
+                )
+                if not applied.get("handled", False):
+                    logger.warning(
+                        "External runtime update %s rejected: %s",
+                        update.event_id,
+                        applied.get("reason", "unknown"),
+                    )
+            if not (
+                remote.cursor
+                and remote.cursor == run.remote_status_cursor
+                and _normalize_remote_status(remote.status) == run.remote_status
+            ):
+                projection = self.run_service.apply_external_update(
+                    run.run_id,
+                    remote_task_id=remote.remote_task_id,
+                    remote_status=remote.status,
+                    cursor=remote.cursor,
+                    result_summary=remote.result_summary,
+                    observed_at=remote.observed_at,
+                )
+                if not projection.get("handled", False) and not run.terminal:
+                    raise RuntimeError(
+                        str(projection.get("reason") or "external_update_rejected")
+                    )
+            elif remote.result_summary:
+                with self.run_service.transaction():
+                    run.result_summary = str(remote.result_summary).strip()
+                    if run.terminal:
+                        run.report = self.run_service._report_service.build_report(run)
+                    self.run_service.persist()
+            self._commit_supervision(run)
+        except Exception as exc:
+            logger.error(
+                "External submission accepted but local projection commit failed for %s: %s",
+                run.run_id,
+                type(exc).__name__,
+            )
+            return self._projection_commit_unknown(
+                run,
+                handoff,
+                assessment,
+                envelope=envelope,
+                remote=remote,
+                idempotency_key=idempotency_key,
+            )
+        remote_metadata = {
+            "remote_task_id": run.remote_task_id,
+            "status": run.remote_status,
+            "cursor": run.remote_status_cursor,
+            "observed_at": run.remote_observed_at,
+            "result_summary": run.result_summary,
+        }
+        if run.remote_status == "rejected":
+            return {
+                "accepted": False,
+                "status": run.current_state,
+                "reason": "external_submission_rejected",
+                "error": {"code": "external_submission_rejected"},
+                "preflight": assessment.to_dict(),
+                "run": run.to_dict(),
+                "handoff": handoff.to_dict(),
+                "runtime_client": envelope,
+                "remote": remote_metadata,
+                "hardware_dispatch": False,
+            }
         return {
             "accepted": True,
             "status": run.current_state,
+            "preflight": assessment.to_dict(),
+            "run": run.to_dict(),
+            "handoff": handoff.to_dict(),
+            "runtime_client": envelope,
+            "remote": remote_metadata,
+            "hardware_dispatch": False,
+        }
+
+    def _projection_commit_unknown(
+        self,
+        run: TaskRun,
+        handoff: TaskHandoff,
+        assessment: SafetyAssessment,
+        *,
+        envelope: dict[str, Any],
+        remote: RuntimeExecutorSubmitResult,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        error_code = "external_projection_commit_unknown"
+        try:
+            self.run_service.mark_external_projection_unknown(
+                run.run_id,
+                remote_task_id=remote.remote_task_id,
+                external_idempotency_key=idempotency_key,
+                error_code=error_code,
+            )
+        except Exception:
+            logger.exception(
+                "TaskRun projection uncertainty recording failed for %s",
+                run.run_id,
+            )
+            with self.run_service.transaction():
+                current = self.run_service.require(run.run_id)
+                if not current.terminal:
+                    current.remote_task_id = str(remote.remote_task_id or "").strip() or None
+                    current.external_idempotency_key = idempotency_key
+                    current.remote_status = current.remote_status or "submitted"
+                    current.current_state = "submission_unknown"
+                    current.last_poll_error_code = error_code
+        current = self.run_service.require(run.run_id)
+        return {
+            "accepted": False,
+            "status": current.current_state,
+            "reason": error_code,
+            "error": {"code": error_code, "ambiguous": True, "retryable": True},
+            "preflight": assessment.to_dict(),
+            "run": current.to_dict(),
+            "handoff": handoff.to_dict(),
+            "runtime_client": envelope,
+            "remote": {
+                "remote_task_id": remote.remote_task_id,
+                "status": remote.status,
+                "cursor": remote.cursor,
+                "observed_at": remote.observed_at,
+                "result_summary": remote.result_summary,
+            },
+            "remote_may_be_running": True,
+            "hardware_dispatch": False,
+        }
+
+    def _commit_supervision(self, run: TaskRun) -> None:
+        self.run_service.emit(
+            run,
+            "external_submission_committed",
+            run.current_state,
+            "Initial external submission projection committed.",
+            {
+                "remote_task_id": run.remote_task_id,
+                "external_idempotency_key": run.external_idempotency_key,
+                "submission_unknown": run.current_state == "submission_unknown",
+            },
+        )
+
+    def _submission_failure(
+        self,
+        run: TaskRun,
+        handoff: TaskHandoff,
+        assessment: SafetyAssessment,
+        *,
+        code: str,
+        event_type: str,
+        message: str,
+        state: str,
+        envelope: dict[str, Any],
+        transport_error: RuntimeExecutorTransportError | None = None,
+    ) -> dict[str, Any]:
+        error: dict[str, Any] = {"code": code}
+        if transport_error is not None:
+            error.update(
+                {
+                    "kind": transport_error.kind,
+                    "status_code": transport_error.status_code,
+                    "retryable": transport_error.retryable,
+                    "ambiguous": transport_error.ambiguous,
+                }
+            )
+        self.run_service.transition(run, state, event_type, message, {"error": error})
+        return {
+            "accepted": False,
+            "status": run.current_state,
+            "reason": code,
+            "error": error,
             "preflight": assessment.to_dict(),
             "run": run.to_dict(),
             "handoff": handoff.to_dict(),
@@ -1652,6 +2775,7 @@ class RuntimeHandoffService:
         require_dog_safety: bool = False,
         require_supervisor_for_high_risk: bool = False,
         external_runtime_config: dict[str, Any] | None = None,
+        executor_transport: RuntimeExecutorTransport | None = None,
     ) -> None:
         self.world_state = world_state
         self.default_operator_id = default_operator_id
@@ -1679,7 +2803,129 @@ class RuntimeHandoffService:
             self.profile,
             external_runtime_config,
         )
+        self.executor_transport = executor_transport
         self.arbiter = self._build_arbiter(auto_complete=auto_complete)
+
+    def subscribe_events(self, observer: Callable[[RuntimeEvent], None]) -> Callable[[], None]:
+        return self.run_service.subscribe_events(observer)
+
+    def bind_external_submission(
+        self,
+        run_id: str,
+        *,
+        remote_task_id: str,
+        external_idempotency_key: str = "",
+        remote_status: str = "submitted",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        result = self.run_service.bind_external_submission(
+            run_id,
+            remote_task_id=remote_task_id,
+            external_idempotency_key=external_idempotency_key,
+            remote_status=remote_status,
+            observed_at=observed_at,
+        )
+        if result.get("handled", False):
+            run = self.run_service.require(run_id)
+            self.run_service.emit(
+                run,
+                "external_submission_committed",
+                run.current_state,
+                "External submission binding committed.",
+                {
+                    "remote_task_id": run.remote_task_id,
+                    "external_idempotency_key": run.external_idempotency_key,
+                },
+            )
+            result = {**result, "run": run.to_dict()}
+        self._update_runtime_facts(result["run"])
+        return result
+
+    def apply_external_update(
+        self,
+        run_id: str,
+        *,
+        remote_task_id: str,
+        remote_status: str,
+        update_id: str = "",
+        cursor: str | int = "",
+        payload: dict[str, Any] | None = None,
+        result_summary: str = "",
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        result = self.run_service.apply_external_update(
+            run_id,
+            remote_task_id=remote_task_id,
+            remote_status=remote_status,
+            update_id=update_id,
+            cursor=cursor,
+            payload=payload,
+            result_summary=result_summary,
+            observed_at=observed_at,
+        )
+        self._update_runtime_facts(result["run"])
+        return result
+
+    def record_external_poll_error(self, run_id: str, *, error_code: str) -> dict[str, Any]:
+        result = self.run_service.record_external_poll_error(run_id, error_code=error_code)
+        self._update_runtime_facts(result["run"])
+        return result
+
+    @_runtime_handoff_task_run_transaction
+    def record_notification_delivery_receipt(
+        self,
+        run_id: str,
+        *,
+        event_id: str,
+        status: str,
+    ) -> dict[str, Any]:
+        """Persist the first terminal delivery outcome for a committed run event."""
+        run = self.run_service.require(run_id)
+        normalized_event_id = str(event_id or "").strip()
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in _NOTIFICATION_DELIVERY_STATES:
+            allowed = ", ".join(sorted(_NOTIFICATION_DELIVERY_STATES))
+            raise ValueError(f"delivery status must be one of: {allowed}")
+        if not any(event.event_id == normalized_event_id for event in run.runtime_events):
+            raise ValueError(
+                f"event_id {normalized_event_id!r} does not belong to TaskRun {run.run_id}"
+            )
+
+        existing = run.notification_delivery_receipts.get(normalized_event_id)
+        if existing is not None:
+            return {
+                "run_id": run.run_id,
+                "event_id": normalized_event_id,
+                "status": existing,
+                "recorded": False,
+            }
+
+        run.notification_delivery_receipts[normalized_event_id] = normalized_status
+        while len(run.notification_delivery_receipts) > _NOTIFICATION_DELIVERY_RECEIPT_LIMIT:
+            oldest_event_id = next(iter(run.notification_delivery_receipts))
+            del run.notification_delivery_receipts[oldest_event_id]
+        self.run_service.persist()
+        return {
+            "run_id": run.run_id,
+            "event_id": normalized_event_id,
+            "status": normalized_status,
+            "recorded": True,
+        }
+
+    @_runtime_handoff_task_run_transaction
+    def notification_delivery_receipt(self, run_id: str, *, event_id: str) -> str | None:
+        run = self.run_service.require(run_id)
+        normalized_event_id = str(event_id or "").strip()
+        if not any(event.event_id == normalized_event_id for event in run.runtime_events):
+            raise ValueError(
+                f"event_id {normalized_event_id!r} does not belong to TaskRun {run.run_id}"
+            )
+        return run.notification_delivery_receipts.get(normalized_event_id)
+
+    @_runtime_handoff_task_run_transaction
+    def notification_delivery_receipts(self, run_id: str) -> dict[str, str]:
+        run = self.run_service.require(run_id)
+        return dict(run.notification_delivery_receipts)
 
     def submit_plan_payload(self, plan: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(plan, dict):
@@ -1693,6 +2939,294 @@ class RuntimeHandoffService:
             planner_version=self.planner_version,
         )
         result = self.arbiter.submit(handoff)
+        self._update_runtime_facts(result["run"])
+        return result
+
+    @_runtime_handoff_task_run_transaction
+    def prepare_plan_payload(
+        self,
+        plan: dict[str, Any],
+        *,
+        approval_request: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist an external TaskRun before asking the operator to confirm it."""
+
+        if not isinstance(plan, dict):
+            raise ValueError("plan must be an object")
+        if not isinstance(approval_request, dict) or not approval_request:
+            raise ValueError("approval_request must be a non-empty object")
+        if str(approval_request.get("kind") or "") == "runtime_handoff":
+            required = {
+                "approval_id",
+                "thread_id",
+                "prompt_turn_id",
+                "operator_id",
+                "person_id",
+                "expires_at",
+                "payload_digest",
+            }
+            if any(not approval_request.get(field) for field in required):
+                raise ValueError("runtime_handoff approval_request is incomplete")
+            if str(approval_request.get("payload_digest")) != _approval_plan_digest(plan):
+                raise ValueError("runtime_handoff approval payload digest mismatch")
+        if self.profile not in EXTERNAL_RUNTIME_PROFILES:
+            raise ValueError("prepared plans require an external or lab runtime profile")
+        snapshot = self.world_state.snapshot() if self.world_state is not None else {}
+        handoff = TaskHandoff.from_plan(
+            plan,
+            world_state_snapshot=snapshot,
+            skill_registry=self.skill_registry,
+            default_operator_id=self.default_operator_id,
+            planner_version=self.planner_version,
+        )
+        run = self.run_service.create(handoff, profile=self.profile)
+        run.approval_request = {**dict(approval_request), "status": "waiting_user"}
+        self.run_service.transition(
+            run,
+            "waiting_user",
+            "approval_requested",
+            "TaskRun is waiting for operator confirmation.",
+            {"approval_request": dict(run.approval_request)},
+        )
+        result: dict[str, Any] = {
+            "accepted": False,
+            "status": run.current_state,
+            "reason": "approval_required",
+            "run": run.to_dict(),
+            "handoff": handoff.to_dict(),
+            "hardware_dispatch": False,
+        }
+        self._update_runtime_facts(result["run"])
+        return result
+
+    @_runtime_handoff_task_run_transaction
+    def confirm_prepared_plan(
+        self,
+        run_id: str,
+        *,
+        confirmed_plan: dict[str, Any],
+        operator_id: str,
+        operator_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist confirmation and the final handoff without contacting the executor."""
+
+        run = self.run_service.get(run_id)
+        if run is None:
+            return {"handled": False, "error": "run not found", "run_id": run_id}
+        failure = _runtime_operator_context_failure("submit", operator_id, operator_context)
+        if failure:
+            return _runtime_operator_rejected_payload(run, "submit", failure)
+        if run.profile not in EXTERNAL_RUNTIME_PROFILES:
+            return _runtime_operator_rejected_payload(run, "submit", "external_profile_required")
+        if run.current_state != "waiting_user":
+            return _runtime_operator_rejected_payload(run, "submit", "approval_not_pending")
+        if not isinstance(confirmed_plan, dict):
+            raise ValueError("confirmed_plan must be an object")
+        approval = run.approval_request
+        if str(approval.get("kind") or "") == "runtime_handoff":
+            if str(approval.get("status") or "") != "waiting_user":
+                return _runtime_operator_rejected_payload(
+                    run, "submit", "approval_not_pending"
+                )
+            if float(approval.get("expires_at") or 0.0) <= time.time():
+                return _runtime_operator_rejected_payload(
+                    run, "submit", "approval_expired"
+                )
+            if str(approval.get("operator_id") or "") != str(operator_id):
+                return _runtime_operator_rejected_payload(
+                    run, "submit", "approval_operator_mismatch"
+                )
+            if str(approval.get("person_id") or "") != str(
+                operator_context.get("person_id") or ""
+            ):
+                return _runtime_operator_rejected_payload(
+                    run, "submit", "approval_person_mismatch"
+                )
+            if str(operator_context.get("approval_id") or "") != str(
+                approval.get("approval_id") or ""
+            ):
+                return _runtime_operator_rejected_payload(
+                    run, "submit", "approval_id_mismatch"
+                )
+            approval_digest = str(approval.get("payload_digest") or "")
+            if _approval_plan_digest(run.handoff.source_plan) != approval_digest:
+                return _runtime_operator_rejected_payload(
+                    run, "submit", "approval_payload_mismatch"
+                )
+            if _approval_plan_digest(
+                _unconfirmed_approval_plan(confirmed_plan)
+            ) != approval_digest:
+                return _runtime_operator_rejected_payload(
+                    run, "submit", "confirmed_payload_mismatch"
+                )
+        snapshot = self.world_state.snapshot() if self.world_state is not None else {}
+        confirmed_handoff = TaskHandoff.from_plan(
+            confirmed_plan,
+            world_state_snapshot=snapshot,
+            skill_registry=self.skill_registry,
+            default_operator_id=self.default_operator_id,
+            planner_version=self.planner_version,
+        )
+        run.handoff = replace(
+            confirmed_handoff,
+            handoff_id=run.handoff.handoff_id,
+        )
+        run.approval_request = {
+            **run.approval_request,
+            "status": "confirmed",
+            "confirmed_at": time.time(),
+            "confirmed_by": str(operator_id),
+        }
+        self.run_service._record_operator_action(
+            run,
+            "submit",
+            operator_id,
+            operator_context=operator_context,
+        )
+        self.run_service.transition(
+            run,
+            "confirmed",
+            "approval_confirmed",
+            "TaskRun was confirmed by the operator.",
+            {"approval_request": dict(run.approval_request)},
+        )
+        result: dict[str, Any] = {
+            "handled": True,
+            "run": run.to_dict(),
+            "handoff": run.handoff.to_dict(),
+        }
+        self._update_runtime_facts(result["run"])
+        return result
+
+    def submit_prepared_run(self, run_id: str) -> dict[str, Any]:
+        """Submit a previously confirmed TaskRun using the same durable run id."""
+
+        if self.run_service.get(run_id) is None:
+            return {"accepted": False, "error": "run not found", "run_id": run_id}
+        if not isinstance(self.arbiter, ExternalRuntimeArbiter):
+            run = self.run_service.get(run_id)
+            if run is None:
+                return {"accepted": False, "error": "run not found", "run_id": run_id}
+            return {
+                "accepted": False,
+                "status": run.current_state,
+                "reason": "external_profile_required",
+                "run": run.to_dict(),
+            }
+        snapshot = self.world_state.snapshot() if self.world_state is not None else {}
+        refreshed = self.run_service.refresh_prepared_handoff_snapshot(
+            run_id,
+            world_state_snapshot=snapshot,
+        )
+        if not refreshed.get("handled", False):
+            run_payload = dict(refreshed.get("run") or {})
+            return {
+                "accepted": False,
+                "status": str(run_payload.get("current_state") or "unknown"),
+                "reason": str(refreshed.get("reason") or "prepared_run_not_confirmed"),
+                "run": run_payload,
+            }
+        run = self.run_service.require(run_id)
+        result = self.arbiter.submit_existing(run)
+        self._update_runtime_facts(result["run"])
+        return result
+
+    def submit_prepared_plan(
+        self,
+        run_id: str,
+        *,
+        confirmed_plan: dict[str, Any],
+        operator_id: str,
+        operator_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compatibility wrapper for non-voice callers that can submit immediately."""
+
+        confirmed = self.confirm_prepared_plan(
+            run_id,
+            confirmed_plan=confirmed_plan,
+            operator_id=operator_id,
+            operator_context=operator_context,
+        )
+        if not confirmed.get("handled", False):
+            return {"accepted": False, **confirmed}
+        return self.submit_prepared_run(run_id)
+
+    @_runtime_handoff_task_run_transaction
+    def cancel_prepared_run(
+        self,
+        run_id: str,
+        *,
+        operator_id: str,
+        operator_context: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any]:
+        """Cancel a local pre-submit TaskRun without contacting the executor."""
+
+        run = self.run_service.get(run_id)
+        if run is None:
+            return {"handled": False, "error": "run not found", "run_id": run_id}
+        failure = _runtime_operator_context_failure("cancel", operator_id, operator_context)
+        if failure:
+            return _runtime_operator_rejected_payload(run, "cancel", failure)
+        if run.current_state not in {"waiting_user", "confirmed"} or run.remote_task_id:
+            return _runtime_operator_rejected_payload(run, "cancel", "prepared_cancel_not_allowed")
+        self.run_service._record_operator_action(
+            run,
+            "cancel",
+            operator_id,
+            reason=reason,
+            operator_context=operator_context,
+        )
+        run.approval_request = {**run.approval_request, "status": "cancelled"}
+        self.run_service.transition(
+            run,
+            "cancelled",
+            "task_cancelled",
+            "Prepared TaskRun cancelled by operator.",
+        )
+        result: dict[str, Any] = {
+            "handled": True,
+            "run": run.to_dict(),
+            "reply": "TaskRun cancelled.",
+        }
+        self._update_runtime_facts(result["run"])
+        return result
+
+    @_runtime_handoff_task_run_transaction
+    def expire_prepared_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "approval_expired",
+    ) -> dict[str, Any]:
+        """Expire an unsubmitted approval challenge without executor contact."""
+
+        run = self.run_service.get(run_id)
+        if run is None:
+            return {"handled": False, "error": "run not found", "run_id": run_id}
+        if run.current_state != "waiting_user" or run.remote_task_id:
+            return _runtime_operator_rejected_payload(
+                run,
+                "expire",
+                "prepared_expiry_not_allowed",
+            )
+        run.approval_request = {
+            **run.approval_request,
+            "status": "expired",
+            "expired_at": time.time(),
+        }
+        self.run_service.transition(
+            run,
+            "cancelled",
+            "approval_expired",
+            "Prepared TaskRun approval expired before submission.",
+            {"reason": str(reason or "approval_expired")},
+        )
+        result: dict[str, Any] = {
+            "handled": True,
+            "run": run.to_dict(),
+            "reply": "TaskRun approval expired.",
+        }
         self._update_runtime_facts(result["run"])
         return result
 
@@ -1783,13 +3317,10 @@ class RuntimeHandoffService:
         return {"run": run.to_dict()}
 
     def report_payload(self, run_id: str) -> dict[str, Any]:
-        run = self.run_service.get(run_id)
-        if run is None:
+        report = self.run_service.get_or_build_report(run_id)
+        if report is None:
             return {"error": "run not found", "run_id": run_id}
-        if run.report is None:
-            run.report = self.report_service.build_report(run)
-            self.run_service.persist()
-        return {"report": run.report}
+        return {"report": report}
 
     def pause_payload(
         self,
@@ -1977,18 +3508,30 @@ class RuntimeHandoffService:
             }
         if active is None:
             return None
-        action_kwargs = {
-            "operator_id": resolved_operator_id,
-            "reason": reason,
-            "risk_acknowledgement": risk_acknowledgement,
-            "operator_context": operator_context or None,
-        }
         if intent == "pause":
-            result = self.pause_payload(latest.run_id, **action_kwargs)
+            result = self.pause_payload(
+                latest.run_id,
+                operator_id=resolved_operator_id,
+                reason=reason,
+                risk_acknowledgement=risk_acknowledgement,
+                operator_context=operator_context or None,
+            )
         elif intent == "resume":
-            result = self.resume_payload(latest.run_id, **action_kwargs)
+            result = self.resume_payload(
+                latest.run_id,
+                operator_id=resolved_operator_id,
+                reason=reason,
+                risk_acknowledgement=risk_acknowledgement,
+                operator_context=operator_context or None,
+            )
         else:
-            result = self.cancel_payload(latest.run_id, **action_kwargs)
+            result = self.cancel_payload(
+                latest.run_id,
+                operator_id=resolved_operator_id,
+                reason=reason,
+                risk_acknowledgement=risk_acknowledgement,
+                operator_context=operator_context or None,
+            )
         payload = {
             "handled": bool(result.get("handled", False)),
             "reply": result.get("reply", ""),
@@ -2138,6 +3681,7 @@ class RuntimeHandoffService:
                 safety_preflight=self.safety_preflight,
                 skill_registry=self.skill_registry,
                 client=self.runtime_arbiter_client,
+                transport=self.executor_transport,
             )
         if self.profile == "shadow":
             return ShadowRuntimeArbiter(
@@ -2528,7 +4072,8 @@ def _visitor_escort_sequence(
     area_id: str,
 ) -> list[tuple[str, dict[str, Any]]]:
     mission = _mission_from_plan(plan)
-    event = mission.get("field_event") if isinstance(mission.get("field_event"), dict) else {}
+    raw_event = mission.get("field_event")
+    event: dict[str, Any] = raw_event if isinstance(raw_event, dict) else {}
     destination = str(event.get("destination") or event.get("destination_name") or area_id)
     escort_parameters = {
         "area_id": area_id,
@@ -2552,7 +4097,8 @@ def _field_incident_response_sequence(
     area_id: str,
 ) -> list[tuple[str, dict[str, Any]]]:
     mission = _mission_from_plan(plan)
-    event = mission.get("field_event") if isinstance(mission.get("field_event"), dict) else {}
+    raw_event = mission.get("field_event")
+    event: dict[str, Any] = raw_event if isinstance(raw_event, dict) else {}
     policy = str(event.get("robot_motion_policy") or "").strip().lower()
     scenario_id = str(event.get("scenario_id") or "field_event")
     destination = str(
@@ -2636,9 +4182,17 @@ def _mission_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
 
 
 def _target_area(plan: dict[str, Any], mission: dict[str, Any]) -> str | None:
+    for candidate in (
+        mission.get("target"),
+        mission.get("target_area"),
+        mission.get("destination"),
+    ):
+        area = _area_label(candidate)
+        if area:
+            return area
     for step in mission.get("steps", []):
         if isinstance(step, dict) and step.get("target"):
-            area = _normalize_area_id(str(step["target"])) or _infer_area(str(step["target"]))
+            area = _area_label(step["target"])
             if area:
                 return area
     reference = plan.get("reference", {})
@@ -2647,10 +4201,17 @@ def _target_area(plan: dict[str, Any], mission: dict[str, Any]) -> str | None:
         if isinstance(resolved, dict):
             label = resolved.get("area_id") or resolved.get("zone") or resolved.get("label")
             if label:
-                area = _normalize_area_id(str(label)) or _infer_area(str(label))
+                area = _area_label(label)
                 if area:
                     return area
     return _infer_area(str(plan.get("goal") or mission.get("goal") or ""))
+
+
+def _area_label(value: Any) -> str | None:
+    text = str(value or "").strip().strip(":：;；")
+    if not text:
+        return None
+    return _normalize_area_id(text) or _infer_area(text) or text
 
 
 def _target_object(plan: dict[str, Any], mission: dict[str, Any]) -> str | None:
@@ -2715,6 +4276,33 @@ def _normalize_roles(values: list[Any]) -> list[str]:
 def _normalize_runtime_profile(value: str) -> str:
     profile = str(value or "fake").strip().lower()
     return profile if profile in _SUPPORTED_RUNTIME_PROFILES else "fake"
+
+
+def _normalize_remote_status(value: str) -> str:
+    status = str(value or "").strip().lower().replace("-", "_")
+    return _REMOTE_STATUS_ALIASES.get(status, status)
+
+
+def _voice_context_from_handoff(handoff: TaskHandoff) -> dict[str, Any]:
+    context = handoff.source_plan.get("voice_context", {})
+    return dict(context) if isinstance(context, dict) else {}
+
+
+def _external_submission_idempotency_key(handoff: TaskHandoff) -> str:
+    voice_context = _voice_context_from_handoff(handoff)
+    return str(voice_context.get("submission_id") or handoff.plan_id).strip()
+
+
+def _remote_cursor_is_out_of_order(candidate: str, current: str) -> bool:
+    if not candidate or not current:
+        return False
+    if candidate == current:
+        return True
+    left = re.fullmatch(r"(.*?)(\d+)", candidate)
+    right = re.fullmatch(r"(.*?)(\d+)", current)
+    if left is None or right is None or left.group(1) != right.group(1):
+        return False
+    return int(left.group(2)) <= int(right.group(2))
 
 
 def _world_snapshot_id(snapshot: dict[str, Any]) -> str:
@@ -2815,20 +4403,27 @@ def _sanitize_runtime_operator_context(
     operator_id = str(operator_context.get("operator_id") or "").strip()
     if operator_id:
         cleaned["operator_id"] = operator_id
+    person_id = str(operator_context.get("person_id") or "").strip()
+    if person_id:
+        cleaned["person_id"] = person_id
     roles = operator_context.get("roles")
     if isinstance(roles, (list, tuple, set)):
         cleaned["roles"] = _unique([str(role).strip() for role in roles if str(role).strip()])
     if "authenticated" in operator_context:
-        cleaned["authenticated"] = bool(operator_context.get("authenticated"))
+        cleaned["authenticated"] = operator_context.get("authenticated") is True
     source = str(operator_context.get("source") or "").strip()
     if source:
         cleaned["source"] = source
     permission = str(operator_context.get("permission") or "").strip()
     if permission:
         cleaned["permission"] = permission
-    session_id = str(operator_context.get("conversation_session_id") or "").strip()
-    if session_id:
-        cleaned["conversation_session_id"] = session_id
+    thread_id = str(
+        operator_context.get("thread_id")
+        or operator_context.get("conversation_session_id")
+        or ""
+    ).strip()
+    if thread_id:
+        cleaned["thread_id"] = thread_id
     return cleaned
 
 
@@ -2840,13 +4435,18 @@ def _runtime_operator_context_failure(
     operator_context = _sanitize_runtime_operator_context(operator_context)
     if not isinstance(operator_context, dict):
         return "runtime_operator_context_required"
+    if operator_context.get("authenticated") is not True:
+        return "runtime_operator_authentication_required"
     expected_permission = f"runtime:{action}"
     context_operator_id = str(operator_context.get("operator_id") or "").strip()
     requested_operator_id = str(operator_id or "").strip()
     if not context_operator_id or context_operator_id != requested_operator_id:
         return "runtime_operator_context_mismatch"
     roles = operator_context.get("roles")
-    if not isinstance(roles, list) or not any(str(role).strip() for role in roles):
+    normalized_roles = {
+        str(role).strip().lower() for role in roles or [] if str(role).strip()
+    }
+    if not isinstance(roles, list) or not normalized_roles.intersection({"operator", "admin"}):
         return "runtime_operator_context_incomplete"
     if not str(operator_context.get("source") or "").strip():
         return "runtime_operator_context_incomplete"
@@ -2900,7 +4500,7 @@ def _runtime_operator_provenance(
             [str(role).strip() for role in operator_roles if str(role).strip()]
         )
     if operator_authenticated is not None:
-        payload["authenticated"] = bool(operator_authenticated)
+        payload["authenticated"] = operator_authenticated is True
     cleaned_source = str(operator_source or "").strip()
     if cleaned_source:
         payload["source"] = cleaned_source
@@ -2909,7 +4509,7 @@ def _runtime_operator_provenance(
         payload["permission"] = cleaned_permission
     cleaned_session_id = str(conversation_session_id or "").strip()
     if cleaned_session_id:
-        payload["conversation_session_id"] = cleaned_session_id
+        payload["thread_id"] = cleaned_session_id
     return payload
 
 
@@ -2959,6 +4559,33 @@ def _voice_turn_metadata(
     if confidence is not None:
         payload["confidence"] = min(max(float(confidence), 0.0), 1.0)
     return payload
+
+
+def _approval_plan_digest(plan: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        plan,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _unconfirmed_approval_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    normalized = json.loads(json.dumps(plan, ensure_ascii=False))
+    normalized["handoff_ready"] = False
+    session = normalized.get("session")
+    if isinstance(session, dict):
+        session["confirmation_status"] = "pending_confirmation"
+    mission_container = normalized.get("mission")
+    mission = (
+        mission_container.get("mission")
+        if isinstance(mission_container, dict)
+        else None
+    )
+    if isinstance(mission, dict):
+        mission["status"] = "pending_confirmation"
+    return normalized
 
 
 def _run_summary(run: TaskRun) -> str:

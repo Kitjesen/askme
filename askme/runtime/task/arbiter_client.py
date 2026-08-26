@@ -1,4 +1,4 @@
-"""Disabled-by-default contract for non-local runtime arbiter clients."""
+"""Disabled-by-default readiness contract for external runtime transports."""
 
 from __future__ import annotations
 
@@ -38,9 +38,9 @@ class RuntimeArbiterClientError:
 class RuntimeArbiterClient:
     """Local contract object for lab/external runtime submission gates.
 
-    This class deliberately does not perform network I/O. It only validates the
-    explicit enablement contract and builds a submission envelope for a caller
-    that owns a real transport in another layer.
+    This class deliberately does not perform network I/O. It validates explicit
+    enablement and builds a secret-free diagnostic envelope.  The actual HTTP
+    transport is owned by :class:`ExternalRuntimeArbiter`.
     """
 
     profile: str
@@ -116,7 +116,7 @@ class RuntimeArbiterClient:
             "endpoint": self.endpoint,
             "handoff_id": str(handoff_payload.get("handoff_id") or ""),
             "plan_id": str(handoff_payload.get("plan_id") or ""),
-            "dispatch_mode": "contract_only",
+            "dispatch_mode": "transport_managed",
             "hardware_dispatch": False,
         }
 

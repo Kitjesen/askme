@@ -12,6 +12,18 @@ from askme.ports.perception import (
     VisionPort,
 )
 from askme.ports.robot_control import RobotControlPort
+from askme.ports.runtime_executor import (
+    AmbiguousRuntimeSubmissionError,
+    RuntimeExecutorCancelRequest,
+    RuntimeExecutorCancelResult,
+    RuntimeExecutorStatusRequest,
+    RuntimeExecutorStatusUpdate,
+    RuntimeExecutorSubmitRequest,
+    RuntimeExecutorSubmitResult,
+    RuntimeExecutorTransport,
+    RuntimeExecutorTransportError,
+    RuntimeExecutorUpdate,
+)
 from askme.ports.safety import SafetyPort
 from askme.ports.spatial_memory import TemporalMemoryPort
 from askme.ports.voice import (
@@ -43,6 +55,16 @@ __all__ = [
     "NavigationPort",
     "PlaybackOwnerTokenPort",
     "RobotControlPort",
+    "AmbiguousRuntimeSubmissionError",
+    "RuntimeExecutorCancelRequest",
+    "RuntimeExecutorCancelResult",
+    "RuntimeExecutorStatusRequest",
+    "RuntimeExecutorStatusUpdate",
+    "RuntimeExecutorSubmitRequest",
+    "RuntimeExecutorSubmitResult",
+    "RuntimeExecutorTransport",
+    "RuntimeExecutorTransportError",
+    "RuntimeExecutorUpdate",
     "RealtimeApprovalPort",
     "RealtimePreparedApprovalPort",
     "RealtimeTwoPhaseVoiceFrontendPort",

@@ -27,6 +27,8 @@ from askme.ports import RobotControlPort, VoiceTurnBridgePort
 
 Current contract modules:
 
+- `runtime_executor/`: provider-neutral DTOs, typed failures, and the transport
+  protocol for supervised external task execution.
 - `arm_control.py`: `ArmControlPort` for mechanical-arm action, state, E-STOP,
   and lifecycle.
 - `led.py`: `LedControllerPort` and `LedBridgePort` for status LED output and

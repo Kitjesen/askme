@@ -13,6 +13,7 @@ _LABEL = "语音感知运行时"
 
 def _build_voice_perception():
     from askme.blueprints.runner.runner import compose_runtime
+    from askme.blueprints.runtime_composition import RuntimeHandoffModule
     from askme.runtime.modules import (
         CognitionModule,
         ExecutorModule,
@@ -24,7 +25,6 @@ def _build_voice_perception():
         PipelineModule,
         PulseModule,
         ReactionModule,
-        RuntimeHandoffModule,
         SafetyModule,
         SkillModule,
         TextModule,

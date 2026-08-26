@@ -14,6 +14,7 @@ _LABEL = "园区巡检机器人运行时"
 
 def _build_edge_robot():
     from askme.blueprints.runner.runner import compose_runtime
+    from askme.blueprints.runtime_composition import RuntimeHandoffModule
     from askme.runtime.modules import (
         CognitionModule,
         ControlModule,
@@ -28,7 +29,6 @@ def _build_edge_robot():
         ProactiveModule,
         PulseModule,
         ReactionModule,
-        RuntimeHandoffModule,
         SafetyModule,
         SkillModule,
         TextModule,

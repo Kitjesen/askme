@@ -13,6 +13,7 @@ _LABEL = "语音任务中心"
 
 def _build_voice():
     from askme.blueprints.runner.runner import compose_runtime
+    from askme.blueprints.runtime_composition import RuntimeHandoffModule
     from askme.runtime.modules import (
         CognitionModule,
         ExecutorModule,
@@ -21,7 +22,6 @@ def _build_voice():
         MemoryModule,
         MissionModule,
         PipelineModule,
-        RuntimeHandoffModule,
         SkillModule,
         TextModule,
         ToolsModule,
