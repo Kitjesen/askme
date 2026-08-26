@@ -87,6 +87,30 @@ class _BlockingMuteWebSocket(_FakeWebSocket):
         super().send(payload)
 
 
+class WebSocketConnectionClosedException(Exception):
+    pass
+
+
+class _FailingAudioSendWebSocket(_FakeWebSocket):
+    def __init__(
+        self,
+        incoming: list[dict[str, Any]],
+        *,
+        fail_on_audio_frame: int,
+    ) -> None:
+        super().__init__(incoming)
+        self.fail_on_audio_frame = fail_on_audio_frame
+        self.audio_frames = 0
+
+    def send(self, payload: str) -> None:
+        event = json.loads(payload)
+        if event.get("type") == "input_audio_buffer.append":
+            self.audio_frames += 1
+            if self.audio_frames == self.fail_on_audio_frame:
+                raise WebSocketConnectionClosedException("socket already closed")
+        super().send(payload)
+
+
 class _ConnectionFactory:
     def __init__(self, ws: _FakeWebSocket) -> None:
         self.ws = ws
@@ -474,6 +498,34 @@ def test_provider_close_during_initial_mute_makes_start_fail_closed() -> None:
     finally:
         ws.release_mute.set()
         session.close("test")
+
+
+def test_third_turn_send_on_closed_socket_is_classified_for_reconnect() -> None:
+    ws = _FailingAudioSendWebSocket(
+        [{"type": "session.created", "session": {"id": "dialog-1"}}],
+        fail_on_audio_frame=3,
+    )
+    session = VolcengineDuplexDialogue(
+        VolcengineDuplexConfig(enabled=True, api_key="configured"),
+        connection_factory=_ConnectionFactory(ws),
+    )
+    context = RealtimeVoiceSessionContext(session_id="local-1", input_mode="push_to_talk")
+    frame = VoiceMediaFrame(pcm=b"A" * 640, sample_rate=16_000, channels=1)
+
+    assert session.start(context) is True
+    assert session.offer_audio(frame) is True
+    assert session.finish_input() is True
+    assert session.offer_audio(frame) is True
+    assert session.finish_input() is True
+    assert session.offer_audio(frame) is True
+    _wait_until(lambda: session.status_snapshot()["state"] == "degraded")
+
+    error = session.next_event(timeout=1.0)
+    assert error is not None
+    assert error.event_type is RealtimeVoiceEventType.ERROR
+    assert error.error == "provider_connection_closed"
+    assert session.status_snapshot()["last_error"] == "provider_connection_closed"
+    session.close("test")
 
 
 def test_mute_send_timeout_discards_the_unknown_provider_session() -> None:

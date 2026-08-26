@@ -183,6 +183,9 @@ def test_event_consumer_prints_transcript_text_and_usage_for_each_turn() -> None
         )
     )
     consumer.handle_event(RealtimeVoiceEvent(event_type=RealtimeVoiceEventType.RESPONSE_DONE))
+    assert consumer.response_done.is_set()
+    assert consumer.turn_done.is_set() is False
+    assert consumer.finish_turn_playback()
 
     assert lines == [
         "[you] hello",
@@ -224,6 +227,80 @@ def test_event_consumer_uses_authoritative_final_text_without_duplication() -> N
     )
 
     assert lines == ["[assistant] 你好。"]
+
+
+def test_response_done_drains_speaker_before_next_turn_is_released(monkeypatch) -> None:
+    class _Output:
+        def __init__(self) -> None:
+            self.calls = []
+            self.stop_started = threading.Event()
+            self.release_stop = threading.Event()
+
+        def stop(self, *, ignore_errors) -> None:
+            assert ignore_errors is False
+            self.calls.append("stop")
+            self.stop_started.set()
+            assert self.release_stop.wait(timeout=1.0)
+
+        def start(self) -> None:
+            self.calls.append("start")
+
+        def write(self, pcm) -> None:
+            del pcm
+            self.calls.append("write")
+
+    output = _Output()
+    consumer = EventConsumer(None, output, emit=lambda _: None)
+    consumer.begin_turn()
+    monkeypatch.setattr(voice_chat, "POST_PLAYBACK_ACOUSTIC_SETTLE_S", 0.0)
+
+    consumer.handle_event(
+        RealtimeVoiceEvent(
+            event_type=RealtimeVoiceEventType.OUTPUT_AUDIO,
+            audio=VoiceMediaFrame(
+                pcm=b"\x01\x00" * 480,
+                sample_rate=24_000,
+                channels=1,
+            ),
+        )
+    )
+
+    consumer.handle_event(
+        RealtimeVoiceEvent(event_type=RealtimeVoiceEventType.RESPONSE_DONE)
+    )
+    assert consumer.response_done.is_set()
+    assert consumer.turn_done.is_set() is False
+    drain_thread = threading.Thread(target=consumer.finish_turn_playback)
+    drain_thread.start()
+
+    assert output.stop_started.wait(timeout=1.0)
+    assert consumer.turn_done.is_set() is False
+    output.release_stop.set()
+    drain_thread.join(timeout=1.0)
+    assert output.calls == ["write", "stop", "start"]
+    assert consumer.turn_done.is_set()
+
+
+def test_consumer_close_timeout_retains_thread_for_safe_retry() -> None:
+    class _BlockingSession:
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def next_event(self, timeout=None):
+            del timeout
+            self.entered.set()
+            self.release.wait(timeout=1.0)
+            return None
+
+    session = _BlockingSession()
+    consumer = EventConsumer(session, object(), emit=lambda _: None)
+    consumer.start()
+    assert session.entered.wait(timeout=1.0)
+
+    assert consumer.close(timeout=0.01) is False
+    session.release.set()
+    assert consumer.close(timeout=1.0) is True
 
 
 def test_provider_failure_requests_reconnect_instead_of_ending_demo() -> None:
@@ -270,10 +347,13 @@ def test_only_transport_and_provider_5xx_failures_are_reconnectable() -> None:
     assert voice_chat.provider_failure_is_reconnectable("provider_connection_closed")
     assert voice_chat.provider_failure_is_reconnectable("provider_error_50700000")
     assert voice_chat.provider_failure_is_reconnectable("provider_error_45000003")
+    assert voice_chat.provider_failure_is_reconnectable("provider_send_timeout")
     assert not voice_chat.provider_failure_is_reconnectable("provider_error_45000004")
     assert not voice_chat.provider_failure_is_reconnectable("provider_receive_error")
     assert not voice_chat.provider_failure_is_reconnectable("provider_frame_error")
     assert not voice_chat.provider_failure_is_reconnectable("provider_event_error")
+    assert not voice_chat.provider_failure_is_reconnectable("provider_send_error")
+    assert not voice_chat.provider_failure_is_reconnectable("provider_send_payload_error")
     assert not voice_chat.provider_failure_is_reconnectable(
         "audio_playback_PortAudioError"
     )
@@ -282,17 +362,22 @@ def test_only_transport_and_provider_5xx_failures_are_reconnectable() -> None:
 def test_main_restarts_demo_after_reconnectable_provider_failure(monkeypatch) -> None:
     outcomes = iter((75, 0))
     calls = []
+    recovery_flags = []
     monkeypatch.setattr(voice_chat, "_load_sounddevice", lambda: object())
     monkeypatch.setattr(
         voice_chat,
         "run_demo",
-        lambda args, sounddevice_module: calls.append(sounddevice_module)
-        or next(outcomes),
+        lambda args, sounddevice_module, *, recovery=False: (
+            calls.append(sounddevice_module),
+            recovery_flags.append(recovery),
+            next(outcomes),
+        )[-1],
     )
     monkeypatch.setattr(voice_chat.time, "sleep", lambda _: None)
 
     assert voice_chat.main([]) == 0
     assert len(calls) == 2
+    assert recovery_flags == [False, True]
 
 
 def test_main_cleans_failed_live_session_and_rebuilds_before_next_prompt(
@@ -309,9 +394,10 @@ def test_main_cleans_failed_live_session_and_rebuilds_before_next_prompt(
             self.response_sent = False
             self.offer_calls = 0
             self.close_calls = 0
+            self.context = None
 
         def start(self, context) -> bool:
-            del context
+            self.context = context
             return True
 
         def next_event(self, timeout=None):
@@ -452,5 +538,10 @@ def test_main_cleans_failed_live_session_and_rebuilds_before_next_prompt(
     assert second_session.response_sent is True
     assert first_session.close_calls == 1
     assert second_session.close_calls == 1
+    assert first_session.context is not None
+    assert second_session.context is not None
+    assert first_session.context.session_id != second_session.context.session_id
+    assert first_session.context.dialog_id == first_session.context.session_id
+    assert second_session.context.dialog_id == ""
     assert len(sounddevice.outputs) == 2
     assert all(stream.started and stream.stopped and stream.closed for stream in sounddevice.outputs)

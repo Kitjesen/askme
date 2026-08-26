@@ -44,6 +44,7 @@ INPUT_SAMPLE_RATE = 16_000
 OUTPUT_SAMPLE_RATE = 24_000
 CHANNELS = 1
 CHUNK_MS = 20
+POST_PLAYBACK_ACOUSTIC_SETTLE_S = 0.15
 PROVIDER_KEY_ENV = {
     "qwen3_5_omni": "DASHSCOPE_API_KEY",
     "volcengine_duplex": "VOLCENGINE_S2S_API_KEY",
@@ -127,11 +128,11 @@ def provider_config(
     return {"voice": {"realtime": realtime}}
 
 
-def build_session_context() -> RealtimeVoiceSessionContext:
+def build_session_context(*, recovery: bool = False) -> RealtimeVoiceSessionContext:
     session_id = f"pc-voice-demo-{uuid.uuid4().hex}"
     return RealtimeVoiceSessionContext(
         session_id=session_id,
-        dialog_id=session_id,
+        dialog_id="" if recovery else session_id,
         input_mode="push_to_talk",
         input_sample_rate=INPUT_SAMPLE_RATE,
         output_sample_rate=OUTPUT_SAMPLE_RATE,
@@ -280,8 +281,11 @@ class EventConsumer:
         self._input_printed = False
         self._output_parts: list[str] = []
         self._usage: Mapping[str, Any] | None = None
+        self._played_audio_this_turn = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self.response_done = threading.Event()
+        self.response_done.set()
         self.turn_done = threading.Event()
         self.turn_done.set()
         self.failed = threading.Event()
@@ -298,12 +302,18 @@ class EventConsumer:
         )
         self._thread.start()
 
-    def close(self, *, timeout: float = 2.0) -> None:
+    def request_stop(self) -> None:
         self._stop.set()
+
+    def close(self, *, timeout: float = 2.0) -> bool:
+        self.request_stop()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, timeout))
+        if thread is not None and thread.is_alive():
+            return False
         self._thread = None
+        return True
 
     def begin_turn(self) -> None:
         self._commit_at = None
@@ -312,7 +322,9 @@ class EventConsumer:
         self._input_printed = False
         self._output_parts.clear()
         self._usage = None
+        self._played_audio_this_turn = False
         self.failure_error = ""
+        self.response_done.clear()
         self.turn_done.clear()
 
     def mark_commit(self, *, now: float | None = None) -> None:
@@ -365,24 +377,26 @@ class EventConsumer:
                 )
                 self._emit(f"[usage] {rendered_usage}")
             self._commit_at = None
-            self.turn_done.set()
+            self.response_done.set()
             return
         if event_type is RealtimeVoiceEventType.ERROR:
             error = " ".join((event.error or "provider_error").splitlines()).strip()
             self._emit(f"[error] {error or 'provider_error'}")
             self.failure_error = error or "provider_error"
             self.failed.set()
+            self.response_done.set()
             self.turn_done.set()
             return
         if event_type is RealtimeVoiceEventType.INTERRUPTED:
             self._emit("[session] response interrupted")
-            self.turn_done.set()
+            self.response_done.set()
             return
         if event_type is RealtimeVoiceEventType.SESSION_CLOSED:
             if not self._stop.is_set():
                 self._emit("[error] provider session closed")
                 self.failure_error = "provider_session_closed"
                 self.failed.set()
+            self.response_done.set()
             self.turn_done.set()
             return
         if event_type is not RealtimeVoiceEventType.OUTPUT_AUDIO:
@@ -392,6 +406,7 @@ class EventConsumer:
             self._emit("[error] provider returned an unsupported output audio shape")
             self.failure_error = "unsupported_output_audio_shape"
             self.failed.set()
+            self.response_done.set()
             self.turn_done.set()
             return
         try:
@@ -400,13 +415,40 @@ class EventConsumer:
             self._emit(f"[error] audio playback failed: {type(exc).__name__}")
             self.failure_error = f"audio_playback_{type(exc).__name__}"
             self.failed.set()
+            self.response_done.set()
             self.turn_done.set()
             return
+        self._played_audio_this_turn = True
         if self._commit_at is not None and not self._latency_reported:
             observed_at = time.perf_counter() if now is None else now
             elapsed_ms = max(0.0, (observed_at - self._commit_at) * 1000.0)
             self._emit(f"[latency] commit-to-first-PCM: {elapsed_ms:.1f} ms")
             self._latency_reported = True
+
+    def finish_turn_playback(self) -> bool:
+        """Drain physical playback on the interaction thread before reopening input."""
+
+        if self.failed.is_set():
+            self.turn_done.set()
+            return False
+        if not self._played_audio_this_turn:
+            self.turn_done.set()
+            return True
+        stop = getattr(self._output_stream, "stop", None)
+        start = getattr(self._output_stream, "start", None)
+        if not callable(stop) or not callable(start):
+            self.turn_done.set()
+            return True
+        try:
+            stop(ignore_errors=False)
+            time.sleep(POST_PLAYBACK_ACOUSTIC_SETTLE_S)
+            start()
+        except Exception as exc:
+            self._emit(f"[error] audio playback drain failed: {type(exc).__name__}")
+            self.failure_error = f"audio_playback_drain_{type(exc).__name__}"
+            self.failed.set()
+        self.turn_done.set()
+        return not self.failed.is_set()
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -417,6 +459,7 @@ class EventConsumer:
                     self._emit(f"[error] provider event consumer failed: {type(exc).__name__}")
                     self.failure_error = f"event_consumer_{type(exc).__name__}"
                     self.failed.set()
+                    self.response_done.set()
                     self.turn_done.set()
                 return
             if event is not None:
@@ -558,7 +601,7 @@ def provider_failure_is_reconnectable(error: str) -> bool:
         "finish_input_mute_timeout",
         "provider_connection_closed",
         "provider_error_45000003",
-        "provider_send_error",
+        "provider_send_timeout",
         "provider_session_closed",
     }:
         return True
@@ -673,16 +716,23 @@ def run_push_to_talk(
             return 1
 
         emit("[waiting] response...")
-        while not consumer.turn_done.wait(timeout=0.1):
+        while not consumer.response_done.wait(timeout=0.1):
             pass
         if consumer.failed.is_set():
+            return _consumer_failure_exit(consumer)
+        if not consumer.finish_turn_playback():
             return _consumer_failure_exit(consumer)
         if quit_after_turn:
             return 0
     return _consumer_failure_exit(consumer)
 
 
-def run_demo(args: argparse.Namespace, sounddevice_module: Any) -> int:
+def run_demo(
+    args: argparse.Namespace,
+    sounddevice_module: Any,
+    *,
+    recovery: bool = False,
+) -> int:
     config = provider_config(args, os.environ)
     realtime = config["voice"]["realtime"]
     key_env = PROVIDER_KEY_ENV[args.provider]
@@ -738,9 +788,9 @@ def run_demo(args: argparse.Namespace, sounddevice_module: Any) -> int:
     sender: AudioSender | None = None
     consumer: EventConsumer | None = None
     try:
-        context = build_session_context()
+        session_context = build_session_context(recovery=recovery)
         try:
-            started = session.start(context)
+            started = session.start(session_context)
         except Exception as exc:
             print(f"[error] provider start failed: {type(exc).__name__}")
             return 1
@@ -772,19 +822,25 @@ def run_demo(args: argparse.Namespace, sounddevice_module: Any) -> int:
         if sender is not None:
             sender.close()
         if consumer is not None:
-            consumer.close()
+            consumer.request_stop()
         try:
             session.close("pc_demo_shutdown")
         except Exception:
             pass
-        try:
-            output_stream.stop()
-        except Exception:
-            pass
-        try:
-            output_stream.close()
-        except Exception:
-            pass
+        consumer_closed = True
+        if consumer is not None:
+            consumer_closed = consumer.close()
+        if consumer_closed:
+            try:
+                output_stream.stop()
+            except Exception:
+                pass
+            try:
+                output_stream.close()
+            except Exception:
+                pass
+        else:
+            print("[error] event consumer did not stop; output stream left open")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -807,7 +863,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     reconnects = 0
     while True:
         try:
-            outcome = run_demo(args, sounddevice_module)
+            outcome = run_demo(
+                args,
+                sounddevice_module,
+                recovery=reconnects > 0,
+            )
         except KeyboardInterrupt:
             print("\nStopping realtime voice demo.")
             return 130

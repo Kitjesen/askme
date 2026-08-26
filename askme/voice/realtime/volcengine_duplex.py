@@ -615,11 +615,11 @@ class VolcengineDuplexDialogue:
                 item.success = True
                 if item.is_media:
                     self._sent_audio_frames += 1
-            except Exception:
+            except Exception as exc:
                 item.success = False
                 item.sent.set()
                 if not self._closing and self._active:
-                    self._transition_degraded("provider_send_error")
+                    self._transition_degraded(self._send_error_name(exc))
                 return
             item.sent.set()
 
@@ -1041,3 +1041,17 @@ class VolcengineDuplexDialogue:
         if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError, TypeError)):
             return "provider_frame_error"
         return "provider_receive_error"
+
+    @classmethod
+    def _send_error_name(cls, exc: BaseException) -> str:
+        if cls._is_timeout(exc):
+            return "provider_send_timeout"
+        name = type(exc).__name__.lower()
+        if isinstance(exc, (ConnectionError, EOFError)) or any(
+            marker in name
+            for marker in ("connectionclosed", "connectionreset", "brokenpipe")
+        ):
+            return "provider_connection_closed"
+        if isinstance(exc, (TypeError, ValueError)):
+            return "provider_send_payload_error"
+        return "provider_send_error"
