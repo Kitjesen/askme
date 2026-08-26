@@ -12,6 +12,32 @@ from __future__ import annotations
 import logging
 import sys
 
+_HELP_FLAGS = frozenset({"-h", "--help"})
+_HELP_TEXT = """askme MCP server
+
+Usage:
+  askme-mcp
+  python -m askme.mcp
+  python -m askme.mcp.server
+
+Options:
+  -h, --help   Show this help without starting MCP services.
+
+Use the askme CLI for MCP transport options:
+  python -m askme mcp serve --help"""
+
+
+def _help_requested(argv: list[str]) -> bool:
+    return any(arg in _HELP_FLAGS for arg in argv)
+
+
+# ``python -m askme.mcp.server --help`` is a CLI metadata query. Handle it
+# before importing FastMCP and the runtime tool surface so it remains reliable
+# under the startup command's bounded preflight deadline.
+if __name__ == "__main__" and _help_requested(sys.argv[1:]):
+    sys.stderr.write(f"{_HELP_TEXT}\n")
+    raise SystemExit(0)
+
 from askme.mcp.context import AppContext
 from askme.mcp.registration import mcp, register_mcp_modules
 
@@ -37,18 +63,8 @@ register_mcp_modules()
 
 def main() -> None:
     """Entry point for ``askme-mcp`` command."""
-    if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
-        logger.info(
-            "askme MCP server\n\n"
-            "Usage:\n"
-            "  askme-mcp\n"
-            "  python -m askme.mcp\n"
-            "  python -m askme.mcp.server\n\n"
-            "Options:\n"
-            "  -h, --help   Show this help without starting MCP services.\n\n"
-            "Use the askme CLI for MCP transport options:\n"
-            "  python -m askme mcp serve --help",
-        )
+    if _help_requested(sys.argv[1:]):
+        logger.info("%s", _HELP_TEXT)
         return
     mcp.run()
 
