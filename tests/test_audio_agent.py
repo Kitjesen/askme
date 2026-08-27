@@ -702,7 +702,11 @@ def test_kws_runtime_error_marks_stream_unavailable_for_fail_closed_mode() -> No
     agent._refresh_voice_metrics.assert_called_once()
 
 
-def test_asr_result_does_not_renew_followup_window_before_admission() -> None:
+def test_asr_result_does_not_renew_followup_window_before_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admitted_at = 456.0
+    monkeypatch.setattr(time, "monotonic", lambda: admitted_at)
     agent = object.__new__(AudioAgent)
     agent._turn_traces = MagicMock()
     agent.audio_queue = MagicMock()
@@ -717,7 +721,7 @@ def test_asr_result_does_not_renew_followup_window_before_admission() -> None:
     assert agent._last_interaction_time == 123.0
 
     agent.mark_interaction_turn()
-    assert agent._last_interaction_time > 123.0
+    assert agent._last_interaction_time == admitted_at
 
 
 def test_accepted_asr_result_exposes_confidence_to_voice_loop() -> None:
