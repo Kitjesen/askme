@@ -25,6 +25,7 @@ def test_repository_layout_doc_tracks_confusing_roots() -> None:
 
     assert "`video-lab/`" not in text
     assert "`config/`" not in text
+    assert not (ROOT / "CLAUDE.md").exists()
 
 
 def test_native_voice_extension_lives_with_voice_owner() -> None:
