@@ -25,12 +25,12 @@ the build copies Freedesktop's `COPYING` file into the wheel as
 - platform development tools required by WebRTC APM
 
 The wheel build itself pins `scikit-build-core==1.0.3` and `pybind11==3.0.4`
-in `native/askme_webrtc_apm/pyproject.toml`.
+in `askme/voice/native/askme_webrtc_apm/pyproject.toml`.
 
 ## Windows (PowerShell)
 
 ```powershell
-cd native/askme_webrtc_apm
+cd askme/voice/native/askme_webrtc_apm
 ./scripts/build_dependency.ps1
 $env:WEBRTC_APM_ROOT = (Resolve-Path ./.build/prefix)
 python -m pip wheel . --no-deps --wheel-dir dist
@@ -49,9 +49,9 @@ this repository's current `uv` environment (CPython 3.11), build and install
 the CPython 3.11 wheel from the repository root:
 
 ```powershell
-$env:WEBRTC_APM_ROOT = (Resolve-Path native/askme_webrtc_apm/.build/prefix).Path
-uv build --wheel --python .\.venv\Scripts\python.exe --out-dir native/askme_webrtc_apm/dist native/askme_webrtc_apm
-$wheel = Get-ChildItem native/askme_webrtc_apm/dist/askme_webrtc_apm-*-cp311-cp311-win_amd64.whl | Select-Object -First 1
+$env:WEBRTC_APM_ROOT = (Resolve-Path askme/voice/native/askme_webrtc_apm/.build/prefix).Path
+uv build --wheel --python .\.venv\Scripts\python.exe --out-dir askme/voice/native/askme_webrtc_apm/dist askme/voice/native/askme_webrtc_apm
+$wheel = Get-ChildItem askme/voice/native/askme_webrtc_apm/dist/askme_webrtc_apm-*-cp311-cp311-win_amd64.whl | Select-Object -First 1
 uv pip install --python .\.venv\Scripts\python.exe --reinstall $wheel.FullName
 ```
 
@@ -70,7 +70,7 @@ unless the native wheel has been installed again afterwards. See uv's
 ## Linux/macOS
 
 ```sh
-cd native/askme_webrtc_apm
+cd askme/voice/native/askme_webrtc_apm
 python -m pip install "meson>=0.63,<2" ninja
 ./scripts/build_dependency.sh
 export WEBRTC_APM_ROOT="$PWD/.build/prefix"

@@ -34,7 +34,6 @@ architecture decisions.
 | `deploy/` | Install files, service units, site profiles, delivery templates. |
 | `docker/` | Dockerfiles, Compose stacks, and container entrypoints. |
 | `.zeroclaw/` | Optional ZeroClaw experiment config and its private persona assets. |
-| `native/` | Optional native extensions, currently WebRTC audio processing. |
 | `pyproject.toml` / `uv.lock` | Dependency declarations and the reproducible dependency lock. |
 | `prompts/` | Runtime prompt assets such as `SOUL.md`. |
 | `data/` | Local runtime state, customer knowledge, captures, sessions. |

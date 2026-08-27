@@ -81,6 +81,7 @@ Issues = "https://github.com/Kitjesen/askme/issues"
 
 [tool.setuptools.packages.find]
 include = ["askme*"]
+exclude = ["askme.voice.native*"]
 
 [tool.ruff]
 exclude = ["archive/", ".tmp/", "data/pytest-tmp/", ".venv*/"]

@@ -16,6 +16,7 @@ code should import from the responsibility-specific subpackages below.
   runtime bridge imports.
 - `diagnostics`: device discovery, calibration, readiness, smoke checks.
 - `lab`: operator-facing, target-hardware Voice Lab state and evidence collection.
+- `native`: separately built native voice extensions; excluded from the main AskMe wheel.
 - `realtime`: provider-neutral speech-to-speech contracts, safety coordination,
   and optional cloud realtime adapters.
 

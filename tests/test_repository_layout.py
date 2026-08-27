@@ -16,7 +16,6 @@ def test_repository_layout_doc_tracks_confusing_roots() -> None:
         "deploy/",
         "docker/",
         ".zeroclaw/",
-        "native/",
         "prompts/",
         "data/",
         "models/",
@@ -26,6 +25,39 @@ def test_repository_layout_doc_tracks_confusing_roots() -> None:
 
     assert "`video-lab/`" not in text
     assert "`config/`" not in text
+
+
+def test_native_voice_extension_lives_with_voice_owner() -> None:
+    import tomllib
+
+    extension_root = ROOT / "askme" / "voice" / "native" / "askme_webrtc_apm"
+    expected_files = {
+        ".gitignore",
+        "CMakeLists.txt",
+        "pyproject.toml",
+        "scripts/build_dependency.ps1",
+        "scripts/build_dependency.sh",
+        "src/bindings.cpp",
+    }
+
+    assert {
+        path.relative_to(extension_root).as_posix()
+        for path in extension_root.rglob("*")
+        if path.is_file()
+    } == expected_files
+    assert not (ROOT / "native").exists()
+
+    build_doc = (ROOT / "docs" / "AEC_BUILD.md").read_text(encoding="utf-8")
+    new_path = "askme/voice/native/askme_webrtc_apm"
+    assert new_path in build_doc
+    assert "cd native/askme_webrtc_apm" not in build_doc
+    assert "Resolve-Path native/askme_webrtc_apm" not in build_doc
+    assert "--out-dir native/askme_webrtc_apm" not in build_doc
+    assert "Get-ChildItem native/askme_webrtc_apm" not in build_doc
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    package_find = project["tool"]["setuptools"]["packages"]["find"]
+    assert "askme.voice.native*" in package_find["exclude"]
 
 
 def test_package_and_layout_guides_point_to_product_architecture_spine() -> None:
