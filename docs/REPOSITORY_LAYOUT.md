@@ -33,7 +33,8 @@ architecture decisions.
 | `scripts/` | Operator scripts, smoke checks, demos, benchmarks, maintenance. |
 | `deploy/` | Install files, service units, site profiles, delivery templates. |
 | `docker/` | Dockerfiles, Compose stacks, and container entrypoints. |
-| `config/` | Environment-specific config templates such as production defaults. |
+| `.zeroclaw/` | Optional ZeroClaw experiment config and its private persona assets. |
+| `native/` | Optional native extensions, currently WebRTC audio processing. |
 | `pyproject.toml` / `uv.lock` | Dependency declarations and the reproducible dependency lock. |
 | `prompts/` | Runtime prompt assets such as `SOUL.md`. |
 | `data/` | Local runtime state, customer knowledge, captures, sessions. |
@@ -41,7 +42,6 @@ architecture decisions.
 | `artifacts/` | Generated reports, evidence, screenshots, benchmark output. |
 | `output/` | Temporary tool output. |
 | `archive/` | Deprecated or parked historical material. |
-| `video-lab/` | Separate video/Remotion workspace. |
 
 ## Package Direction
 

@@ -224,20 +224,24 @@ def _run_zeroclaw_onboard(base_url: str, api_key: str) -> None:
 
 
 def _install_persona() -> None:
-    persona_files = [
+    persona_files = (
         "IDENTITY.md",
         "SOUL.md",
         "AGENTS.md",
         "TOOLS.md",
         "MEMORY.md",
         "HEARTBEAT.md",
-    ]
-    agent_dir = PROJECT_ROOT / "agent"
+    )
+    agent_dir = PROJECT_ROOT / ".zeroclaw" / "agent"
+    missing = [filename for filename in persona_files if not (agent_dir / filename).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "missing ZeroClaw persona assets: " + ", ".join(missing)
+        )
+
     ZEROCLAW_WORKSPACE.mkdir(parents=True, exist_ok=True)
     for filename in persona_files:
-        source = agent_dir / filename
-        if source.exists():
-            shutil.copy2(source, ZEROCLAW_WORKSPACE / filename)
+        shutil.copy2(agent_dir / filename, ZEROCLAW_WORKSPACE / filename)
 
 
 _LEGACY_BRIDGE_MARKERS = (

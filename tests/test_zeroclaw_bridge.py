@@ -239,6 +239,46 @@ def test_repo_manual_config_does_not_advertise_unverified_native_mcp() -> None:
     config = tomllib.loads((ROOT / ".zeroclaw" / "config.toml").read_text(encoding="utf-8"))
 
     assert "mcp" not in config
+    for key in ("identity_file", "soul_file", "tools_file", "memory_file"):
+        asset_path = ROOT / config["agent"][key]
+        assert asset_path.parent == ROOT / ".zeroclaw" / "agent"
+        assert asset_path.is_file()
+
+
+def test_setup_installs_complete_zeroclaw_persona(tmp_path, monkeypatch) -> None:
+    setup = importlib.import_module("scripts.dev.setup_zeroclaw")
+    workspace = tmp_path / "workspace"
+    monkeypatch.setattr(setup, "ZEROCLAW_WORKSPACE", workspace)
+
+    setup._install_persona()
+
+    expected = {
+        "IDENTITY.md",
+        "SOUL.md",
+        "AGENTS.md",
+        "TOOLS.md",
+        "MEMORY.md",
+        "HEARTBEAT.md",
+    }
+    assert {path.name for path in workspace.iterdir()} == expected
+    for filename in expected:
+        assert (workspace / filename).read_bytes() == (
+            ROOT / ".zeroclaw" / "agent" / filename
+        ).read_bytes()
+
+
+def test_setup_fails_closed_when_persona_assets_are_missing(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    setup = importlib.import_module("scripts.dev.setup_zeroclaw")
+    workspace = tmp_path / "workspace"
+    monkeypatch.setattr(setup, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(setup, "ZEROCLAW_WORKSPACE", workspace)
+
+    with pytest.raises(FileNotFoundError, match="IDENTITY.md.*HEARTBEAT.md"):
+        setup._install_persona()
+
+    assert not workspace.exists()
 
 
 def test_setup_audit_rejects_any_unverified_mcp_table(tmp_path) -> None:

@@ -19,7 +19,7 @@
 
 - **频率**: 每 5 分钟
 - **动作**: `memory_search` → 汇总最近系统状态
-- **输出**: 写入 agent/MEMORY.md 的 `## Health` 节
+- **输出**: 写入 `MEMORY.md` 的 `## Health` 节
 
 ### 2. 技能目录同步
 

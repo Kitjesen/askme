@@ -15,13 +15,17 @@ def test_repository_layout_doc_tracks_confusing_roots() -> None:
         "scripts/",
         "deploy/",
         "docker/",
-        "config/",
+        ".zeroclaw/",
+        "native/",
         "prompts/",
         "data/",
         "models/",
         "artifacts/",
     ):
         assert f"`{path}`" in text
+
+    assert "`video-lab/`" not in text
+    assert "`config/`" not in text
 
 
 def test_package_and_layout_guides_point_to_product_architecture_spine() -> None:

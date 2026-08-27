@@ -1,4 +1,4 @@
-# 小穹工具清单
+# 小穹 — ZeroClaw 实验工具清单
 
 > 以下是通过 Askme MCP Server 暴露的工具和能力。
 

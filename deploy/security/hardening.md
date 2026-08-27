@@ -122,7 +122,7 @@
 |---|--------|----------|------|
 | 10.1 | 服务以非 root 用户运行（建议创建专用 `askme` 系统用户） | ASVS 1.1 | [ ] |
 | 10.2 | 容器镜像使用官方基础镜像，定期扫描漏洞 | OWASP A06 | [ ] |
-| 10.3 | 敏感文件权限：`config/production.yaml` 640, `.env` 600 | OWASP A05 | [ ] |
+| 10.3 | `ASKME_CONFIG_PATH` 指向的生产配置（如 `/etc/askme/config.yaml`）权限 640，`.env` 权限 600 | OWASP A05 | [ ] |
 | 10.4 | 生产环境使用独立配置文件，与开发配置隔离 | OWASP A05 | [ ] |
 | 10.5 | 依赖定期更新（`pip-audit` 或 `safety` 检查已知 CVE） | OWASP A06 | [ ] |
 | 10.6 | 存在安全事件响应流程（见 `SECURITY.md`） | ASVS 12.2 | [ ] |

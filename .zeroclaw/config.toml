@@ -16,9 +16,9 @@ model_fallbacks = {}
 
 
 [agent]
-identity_file = "agent/IDENTITY.md"
-soul_file = "agent/SOUL.md"
-tools_file = "agent/TOOLS.md"
-memory_file = "agent/MEMORY.md"
+identity_file = ".zeroclaw/agent/IDENTITY.md"
+soul_file = ".zeroclaw/agent/SOUL.md"
+tools_file = ".zeroclaw/agent/TOOLS.md"
+memory_file = ".zeroclaw/agent/MEMORY.md"
 max_tool_iterations = 50
 parallel_tools = true

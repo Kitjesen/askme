@@ -81,10 +81,6 @@ secrets/
 # Local patch probes (never commit)
 .tmp_patch_probe
 
-# Frontend/video generated artifacts
-video-lab/node_modules/
-video-lab/out/
-
 # Audio fixtures and one-off bench artifacts (never commit recordings)
 *.wav
 scripts/bench/test_voice_generated.py
