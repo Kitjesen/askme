@@ -48,6 +48,15 @@ async def test_run_benchmarks_emits_core_path_metrics() -> None:
     assert evidence["after"]["extra"]["backend_calls"] < evidence["before"]["extra"]["backend_calls"]
 
 
+def test_core_path_benchmark_declares_runtime_operator() -> None:
+    config = benchmark_core_paths._benchmark_config(concurrency=2)
+
+    operator = config["field_operations"]["operators"][
+        benchmark_core_paths.BENCHMARK_OPERATOR_ID
+    ]
+    assert operator == {"roles": ["operator"]}
+
+
 def test_benchmark_cli_writes_json_report(tmp_path) -> None:
     output_path = tmp_path / "core_paths.json"
 

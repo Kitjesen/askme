@@ -33,6 +33,7 @@ DEFAULT_QUICK_ITERATIONS = 40
 DEFAULT_FULL_ITERATIONS = 200
 DEFAULT_QUICK_CONCURRENCY = 8
 DEFAULT_FULL_CONCURRENCY = 16
+BENCHMARK_OPERATOR_ID = "benchmark.operator"
 
 
 class _RuntimeVoiceHandler:
@@ -103,6 +104,9 @@ def _benchmark_config(concurrency: int) -> dict[str, Any]:
             "runtime_voice_turn_timeout_s": 2.0,
         },
         "memory": {"enabled": False},
+        "field_operations": {
+            "operators": {BENCHMARK_OPERATOR_ID: {"roles": ["operator"]}},
+        },
         "tools": {},
     }
 
@@ -248,6 +252,7 @@ async def benchmark_runtime_voice_turn(*, attempts: int, concurrency: int) -> di
         async def operation(index: int) -> None:
             response = await client.post(
                 "/api/runtime/voice-turn",
+                headers={"X-Askme-Operator-Id": BENCHMARK_OPERATOR_ID},
                 json={
                     "text": f"benchmark voice {index}",
                     "transcript_id": f"voice-{index}",
