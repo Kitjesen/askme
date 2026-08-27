@@ -7,6 +7,7 @@ wire together via In/Out ports, and can be replaced with mocks.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -294,15 +295,15 @@ class TestMemoryModule:
         assert mem_mod.memory_system is not None
         assert mem_mod.conversation is not None
 
-    def test_health(self):
+    def test_health(self, tmp_path: Path):
         from askme.runtime.modules.memory_module import MemoryModule
 
         mod = MemoryModule()
         mod.llm_client = None
-        mod.build({}, ModuleRegistry())
+        mod.build({"app": {"data_dir": str(tmp_path / "data")}}, ModuleRegistry())
         h = mod.health()
-        assert h["status"] in {"ok", "catalog_only"}
-        assert h["ready"] is True
+        assert h["status"] == "not_ready"
+        assert h["ready"] is False
         assert "conversation_len" in h
         assert "episodic_buffer_len" in h
 
@@ -330,7 +331,7 @@ class TestMemoryModule:
 
 
 class TestComposition:
-    async def test_four_modules_compose(self):
+    async def test_four_modules_compose(self, tmp_path: Path):
         """All four Phase 1 modules compose, build, and start."""
         from askme.runtime.modules.memory_module import MemoryModule
         from askme.runtime.modules.tools_module import ToolsModule
@@ -341,7 +342,7 @@ class TestComposition:
             + Runtime.use(MockPulseModule)
             + Runtime.use(MemoryModule)
         )
-        app = await rt.build()
+        app = await rt.build({"app": {"data_dir": str(tmp_path / "data")}})
         assert len(app.modules) == 4
 
         await app.start()
@@ -352,10 +353,10 @@ class TestComposition:
         assert "memory" in h
         for name, status in h.items():
             if name == "memory":
-                assert status["status"] in {"ok", "catalog_only"}, (
+                assert status["status"] == "not_ready", (
                     f"{name} health not ready: {status}"
                 )
-                assert status["ready"] is True
+                assert status["ready"] is False
                 continue
             assert status["status"] == "ok", f"{name} health not ok: {status}"
         await app.stop()

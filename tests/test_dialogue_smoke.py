@@ -6,6 +6,8 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
+
 from askme.runtime.diagnostics.dialogue_smoke import (
     _all_run_check,
     _build_checks,
@@ -24,6 +26,7 @@ from askme.runtime.diagnostics.dialogue_smoke import (
     _write_report,
     print_dialogue_burst_summary,
     print_dialogue_smoke_summary,
+    run_dialogue_smoke,
 )
 
 # ── _safe_run_id ─────────────────────────────────────────────────────────
@@ -343,6 +346,32 @@ class TestSmokeConfig:
             token="T1",
         )
         assert "data_dir" not in base["app"]
+
+
+@pytest.mark.asyncio
+async def test_fake_llm_smoke_runs_without_fastembed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from askme.memory.retrieval import vector_store
+
+    monkeypatch.setattr(vector_store, "_FE_AVAILABLE", False)
+    monkeypatch.setattr(vector_store, "_MODEL_CACHE", {})
+
+    report = await run_dialogue_smoke(
+        fake_llm=True,
+        token="ASKME-OFFLINE-TEST",
+        output_dir=tmp_path / "output",
+        data_dir=tmp_path / "data",
+        chat_timeout_s=15.0,
+        memory_timeout_s=5.0,
+    )
+
+    assert report["status"] == "passed"
+    assert all(report["checks"].values())
+    assert report["config_overrides"]["memory.embedding_mode"] == "deterministic_offline"
+    assert vector_store._FE_AVAILABLE is False
+    assert vector_store._MODEL_CACHE == {}
 
 
 # ── _build_checks ────────────────────────────────────────────────────────

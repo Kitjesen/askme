@@ -178,7 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_dialogue_smoke.add_argument(
         "--fake-llm",
         action="store_true",
-        help="Use the fake LLM provider. Off by default so the smoke exercises configured LLM.",
+        help=(
+            "Use the fake LLM provider and deterministic offline embeddings. "
+            "Off by default so the smoke exercises configured models."
+        ),
     )
     runtime_dialogue_smoke.add_argument(
         "--allow-reply-without-token",

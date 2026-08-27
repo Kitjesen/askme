@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
+import importlib
 import json
 import logging
+import math
+import re
 import secrets
 import time
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +30,57 @@ DEFAULT_MEMORY_TEMPLATE = (
     "Thunder's current test identifier is {token}. "
     "This temporary record exists only for the AskMe runtime dialogue smoke test."
 )
+
+
+class _DeterministicTextEmbedding:
+    """Small network-free embedder used only by the fake diagnostic path."""
+
+    def embed(self, texts: list[str]) -> Iterator[list[float]]:
+        for text in texts:
+            yield _deterministic_embedding(text)
+
+
+def _deterministic_embedding(text: str, *, dimensions: int = 256) -> list[float]:
+    tokens = re.findall(r"[0-9a-z]+", text.casefold())
+    if not tokens:
+        tokens = [character for character in text.casefold() if not character.isspace()]
+    vector = [0.0] * dimensions
+    for token in tokens:
+        digest = hashlib.blake2b(
+            token.encode("utf-8"),
+            digest_size=8,
+            person=b"askme-smoke",
+        ).digest()
+        index = int.from_bytes(digest[:2], "big") % dimensions
+        vector[index] += 1.0 if digest[2] & 1 else -1.0
+    norm = math.sqrt(sum(value * value for value in vector))
+    return [value / norm for value in vector] if norm else vector
+
+
+@contextmanager
+def _offline_vector_model(enabled: bool) -> Iterator[None]:
+    """Install a deterministic model for one fake smoke and restore global state."""
+
+    if not enabled:
+        yield
+        return
+
+    vector_store = importlib.import_module("askme.memory.retrieval.vector_store")
+    model_cache = getattr(vector_store, "_MODEL_CACHE")
+    model_key = getattr(vector_store, "_FASTEMBED_MODEL")
+    previous_available = getattr(vector_store, "_FE_AVAILABLE")
+    missing = object()
+    previous_model = model_cache.get(model_key, missing)
+    setattr(vector_store, "_FE_AVAILABLE", True)
+    model_cache[model_key] = _DeterministicTextEmbedding()
+    try:
+        yield
+    finally:
+        setattr(vector_store, "_FE_AVAILABLE", previous_available)
+        if previous_model is missing:
+            model_cache.pop(model_key, None)
+        else:
+            model_cache[model_key] = previous_model
 
 
 def run_dialogue_smoke_sync(**kwargs: Any) -> dict[str, Any]:
@@ -173,6 +230,8 @@ async def run_dialogue_smoke(
     service_diagnostics: dict[str, Any] = {}
     app_health: dict[str, Any] = {}
     failure_reason = ""
+    runtime_context = ExitStack()
+    runtime_context.enter_context(_offline_vector_model(fake_llm))
 
     try:
         text_blueprint = __import__(
@@ -231,12 +290,17 @@ async def run_dialogue_smoke(
     except Exception as exc:  # pragma: no cover - real diagnostic path
         failure_reason = f"{type(exc).__name__}: {exc}"
     finally:
-        if app is not None:
-            try:
-                await app.stop()
-            except Exception as exc:  # pragma: no cover - shutdown best effort
-                stop_error = f"stop_error={type(exc).__name__}: {exc}"
-                failure_reason = f"{failure_reason}; {stop_error}" if failure_reason else stop_error
+        try:
+            if app is not None:
+                try:
+                    await app.stop()
+                except Exception as exc:  # pragma: no cover - shutdown best effort
+                    stop_error = f"stop_error={type(exc).__name__}: {exc}"
+                    failure_reason = (
+                        f"{failure_reason}; {stop_error}" if failure_reason else stop_error
+                    )
+        finally:
+            runtime_context.close()
 
     checks = _build_checks(
         token=run_token,
@@ -265,6 +329,7 @@ async def run_dialogue_smoke(
         "config_overrides": {
             "memory.backend": "vector",
             "memory.customer_knowledge_backend": "vector",
+            "memory.embedding_mode": "deterministic_offline" if fake_llm else "fastembed",
             "memory.retrieve_timeout": memory_timeout_s,
             "memory.vector_min_similarity": vector_min_similarity,
             "brain.provider": "fake" if fake_llm else cfg.get("brain", {}).get("provider", ""),

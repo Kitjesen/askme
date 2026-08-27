@@ -77,7 +77,9 @@ jobs:
       - name: Install bandit
         run: pip install bandit
       - name: Run bandit
-        run: bandit -r askme/ -ll -x askme/cli.py,askme/voice/diagnostics/,tests/ -f json -o artifacts/bandit-report.json
+        run: |
+          mkdir -p artifacts
+          bandit -r askme/ -ll -x askme/cli.py,askme/voice/diagnostics/,tests/ -f json -o artifacts/bandit-report.json
 
   smoke:
     runs-on: ubuntu-latest
