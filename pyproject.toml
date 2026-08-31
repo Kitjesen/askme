@@ -54,7 +54,7 @@ robot = [
     "onnxruntime>=1.16.0",
 ]
 memory = [
-    "mem0ai>=0.1.0",
+    "mem0ai>=2.0.19",
     "fastembed>=0.4.0",
 ]
 robotmem = [
