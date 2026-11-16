@@ -4,6 +4,18 @@
 MemPalace and Chroma own process-level state that is unsafe to share across
 AskMe worker threads. This process serializes every storage operation through
 the stdlib HTTPServer and is intentionally reachable only over loopback.
+
+The sidecar opens MemPalace's default drawers collection (``collection_name``
+is ``None``). AskMe isolates customer knowledge, robot behavior, and user
+memory with wing/room metadata. MemPalace 3.12 raises
+``CollectionNameMismatchError`` for any other collection name, including the
+old ``askme`` name.
+
+This process is the HTTP API the AskMe client calls: ``GET /healthz`` and
+``POST /v1/search``, ``/v1/upsert``, ``/v1/update``, and ``/v1/stats``.
+MemPalace 3.12's own ``mempalace serve`` server does not implement those
+routes; its ``GET /healthz`` is plain text and its only POST route is
+``/mcp``.
 """
 
 from __future__ import annotations
@@ -82,7 +94,13 @@ def _where(wing: str, room: str) -> dict[str, Any]:
 class MemPalaceStore:
     """Synchronous storage facade; one HTTPServer thread is the sole caller."""
 
-    def __init__(self, collection: Any, *, palace_path: str, collection_name: str) -> None:
+    def __init__(
+        self,
+        collection: Any,
+        *,
+        palace_path: str,
+        collection_name: str | None,
+    ) -> None:
         self.collection = collection
         self.palace_path = palace_path
         self.collection_name = collection_name
@@ -323,20 +341,20 @@ def build_handler(store: MemPalaceStore) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def open_store(*, palace_path: str, collection_name: str) -> MemPalaceStore:
-    """Open MemPalace and prove embeddings work before returning."""
+def open_store(*, palace_path: str) -> MemPalaceStore:
+    """Open the default drawers collection and prove embeddings work."""
     from mempalace.palace import get_collection
 
     Path(palace_path).mkdir(parents=True, exist_ok=True)
     collection = get_collection(
         palace_path,
-        collection_name=collection_name,
+        collection_name=None,
         create=True,
     )
     store = MemPalaceStore(
         collection,
         palace_path=palace_path,
-        collection_name=collection_name,
+        collection_name=None,
     )
     store.probe()
     return store
@@ -355,7 +373,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--collection-name",
-        default=os.getenv("MEMPALACE_COLLECTION", "askme"),
+        default=os.getenv("MEMPALACE_COLLECTION") or None,
+        help=(
+            "Ignored. MemPalace 3.12 only opens the default drawers collection; "
+            "AskMe isolates data with wing and room metadata."
+        ),
     )
     return parser.parse_args()
 
@@ -368,9 +390,14 @@ def main() -> None:
         level=os.getenv("MEMPALACE_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    legacy_collection = str(args.collection_name or "").strip()
+    if legacy_collection:
+        logger.warning(
+            "Ignoring MemPalace collection name %r; opening the default drawers collection",
+            legacy_collection,
+        )
     store = open_store(
         palace_path=str(Path(args.palace_path).expanduser().resolve()),
-        collection_name=str(args.collection_name),
     )
     server = HTTPServer((args.host, args.port), build_handler(store))
     logger.info(

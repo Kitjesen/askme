@@ -14,7 +14,6 @@ Environment=MEMPALACE_EMBEDDING_MODEL=embeddinggemma
 Environment=MEMPALACE_EMBEDDING_DEVICE=cpu
 Environment=MEMPALACE_EMBEDDING_THREADS=2
 Environment=MEMPALACE_PALACE_PATH=/home/sunrise/data/inovxio/askme/data/memory/mempalace/palace
-Environment=MEMPALACE_COLLECTION=askme
 Environment=HF_HOME=/home/sunrise/data/inovxio/askme/data/memory/mempalace/hf-cache
 Environment=HF_HUB_CACHE=/home/sunrise/data/inovxio/askme/data/memory/mempalace/hf-cache/hub
 Environment=HF_HUB_OFFLINE=1
@@ -22,7 +21,7 @@ Environment=TRANSFORMERS_OFFLINE=1
 Environment=ANONYMIZED_TELEMETRY=False
 ExecStartPre=/usr/bin/test -x /home/sunrise/data/inovxio/askme/.venv-mempalace/bin/python
 ExecStartPre=/usr/bin/mkdir -p /home/sunrise/data/inovxio/askme/data/memory/mempalace/runtime-home/.mempalace/locks
-ExecStart=/home/sunrise/data/inovxio/askme/.venv-mempalace/bin/python /home/sunrise/data/inovxio/askme/scripts/runtime/mempalace_sidecar.py --host 127.0.0.1 --port 8766 --palace-path /home/sunrise/data/inovxio/askme/data/memory/mempalace/palace --collection-name askme
+ExecStart=/home/sunrise/data/inovxio/askme/.venv-mempalace/bin/python /home/sunrise/data/inovxio/askme/scripts/runtime/mempalace_sidecar.py --host 127.0.0.1 --port 8766 --palace-path /home/sunrise/data/inovxio/askme/data/memory/mempalace/palace
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=180

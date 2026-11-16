@@ -4,6 +4,19 @@ MemPalace is a local-first Chroma-based memory store. This adapter keeps it
 optional: if the ``mempalace`` package is missing or the palace cannot be
 opened, callers get an empty result and MemoryBridge can fall back to another
 backend.
+
+MemPalace 3.12 rejects custom collection names. This adapter always opens the
+default drawers collection (``collection_name=None``) and isolates AskMe data
+with wing/room metadata.
+
+``mempalace_transport: http`` talks to the AskMe sidecar
+(``scripts/runtime/mempalace_sidecar.py``), which serves ``GET /healthz`` and
+``POST /v1/search``, ``/v1/upsert``, ``/v1/update``, and ``/v1/stats``.
+MemPalace 3.12's own ``mempalace serve`` process is a different server: its
+``GET /healthz`` returns plain text and its only POST route is ``/mcp``.
+Point this client at that server and the calls fail. Use
+``mempalace_transport: python`` for in-process access to the same drawers
+collection.
 """
 
 from __future__ import annotations
@@ -61,7 +74,16 @@ class MemPalaceBackend:
 
         self._wing = str(mem_cfg.get("mempalace_wing", "askme")).strip()
         self._room = str(mem_cfg.get("mempalace_room", "robot")).strip()
-        self._collection_name = mem_cfg.get("mempalace_collection_name") or None
+        legacy_collection = str(mem_cfg.get("mempalace_collection_name") or "").strip()
+        if legacy_collection:
+            logger.warning(
+                "[Memory] Ignoring mempalace_collection_name=%r; MemPalace 3.12 "
+                "only opens the default drawers collection. AskMe isolates data "
+                "with wing=%r room=%r.",
+                legacy_collection,
+                self._wing,
+                self._room,
+            )
         self._n_results = int(mem_cfg.get("mempalace_n_results", 5))
         self._min_similarity = float(mem_cfg.get("mempalace_min_similarity", 0.3))
         self._retrieve_timeout = float(mem_cfg.get("retrieve_timeout", 2.0))
@@ -136,7 +158,7 @@ class MemPalaceBackend:
             return None
         return self._get_collection(
             str(self._palace_path),
-            collection_name=self._collection_name,
+            collection_name=None,
             create=create,
         )
 
