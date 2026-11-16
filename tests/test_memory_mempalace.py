@@ -92,6 +92,29 @@ class TestMemPalaceBackend:
             "$and": [{"wing": "askme"}, {"room": "robot"}]
         }
 
+    def test_open_collection_uses_default_drawers_name(self, tmp_path):
+        collection = _FakeCollection()
+        backend = MemPalaceBackend(
+            {
+                "mempalace_palace_path": str(tmp_path / "palace"),
+                "mempalace_collection_name": "askme",
+                "mempalace_wing": "askme",
+                "mempalace_room": "customer_knowledge",
+            }
+        )
+
+        with _patch_mempalace(collection):
+            opened = backend._open_collection(create=True)
+            from mempalace.palace import get_collection
+
+            get_collection.assert_called_once_with(
+                str(tmp_path / "palace"),
+                collection_name=None,
+                create=True,
+            )
+
+        assert opened is collection
+
     @pytest.mark.asyncio
     async def test_retrieve_items_applies_metadata_filter_without_swallowing_results(
         self,

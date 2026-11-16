@@ -246,7 +246,7 @@ requires-dist = [
     { name = "fastembed", marker = "extra == 'memory'", specifier = ">=0.4.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.28.1,<2" },
     { name = "mem0ai", marker = "extra == 'memory'", specifier = ">=2.0.19" },
-    { name = "mempalace", marker = "extra == 'mempalace'", specifier = "==3.5.0" },
+    { name = "mempalace", marker = "extra == 'mempalace'", specifier = "==3.12.0" },
     { name = "miniaudio", specifier = ">=1.73" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.4.1" },
     { name = "numpy", specifier = ">=2.4.6" },
@@ -2169,7 +2169,7 @@ wheels = [
 
 [[package]]
 name = "mempalace"
-version = "3.5.0"
+version = "3.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "chromadb" },
@@ -2179,9 +2179,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "tokenizers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/cf/35/0b647c4508b05e755b334a440e60d81e0f8db27f34dfcc55f61d7eb1d103/mempalace-3.5.0.tar.gz", hash = "sha256:65166dfddd51b58385341afe1db113b8e3abdafa5b49caad7b83a9876140737e", size = 25205826, upload-time = "2026-06-23T01:21:16.252Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d2/a5/debb4d7a3da8cc19b5cc1fcc0e24f117c5cc1146f88a92ee1bbef6937f89/mempalace-3.12.0.tar.gz", hash = "sha256:f54cd31d050fc8c76ba822bc30be93580ecbb838a7a50a335d9a1192bd27d335", size = 26892562, upload-time = "2026-11-12T10:25:54.871Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/c7/ae5d244ec0e4d419ca5f45334d7d7e79da1146f91a4681be649529c22a95/mempalace-3.5.0-py3-none-any.whl", hash = "sha256:df8ac612e59ff2910779a35b19743fbd6824f09fe6388565388f479433784408", size = 536970, upload-time = "2026-06-23T01:21:14.377Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/c7/17a4b25d5ba655f31f38208a0c6ff098be6f4c00233bf47fa1dc7dad03d2/mempalace-3.12.0-py3-none-any.whl", hash = "sha256:3832534f377f3a81a324f741f90bf3c1ec277d49404608257cde1b5b0d52626f", size = 1140726, upload-time = "2026-11-12T10:25:52.691Z" },
 ]
 
 [[package]]

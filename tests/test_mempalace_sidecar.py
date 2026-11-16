@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from http.server import HTTPServer
 from threading import Thread
+from types import ModuleType
 from unittest.mock import patch
 from urllib.request import ProxyHandler, Request, build_opener
 
 import pytest
 
-from scripts.runtime.mempalace_sidecar import MemPalaceStore, build_handler
+from scripts.runtime.mempalace_sidecar import MemPalaceStore, build_handler, open_store
 
 
 @dataclass
@@ -86,7 +88,7 @@ def _matches(metadata: dict, where: dict) -> bool:
 
 def test_probe_uses_chinese_query_and_propagates_embedding_failure():
     collection = _FakeCollection()
-    store = MemPalaceStore(collection, palace_path="/palace", collection_name="askme")
+    store = MemPalaceStore(collection, palace_path="/palace", collection_name=None)
 
     store.probe()
 
@@ -100,7 +102,7 @@ def test_probe_uses_chinese_query_and_propagates_embedding_failure():
 
 def test_probe_verifies_write_lock_and_removes_probe_record():
     collection = _FakeCollection()
-    store = MemPalaceStore(collection, palace_path="/palace", collection_name="askme")
+    store = MemPalaceStore(collection, palace_path="/palace", collection_name=None)
 
     store.probe()
 
@@ -108,7 +110,7 @@ def test_probe_verifies_write_lock_and_removes_probe_record():
     assert len(collection.deleted_ids) == 1
 
     collection = _FakeCollection(write_error=OSError("read-only lock directory"))
-    store = MemPalaceStore(collection, palace_path="/palace", collection_name="askme")
+    store = MemPalaceStore(collection, palace_path="/palace", collection_name=None)
     with pytest.raises(OSError, match="read-only lock directory"):
         store.probe()
 def test_health_reports_sidecar_mempalace_version():
@@ -118,7 +120,7 @@ def test_health_reports_sidecar_mempalace_version():
         return_value="3.5.0",
     ):
         store = MemPalaceStore(
-            collection, palace_path="/palace", collection_name="askme"
+            collection, palace_path="/palace", collection_name=None
         )
 
     assert store.health()["mempalace_version"] == "3.5.0"
@@ -126,7 +128,7 @@ def test_health_reports_sidecar_mempalace_version():
 
 def test_upsert_and_update_cannot_escape_requested_lane():
     collection = _FakeCollection()
-    store = MemPalaceStore(collection, palace_path="/palace", collection_name="askme")
+    store = MemPalaceStore(collection, palace_path="/palace", collection_name=None)
 
     result = store.upsert(
         {
@@ -183,7 +185,7 @@ def test_search_and_stats_are_scoped_to_requested_lane():
             "behavior": ("User preference", {"wing": "askme", "room": "robot_behavior"}),
         }
     )
-    store = MemPalaceStore(collection, palace_path="/palace", collection_name="askme")
+    store = MemPalaceStore(collection, palace_path="/palace", collection_name=None)
 
     result = store.search(
         {
@@ -206,7 +208,7 @@ def test_same_query_across_rooms_reuses_one_query_embedding():
             "behavior": ("User preference", {"wing": "askme", "room": "robot_behavior"}),
         }
     )
-    store = MemPalaceStore(collection, palace_path="/palace", collection_name="askme")
+    store = MemPalaceStore(collection, palace_path="/palace", collection_name=None)
 
     customer = store.search(
         {
@@ -239,7 +241,7 @@ def test_search_falls_back_to_query_texts_without_private_embed_api():
         }
     )
     collection._embed = None
-    store = MemPalaceStore(collection, palace_path="/palace", collection_name="askme")
+    store = MemPalaceStore(collection, palace_path="/palace", collection_name=None)
 
     store.search(
         {
@@ -254,7 +256,7 @@ def test_search_falls_back_to_query_texts_without_private_embed_api():
 
 def test_http_server_exposes_health_and_json_endpoints():
     collection = _FakeCollection()
-    store = MemPalaceStore(collection, palace_path="/palace", collection_name="askme")
+    store = MemPalaceStore(collection, palace_path="/palace", collection_name=None)
     server = HTTPServer(("127.0.0.1", 0), build_handler(store))
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -288,3 +290,29 @@ def test_http_server_exposes_health_and_json_endpoints():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_open_store_requests_default_drawers_collection(tmp_path, monkeypatch):
+    collection = _FakeCollection()
+    seen: dict[str, object] = {}
+
+    def _get_collection(palace_path, collection_name=None, create=True):
+        seen["palace_path"] = palace_path
+        seen["collection_name"] = collection_name
+        seen["create"] = create
+        return collection
+
+    palace = ModuleType("mempalace.palace")
+    palace.get_collection = _get_collection
+    package = ModuleType("mempalace")
+    package.palace = palace
+    monkeypatch.setitem(sys.modules, "mempalace", package)
+    monkeypatch.setitem(sys.modules, "mempalace.palace", palace)
+
+    store = open_store(palace_path=str(tmp_path / "palace"))
+
+    assert seen["collection_name"] is None
+    assert seen["create"] is True
+    assert store.collection_name is None
+    assert store.palace_path == str(tmp_path / "palace")
+    assert collection.deleted_ids == ["__askme_mempalace_write_probe__"]

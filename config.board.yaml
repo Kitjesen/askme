@@ -133,11 +133,15 @@ memory:
   robotmem_collection: askme
   # robotmem_db_path: null  # default: ~/.robotmem/memory.db
   # MemPalace runs in an isolated local sidecar so its native dependencies do
-  # not change the latency-sensitive AskMe environment.
+  # not change the latency-sensitive AskMe environment. MemPalace 3.12 opens
+  # only the default drawers collection; AskMe isolates customer_knowledge,
+  # robot_behavior, and user_long_term with wing/room metadata.
+  # HTTP transport targets the AskMe sidecar (GET /healthz, POST /v1/search),
+  # not MemPalace's native MCP server. Use mempalace_transport: python for
+  # in-process access to the same drawers collection.
   mempalace_transport: http
   mempalace_url: http://127.0.0.1:8766
   mempalace_palace_path: data/memory/mempalace/palace
-  mempalace_collection_name: askme
   mempalace_wing: askme
   mempalace_room: customer_knowledge
   mempalace_behavior_wing: askme
