@@ -33,7 +33,19 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install system libs for sounddevice/soundfile
-        run: sudo apt-get update && sudo apt-get install -y libportaudio2 libsndfile1
+        run: |
+          sudo apt-get update && sudo apt-get install -y libportaudio2 libsndfile1 pulseaudio
+          # sounddevice calls Pa_Initialize() at import time. The runner's
+          # PortAudio is built with the PulseAudio host API, and that call
+          # fails the process when no server is running.
+          if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+            export XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
+            mkdir -p "$XDG_RUNTIME_DIR"
+            chmod 700 "$XDG_RUNTIME_DIR"
+            echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          fi
+          pulseaudio --start --exit-idle-time=-1 --log-target=stderr
+          pactl info
       - name: Install dependencies
         run: pip install -e ".[dev,embed]"
       - name: Download silero_vad.onnx for VAD-dependent tests
@@ -94,7 +106,19 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install system libs for sounddevice/soundfile
-        run: sudo apt-get update && sudo apt-get install -y libportaudio2 libsndfile1
+        run: |
+          sudo apt-get update && sudo apt-get install -y libportaudio2 libsndfile1 pulseaudio
+          # sounddevice calls Pa_Initialize() at import time. The runner's
+          # PortAudio is built with the PulseAudio host API, and that call
+          # fails the process when no server is running.
+          if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+            export XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
+            mkdir -p "$XDG_RUNTIME_DIR"
+            chmod 700 "$XDG_RUNTIME_DIR"
+            echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          fi
+          pulseaudio --start --exit-idle-time=-1 --log-target=stderr
+          pactl info
       - name: Install dependencies
         run: pip install -e ".[dev,embed]"
       - name: Download silero_vad.onnx for VAD-dependent operations
