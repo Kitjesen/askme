@@ -21,6 +21,28 @@ jobs:
       - name: Ruff check
         run: ruff check askme/ tests/
 
+  # Pure speech helpers. No PortAudio, PulseAudio, VAD model, or network.
+  # The full test job below still runs these tests; this job only fails faster.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install pytest
+        run: pip install "pytest>=9.2.0" "pytest-asyncio>=1.5.0"
+      - name: Run pure speech unit tests
+        run: |
+          python -m pytest \
+            tests/test_speech_correct_words.py \
+            tests/test_speech_emotion.py \
+            tests/test_speech_tts_retry.py \
+            tests/test_speech_config_examples.py \
+            -q --tb=short --override-ini="addopts="
+
   test:
     runs-on: ubuntu-latest
     steps:

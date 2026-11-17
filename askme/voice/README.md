@@ -9,6 +9,7 @@ code should import from the responsibility-specific subpackages below.
 - `core`: pure contracts, trace helpers, stream splitting, punctuation.
 - `input`: microphone input, ASR, cloud ASR, VAD, KWS, audio preprocessing.
 - `output`: TTS engines, audio routing, voice profiles, sound cues.
+- `speech`: pronunciation corrections, Xiaozhi device-emotion payloads, and TTS retry. Pure helpers with no audio device.
 - `playback`: governed targeted-speech queue, idempotency, artifacts, and cancellation.
 - `interaction`: compatibility facades for interaction imports that now live in
   `robot_interaction`.

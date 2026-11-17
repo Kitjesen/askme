@@ -468,6 +468,19 @@ voice:
     # MiniMax is the cloud-primary product path; local remains the offline
     # fallback when the provider is unavailable or out of balance.
     backend: minimax
+    # Pronunciation replacements for text that is about to be synthesized.
+    # Format: "原文|读法". Longest match wins. Captions and sentence_start keep 原文.
+    # 算 and 蒜 are both suàn; the spoken form only steers engines that misread 算.
+    # 伊 is the spoken name of the Latin letter in 科创e谷. An empty list disables
+    # these examples. Append more without code changes, or set
+    # ASKME_TTS_CORRECT_WORDS to a semicolon-separated list that is added on top.
+    correct_words:
+      - "小算|小蒜"
+      - "大算|大蒜"
+      - "聚龙科创e谷|聚龙科创伊谷"
+      - "巨龙科创e谷|巨龙科创伊谷"
+    # Optional Xiaozhi session id stamped on device emotion messages.
+    device_session_id: ""
     phrase_cache_enabled: true
     phrase_cache_dir: data/voice/phrase_cache
     # Startup priming accepts only phrases already consumed through a stable
