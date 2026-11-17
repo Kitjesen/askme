@@ -9,6 +9,7 @@ from typing import Any, TypeAlias
 
 from askme.conversation import canonical_thread_id
 from askme.ports import VoiceTurnBridgePort
+from askme.voice.speech.emotion import push_device_emotion
 from askme.voice_gateway.session import (
     ConversationSessionManager,
     SessionSnapshot,
@@ -33,6 +34,8 @@ class VoiceGatewayService:
     ) -> None:
         self._bridge = bridge
         self._session_manager = session_manager or ConversationSessionManager()
+        self._device_emotion_sender: Callable[[str], Any] | None = None
+        self._device_session_id = ""
 
     @property
     def bridge(self) -> VoiceTurnBridge | None:
@@ -205,6 +208,8 @@ class VoiceGatewayService:
             )
         except ValueError:
             return False
+        if assistant_text:
+            self._push_configured_emotion(clean_session_id, assistant_text)
         return True
 
     def _handle_turn(
@@ -329,6 +334,8 @@ class VoiceGatewayService:
         gate_decision = _clean_optional(turn.get("gate_decision") or result.get("gate_decision"))
         skill_name = _clean_optional(turn.get("skill_name") or result.get("skill_name"))
         handoff_id = _clean_optional(turn.get("handoff_id") or result.get("handoff_id"))
+        if assistant_text:
+            self._push_configured_emotion(session_id, assistant_text)
         self._session_manager.append_turn(
             session_id,
             user_text=user_text,
@@ -340,6 +347,40 @@ class VoiceGatewayService:
             handoff_id=handoff_id,
             metadata=turn_metadata,
         )
+
+    def set_device_emotion_sender(
+        self,
+        sender: Callable[[str], Any] | None,
+        *,
+        session_id: str | None = None,
+    ) -> None:
+        """Register a Xiaozhi device sender for reply emotion messages.
+
+        AskMe does not own the board WebSocket. Registering a sender makes
+        recorded assistant replies push the official ``llm`` emotion payload
+        as the turn is committed. TTS ``speak`` can carry the same sender when
+        the expression should move as speech starts.
+        """
+        self._device_emotion_sender = sender
+        if session_id is not None:
+            self._device_session_id = str(session_id)
+
+    def push_device_emotion(
+        self,
+        reply_text: str,
+        *,
+        session_id: str | None = None,
+        sender: Callable[[str], Any] | None = None,
+    ) -> dict[str, str]:
+        """Build and optionally send the Xiaozhi emotion message for a reply."""
+        active_sender = self._device_emotion_sender if sender is None else sender
+        active_session = self._device_session_id if session_id is None else session_id
+        return push_device_emotion(reply_text, str(active_session or ""), active_sender)
+
+    def _push_configured_emotion(self, session_id: str, reply_text: str) -> None:
+        if self._device_emotion_sender is None or not reply_text:
+            return
+        push_device_emotion(reply_text, session_id, self._device_emotion_sender)
 
 
 def _call_with_supported_kwargs(

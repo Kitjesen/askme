@@ -120,6 +120,7 @@ asyncio_mode = "auto"
 norecursedirs = ["tests/tmp", "data/pytest-tmp"]
 addopts = ["-m", "not slow"]
 markers = [
+    "unit: fast pure-Python tests with no audio device, model download, or network",
     "slow: slower integration/scenario coverage excluded from the default fast shard",
     "scenario: customer or runtime scenario evaluation tests",
     "e2e: end-to-end workflow tests",

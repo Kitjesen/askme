@@ -11,6 +11,7 @@ available only for legacy imports.
 
 from __future__ import annotations
 
+from askme.voice.speech.emotion import build_llm_emotion_message, push_device_emotion
 from askme.voice_gateway.service import VoiceGatewayService
 from askme.voice_gateway.session import (
     ConversationSession,
@@ -27,6 +28,8 @@ __all__ = [
     "InMemorySessionStore",
     "SessionSnapshot",
     "VoiceGatewayService",
+    "build_llm_emotion_message",
+    "push_device_emotion",
 ]
 
 

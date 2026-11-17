@@ -40,6 +40,9 @@ from askme.voice.output.volcengine_tts_client import (
     VolcengineTTSClientError,
     VolcengineTTSConfig,
 )
+from askme.voice.speech.correct_words import PronunciationTable, resolve_correct_words
+from askme.voice.speech.emotion import push_device_emotion
+from askme.voice.speech.tts_retry import synthesize_with_retry
 
 try:
     import sounddevice as sd
@@ -129,6 +132,8 @@ class TTSEngine(TTSBackend):
         # Common
         sample_rate: int      - playback sample rate (default 24000)
         output_device: int|str - sounddevice output device
+        correct_words: list   - "原文|读法" pairs applied after cleanup, before TTS
+        device_session_id: str - Xiaozhi session id stamped on emotion messages
     """
 
     # MiniMax consecutive failure threshold before temporarily disabling it.
@@ -189,6 +194,13 @@ class TTSEngine(TTSBackend):
                 self._fallback_backend,
             )
             self._fallback_backend = "edge"
+        configured_words = config.get("correct_words") if "correct_words" in config else None
+        self._pronunciations: PronunciationTable = resolve_correct_words(configured_words)
+        self._device_session_id: str = str(config.get("device_session_id") or "")
+        self._device_emotion_sender: Any | None = None
+        self._last_device_emotion: dict[str, str] | None = None
+        self._last_tts_display_text: str = ""
+        self._last_tts_spoken_text: str = ""
         self._sample_rate: int = int(config.get("sample_rate", 24000))
         self._output_device: int | str | None = config.get("output_device")
         self._output_transport: str = str(config.get("output_transport", "auto")).lower()
@@ -765,12 +777,54 @@ class TTSEngine(TTSBackend):
     # ------------------------------------------------------------------
 
     def speak(self, text: str) -> None:
-        """Strip emoji/markdown from *text* and queue it for TTS generation."""
+        """Strip emoji/markdown from *text* and queue the display form for TTS.
+
+        Emotion is taken from the raw reply, before emoji are removed. The
+        queue keeps that cleaned display text. Pronunciation replacement runs
+        later, immediately before the TTS call, so captions can stay original.
+        """
         if not text:
             return
         if self._discard_text_until_restart.is_set():
             logger.info("TTS interrupted: dropping late streamed text")
             return
+        self._publish_reply_emotion(text)
+        clean = self._clean_tts_text(text)
+        if clean and self._is_speakable_text(clean):
+            logger.info("speak queued: %r", clean[:60])
+            self.tts_text_queue.put((self._get_generation(), clean))
+
+    def set_device_emotion_sender(
+        self,
+        sender: Any | None,
+        *,
+        session_id: str | None = None,
+    ) -> None:
+        """Register the board hook that receives Xiaozhi ``llm`` emotion JSON.
+
+        ``sender`` is a callable or an object with ``send(str)``. There is no
+        device socket in this process; leave it unset until the board connects.
+        """
+        self._device_emotion_sender = sender
+        if session_id is not None:
+            self._device_session_id = str(session_id)
+
+    def spoken_text_for(self, text: str) -> str:
+        """Return the pronunciation-corrected form of already cleaned text."""
+        table = getattr(self, "_pronunciations", None)
+        if table is None:
+            return text
+        return table.apply(text)
+
+    def display_text_for(self, spoken_text: str) -> str:
+        """Map TTS-side text back to the original writing for a caption."""
+        table = getattr(self, "_pronunciations", None)
+        if table is None or not spoken_text:
+            return spoken_text
+        return table.restore(spoken_text)
+
+    def _clean_tts_text(self, text: str) -> str:
+        """Existing markdown/emoji cleanup. This does not apply correct_words."""
         clean = text
         clean = self._RE_EMOJI.sub("", clean)
         clean = self._RE_BOLD.sub(r"\1", clean)
@@ -780,10 +834,27 @@ class TTSEngine(TTSBackend):
         clean = self._RE_LIST.sub("", clean)
         clean = self._RE_IMG.sub("", clean)
         clean = self._RE_LINK.sub(r"\1", clean)
-        clean = clean.strip()
-        if clean and self._is_speakable_text(clean):
-            logger.info("speak queued: %r", clean[:60])
-            self.tts_text_queue.put((self._get_generation(), clean))
+        return clean.strip()
+
+    def _publish_reply_emotion(self, text: str) -> dict[str, str]:
+        """Push the Xiaozhi emotion for this reply, then keep the payload."""
+        payload = push_device_emotion(
+            text,
+            str(getattr(self, "_device_session_id", "") or ""),
+            getattr(self, "_device_emotion_sender", None),
+        )
+        self._last_device_emotion = payload
+        return payload
+
+    def _tts_call(self, call: Any, original_text: str) -> bool:
+        """Retry one synthesize call. False and raised runtime errors are failures."""
+        result = synthesize_with_retry(
+            call,
+            original_text=original_text,
+            is_empty=lambda value: value is False,
+            log=logger,
+        )
+        return result.ok
 
     def begin_streaming_pcm(self) -> int:
         """Capture the cancellation generation for a provider PCM stream.
@@ -2626,17 +2697,33 @@ class TTSEngine(TTSBackend):
         return merged, acknowledgements, stop_after_item
 
     def _generate_audio(self, text: str, generation: int) -> str | None:
-        """Dispatch to local, edge, or minimax backend."""
+        """Dispatch to local, edge, or minimax backend.
+
+        ``text`` is the cleaned display form. Pronunciation correction is
+        applied to the copy sent to TTS. Logs and fallback messages keep the
+        display text.
+        """
         if not self._is_generation_current(generation):
             logger.debug("TTS: dropping stale request before synthesis")
             return None
 
-        logger.info("TTS [%s] generating: %r", self._backend, text[:80])
+        display_text = text
+        spoken_text = self.spoken_text_for(text)
+        self._last_tts_display_text = display_text
+        self._last_tts_spoken_text = spoken_text
+        logger.info("TTS [%s] generating: %r", self._backend, display_text[:80])
+        if spoken_text != display_text:
+            logger.info("TTS pronunciation: %r -> %r", display_text[:80], spoken_text[:80])
         generated_backend: str | None = None
 
         if self._backend == "local":
-            self._generate_local(text, generation)
-            generated_backend = "local"
+            if self._local_tts is None:
+                logger.error("TTS local backend is not initialized: %s", display_text[:80])
+            elif self._tts_call(
+                lambda: self._generate_local(spoken_text, generation),
+                display_text,
+            ):
+                generated_backend = "local"
         elif self._backend == "minimax":
             with self._generation_lock:
                 if generation == self._generation:
@@ -2649,8 +2736,11 @@ class TTSEngine(TTSBackend):
                     "TTS: MiniMax temporarily disabled (%.0fs remaining), using fallback",
                     remaining,
                 )
-                generated_backend = self._use_minimax_fallback(text, generation)
-            elif not self._run_async(self._generate_minimax_transport(text, generation)):
+                generated_backend = self._use_minimax_fallback(spoken_text, generation)
+            elif not self._tts_call(
+                lambda: self._run_async(self._generate_minimax_transport(spoken_text, generation)),
+                display_text,
+            ):
                 # MiniMax failed — track and possibly disable temporarily
                 self._minimax_fail_count += 1
                 if self._minimax_fail_count >= self._MINIMAX_FAIL_THRESHOLD:
@@ -2666,7 +2756,7 @@ class TTSEngine(TTSBackend):
                         self._minimax_fail_count,
                         self._MINIMAX_FAIL_THRESHOLD,
                     )
-                generated_backend = self._use_minimax_fallback(text, generation)
+                generated_backend = self._use_minimax_fallback(spoken_text, generation)
             else:
                 # Success — reset failure counter
                 if self._minimax_fail_count > 0:
@@ -2687,8 +2777,8 @@ class TTSEngine(TTSBackend):
                     "TTS: Volcengine temporarily disabled (%.0fs remaining), using fallback",
                     remaining,
                 )
-                generated_backend = self._use_cloud_tts_fallback(text, generation)
-            elif not self._generate_volcengine(text, generation):
+                generated_backend = self._use_cloud_tts_fallback(spoken_text, generation)
+            elif not self._volcengine_attempt(spoken_text, generation, display_text):
                 self._volcengine_fail_count += 1
                 if self._volcengine_fail_count >= self._VOLCENGINE_FAIL_THRESHOLD:
                     self._volcengine_disabled_until = (
@@ -2705,7 +2795,7 @@ class TTSEngine(TTSBackend):
                         self._volcengine_fail_count,
                         self._VOLCENGINE_FAIL_THRESHOLD,
                     )
-                generated_backend = self._use_cloud_tts_fallback(text, generation)
+                generated_backend = self._use_cloud_tts_fallback(spoken_text, generation)
             else:
                 if self._volcengine_fail_count > 0:
                     logger.info(
@@ -2716,10 +2806,22 @@ class TTSEngine(TTSBackend):
                 if self._volcengine_last_complete_generation == generation:
                     generated_backend = "volcengine"
         else:
-            self._run_async(self._generate_edge(text, generation))
-            generated_backend = "edge"
+            if self._tts_call(
+                lambda: self._run_async(self._generate_edge(spoken_text, generation)),
+                display_text,
+            ):
+                generated_backend = "edge"
         self._queue_output_tail_silence(generation)
         return generated_backend
+
+    def _volcengine_attempt(self, spoken_text: str, generation: int, display_text: str) -> bool:
+        """Retry a configured Volcengine call. A missing PCM setup is not transient."""
+        if not self._is_volcengine_configured():
+            return self._generate_volcengine(spoken_text, generation)
+        return self._tts_call(
+            lambda: self._generate_volcengine(spoken_text, generation),
+            display_text,
+        )
 
     def _queue_output_tail_silence(self, generation: int) -> None:
         """Keep USB playback fed briefly so the device does not swallow the final phoneme."""
@@ -2740,7 +2842,12 @@ class TTSEngine(TTSBackend):
         return self._use_cloud_tts_fallback(text, generation)
 
     def _use_cloud_tts_fallback(self, text: str, generation: int) -> str:
-        """Use local or edge TTS as a fallback when a cloud provider is unavailable."""
+        """Use local or edge TTS as a fallback when a cloud provider is unavailable.
+
+        ``text`` is the form sent to the engine. Retry logs keep the display
+        text recorded by ``_generate_audio`` when that call is in progress.
+        """
+        logged_text = self._last_tts_display_text or text
         if (
             self._local_tts is None
             and self._fallback_backend == "local"
@@ -2748,9 +2855,12 @@ class TTSEngine(TTSBackend):
         ):
             self._init_local_tts()
         if self._local_tts is not None:
-            self._generate_local(text, generation)
+            self._tts_call(lambda: self._generate_local(text, generation), logged_text)
             return "local"
-        self._run_async(self._generate_edge(text, generation))
+        self._tts_call(
+            lambda: self._run_async(self._generate_edge(text, generation)),
+            logged_text,
+        )
         return "edge"
 
     def _run_async(self, coro) -> bool:
@@ -2767,6 +2877,8 @@ class TTSEngine(TTSBackend):
             # already owns the process-wide event loop.
             result = loop.run_until_complete(coro)
             return True if result is None else bool(result)
+        except (TypeError, ValueError):
+            raise
         except Exception as exc:
             logger.error("TTS async error: %s", exc)
             return False
@@ -2799,29 +2911,41 @@ class TTSEngine(TTSBackend):
     # Local backend (sherpa-onnx)
     # ------------------------------------------------------------------
 
-    def _generate_local(self, text: str, generation: int) -> None:
-        """Synthesise via sherpa-onnx OfflineTts — direct float32 samples."""
+    def _generate_local(self, text: str, generation: int) -> bool:
+        """Synthesise via sherpa-onnx OfflineTts — direct float32 samples.
+
+        Returns False when the engine yields no samples so the caller can retry.
+        A stale generation returns True so a cancelled turn is not retried.
+        """
         if self._local_tts is None:
-            return
+            return False
 
         audio = self._local_tts.generate(text, sid=self._sid, speed=self._speed)
         if not self._is_generation_current(generation):
-            return
+            return True
 
         samples = np.array(audio.samples, dtype=np.float32)
 
         # Resample if model rate differs from playback rate
         samples = self._resample(samples, self._local_sample_rate, self._sample_rate)
 
-        if self._is_generation_current(generation) and len(samples) > 0:
-            self._append_audio_for_generation(generation, samples)
+        if len(samples) == 0:
+            return False
+        if not self._is_generation_current(generation):
+            return True
+        self._append_audio_for_generation(generation, samples)
+        return True
 
     # ------------------------------------------------------------------
     # Edge backend (network)
     # ------------------------------------------------------------------
 
-    async def _generate_edge(self, text: str, generation: int) -> None:
-        """Synthesise via Microsoft Edge TTS — MP3 stream → decode → queue."""
+    async def _generate_edge(self, text: str, generation: int) -> bool:
+        """Synthesise via Microsoft Edge TTS — MP3 stream → decode → queue.
+
+        Returns False when the provider yields no playable audio. A cancelled
+        generation returns True so the retry helper does not start another call.
+        """
         import edge_tts
         import miniaudio
 
@@ -2831,19 +2955,25 @@ class TTSEngine(TTSBackend):
         async for chunk in communicate.stream():
             if not self._is_generation_current(generation):
                 logger.debug("TTS: aborting stale edge request mid-stream")
-                return
+                return True
             if chunk["type"] == "audio":
                 mp3_acc.extend(chunk["data"])
 
-        if not mp3_acc or not self._is_generation_current(generation):
-            return
+        if not self._is_generation_current(generation):
+            return True
+        if not mp3_acc:
+            return False
 
         try:
             decoded = miniaudio.decode(bytes(mp3_acc), nchannels=1, sample_rate=self._sample_rate)
             samples = np.frombuffer(decoded.samples, dtype=np.int16).astype(np.float32) / 32768.0
-            self._append_audio_for_generation(generation, samples)
         except Exception as exc:
             logger.error("TTS edge decode error: %s", exc)
+            return False
+        if len(samples) == 0:
+            return False
+        self._append_audio_for_generation(generation, samples)
+        return True
 
     # ------------------------------------------------------------------
     # MiniMax backend (SSE streaming, incremental playback)
